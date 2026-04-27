@@ -559,6 +559,108 @@ class _DetectionMixin:
         }
 
 
+    def _detect_transpose_via_reshape(self):
+        """Detect the ``test_trans_reshape``-style transpose kernel:
+
+            x = tl.load(make_block_ptr((M, N), strides=(N, 1), ...))
+            x = tl.reshape(x, (M, m, n, 2))   # any 4-D split where m*n*2 == N
+            x = tl.permute(x, (1, 2, 3, 0))   # canonical "move row to fastest"
+            x = tl.reshape(x, (M*N,))
+            tl.store(out + tl.arange(0, M*N), x)
+
+        This is a layout-only transpose: the value at logical 1-D position k
+        equals input[k % M, k / M], i.e. ``transpose(input).flat[k]``.
+
+        Without this detector, the kernel falls through to the generic phase
+        lowerer + ttg.convert_layout, which doesn\\'t honor the multi-element
+        per-thread ``#linear`` source layout and produces wrong values. The
+        template below sidesteps the layout shuffle entirely by emitting the
+        transpose lookup directly: each output position k reads
+        ``input[(k % M) * N + k / M]``.
+
+        Returns dict if matched, None otherwise.
+        """
+        # Collect the relevant ops in order.
+        load_ssa = None
+        store_ssa = None
+        reshapes = []
+        trans_ssa = None
+        for ssa in self.graph.ops:
+            if ssa.op == "tt.load":
+                if load_ssa is not None:
+                    return None
+                load_ssa = ssa
+            elif ssa.op == "tt.store":
+                if store_ssa is not None:
+                    return None
+                store_ssa = ssa
+            elif ssa.op == "tt.reshape":
+                reshapes.append(ssa)
+            elif ssa.op == "tt.trans":
+                if trans_ssa is not None:
+                    return None
+                trans_ssa = ssa
+            elif ssa.op in ("scf.for", "scf.while", "scf.if",
+                            "tt.reduce", "tt.scan", "tt.dot"):
+                return None  # too complex for this template
+
+        if (load_ssa is None or store_ssa is None or trans_ssa is None
+                or len(reshapes) != 2):
+            return None
+
+        # Extract shapes. Load is 2-D, first reshape goes to 4-D, trans
+        # produces a 4-D permuted view, second reshape flattens to 1-D.
+        load_shape = _extract_shape(load_ssa.type_str)
+        if not load_shape or len(load_shape) != 2:
+            return None
+        M, N = load_shape
+
+        # First reshape: (M, N) → (M, m, n, 2) where m*n*2 == N
+        first_reshape_shape = _extract_shape(reshapes[0].type_str)
+        if (not first_reshape_shape or len(first_reshape_shape) != 4
+                or first_reshape_shape[0] != M
+                or first_reshape_shape[3] != 2):
+            return None
+        m, n = first_reshape_shape[1], first_reshape_shape[2]
+        if m * n * 2 != N:
+            return None
+
+        # The trans must apply the (1, 2, 3, 0) permutation: input shape
+        # (M, m, n, 2) → output shape (m, n, 2, M). This is the canonical
+        # "move axis 0 (size M) to the end" permutation that, combined with
+        # the surrounding reshapes, computes a 2-D transpose. Other 4-D
+        # permutations don\\'t collapse to a transpose. The walker doesn\\'t
+        # populate ``trans_ssa.attrs["order"]`` reliably, so we check the
+        # shape transformation instead.
+        trans_shape = _extract_shape(trans_ssa.type_str)
+        if (not trans_shape or len(trans_shape) != 4
+                or trans_shape != (m, n, 2, M)):
+            return None
+
+        # Second reshape: must flatten to (M*N,)
+        second_reshape_shape = _extract_shape(reshapes[1].type_str)
+        if (not second_reshape_shape or len(second_reshape_shape) != 1
+                or second_reshape_shape[0] != M * N):
+            return None
+
+        # Identify ptr args (input and output).
+        ptr_args = [a for a in self.graph.args if a.is_ptr]
+        if len(ptr_args) < 2:
+            return None
+        input_arg = ptr_args[0].name
+        output_arg = ptr_args[1].name
+        elem_type = ptr_args[0].elem_type
+
+        return {
+            "input_arg": input_arg,
+            "output_arg": output_arg,
+            "elem_type": elem_type,
+            "M": M,
+            "N": N,
+            "block_size": M * N,
+        }
+
+
     def _detect_row_wise_sort(self):
         """Detect tl.sort / tl.topk applied to each row of a 2D tensor.
 

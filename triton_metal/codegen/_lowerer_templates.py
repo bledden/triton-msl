@@ -751,6 +751,65 @@ class _TemplateMixin:
         lines.append("")
         return "\n".join(lines)
 
+    def _lower_transpose_via_reshape_template(self, info) -> str:
+        """Emit a direct transpose-lookup kernel for the test_trans_reshape pattern.
+
+        The detected pattern is a 2-D transpose expressed via reshape→permute→
+        reshape: input shape (M, N), output is the row-major flatten of
+        ``transpose(input)``. The closed-form mapping is
+
+            output[k] = input[(k % M) * N + (k // M)]
+
+        Each thread iterates ``k`` in stride-``threads`` chunks and emits one
+        element per iteration. We bypass the generic phase lowerer entirely
+        because the source ``#linear`` layout assigns multiple elements per
+        thread and the generic ``ttg.convert_layout`` path can\\'t honor that
+        without a shared-memory shuffle (see ``_linear_layout`` and Phase 4).
+        """
+        M = info["M"]
+        N = info["N"]
+        elem_type = info["elem_type"]
+        input_arg = info["input_arg"]
+        output_arg = info["output_arg"]
+        block_size = info["block_size"]  # = M * N
+
+        msl_type = triton_type_to_msl(elem_type)
+        safe_name = _sanitize_msl_name(self.graph.func_name)
+
+        num_warps = self.options.num_warps if self.options else 4
+        threads = num_warps * 32
+
+        arg_decls = []
+        for i, arg in enumerate(self.graph.args):
+            if arg.is_ptr:
+                arg_msl_type = triton_type_to_msl(arg.elem_type)
+                arg_decls.append(
+                    f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+            else:
+                arg_msl_type = (triton_type_to_msl(arg.elem_type)
+                                if arg.elem_type else "int")
+                arg_decls.append(
+                    f"    constant {arg_msl_type}& {arg.name} [[buffer({i})]]")
+
+        lines = []
+        lines.append("#include <metal_stdlib>")
+        lines.append("using namespace metal;")
+        lines.append("")
+        lines.append(f"kernel void {safe_name}(")
+        lines.append(",\n".join(arg_decls) + ",")
+        lines.append("    uint pid [[threadgroup_position_in_grid]],")
+        lines.append("    uint lid [[thread_position_in_threadgroup]],")
+        lines.append("    uint tid [[thread_position_in_grid]]")
+        lines.append(") {")
+        lines.append(f"    for (uint k = lid; k < {block_size}u; k += {threads}u) {{")
+        lines.append(f"        uint _row = k % {M}u;")
+        lines.append(f"        uint _col = k / {M}u;")
+        lines.append(f"        {output_arg}[k] = {input_arg}[_row * {N}u + _col];")
+        lines.append("    }")
+        lines.append("}")
+        lines.append("")
+        return "\n".join(lines)
+
     def _lower_row_wise_sort_template(self, info) -> str:
         """Emit a per-row bitonic sort / top-k kernel.
 

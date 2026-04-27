@@ -319,6 +319,19 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self._prescan_stores()
             return msl
 
+        # Check for the test_trans_reshape pattern: load 2-D, reshape to 4-D,
+        # permute (1,2,3,0), reshape to 1-D, store. The generic phase lowerer
+        # routes this through ttg.convert_layout from a multi-element-per-thread
+        # #linear layout into #blocked, which the per-thread scalar model can\'t
+        # honor. The template emits a closed-form transpose lookup directly.
+        trans_reshape_info = self._detect_transpose_via_reshape()
+        if trans_reshape_info:
+            msl = self._lower_transpose_via_reshape_template(trans_reshape_info)
+            self.effective_block_size = (
+                (self.options.num_warps if self.options else 4) * 32)
+            self._prescan_stores()
+            return msl
+
         # Check for tl.sort / tl.topk applied to each row of a 2D tensor.
         # When total > 1024 threads are needed, the generic reduce path can't
         # run (threadgroup cap), but each row can be sorted independently in
