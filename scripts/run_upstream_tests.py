@@ -41,6 +41,14 @@ def run_tests(test_dir, test_file, timeout=900):
 
     env = os.environ.copy()
     env["TRITON_DEFAULT_BACKEND"] = "metal"
+    # Pin imports to this checkout so worktree changes are exercised instead
+    # of the editable install at ~/Documents/triton-metal. Mirrors
+    # scripts/run_upstream_test.sh.
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = (
+        repo_root + (os.pathsep + env["PYTHONPATH"]) if env.get("PYTHONPATH")
+        else repo_root
+    )
 
     cmd = [
         sys.executable, "-m", "pytest",
