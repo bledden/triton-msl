@@ -4513,6 +4513,31 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         needs_redistribute = ("ttg.slice" in src_type
                               and "ttg.slice" not in dest_type)
 
+        # Multi-element-per-thread #linear source layouts are handled today
+        # only by pattern detectors (e.g. ``_detect_transpose_via_reshape``)
+        # that bypass this path entirely. Reaching here with an unhandled
+        # ``#linear`` source means the kernel will produce wrong values.
+        # Architectural fix tracked as the multi-element-per-thread refactor:
+        # the lowerer needs to model N elements per thread (one register
+        # array slot per LinearLayout register basis) and split wrap-loops
+        # at convert_layout boundaries — see _linear_layout.LinearLayout for
+        # the position math the shuffle would emit.
+        if "ttg.linear" in src_type:
+            from triton_metal.codegen._linear_layout import parse_linear_layout
+            mod_text = getattr(self.graph, "mod_text", "") or ""
+            m = re.search(r"#(\w+)\s*=\s*#ttg\.linear<", mod_text)
+            if m:
+                ll = parse_linear_layout(mod_text, m.group(1))
+                if ll and ll.num_registers_per_thread > 1:
+                    raise MetalNotImplementedError(
+                        "ttg.convert_layout from a multi-element-per-thread "
+                        "#linear source layout is not yet implemented. The "
+                        "kernel hit the generic convert_layout path with "
+                        f"{ll.num_registers_per_thread} elements per thread; "
+                        "add a pattern detector (see "
+                        "_detect_transpose_via_reshape) or implement the "
+                        "general per-register shuffle (Phase 4).")
+
         if not needs_redistribute or not self._is_2d or N <= 1:
             self._emit_passthrough(ssa)
             return
