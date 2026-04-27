@@ -67,6 +67,10 @@ class IRGraph:
     num_warps: int = 4            # From module attribute
     called_funcs: Optional[List[CalledFunc]] = None  # Noinline function defs
     size_per_thread: Optional[List[int]] = None  # From #ttg.blocked layout
+    # Module text — kept around so the lowerer can parse layout attributes
+    # (#ttg.blocked, #ttg.linear, #ttg.slice) on demand. Populated by the
+    # walker; defaults to empty for tests that hand-construct an IRGraph.
+    mod_text: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +625,7 @@ class MLIRWalker:
             num_warps=self._num_warps,
             called_funcs=called_funcs if called_funcs else None,
             size_per_thread=self._layout["size_per_thread"] if self._layout else None,
+            mod_text=self._mod_text,
         )
 
     def _attach_nested_ops(self, ops, nested_ops, block_args_map):
