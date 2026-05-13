@@ -135,7 +135,30 @@ class _DetectionMixin:
         if len(ptr_args) < 3:
             return None
 
-        return {"M": M, "N": N, "K": K, "ptr_args": ptr_args, "dot_ssa": dot_ssa}
+        # Detect whether each dot operand is transposed. A ``tl.trans`` before
+        # tt.dot lowers to ``ttg.memdesc_trans`` between the local_alloc and
+        # the local_load that feeds the dot. Walk the operand chain
+        # local_load → memdesc_trans? → local_alloc to flag this.
+        def _is_trans(operand_id):
+            for op in self.graph.ops:
+                if op.id == operand_id and op.op == "ttg.local_load":
+                    if not op.operand_ids:
+                        return False
+                    src_id = op.operand_ids[0]
+                    for inner in self.graph.ops:
+                        if inner.id == src_id:
+                            return inner.op == "ttg.memdesc_trans"
+                    return False
+            return False
+
+        trans_a = _is_trans(dot_ssa.operand_ids[0])
+        trans_b = _is_trans(dot_ssa.operand_ids[1])
+
+        return {
+            "M": M, "N": N, "K": K,
+            "ptr_args": ptr_args, "dot_ssa": dot_ssa,
+            "trans_a": trans_a, "trans_b": trans_b,
+        }
 
 
     def _detect_3d_reduce(self):

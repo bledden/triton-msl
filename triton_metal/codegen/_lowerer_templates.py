@@ -54,6 +54,8 @@ class _TemplateMixin:
         K = info["K"]
         ptr_args = info["ptr_args"]
         dot_ssa = info["dot_ssa"]
+        trans_a = info.get("trans_a", False)
+        trans_b = info.get("trans_b", False)
 
         # 128 threads = 4 SIMD groups x 32 threads
         self.effective_block_size = 128
@@ -62,19 +64,16 @@ class _TemplateMixin:
         b_name = ptr_args[1].name
         c_name = ptr_args[2].name
 
-        # Determine input element type from A pointer arg
-        a_elem = ptr_args[0].elem_type  # e.g. "f32", "f16"
-        if a_elem in ("f16",):
-            input_msl_type = "half"
-        else:
-            input_msl_type = "float"
+        # Determine input element type from A pointer arg. ``triton_type_to_msl``
+        # handles bf16 → bfloat, fp16 → half, fp64 → float (with warning), etc.;
+        # the previous hand-rolled mapping silently misrouted bf16 as float
+        # (4-byte stride over a 2-byte buffer → wrong loads, partial output).
+        a_elem = ptr_args[0].elem_type  # e.g. "f32", "f16", "bf16"
+        input_msl_type = triton_type_to_msl(a_elem)
 
-        # Determine output element type from C pointer arg
+        # Determine output element type from C pointer arg.
         c_elem = ptr_args[2].elem_type
-        if c_elem in ("f16",):
-            output_msl_type = "half"
-        else:
-            output_msl_type = "float"
+        output_msl_type = triton_type_to_msl(c_elem)
 
         # Threadgroup staging and accumulation always in float
         tg_type = "float"
@@ -119,19 +118,24 @@ class _TemplateMixin:
         lines.append(f"")
         lines.append(f"        for (uint kk = 0u; kk < K; kk += 8u) {{")
 
-        # Load A tile (32x8) cooperatively
+        # Load A tile (32x8) cooperatively. When ``trans_a`` is set, the
+        # dot operand A is X.T — i.e. the original buffer X has shape (K, M)
+        # in row-major and A[gr, gc] = X[gc, gr] = X_buf[gc * M + gr].
+        a_index = f"gc * {M}u + gr" if trans_a else f"gr * K + gc"
         lines.append(f"            for (uint i = tiitg; i < 256u; i += 128u) {{")
         lines.append(f"                uint r = i / 8u, c = i % 8u;")
         lines.append(f"                uint gr = row_base + r, gc = kk + c;")
-        lines.append(f"                tg_A[i] = (gr < M && gc < K) ? {cast_load}({a_name}[gr * K + gc]) : 0.0f;")
+        lines.append(f"                tg_A[i] = (gr < M && gc < K) ? {cast_load}({a_name}[{a_index}]) : 0.0f;")
         lines.append(f"            }}")
 
-        # Load B tile (8x32) cooperatively
+        # Load B tile (8x32) cooperatively. ``trans_b`` analogue: original
+        # buffer Y has shape (N, K) and B[gr, gc] = Y[gc, gr] = Y_buf[gc * K + gr].
+        b_index = f"gc * K + gr" if trans_b else f"gr * N + gc"
         lines.append(f"            uint col_base_tg = tile_col * 32u;")
         lines.append(f"            for (uint i = tiitg; i < 256u; i += 128u) {{")
         lines.append(f"                uint r = i / 32u, c = i % 32u;")
         lines.append(f"                uint gr = kk + r, gc = col_base_tg + c;")
-        lines.append(f"                tg_B[i] = (gr < K && gc < N) ? {cast_load}({b_name}[gr * N + gc]) : 0.0f;")
+        lines.append(f"                tg_B[i] = (gr < K && gc < N) ? {cast_load}({b_name}[{b_index}]) : 0.0f;")
         lines.append(f"            }}")
         lines.append(f"")
         lines.append(f"            threadgroup_barrier(mem_flags::mem_threadgroup);")
@@ -215,19 +219,12 @@ class _TemplateMixin:
         b_name = ptr_args[1].name
         c_name = ptr_args[2].name
 
-        # Determine input element type from A pointer arg
+        # Determine input/output element types via the shared mapping —
+        # see the simple-dot variant for the bf16 stride bug this avoids.
         a_elem = ptr_args[0].elem_type
-        if a_elem in ("f16",):
-            input_msl_type = "half"
-        else:
-            input_msl_type = "float"
-
-        # Determine output element type from C pointer arg
+        input_msl_type = triton_type_to_msl(a_elem)
         c_elem = ptr_args[2].elem_type
-        if c_elem in ("f16",):
-            output_msl_type = "half"
-        else:
-            output_msl_type = "float"
+        output_msl_type = triton_type_to_msl(c_elem)
 
         tg_type = "float"
         frag_type = "simdgroup_float8x8"
