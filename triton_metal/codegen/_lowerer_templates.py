@@ -56,6 +56,7 @@ class _TemplateMixin:
         dot_ssa = info["dot_ssa"]
         trans_a = info.get("trans_a", False)
         trans_b = info.get("trans_b", False)
+        batch_size = info.get("batch_size", 1)
 
         # 128 threads = 4 SIMD groups x 32 threads
         self.effective_block_size = 128
@@ -107,6 +108,19 @@ class _TemplateMixin:
         lines.append(f"    threadgroup {tg_type} tg_B[8 * 32];")
         lines.append(f"")
 
+        # Leading batch dimensions on tt.dot become an outer loop. Each batch
+        # is an independent 32×32 matmul over its own slice of X / Y / Z.
+        if batch_size > 1:
+            lines.append(f"    for (uint batch = 0u; batch < {batch_size}u; batch++) {{")
+            lines.append(f"        uint a_batch_off = batch * {M * K}u;")
+            lines.append(f"        uint b_batch_off = batch * {K * N}u;")
+            lines.append(f"        uint c_batch_off = batch * {M * N}u;")
+        else:
+            lines.append(f"    {{")
+            lines.append(f"        uint a_batch_off = 0u;")
+            lines.append(f"        uint b_batch_off = 0u;")
+            lines.append(f"        uint c_batch_off = 0u;")
+
         # Loop over 32x32 output tiles (single threadgroup handles entire matrix)
         lines.append(f"    for (uint tile_row = 0u; tile_row < {n_tile_rows}u; tile_row++) {{")
         lines.append(f"    for (uint tile_col = 0u; tile_col < {n_tile_cols}u; tile_col++) {{")
@@ -125,7 +139,7 @@ class _TemplateMixin:
         lines.append(f"            for (uint i = tiitg; i < 256u; i += 128u) {{")
         lines.append(f"                uint r = i / 8u, c = i % 8u;")
         lines.append(f"                uint gr = row_base + r, gc = kk + c;")
-        lines.append(f"                tg_A[i] = (gr < M && gc < K) ? {cast_load}({a_name}[{a_index}]) : 0.0f;")
+        lines.append(f"                tg_A[i] = (gr < M && gc < K) ? {cast_load}({a_name}[a_batch_off + {a_index}]) : 0.0f;")
         lines.append(f"            }}")
 
         # Load B tile (8x32) cooperatively. ``trans_b`` analogue: original
@@ -135,7 +149,7 @@ class _TemplateMixin:
         lines.append(f"            for (uint i = tiitg; i < 256u; i += 128u) {{")
         lines.append(f"                uint r = i / 32u, c = i % 32u;")
         lines.append(f"                uint gr = kk + r, gc = col_base_tg + c;")
-        lines.append(f"                tg_B[i] = (gr < K && gc < N) ? {cast_load}({b_name}[{b_index}]) : 0.0f;")
+        lines.append(f"                tg_B[i] = (gr < K && gc < N) ? {cast_load}({b_name}[b_batch_off + {b_index}]) : 0.0f;")
         lines.append(f"            }}")
         lines.append(f"")
         lines.append(f"            threadgroup_barrier(mem_flags::mem_threadgroup);")
@@ -162,10 +176,10 @@ class _TemplateMixin:
 
         # Store results to global memory
         if output_msl_type == "float":
-            lines.append(f"        simdgroup_store(acc0, {c_name} + (row_base) * N + col_base, N);")
-            lines.append(f"        simdgroup_store(acc1, {c_name} + (row_base + 8u) * N + col_base, N);")
-            lines.append(f"        simdgroup_store(acc2, {c_name} + (row_base + 16u) * N + col_base, N);")
-            lines.append(f"        simdgroup_store(acc3, {c_name} + (row_base + 24u) * N + col_base, N);")
+            lines.append(f"        simdgroup_store(acc0, {c_name} + c_batch_off + (row_base) * N + col_base, N);")
+            lines.append(f"        simdgroup_store(acc1, {c_name} + c_batch_off + (row_base + 8u) * N + col_base, N);")
+            lines.append(f"        simdgroup_store(acc2, {c_name} + c_batch_off + (row_base + 16u) * N + col_base, N);")
+            lines.append(f"        simdgroup_store(acc3, {c_name} + c_batch_off + (row_base + 24u) * N + col_base, N);")
         else:
             # For half output, store through threadgroup memory and convert
             lines.append(f"        // Store accumulators (float) to threadgroup, then convert to {output_msl_type}")
@@ -179,13 +193,14 @@ class _TemplateMixin:
             lines.append(f"            uint r = i / 8u, c = i % 8u;")
             lines.append(f"            uint gr = row_base + r, gc = col_base + c;")
             lines.append(f"            if (gr < M && gc < N) {{")
-            lines.append(f"                {c_name}[gr * N + gc] = {output_msl_type}(tg_out[i]);")
+            lines.append(f"                {c_name}[c_batch_off + gr * N + gc] = {output_msl_type}(tg_out[i]);")
             lines.append(f"            }}")
             lines.append(f"        }}")
             lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         lines.append(f"    }} // tile_col")
         lines.append(f"    }} // tile_row")
+        lines.append(f"    }} // batch")
         lines.append(f"}}")
 
         return "\n".join(lines)

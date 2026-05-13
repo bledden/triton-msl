@@ -128,27 +128,80 @@ class _DetectionMixin:
         if not a_shape or not b_shape or len(a_shape) < 2 or len(b_shape) < 2:
             return None
 
-        M, K = a_shape[0], a_shape[1]
-        K2, N = b_shape[0], b_shape[1]
+        # tt.dot operates on the two innermost dims; any leading dims form a
+        # broadcast batch. Both operands must have the same batch shape.
+        if a_shape[:-2] != b_shape[:-2]:
+            return None
+        batch_dims = list(a_shape[:-2])
+        M, K = a_shape[-2], a_shape[-1]
+        K2, N = b_shape[-2], b_shape[-1]
+        batch_size = 1
+        for d in batch_dims:
+            batch_size *= d
 
         ptr_args = [a for a in self.graph.args if a.is_ptr]
         if len(ptr_args) < 3:
             return None
 
-        # Detect whether each dot operand is transposed. A ``tl.trans`` before
-        # tt.dot lowers to ``ttg.memdesc_trans`` between the local_alloc and
-        # the local_load that feeds the dot. Walk the operand chain
-        # local_load → memdesc_trans? → local_alloc to flag this.
+        # Detect whether each dot operand is transposed. ``tl.trans`` before
+        # tt.dot can land in TTGIR three ways depending on rank:
+        #   - Rank-2 inputs:  local_alloc → memdesc_trans → local_load → dot
+        #     (transpose is folded into the memdesc layout swap).
+        #   - Rank-3 inputs:  tt.trans → local_alloc → local_load → dot
+        #     (transpose is a tensor op before shared-memory alloc).
+        #   - Rank-4+ inputs: tt.trans → tt.reshape → local_alloc → ...
+        #     (a reshape collapses leading batch dims into a single batch
+        #     after the transpose).
+        # We accept the trans only if its ``order`` swaps the last two dims
+        # and is identity on the rest — that's the matmul-relevant transpose.
+        op_by_id = {op.id: op for op in self.graph.ops}
+
+        def _trans_is_inner_swap(trans_op):
+            order = trans_op.attrs.get("order")
+            if order is None:
+                # The walker doesn\'t always populate ``order``; fall back to
+                # shape comparison. tt.trans with inner-2-dim swap maps an
+                # input of shape (..., M, K) to (..., K, M).
+                # If we can\'t tell, assume yes (matches the common matmul case).
+                return True
+            order = list(order)
+            n = len(order)
+            if n < 2:
+                return False
+            return (order[:n - 2] == list(range(n - 2))
+                    and order[n - 2:] == [n - 1, n - 2])
+
+        def _walk_back_to_trans(start_id, max_steps=4):
+            """Follow tt.reshape / layout-only ops back from ``start_id``,
+            return the first tt.trans found whose order is an inner swap,
+            or None.
+            """
+            current_id = start_id
+            for _ in range(max_steps):
+                op = op_by_id.get(current_id)
+                if not op or not op.operand_ids:
+                    return None
+                if op.op == "tt.trans":
+                    return op if _trans_is_inner_swap(op) else None
+                if op.op in ("tt.reshape", "ttg.convert_layout"):
+                    current_id = op.operand_ids[0]
+                    continue
+                return None
+            return None
+
         def _is_trans(operand_id):
-            for op in self.graph.ops:
-                if op.id == operand_id and op.op == "ttg.local_load":
-                    if not op.operand_ids:
-                        return False
-                    src_id = op.operand_ids[0]
-                    for inner in self.graph.ops:
-                        if inner.id == src_id:
-                            return inner.op == "ttg.memdesc_trans"
-                    return False
+            load_op = op_by_id.get(operand_id)
+            if not load_op or load_op.op != "ttg.local_load":
+                return False
+            if not load_op.operand_ids:
+                return False
+            src = op_by_id.get(load_op.operand_ids[0])
+            if not src:
+                return False
+            if src.op == "ttg.memdesc_trans":
+                return True
+            if src.op == "ttg.local_alloc" and src.operand_ids:
+                return _walk_back_to_trans(src.operand_ids[0]) is not None
             return False
 
         trans_a = _is_trans(dot_ssa.operand_ids[0])
@@ -158,6 +211,7 @@ class _DetectionMixin:
             "M": M, "N": N, "K": K,
             "ptr_args": ptr_args, "dot_ssa": dot_ssa,
             "trans_a": trans_a, "trans_b": trans_b,
+            "batch_size": batch_size,
         }
 
 
