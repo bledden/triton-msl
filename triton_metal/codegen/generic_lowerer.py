@@ -4522,12 +4522,19 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # array slot per LinearLayout register basis) and split wrap-loops
         # at convert_layout boundaries — see _linear_layout.LinearLayout for
         # the position math the shuffle would emit.
-        if "ttg.linear" in src_type:
+        #
+        # Type strings reference layouts by alias (``tensor<1024xf32, #linear>``),
+        # so resolve the alias against ``mod_text`` to identify ``#ttg.linear``
+        # sources. Skip resolution for inline layouts (no alias to look up).
+        mod_text = getattr(self.graph, "mod_text", "") or ""
+        alias_match = re.search(r",\s*#(\w+)\s*>\s*$", src_type)
+        if alias_match and mod_text:
             from triton_metal.codegen._linear_layout import parse_linear_layout
-            mod_text = getattr(self.graph, "mod_text", "") or ""
-            m = re.search(r"#(\w+)\s*=\s*#ttg\.linear<", mod_text)
-            if m:
-                ll = parse_linear_layout(mod_text, m.group(1))
+            alias = alias_match.group(1)
+            # Cheap pre-check: the alias must resolve to a #ttg.linear def.
+            if re.search(rf"#{re.escape(alias)}\s*=\s*#ttg\.linear<",
+                         mod_text):
+                ll = parse_linear_layout(mod_text, alias)
                 if ll and ll.num_registers_per_thread > 1:
                     raise MetalNotImplementedError(
                         "ttg.convert_layout from a multi-element-per-thread "
