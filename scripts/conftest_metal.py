@@ -73,7 +73,12 @@ UNSUPPORTED_TYPES = {
     "e2m1",  # microscaling format — not standard FP8, not supported
 }
 
-UNSUPPORTED_PRECISIONS = {"tf32"}
+UNSUPPORTED_PRECISIONS = {
+    "tf32",      # Apple GPU has no TF32 mode
+    "tf32x3",    # 3-pass TF32 emulation, CUDA-specific
+    "bf16x3",    # 3-pass bf16 emulation for fp32, CUDA-specific
+    "bf16x6",    # 6-pass bf16 emulation for fp32, CUDA-specific
+}
 
 # Features not yet implemented in the Metal backend.
 # These tests are skipped (not failed) because the backend doesn't support
@@ -89,7 +94,7 @@ UNIMPLEMENTED_FEATURES = {
     "test_trans_4d",
     # "test_trans_2d",  # Enabled: 2D expand_dims + shared memory transpose
     # "test_optimize_thread_locality",  # Enabled: BLOCK_N=32 configs pass (per-config skip for BLOCK_N>32)
-    "test_dot_multidim",
+    # "test_dot_multidim",  # Enabled 2026-05-13: batched simdgroup dot template
     # Tensor atomic ops — most configs now work with 2D support
     # "test_tensor_atomic_rmw_block",  # Enabled: 2D matrix access (8x8)
     # "test_tensor_atomic_add_non_exclusive_offset",  # Enabled: most configs pass
@@ -113,7 +118,7 @@ UNIMPLEMENTED_FEATURES = {
     # "test_index1d",  # Enabled: 2D expand_dims + broadcast
     # "test_reshape",  # Enabled: 1D↔2D reshape works, >2D and >1024 threads skipped
     # "test_permute",  # Enabled: wrapping loop handles >1024 threads
-    "test_trans_reshape",  # Reshape→transpose→reshape: stride mismatch in 2D mode
+    # "test_trans_reshape",  # Enabled 2026-05-13: closed-form transpose-lookup template
     # "test_gather",  # Enabled: shared memory indexed lookup (1D configs, 2D too large)
     # Interleave/join/split — multi-tensor ops
     # "test_interleave",  # Enabled: tt.join + shared memory interleave
@@ -228,8 +233,12 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_unsupported)
             continue
 
-        # Skip TF32 input_precision tests
-        if "tf32" in test_id:
+        # Skip input_precision modes Apple GPU can\'t honor: tf32, tf32x3,
+        # bf16x3, bf16x6. All are CUDA-specific emulation modes that map
+        # back to ieee on Metal, producing numerics the reference path
+        # doesn\'t expect. Substring match so any parametrization carrying
+        # the precision keyword is filtered.
+        if any(p in test_id for p in ("tf32", "bf16x3", "bf16x6")):
             item.add_marker(skip_unsupported)
             continue
 

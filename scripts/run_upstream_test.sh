@@ -24,8 +24,13 @@ if [[ ! -d "$test_dir" ]]; then
     exit 1
 fi
 
-export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"
+# Add the repo root and ``scripts/`` to PYTHONPATH so pytest can both
+# (1) import ``triton_metal`` from this checkout and (2) load
+# ``conftest_metal`` as a plugin via ``-p`` (the skip rules for unsupported
+# dtypes / precisions live there; upstream's own conftest doesn't know
+# about them).
+export PYTHONPATH="$repo_root:$repo_root/scripts${PYTHONPATH:+:$PYTHONPATH}"
 export TRITON_DEFAULT_BACKEND="${TRITON_DEFAULT_BACKEND:-metal}"
 
 cd "$test_dir"
-exec python3 -m pytest --device cpu "$@"
+exec python3 -m pytest -p conftest_metal --device cpu "$@"
