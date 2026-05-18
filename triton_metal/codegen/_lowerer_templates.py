@@ -822,6 +822,203 @@ class _TemplateMixin:
         lines.append("")
         return "\n".join(lines)
 
+    def _lower_matmul_softmax_template(self, info) -> str:
+        """Emit a fused matmul + row-softmax kernel.
+
+        Layout (single threadgroup of 128 threads, 4 SIMD groups):
+          1. Outer loop over M-strips of ``M_BLOCK`` rows so the staged
+             output never exceeds Metal\'s 32 KB threadgroup-memory cap.
+          2. Per strip: stage A[M_BLOCK, K] and B[K, N] (one 8-wide
+             K-tile at a time), accumulate via simdgroup_matrix MMA.
+          3. Store the strip\'s output (M_BLOCK × N) into TG memory.
+          4. Cooperative row softmax across all N cols, one thread per
+             row.
+          5. Write the strip to global through the supplied output
+             strides (or row-major contiguous when none are named).
+
+        Constraints: M, N, K are multiples of 8. M_BLOCK is chosen so
+        ``M_BLOCK * N`` floats ≤ 16 KB and ``M_BLOCK`` is a multiple of
+        the simdgroup tile (8) — currently ``min(M, 32)`` which handles
+        the 64×64 and 128×128 test_dot softmax cases.
+        """
+        M = info["M"]
+        N = info["N"]
+        K = info["K"]
+        a_ptr = info["a_ptr"]
+        b_ptr = info["b_ptr"]
+        c_ptr = info["c_ptr"]
+        a_elem = info["a_elem"]
+        c_elem = info["c_elem"]
+        a_row_s = info["a_row_stride"]
+        a_col_s = info["a_col_stride"]
+        b_row_s = info["b_row_stride"]
+        b_col_s = info["b_col_stride"]
+        c_row_s = info["c_row_stride"]
+        c_col_s = info["c_col_stride"]
+
+        # M, N, K must be 8-multiples so 8×8 simdgroup matrices cover
+        # the whole tile without partial-tile guards.
+        if M % 8 or N % 8 or K % 8:
+            return None
+
+        # Strip the M dimension so the staged output fits in TG memory.
+        # Cap the strip at 32 rows (one strip\'s tg_C is M_BLOCK*N floats;
+        # 32 × 256 = 32KB, the Metal limit). M itself must split evenly
+        # into M_BLOCK strips.
+        m_block = min(M, 32)
+        while m_block > 8 and M % m_block != 0:
+            m_block -= 8
+        if m_block < 8:
+            return None
+        n_strips = M // m_block
+        tg_bytes = (m_block * 8 + 8 * N + m_block * N) * 4
+        if tg_bytes > 32 * 1024:
+            return None
+
+        # 128 threads = 4 SIMD groups × 32 threads.
+        self.effective_block_size = 128
+
+        c_msl_type = triton_type_to_msl(c_elem)
+
+        # Each SIMD group owns ``N / 4`` columns of the output, which must
+        # split evenly into 8-wide simdgroup tiles.
+        cols_per_sg = N // 4
+        if cols_per_sg == 0 or cols_per_sg % 8:
+            return None
+        col_tiles_per_sg = cols_per_sg // 8        # 8×8 col tiles per SG
+        row_tiles = m_block // 8                   # 8×8 row tiles per strip
+
+        def _addr(base, row, col, row_stride, col_stride, inner_dim):
+            row_term = f"({row}) * {row_stride}" if row_stride \
+                else f"({row}) * {inner_dim}u"
+            col_term = f"({col}) * {col_stride}" if col_stride else f"({col})"
+            return f"{base}[{row_term} + {col_term}]"
+
+        safe_name = _sanitize_msl_name(self.graph.func_name)
+
+        arg_decls = []
+        for i, arg in enumerate(self.graph.args):
+            if arg.is_ptr:
+                m = triton_type_to_msl(arg.elem_type)
+                arg_decls.append(
+                    f"    device {m}* {arg.name} [[buffer({i})]]")
+            else:
+                m = (triton_type_to_msl(arg.elem_type)
+                     if arg.elem_type else "int")
+                arg_decls.append(
+                    f"    constant {m}& {arg.name} [[buffer({i})]]")
+
+        lines = []
+        lines.append("#include <metal_stdlib>")
+        lines.append("#include <metal_simdgroup_matrix>")
+        lines.append("using namespace metal;")
+        lines.append("")
+        lines.append(f"kernel void {safe_name}(")
+        lines.append(",\n".join(arg_decls) + ",")
+        lines.append("    uint sgitg [[simdgroup_index_in_threadgroup]],")
+        lines.append("    uint tiitg [[thread_index_in_threadgroup]],")
+        lines.append("    uint pid [[threadgroup_position_in_grid]],")
+        lines.append("    uint lid [[thread_position_in_threadgroup]],")
+        lines.append("    uint tid [[thread_position_in_grid]]")
+        lines.append(") {")
+        lines.append(f"    threadgroup float tg_A[{m_block} * 8];")
+        lines.append(f"    threadgroup float tg_B[8 * {N}];")
+        lines.append(f"    threadgroup float tg_C[{m_block} * {N}];")
+        lines.append("")
+
+        # ----- Outer M-strip loop -----
+        lines.append(f"    for (uint mstrip = 0u; mstrip < {M}u; mstrip += {m_block}u) {{")
+
+        lines.append("        // Per-SG output accumulators for this strip.")
+        for rt in range(row_tiles):
+            for ct in range(col_tiles_per_sg):
+                lines.append(
+                    f"        simdgroup_float8x8 acc_{rt}_{ct}(0);")
+        lines.append("")
+
+        lines.append(f"        for (uint kk = 0u; kk < {K}u; kk += 8u) {{")
+        # Stage strip\'s A[M_BLOCK, 8] cooperatively.
+        lines.append(
+            f"            for (uint i = tiitg; i < {m_block * 8}u; i += 128u) {{")
+        lines.append("                uint r = i / 8u, c = i % 8u;")
+        a_load = _addr(a_ptr, "mstrip + r", "kk + c", a_row_s, a_col_s, K)
+        lines.append(f"                tg_A[i] = (float)({a_load});")
+        lines.append("            }")
+        # Stage B[8, N] cooperatively.
+        lines.append(
+            f"            for (uint i = tiitg; i < {8 * N}u; i += 128u) {{")
+        lines.append(f"                uint r = i / {N}u, c = i % {N}u;")
+        b_load = _addr(b_ptr, "kk + r", "c", b_row_s, b_col_s, N)
+        lines.append(f"                tg_B[i] = (float)({b_load});")
+        lines.append("            }")
+        lines.append("            threadgroup_barrier(mem_flags::mem_threadgroup);")
+        lines.append("")
+        for ct in range(col_tiles_per_sg):
+            lines.append(f"            simdgroup_float8x8 b_{ct};")
+            lines.append(
+                f"            simdgroup_load(b_{ct}, "
+                f"tg_B + sgitg * {cols_per_sg}u + {ct * 8}u, {N});")
+        lines.append("")
+        lines.append("            simdgroup_float8x8 a_frag;")
+        for rt in range(row_tiles):
+            lines.append(
+                f"            simdgroup_load(a_frag, tg_A + {rt * 8 * 8}u, 8);")
+            for ct in range(col_tiles_per_sg):
+                lines.append(
+                    f"            simdgroup_multiply_accumulate(acc_{rt}_{ct}, "
+                    f"a_frag, b_{ct}, acc_{rt}_{ct});")
+        lines.append("            threadgroup_barrier(mem_flags::mem_threadgroup);")
+        lines.append("        }")
+        lines.append("")
+
+        # Spill the strip\'s accumulators.
+        lines.append("        // Store strip accumulators to TG memory.")
+        for rt in range(row_tiles):
+            for ct in range(col_tiles_per_sg):
+                row_off = rt * 8 * N
+                col_off = f"sgitg * {cols_per_sg}u + {ct * 8}u"
+                lines.append(
+                    f"        simdgroup_store(acc_{rt}_{ct}, "
+                    f"tg_C + {row_off}u + {col_off}, {N});")
+        lines.append("        threadgroup_barrier(mem_flags::mem_threadgroup);")
+        lines.append("")
+
+        # Row softmax across the strip\'s M_BLOCK rows.
+        lines.append(
+            f"        for (uint row = tiitg; row < {m_block}u; row += 128u) {{")
+        lines.append(f"            uint row_off = row * {N}u;")
+        lines.append("            float row_max = -INFINITY;")
+        lines.append(f"            for (uint c = 0u; c < {N}u; c++) {{")
+        lines.append("                row_max = max(row_max, tg_C[row_off + c]);")
+        lines.append("            }")
+        lines.append("            float row_sum = 0.0f;")
+        lines.append(f"            for (uint c = 0u; c < {N}u; c++) {{")
+        lines.append("                float v = exp(tg_C[row_off + c] - row_max);")
+        lines.append("                tg_C[row_off + c] = v;")
+        lines.append("                row_sum += v;")
+        lines.append("            }")
+        lines.append("            float inv = 1.0f / row_sum;")
+        lines.append(f"            for (uint c = 0u; c < {N}u; c++) {{")
+        lines.append("                tg_C[row_off + c] *= inv;")
+        lines.append("            }")
+        lines.append("        }")
+        lines.append("        threadgroup_barrier(mem_flags::mem_threadgroup);")
+        lines.append("")
+
+        # Write strip to global.
+        lines.append(
+            f"        for (uint i = tiitg; i < {m_block * N}u; i += 128u) {{")
+        lines.append(f"            uint row = i / {N}u, col = i % {N}u;")
+        c_store_addr = _addr(c_ptr, "mstrip + row", "col",
+                             c_row_s, c_col_s, N)
+        lines.append(f"            {c_store_addr} = ({c_msl_type})tg_C[i];")
+        lines.append("        }")
+        lines.append("        threadgroup_barrier(mem_flags::mem_threadgroup);")
+        lines.append("    }  // end M-strip loop")
+        lines.append("}")
+        lines.append("")
+        return "\n".join(lines)
+
     def _lower_row_wise_sort_template(self, info) -> str:
         """Emit a per-row bitonic sort / top-k kernel.
 

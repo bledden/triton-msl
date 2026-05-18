@@ -277,6 +277,19 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         if simple_dot:
             return self._lower_simple_dot_inline(simple_dot)
 
+        # Check for the fused matmul + row-softmax pattern (test_dot with
+        # epilogue=softmax at sizes that exceed the per-thread scalar
+        # model — e.g. 64×64). Must run before ``_requires_matmul_template``
+        # would reject the kernel for having a tt.reduce, since that path
+        # falls back to the legacy text parser\'s bare matmul template,
+        # which silently drops the softmax.
+        matmul_softmax_info = self._detect_matmul_softmax()
+        if matmul_softmax_info:
+            msl = self._lower_matmul_softmax_template(matmul_softmax_info)
+            if msl is not None:
+                self._prescan_stores()
+                return msl
+
         # Check for tt.dot — switch to prebuilt matmul template
         if self._requires_matmul_template():
             msl = self._lower_dot_via_prebuilt_template()

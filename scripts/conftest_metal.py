@@ -420,8 +420,11 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_cuda)
             continue
 
-        # Skip tensor descriptor tests (require CUDA TMA)
-        if "tensor_descriptor" in test_id or "tma" in test_id.lower():
+        # Skip tensor descriptor tests (require CUDA TMA). Use ``_tma`` /
+        # ``test_tma`` boundaries so substrings inside other tokens (e.g.
+        # ``soft m a x`` → contains "tma") don\'t trigger a
+        # false skip.
+        if "tensor_descriptor" in test_id or "_tma" in test_id.lower() or test_id.lower().endswith("test_tma"):
             item.add_marker(skip_cuda)
             continue
 

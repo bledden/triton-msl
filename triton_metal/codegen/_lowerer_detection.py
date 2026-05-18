@@ -215,6 +215,181 @@ class _DetectionMixin:
         }
 
 
+    def _detect_matmul_softmax(self):
+        """Detect the matmul → row-softmax → store fused kernel pattern.
+
+        Triton lowers ``tl.dot`` followed by softmax into:
+          tt.dot                              # 2-D result, shape (M, N)
+          tt.reduce(axis=1, maxnumf)          # row max,   (M,)
+          tt.expand_dims + tt.broadcast       # back to (M, N)
+          arith.subf                          # subtract max
+          math.exp
+          tt.reduce(axis=1, addf)             # row sum,   (M,)
+          tt.expand_dims + tt.broadcast       # back to (M, N)
+          arith.divf
+          (ttg.convert_layout)                # optional
+          tt.store
+
+        The generic op-by-op lowerer can\'t handle cooperative ops over
+        more than 1024 elements (Metal threadgroup cap), and a 64×64 dot
+        product is 4096 elements. ``_requires_matmul_template`` refuses
+        because ``has_reduce`` is True, so the kernel hits UNSUPPORTED and
+        the legacy text parser silently substitutes a bare matmul template
+        that drops the softmax. Detecting the full pattern lets us emit a
+        single fused kernel that stages the dot result in shared memory
+        and does row softmax cooperatively before the store.
+
+        Returns dict with M/N/K/ptr_args/strides/dtypes when matched, else
+        None. M, N, K are read from the dot operand shapes; strides come
+        from the kernel\'s scalar arg list.
+        """
+        # Locate the single tt.dot.
+        dot_ssa = None
+        for ssa in self.graph.ops:
+            if ssa.op == "tt.dot":
+                if dot_ssa is not None:
+                    return None
+                dot_ssa = ssa
+        if dot_ssa is None or len(dot_ssa.operand_ids) < 2:
+            return None
+
+        # Get M, N, K from dot operand and result shapes.
+        a_type = self._find_op_type_str(dot_ssa.operand_ids[0])
+        b_type = self._find_op_type_str(dot_ssa.operand_ids[1])
+        a_shape = _extract_shape(a_type) if a_type else None
+        b_shape = _extract_shape(b_type) if b_type else None
+        if (not a_shape or not b_shape
+                or len(a_shape) != 2 or len(b_shape) != 2):
+            return None  # batched dot not handled by this template
+        M, K = a_shape
+        K2, N = b_shape
+        if K != K2:
+            return None
+
+        # Walk the post-dot ops looking for the softmax signature. The exact
+        # order Triton emits is dot → reduce(max) → expand → broadcast →
+        # subf → exp → reduce(sum) → expand → broadcast → divf → store
+        # (with an optional convert_layout between divf and store).
+        op_index = {ssa.id: i for i, ssa in enumerate(self.graph.ops)}
+
+        def _consumer_of(producer_id, expected_op):
+            for ssa in self.graph.ops:
+                if ssa.op == expected_op and producer_id in (ssa.operand_ids or []):
+                    return ssa
+            return None
+
+        def _reduce_op(ssa):
+            """Inspect a tt.reduce\'s region to identify maxnumf / addf."""
+            if not ssa.region_ops:
+                return None
+            for body in ssa.region_ops:
+                if body.op in ("arith.maxnumf", "arith.maximumf"):
+                    return "max"
+                if body.op in ("arith.addf",):
+                    return "add"
+            return None
+
+        max_reduce = _consumer_of(dot_ssa.id, "tt.reduce")
+        if max_reduce is None or _reduce_op(max_reduce) != "max":
+            return None
+        if max_reduce.attrs.get("axis") != 1:
+            return None
+
+        # Trace expand_dims → broadcast → subf
+        max_expand = _consumer_of(max_reduce.id, "tt.expand_dims")
+        if max_expand is None:
+            return None
+        max_bcast = _consumer_of(max_expand.id, "tt.broadcast")
+        if max_bcast is None:
+            return None
+        sub = _consumer_of(max_bcast.id, "arith.subf")
+        if sub is None or dot_ssa.id not in (sub.operand_ids or []):
+            return None
+        exp_op = _consumer_of(sub.id, "math.exp")
+        if exp_op is None:
+            return None
+        sum_reduce = _consumer_of(exp_op.id, "tt.reduce")
+        if sum_reduce is None or _reduce_op(sum_reduce) != "add":
+            return None
+        if sum_reduce.attrs.get("axis") != 1:
+            return None
+        sum_expand = _consumer_of(sum_reduce.id, "tt.expand_dims")
+        if sum_expand is None:
+            return None
+        sum_bcast = _consumer_of(sum_expand.id, "tt.broadcast")
+        if sum_bcast is None:
+            return None
+        div = _consumer_of(sum_bcast.id, "arith.divf")
+        if div is None or exp_op.id not in (div.operand_ids or []):
+            return None
+
+        # The divf feeds the store, possibly through a layout-only chain
+        # of ``arith.truncf`` (fp32 → fp16 downcast when out_dtype is half),
+        # ``arith.extf`` (fp16 → fp32 upcast), and ``ttg.convert_layout``.
+        # Walk forward until we hit the store or run out of layout-only
+        # ops; anything else (another reduce, a second math op, …) means
+        # this is a richer kernel that the template can\'t reproduce.
+        final_id = div.id
+        for _ in range(4):
+            next_op = None
+            for cand_op in ("arith.truncf", "arith.extf", "ttg.convert_layout"):
+                cand = _consumer_of(final_id, cand_op)
+                if cand is not None:
+                    next_op = cand
+                    break
+            if next_op is None:
+                break
+            final_id = next_op.id
+        store = _consumer_of(final_id, "tt.store")
+        if store is None:
+            return None
+
+        ptr_args = [a for a in self.graph.args if a.is_ptr]
+        scalar_args = [a for a in self.graph.args if not a.is_ptr]
+        if len(ptr_args) < 3:
+            return None
+
+        # Identify X / Y / Z pointer args. The upstream test_dot kernel
+        # passes (ptr, row_stride, col_stride) triples per matrix in arg
+        # order: (X, stride_xm, stride_xk) for A∈ℝ^{M×K},
+        # (Y, stride_yk, stride_yn) for B∈ℝ^{K×N}, plus a chain-dot
+        # weight (W) and the output (Z, stride_zm, stride_zn). The
+        # softmax variant doesn\'t use W, so the store target is the
+        # *last* pointer; everything else identifies positionally.
+        a_ptr = ptr_args[0]
+        b_ptr = ptr_args[1]
+        c_ptr = ptr_args[-1]
+
+        # Read the two stride args immediately following each pointer in
+        # the kernel signature. Triton\'s naming for the inner dim varies
+        # (``stride_xk`` vs ``stride_ym`` vs ``stride_zn``), so positional
+        # adjacency is the only convention reliable across matrices.
+        def _strides_after(ptr_arg):
+            idx = ptr_arg.index
+            row = None
+            col = None
+            for a in scalar_args:
+                if a.index == idx + 1:
+                    row = a.name
+                elif a.index == idx + 2:
+                    col = a.name
+            return row, col
+
+        a_row_s, a_col_s = _strides_after(a_ptr)
+        b_row_s, b_col_s = _strides_after(b_ptr)
+        c_row_s, c_col_s = _strides_after(c_ptr)
+
+        return {
+            "M": M, "N": N, "K": K,
+            "a_ptr": a_ptr.name, "b_ptr": b_ptr.name, "c_ptr": c_ptr.name,
+            "a_elem": a_ptr.elem_type, "b_elem": b_ptr.elem_type,
+            "c_elem": c_ptr.elem_type,
+            "a_row_stride": a_row_s, "a_col_stride": a_col_s,
+            "b_row_stride": b_row_s, "b_col_stride": b_col_s,
+            "c_row_stride": c_row_s, "c_col_stride": c_col_s,
+        }
+
+
     def _detect_3d_reduce(self):
         """Detect if this kernel is a simple 3D reduce that needs a template.
 
