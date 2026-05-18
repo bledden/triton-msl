@@ -161,6 +161,14 @@ UNIMPLEMENTED_FEATURES = {
     # "test_cast",  # Enabled: type casts work correctly
     # Misc unimplemented
     "test_dot_mulbroadcasted",
+    # tl.device_print: Metal GPUs have no device-side printf. The CUDA
+    # ``__printf`` runtime is what makes ``tl.device_print`` work; on
+    # Apple GPUs there\'s no equivalent stdout channel, and the harness
+    # compares against the captured CUDA output. No-op support would
+    # silently produce empty output and fail the same harness; explicit
+    # skip is the right answer here.
+    "test_print",
+    "test_assert",
     # Subnormal handling: Metal correctly preserves IEEE 754 subnormals
     # while CUDA default flushes them to zero. Tests expect CUDA FTZ
     # behavior. Adding global FTZ would silently degrade real-world
