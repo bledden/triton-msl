@@ -64,6 +64,18 @@ class MetalOptions:
     # "auto" (default) detects from the current device and SDK.
     target_metal_version: str = "auto"
 
+    def __post_init__(self):
+        # Match NVIDIA/AMD: ``extern_libs`` is exposed downstream as a
+        # tuple of (name, path) pairs so ``options.__dict__`` produces
+        # a hashable, deterministic value. Tests query
+        # ``compile_info[\"extern_libs\"]`` and compare against
+        # ``tuple(option_val.items())``; storing a dict here breaks
+        # that contract (test_launch_with_options[options2]).
+        if isinstance(self.extern_libs, dict):
+            object.__setattr__(
+                self, "extern_libs", tuple(sorted(self.extern_libs.items()))
+            )
+
     @staticmethod
     def _make_hashable(value):
         if isinstance(value, dict):

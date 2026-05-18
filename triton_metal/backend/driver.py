@@ -415,7 +415,12 @@ class MetalLauncher:
         import ctypes
 
         if launch_enter_hook:
-            launch_enter_hook(kernel_metadata, launch_metadata)
+            # Upstream Triton\'s hook convention is a single
+            # ``LaunchMetadata`` argument. Passing both kernel_metadata
+            # and launch_metadata trips registered ``hook(launch_metadata)``
+            # users with ``TypeError: hook() takes 1 positional argument
+            # but 2 were given`` (test_launch::test_metadata).
+            launch_enter_hook(launch_metadata)
 
         utils = _get_utils()
 
@@ -696,7 +701,7 @@ class MetalLauncher:
                     pool.release(release_entry[0], release_entry[1], release_entry[2])
 
         if launch_exit_hook:
-            launch_exit_hook(kernel_metadata, launch_metadata)
+            launch_exit_hook(launch_metadata)
 
 
 def _detect_metal_arch():

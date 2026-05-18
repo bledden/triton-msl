@@ -169,6 +169,64 @@ UNIMPLEMENTED_FEATURES = {
     # skip is the right answer here.
     "test_print",
     "test_assert",
+    # test_compile_only.* drives NVIDIA\'s ptxas to compile a kernel for
+    # a specific compute capability; on macOS the bundled ``ptxas-*``
+    # binary is a Linux ELF and Python\'s subprocess raises
+    # ``Exec format error``. Fundamentally NVIDIA-specific.
+    "test_compile_only_dot",
+    "test_compile_only_k_loop",
+    "test_compile_only_dot_mxfp",
+    "test_compile_only_sm100",
+    "test_fp8_compiles_for_multiple_architectures_cuda",
+    # test_fp8_support expects non-CUDA/non-HIP backends to reject
+    # fp8e4nv at compile time. Metal accepts it (we have software
+    # emulation), so the ``pytest.raises`` context fails. Skipping
+    # rather than declaring fp8e4nv unsupported — the emulated path
+    # works in practice.
+    "test_fp8_support[dtype2]",
+    # test_device_assert: same hardware blocker as tl.device_print —
+    # no Metal device-side abort/printf, and the harness greps a
+    # captured CUDA stderr trace for the assertion message.
+    "test_device_assert",
+    # ``test_sanitize_int_*_overflow`` rely on ``tl.device_assert`` to
+    # raise a host-side ``RuntimeError("device-side assert")`` when an
+    # arithmetic overflow is detected. Same Metal blocker as the other
+    # device-assert tests.
+    "test_sanitize_int_add_overflow",
+    "test_sanitize_int_sub_overflow",
+    "test_sanitize_int_mul_overflow",
+    # test_perf_warning + test_remark_* compare against the LLVM
+    # vectorization / SWP / MMA pass remarks NVIDIA\'s pipeline emits
+    # via ``-Rpass``. The Metal backend doesn\'t route through the
+    # NVIDIA LLVM passes, so the expected remark text is never
+    # produced.
+    "test_remark_vectorization",
+    "test_remark_swp_op_before_operands",
+    "test_mma_remark",
+    # test_link_extern_libs links a libdevice .bc file into the kernel
+    # via NVIDIA\'s ptxas pipeline; the harness setup imports
+    # torch.cuda. Strictly CUDA-only.
+    "test_link_extern_libs",
+    # test_triton_debuginfo_on grep\'s the emitted PTX/SASS for DWARF
+    # tags Triton\'s NVIDIA backend inserts. Metal generates AIR/MSL
+    # without those tags.
+    "test_triton_debuginfo_on",
+    # test_nvidia_tool inspects an NVIDIA-specific tool resolution.
+    "test_nvidia_tool",
+    # test_fn_dump exercises Triton\'s ``TRITON_FN_DUMP`` knob which
+    # writes PTX to a file path the test then parses; the Metal
+    # pipeline produces MSL / metallib by the same knob, but the test
+    # asserts PTX-specific contents.
+    "test_fn_dump",
+    # test_build.test_compile_module exercises Triton\'s C-extension
+    # build helper, which links against private CPython symbols that
+    # are no longer exported in CPython 3.14. Build-infra problem, not
+    # a backend bug.
+    "test_compile_module",
+    "test_compile_module_bad_cache",
+    # test_no_torch_dispatch validates running an NVIDIA kernel
+    # without importing torch — strictly an NVIDIA-runtime test.
+    "test_nvidia_kernel_dispatch_without_torch",
     # Subnormal handling: Metal correctly preserves IEEE 754 subnormals
     # while CUDA default flushes them to zero. Tests expect CUDA FTZ
     # behavior. Adding global FTZ would silently degrade real-world
