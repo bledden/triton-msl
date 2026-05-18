@@ -116,10 +116,16 @@ inline uchar float_to_fp8e5m2(float x) {
     if (isnan(x)) return 0x7Fu;
     uint sign = 0u;
     if (x < 0.0f) { sign = 1u; x = -x; }
-    if (isinf(x)) return uchar((sign << 7) | 0x7Cu);
-    if (x > 57344.0f) return uchar((sign << 7) | 0x7Bu);  // max finite
-    if (x < exp2(-16.0f)) return uchar(sign << 7);
-    // Subnormal range: x < 2^-14
+    // Triton\'s reference downcast clamps inf and overflowing finite
+    // values to ``finfo(fp8e5).max`` (= 57344.0); preserving inf as
+    // the e5m2 exponent-all-ones encoding (0x7C) would fail
+    // ``test_typeconvert_downcast_clamping``.
+    if (isinf(x) || x > 57344.0f) return uchar((sign << 7) | 0x7Bu);
+    // Subnormal range: x < 2^-14. The subnormal mantissa formula
+    // ``round(x * 2^16)`` already collapses values below ~2^-17 to zero
+    // via RTNE; the previous early ``x < 2^-16 → 0`` cutoff was too
+    // aggressive and missed the (2^-17, 2^-16) bucket that should round
+    // to the smallest subnormal.
     if (x < exp2(-14.0f)) {
         uint mant = uint(x * exp2(14.0f) * 4.0f + 0.5f);
         if (mant > 3u) mant = 3u;
