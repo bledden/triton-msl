@@ -126,10 +126,16 @@ class MetalBackend(BaseBackend):
         block_size = getattr(metadata, "block_size", None) or metadata.num_warps * 32
         output_arg_indices = getattr(metadata, "output_arg_indices", None)
         needs_2d_grid = getattr(metadata, "needs_2d_grid", False)
+        # IRSource-loaded kernels skip the codegen stage that sets
+        # ``shared``; fall back to 0 instead of raising. The Metal
+        # driver doesn\'t use this value (threadgroup allocs are
+        # baked into the MSL), but unpacking still expects a tuple
+        # of fixed shape (test_irsource::test_mlir_attribute_parsing).
+        shared = getattr(metadata, "shared", 0)
         return (
             metadata.num_warps,
             metadata.num_ctas,
-            metadata.shared,
+            shared,
             block_size,
             output_arg_indices,
             needs_2d_grid,
