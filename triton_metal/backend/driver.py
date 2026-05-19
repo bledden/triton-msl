@@ -815,8 +815,15 @@ class MetalDriver(DriverBase):
     def get_empty_cache_for_benchmark(self):
         import torch
 
+        # Apple Silicon\'s UMA means CPU and GPU share memory; there\'s no
+        # separate L2 cache to evict between benchmark iterations the way
+        # discrete NVIDIA GPUs require. Allocate on CPU so we don\'t
+        # contend with torch\'s MPS allocator (which can mis-report ``other
+        # allocations`` after our zero-copy ``newBufferWithBytesNoCopy``
+        # mappings churn and surface as
+        # ``RuntimeError: MPS backend out of memory``).
         cache_size = 256 * 1024 * 1024
-        return torch.empty(int(cache_size // 4), dtype=torch.int, device="mps")
+        return torch.empty(int(cache_size // 4), dtype=torch.int, device="cpu")
 
     def clear_cache(self, cache):
         cache.zero_()

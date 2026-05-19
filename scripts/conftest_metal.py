@@ -66,6 +66,27 @@ def pytest_runtest_setup(item):
         item.module.check_type_supported = _metal_check_type_supported
 
 
+def pytest_runtest_teardown(item, nextitem):
+    """Restore Triton\'s knob class attributes after each test.
+
+    ``triton.knobs.refresh_knobs()`` mutates class-level attributes
+    (e.g. ``runtime_knobs.debug``) by reading the current environment.
+    When a test using ``monkeypatch.setenv("TRITON_DEBUG", "1")``
+    followed by ``refresh_knobs()`` finishes, monkeypatch reverts the
+    env but the mutated class attribute persists, polluting any
+    subsequent test that asserts the default value (``test_read_env``,
+    ``test_autotuner``, etc.). Re-refreshing here against the
+    monkeypatch-restored env restores the class attributes to their
+    pristine values.
+    """
+    try:
+        import triton.knobs as _knobs
+        if hasattr(_knobs, "refresh_knobs"):
+            _knobs.refresh_knobs()
+    except Exception:
+        pass  # never fail teardown over a knob refresh
+
+
 # ── Types that Metal hardware cannot support ─────────────────────────────
 
 UNSUPPORTED_TYPES = {
