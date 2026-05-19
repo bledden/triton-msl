@@ -40,6 +40,29 @@ def _metal_check_type_supported(dtype, device):
         pytest.skip(f"Metal: {dtype} not supported")
 
 
+def pytest_ignore_collect(collection_path, path, config):
+    """Block upstream test files that can\'t even import on Metal.
+
+    ``collect_ignore_glob`` only works in a per-directory ``conftest.py``;
+    we run as a ``-p conftest_metal`` plugin so we use this hook
+    instead. Returning ``True`` here tells pytest to skip the entire
+    file without trying to import it. Pytest passes both the new
+    ``collection_path`` (``pathlib.Path``) and the legacy ``path``
+    (``py.path.local``); we use the former.
+    """
+    path_str = str(collection_path)
+    blocked_suffixes = (
+        # CUDA/HIP-only AOT C-extension tests: ``test_utils_src`` only
+        # gets assigned inside ``if is_cuda():`` / ``elif is_hip():`` so
+        # plain module import raises NameError at collection.
+        "unit/tools/test_aot.py",
+        # ``test_cache.py`` imports ``expecttest`` (a pytorch-side test
+        # helper) that isn\'t in our runtime deps.
+        "unit/runtime/test_cache.py",
+    )
+    return any(path_str.endswith(s) for s in blocked_suffixes)
+
+
 def pytest_configure(config):
     """Monkeypatch check_type_supported at import time.
 
