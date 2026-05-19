@@ -63,6 +63,15 @@ class MetalOptions:
     # Metal Shading Language version for xcrun compilation.
     # "auto" (default) detects from the current device and SDK.
     target_metal_version: str = "auto"
+    # HIP-specific knobs that upstream tutorials pass for any non-CUDA
+    # backend. Apple GPUs ignore them, but they need to be accepted as
+    # kwargs so ``triton.runtime.jit`` doesn\'t raise
+    # ``KeyError: Keyword argument <name> was specified but
+    # unrecognised`` when running e.g. tutorial 03 (matmul) with the
+    # HIP autotune config as fallback.
+    matrix_instr_nonkdim: int = 0
+    kpack: int = 1
+    waves_per_eu: int = 0
 
     def __post_init__(self):
         # Match NVIDIA/AMD: ``extern_libs`` is exposed downstream as a
@@ -1753,7 +1762,12 @@ class MetalBackend(BaseBackend):
             shared = mod.get_int_attr("ttg.shared")
         except Exception:
             shared = None
-        metadata["shared"] = shared if shared is not None else 0
+        # ``shared`` reports threadgroup-memory usage in bytes. Upstream
+        # tutorials compute occupancy as ``SIZE_SMEM // metadata.shared``
+        # and crash on 0 (ZeroDivisionError) — report at least 1 byte so
+        # the division evaluates to ``SIZE_SMEM`` (i.e., no constraint),
+        # which is the correct semantic when the kernel uses no TG memory.
+        metadata["shared"] = max(1, shared if shared is not None else 0)
 
         if level >= 2:
             kernel_name = metadata.get("name", "kernel")

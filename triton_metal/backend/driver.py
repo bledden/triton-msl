@@ -159,7 +159,14 @@ class MetalUtils:
             raise RuntimeError(f"Failed to create pipeline state: {error}")
 
         n_max_threads = pipeline_state.maxTotalThreadsPerThreadgroup()
-        return library, pipeline_state, 0, 0, n_max_threads
+        # Apple doesn\'t expose per-kernel register usage to client code,
+        # so we report a conservative ``32`` (one full register file
+        # slot per thread) instead of 0. Returning 0 here triggers
+        # ``ZeroDivisionError`` in upstream tutorials that compute
+        # ``NUM_REGS // (n_regs * ...)`` to estimate occupancy.
+        n_regs = 32
+        n_spills = 0
+        return library, pipeline_state, n_regs, n_spills, n_max_threads
 
     def launch(
         self,
@@ -360,9 +367,22 @@ class MetalUtils:
             mp_count = 10  # M-series base
         return {
             "max_shared_mem": 32768,  # 32 KB threadgroup memory
-            "max_num_regs": 0,
+            # 32K 32-bit registers per SIMD-group on Apple M4 (and
+            # similar on M1/M2/M3 — the exact value isn\'t queryable, so
+            # we report Apple\'s documented per-SIMD-group register file
+            # size). Tutorials use this to compute occupancy as
+            # ``NUM_REGS // (n_regs * WARP_SIZE * num_warps)`` and need
+            # a non-zero value to avoid ZeroDivisionError.
+            "max_num_regs": 32 * 1024,
             "multiprocessor_count": mp_count,
+            # Apple\'s per-SIMD-group max resident threads. Used in HIP
+            # tutorial branches; harmless to include for Metal too.
+            "max_threads_per_sm": 1024,
+            # Both spellings — upstream tutorials use ``warpSize`` (camelCase,
+            # matches CUDA\'s property name) while internal triton code uses
+            # ``warp_size``. Tutorials currently fail otherwise.
             "warp_size": 32,
+            "warpSize": 32,
         }
 
     def unload_module(self, module):
@@ -804,7 +824,12 @@ class MetalDriver(DriverBase):
     def get_active_torch_device(self):
         import torch
 
-        return torch.device("mps")
+        # Explicit device index so equality comparisons with tensor
+        # devices succeed: ``torch.device(\"mps\") != torch.device(\"mps:0\")``
+        # but ``torch.rand(..., device=torch.device(\"mps\")).device``
+        # returns the ``mps:0`` form. Tutorials commonly assert
+        # ``tensor.device == DEVICE`` and would otherwise fail.
+        return torch.device("mps", 0)
 
     def map_python_to_cpp_type(self, ty: str) -> str:
         return ty_to_cpp(ty)
