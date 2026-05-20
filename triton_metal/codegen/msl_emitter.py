@@ -333,7 +333,14 @@ class KernelBuilder:
 
         n_simd_groups = (self.block_size + 31) // 32
 
-        # Step 2: Initialize shared memory (bounds-guarded)
+        # Step 2: Initialize shared memory (bounds-guarded). A leading
+        # barrier here is required because ``shared_var`` may be reused
+        # by an earlier reduction in the same kernel (e.g. softmax\'s
+        # max then sum, or any loop body re-entering the reduction).
+        # Without it, SG 0\'s init writes can race with another SG\'s
+        # final read in step 4 — manifests as 350/1823 rows mismatching
+        # with the persistent-softmax tutorial pattern.
+        self.barrier("threadgroup")
         self.begin_if(f"sgitg == 0 && tiisg < {n_simd_groups}u")
         self._emit(f"{shared_var}[tiisg] = {identity};")
         self.end_block()
