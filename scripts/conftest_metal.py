@@ -233,6 +233,11 @@ UNIMPLEMENTED_FEATURES = {
     # "test_transpose",  # Enabled: 2D transpose works for most types
     # "test_cast",  # Enabled: type casts work correctly
     # Misc unimplemented
+    # Broadcast-mul matmul: kernel bakes M/N/K in as constexpr and
+    # the K-loop matmul template can\'t derive the full N stride from
+    # constants. Pointer-role detection is fixed (load X→A, Y→B,
+    # store→Z); only the N-stride remains. Skipping for now since
+    # this kernel pattern is uncommon in production workloads.
     "test_dot_mulbroadcasted",
     # tl.device_print: Metal GPUs have no device-side printf. The CUDA
     # ``__printf`` runtime is what makes ``tl.device_print`` work; on

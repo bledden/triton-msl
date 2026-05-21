@@ -299,8 +299,15 @@ class _TemplateMixin:
             lines.append(f"    uint _N = (uint)N;")
         else:
             lines.append(f"    uint _N = {BLOCK_N}u;  // no N arg, single tile")
+        scf_iters = info.get("scf_iters")
         if has_K:
             lines.append(f"    uint _K = (uint)K;")
+        elif scf_iters and scf_iters > 1:
+            # K is a constexpr / not a runtime scalar arg, but the
+            # ``scf.for`` body iterates ``scf_iters`` times across BLOCK_K
+            # chunks. Total K = BLOCK_K * scf_iters
+            # (``test_dot_mulbroadcasted`` baked K=160 in as constexpr).
+            lines.append(f"    uint _K = {BLOCK_K * scf_iters}u;  // BLOCK_K * scf.for iters")
         else:
             lines.append(f"    uint _K = {BLOCK_K}u;  // no K arg, single tile")
 

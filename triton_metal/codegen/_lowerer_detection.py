@@ -24,6 +24,80 @@ class _DetectionMixin:
     ``self.ssa_values``, etc.) — they do not define new state.
     """
 
+    def _trace_ptr_source(self, ssa_id, op_by_id=None, depth=0):
+        """Walk the value chain from an SSA id back to a kernel ``FuncArg``.
+
+        Follows the typical ``ttg.local_load → ttg.local_alloc →
+        ttg.memdesc_trans? → tt.trans? → tt.reshape? → tt.load →
+        tt.addptr* → tt.splat → <func-arg>`` chain. Returns the matching
+        ``FuncArg`` or ``None`` if no path lands on one (e.g. for
+        constant-initialized accumulators).
+        """
+        if op_by_id is None:
+            op_by_id = {}
+            def _collect(ops):
+                for s in ops:
+                    op_by_id[s.id] = s
+                    if s.region_ops:
+                        _collect(s.region_ops)
+                    if s.else_ops:
+                        _collect(s.else_ops)
+            _collect(self.graph.ops)
+        if depth > 32:
+            return None
+        # Function-arg ids: check against graph.args.
+        for arg in self.graph.args:
+            if arg.id == ssa_id and arg.is_ptr:
+                return arg
+        op = op_by_id.get(ssa_id)
+        if not op or not op.operand_ids:
+            return None
+        # ``tt.addptr`` and ``tt.splat`` use operand 0 as the base ptr;
+        # ``ttg.local_load`` / ``ttg.local_alloc`` / ``ttg.memdesc_trans``
+        # / ``tt.trans`` / ``tt.reshape`` / ``tt.load`` / ``arith.*``
+        # all pass through the value (or address) chain via operand 0
+        # too, so a single recursive walk handles every step.
+        return self._trace_ptr_source(op.operand_ids[0], op_by_id, depth + 1)
+
+    def _resolve_dot_ptr_roles(self, dot_ssa, all_ptr_args):
+        """Return ``[A_ptr, B_ptr, C_ptr]`` by tracing dot operands and the
+        ``tt.store`` target back to their kernel function args.
+
+        Falls back to the function-arg-declaration order when any leg
+        of the trace fails. The caller treats a ``None`` return as
+        \"use declaration order\".
+        """
+        if dot_ssa is None or len(dot_ssa.operand_ids) < 2:
+            return None
+        # Build op index once.
+        op_by_id = {}
+        def _collect(ops):
+            for s in ops:
+                op_by_id[s.id] = s
+                if s.region_ops:
+                    _collect(s.region_ops)
+                if s.else_ops:
+                    _collect(s.else_ops)
+        _collect(self.graph.ops)
+        a_arg = self._trace_ptr_source(dot_ssa.operand_ids[0], op_by_id)
+        b_arg = self._trace_ptr_source(dot_ssa.operand_ids[1], op_by_id)
+        # Find the (single) tt.store and trace its address operand.
+        c_arg = None
+        for ssa in self.graph.ops:
+            if ssa.op == "tt.store" and ssa.operand_ids:
+                c_arg = self._trace_ptr_source(ssa.operand_ids[0], op_by_id)
+                break
+        # All three must resolve to distinct args.
+        ptrs = [a_arg, b_arg, c_arg]
+        if any(p is None for p in ptrs):
+            return None
+        if len({p.name for p in ptrs}) != 3:
+            return None
+        # Append any extra unused ptr args at the end (preserves
+        # downstream slicing that may want ``ptr_args[3]`` for a W bias).
+        extras = [p for p in all_ptr_args if p.name not in {q.name for q in ptrs}]
+        return ptrs + extras
+
     def _detect_simple_dot(self):
         """Detect a simple dot kernel: load→local_alloc→local_load→dot→store.
 
@@ -48,6 +122,30 @@ class _DetectionMixin:
             if ssa.op == "scf.for":
                 scf_for_ssa = ssa
                 break
+
+        def _const_scf_iters(scf_op):
+            """Return the static iteration count of an scf.for if its
+            bounds are compile-time constants (``%c0_i32 to %cN_i32 step %c1_i32``),
+            else ``None``."""
+            if not scf_op or not scf_op.operand_ids or len(scf_op.operand_ids) < 3:
+                return None
+            op_by_id = {s.id: s for s in self.graph.ops}
+            def _const_val(sid):
+                s = op_by_id.get(sid)
+                if not s or s.op != "arith.constant":
+                    return None
+                return s.attrs.get("value")
+            lo = _const_val(scf_op.operand_ids[0])
+            hi = _const_val(scf_op.operand_ids[1])
+            step = _const_val(scf_op.operand_ids[2])
+            if lo is None or hi is None or step is None or step == 0:
+                return None
+            try:
+                return max(0, (int(hi) - int(lo) + int(step) - 1) // int(step))
+            except (TypeError, ValueError):
+                return None
+
+        scf_iters = _const_scf_iters(scf_for_ssa)
 
         if scf_for_ssa:
             # Check if the scf.for body contains tt.dot
@@ -78,7 +176,17 @@ class _DetectionMixin:
             BLOCK_M, BLOCK_K = a_shape[0], a_shape[1]
             BLOCK_K2, BLOCK_N = b_shape[0], b_shape[1]
 
-            ptr_args = [a for a in self.graph.args if a.is_ptr]
+            all_ptr_args = [a for a in self.graph.args if a.is_ptr]
+            if len(all_ptr_args) < 3:
+                return None
+
+            # Reorder ``ptr_args`` to (A, B, C) by tracing the dot\'s
+            # operand_a / operand_b sources and the tt.store target.
+            # Falling back to function-arg-declaration order gives wrong
+            # results when the kernel lists ``(Z, X, Y)`` like
+            # ``test_dot_mulbroadcasted``.
+            ptr_args = self._resolve_dot_ptr_roles(
+                dot_in_loop, all_ptr_args) or all_ptr_args
             if len(ptr_args) < 3:
                 return None
 
@@ -91,6 +199,11 @@ class _DetectionMixin:
                 "has_k_loop": True,
                 "scalar_args": scalar_arg_map,
                 "all_scalar_args": scalar_args,
+                # When K is a constexpr (not a runtime scalar arg) the
+                # template can\'t read it from a buffer. Pre-compute the
+                # full ``_K = BLOCK_K * scf_iters`` from the scf.for
+                # bounds when those are constants (``test_dot_mulbroadcasted``).
+                "scf_iters": scf_iters,
             }
 
         # --- Non-K-loop: simple dot without scf.for ---
@@ -139,9 +252,16 @@ class _DetectionMixin:
         for d in batch_dims:
             batch_size *= d
 
-        ptr_args = [a for a in self.graph.args if a.is_ptr]
-        if len(ptr_args) < 3:
+        all_ptr_args = [a for a in self.graph.args if a.is_ptr]
+        if len(all_ptr_args) < 3:
             return None
+
+        # Reorder to (A, B, C) by tracing the dot operand sources and the
+        # store target. The function-arg-declaration order can put C
+        # ahead of A/B (e.g. ``kernel(Z, X, Y, ...)`` in
+        # ``test_dot_mulbroadcasted``).
+        ptr_args = self._resolve_dot_ptr_roles(
+            dot_ssa, all_ptr_args) or all_ptr_args
 
         # Detect whether each dot operand is transposed. ``tl.trans`` before
         # tt.dot can land in TTGIR three ways depending on rank:
