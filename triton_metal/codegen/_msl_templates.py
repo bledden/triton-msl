@@ -456,6 +456,10 @@ def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32"):
     Constrained by Metal's 32KB threadgroup memory limit:
     - 32x32 fp32 tile = 4KB, two tiles = 8KB (well within limit)
 
+    Apple GPUs cap threadgroup size at 1024 threads, so tiles larger
+    than 32×32 distribute multiple output elements per thread:
+    ``elements_per_thread = (block_m * block_n) / threads_per_tg``.
+
     Args:
         block_m: Tile height (rows of A/C per threadgroup).
         block_n: Tile width (cols of B/C per threadgroup).
@@ -466,8 +470,11 @@ def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32"):
 
     fp8_input = is_fp8_type(dtype)
 
-    # Threadgroup size: one thread per output element in the tile
-    threads_per_tg = block_m * block_n
+    # Apple GPU threadgroup-thread cap.
+    TG_MAX = 1024
+    tile_elems = block_m * block_n
+    threads_per_tg = min(tile_elems, TG_MAX)
+    elements_per_thread = max(1, tile_elems // threads_per_tg)
 
     kb = KernelBuilder("matmul_kernel", block_size=threads_per_tg)
     kb.add_ptr_arg("A", dtype=dtype, const=True)
@@ -488,99 +495,122 @@ def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32"):
     kb.declare_threadgroup_array("tileA", dtype="fp32", size=block_m * block_k)
     kb.declare_threadgroup_array("tileB", dtype="fp32", size=block_k * block_n)
 
-    # Thread mapping: each thread computes one element of the output tile
-    # pid.x = tile column, pid.y = tile row (we use 2D grid)
-    # For simplicity, we flatten the 2D threadgroup into 1D and compute
-    # the local (row, col) from lid.
-    kb._var("local_row", f"lid / {block_n}u", ty="uint")
-    kb._var("local_col", f"lid % {block_n}u", ty="uint")
-
     # Global tile position: pid encodes the 2D tile index (grid is flattened 1D).
     kb._var("n_tile_cols", f"(N + {block_n}u - 1u) / {block_n}u", ty="uint")
     kb._var("tile_row", "pid / n_tile_cols", ty="uint")
     kb._var("tile_col", "pid % n_tile_cols", ty="uint")
 
-    # Global output row/col for this thread
-    kb._var("global_row", f"tile_row * {block_m}u + local_row", ty="uint")
-    kb._var("global_col", f"tile_col * {block_n}u + local_col", ty="uint")
-
-    # Accumulator
-    kb._var("acc", "0.0f", ty="float")
-
     # Tile loop over K dimension
     kb._var("n_tiles_k", f"(K + {block_k}u - 1u) / {block_k}u", ty="uint")
+
+    # Per-thread accumulator(s). When the BM×BN tile exceeds 1024
+    # output elements, each thread accumulates a strided sub-set of
+    # the tile (positions ``lid``, ``lid + threads_per_tg``, …).
+    if elements_per_thread == 1:
+        kb._var("acc_0", "0.0f", ty="float")
+    else:
+        for i in range(elements_per_thread):
+            kb._var(f"acc_{i}", "0.0f", ty="float")
+
+    # A-tile load amount per K-iter: block_m * block_k entries split
+    # across ``threads_per_tg`` threads.
+    a_tile_elems = block_m * block_k
+    a_loads_per_thread = max(1, (a_tile_elems + threads_per_tg - 1) // threads_per_tg)
+    b_tile_elems = block_k * block_n
+    b_loads_per_thread = max(1, (b_tile_elems + threads_per_tg - 1) // threads_per_tg)
+
     kb.raw_line("for (uint tk = 0; tk < n_tiles_k; tk++) {")
     kb.indent()
 
-    # Load A tile: tileA[local_row][local_col_k] = A[global_row][tk*BLOCK_K + local_col_k]
-    # Each thread loads one element. We need block_m * block_k elements loaded
-    # by block_m * block_n threads, so some threads load multiple elements.
-    kb._var("a_col", f"tk * {block_k}u + local_col", ty="uint")
     if fp8_input:
         to_float = fp8_to_float_func(dtype)
-        kb.raw_line(f"if (global_row < M && a_col < K) {{")
-        kb.indent()
-        kb.raw_line(f"tileA[local_row * {block_k}u + local_col] = {to_float}(A[global_row * K + a_col]);")
-        kb.dedent()
-        kb.raw_line("} else {")
-        kb.indent()
-        kb.raw_line(f"tileA[local_row * {block_k}u + local_col] = 0.0f;")
-        kb.dedent()
-        kb.raw_line("}")
+        a_expr = lambda gr, ac: f"{to_float}(A[({gr}) * K + ({ac})])"
+        b_expr = lambda br, gc: f"{to_float}(B[({br}) * N + ({gc})])"
     else:
-        kb.raw_line(f"if (global_row < M && a_col < K) {{")
-        kb.indent()
-        kb.raw_line(f"tileA[local_row * {block_k}u + local_col] = A[global_row * K + a_col];")
-        kb.dedent()
-        kb.raw_line("} else {")
-        kb.indent()
-        kb.raw_line(f"tileA[local_row * {block_k}u + local_col] = 0.0f;")
-        kb.dedent()
-        kb.raw_line("}")
+        a_expr = lambda gr, ac: f"A[({gr}) * K + ({ac})]"
+        b_expr = lambda br, gc: f"B[({br}) * N + ({gc})]"
 
-    # Load B tile: tileB[local_row_k][local_col] = B[tk*BLOCK_K + local_row_k][global_col]
-    kb._var("b_row", f"tk * {block_k}u + local_row", ty="uint")
-    if fp8_input:
-        kb.raw_line(f"if (b_row < K && global_col < N) {{")
+    # --- Load A tile ---
+    # Each thread loads ``a_loads_per_thread`` elements at
+    # ``a_idx = i * threads_per_tg + lid`` (i = 0..a_loads_per_thread-1).
+    for i in range(a_loads_per_thread):
+        a_idx = f"({i}u * {threads_per_tg}u + lid)" if a_loads_per_thread > 1 else "lid"
+        if a_loads_per_thread > 1:
+            kb.raw_line(f"if ({a_idx} < {a_tile_elems}u) {{")
+            kb.indent()
+        kb._var(f"a_lr_{i}", f"{a_idx} / {block_k}u", ty="uint")
+        kb._var(f"a_lc_{i}", f"{a_idx} % {block_k}u", ty="uint")
+        kb._var(f"a_gr_{i}", f"tile_row * {block_m}u + a_lr_{i}", ty="uint")
+        kb._var(f"a_gc_{i}", f"tk * {block_k}u + a_lc_{i}", ty="uint")
+        kb.raw_line(f"if (a_gr_{i} < M && a_gc_{i} < K) {{")
         kb.indent()
-        kb.raw_line(f"tileB[local_row * {block_n}u + local_col] = {to_float}(B[b_row * N + global_col]);")
+        kb.raw_line(f"tileA[a_lr_{i} * {block_k}u + a_lc_{i}] = {a_expr(f'a_gr_{i}', f'a_gc_{i}')};")
         kb.dedent()
         kb.raw_line("} else {")
         kb.indent()
-        kb.raw_line(f"tileB[local_row * {block_n}u + local_col] = 0.0f;")
+        kb.raw_line(f"tileA[a_lr_{i} * {block_k}u + a_lc_{i}] = 0.0f;")
         kb.dedent()
         kb.raw_line("}")
-    else:
-        kb.raw_line(f"if (b_row < K && global_col < N) {{")
+        if a_loads_per_thread > 1:
+            kb.dedent()
+            kb.raw_line("}")
+
+    # --- Load B tile ---
+    for i in range(b_loads_per_thread):
+        b_idx = f"({i}u * {threads_per_tg}u + lid)" if b_loads_per_thread > 1 else "lid"
+        if b_loads_per_thread > 1:
+            kb.raw_line(f"if ({b_idx} < {b_tile_elems}u) {{")
+            kb.indent()
+        kb._var(f"b_lr_{i}", f"{b_idx} / {block_n}u", ty="uint")
+        kb._var(f"b_lc_{i}", f"{b_idx} % {block_n}u", ty="uint")
+        kb._var(f"b_gr_{i}", f"tk * {block_k}u + b_lr_{i}", ty="uint")
+        kb._var(f"b_gc_{i}", f"tile_col * {block_n}u + b_lc_{i}", ty="uint")
+        kb.raw_line(f"if (b_gr_{i} < K && b_gc_{i} < N) {{")
         kb.indent()
-        kb.raw_line(f"tileB[local_row * {block_n}u + local_col] = B[b_row * N + global_col];")
+        kb.raw_line(f"tileB[b_lr_{i} * {block_n}u + b_lc_{i}] = {b_expr(f'b_gr_{i}', f'b_gc_{i}')};")
         kb.dedent()
         kb.raw_line("} else {")
         kb.indent()
-        kb.raw_line(f"tileB[local_row * {block_n}u + local_col] = 0.0f;")
+        kb.raw_line(f"tileB[b_lr_{i} * {block_n}u + b_lc_{i}] = 0.0f;")
+        kb.dedent()
+        kb.raw_line("}")
+        if b_loads_per_thread > 1:
+            kb.dedent()
+            kb.raw_line("}")
+
+    kb.barrier("threadgroup")
+
+    # --- Compute partial dot products ---
+    # Each thread accumulates ``elements_per_thread`` output positions.
+    # Position ``i`` of thread ``lid`` is ``i * threads_per_tg + lid``
+    # interpreted as a (row, col) inside the BM×BN tile.
+    for i in range(elements_per_thread):
+        out_idx = f"({i}u * {threads_per_tg}u + lid)" if elements_per_thread > 1 else "lid"
+        kb._var(f"lr_{i}", f"{out_idx} / {block_n}u", ty="uint")
+        kb._var(f"lc_{i}", f"{out_idx} % {block_n}u", ty="uint")
+        kb.raw_line(f"for (uint kk = 0; kk < {block_k}u; kk++) {{")
+        kb.indent()
+        kb.raw_line(f"acc_{i} += tileA[lr_{i} * {block_k}u + kk] * tileB[kk * {block_n}u + lc_{i}];")
         kb.dedent()
         kb.raw_line("}")
 
     kb.barrier("threadgroup")
 
-    # Compute partial dot product for this tile
-    kb.raw_line(f"for (uint kk = 0; kk < {block_k}u; kk++) {{")
-    kb.indent()
-    kb.raw_line(f"acc += tileA[local_row * {block_k}u + kk] * tileB[kk * {block_n}u + local_col];")
     kb.dedent()
-    kb.raw_line("}")
+    kb.raw_line("}")  # end K-tile loop
 
-    kb.barrier("threadgroup")
-
-    kb.dedent()
-    kb.raw_line("}")  # end tile loop
-
-    # Write result
-    kb.raw_line("if (global_row < M && global_col < N) {")
-    kb.indent()
-    kb.raw_line("C[global_row * N + global_col] = acc;")
-    kb.dedent()
-    kb.raw_line("}")
+    # --- Write results ---
+    for i in range(elements_per_thread):
+        out_idx = f"({i}u * {threads_per_tg}u + lid)" if elements_per_thread > 1 else "lid"
+        kb._var(f"olr_{i}", f"{out_idx} / {block_n}u", ty="uint")
+        kb._var(f"olc_{i}", f"{out_idx} % {block_n}u", ty="uint")
+        kb._var(f"gr_{i}", f"tile_row * {block_m}u + olr_{i}", ty="uint")
+        kb._var(f"gc_{i}", f"tile_col * {block_n}u + olc_{i}", ty="uint")
+        kb.raw_line(f"if (gr_{i} < M && gc_{i} < N) {{")
+        kb.indent()
+        kb.raw_line(f"C[gr_{i} * N + gc_{i}] = acc_{i};")
+        kb.dedent()
+        kb.raw_line("}")
 
     return kb.build()
 
