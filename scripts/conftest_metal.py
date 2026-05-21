@@ -147,6 +147,10 @@ UNSUPPORTED_TYPES = {
     "float8e4b15", "fp8e4b15",
     "float8e4b8",  "fp8e4b8",
     "float8e5b16", "fp8e5b16",
+    # TF32 is a CUDA-only output-dtype shortcut. Apple GPU has no TF32
+    # hardware; ``test_simple_matmul`` parametrizes the matmul output
+    # dtype over ``tensorfloat32`` which our backend can\'t honor.
+    "tensorfloat32",
 }
 
 UNSUPPORTED_PRECISIONS = {
