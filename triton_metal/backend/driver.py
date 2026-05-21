@@ -156,6 +156,30 @@ class MetalUtils:
             self.device.newComputePipelineStateWithFunction_error_(function, None)
         )
         if error is not None:
+            # Pipeline-state creation can fail for resource reasons
+            # (threadgroup memory > 32 KB, register pressure, compiler
+            # complexity limit) or genuinely malformed code. Triton\'s
+            # autotuner catches ``OutOfResources`` to silently skip
+            # configs that don\'t fit; without translating these errors
+            # the autotuner aborts on the first oversized config
+            # instead of moving on. Detect resource-style failures by
+            # the error\'s description and raise ``OutOfResources`` so
+            # the autotuner can continue.
+            err_str = str(error).lower()
+            resource_markers = (
+                "internal error",          # AGXMetalG16X Code=3
+                "threadgroup memory",
+                "out of memory",
+                "register",
+                "too large",
+                "exceeds",
+            )
+            if any(m in err_str for m in resource_markers):
+                try:
+                    from triton.runtime.errors import OutOfResources
+                    raise OutOfResources(0, 0, f"pipeline state: {error}")
+                except ImportError:
+                    raise RuntimeError(f"Failed to create pipeline state: {error}")
             raise RuntimeError(f"Failed to create pipeline state: {error}")
 
         n_max_threads = pipeline_state.maxTotalThreadsPerThreadgroup()
