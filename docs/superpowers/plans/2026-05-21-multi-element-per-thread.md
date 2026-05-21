@@ -18,6 +18,18 @@
   - `_detect_transpose_via_reshape` (test_trans_reshape)
   - `_detect_matmul_softmax` (test_dot softmax-epilogue)
   - `_detect_simple_dot` (with `_resolve_dot_ptr_roles`, `scf_iters` extraction)
+- **Phase 4a (DONE)** — `env_n_elems` dict + `_track_n_elems` /
+  `_parse_blocked_field` helpers populate elements-per-thread for every
+  tensor SSA that flows through `_propagate_shape_from_type`. Locked in
+  with unit tests in `tests/test_generic_lowerer.py`
+  (`test_track_n_elems_*`, `test_parse_blocked_field_*`). Direct
+  `env_shapes[]` writes (e.g. tt.make_range, splat) don't yet populate
+  `env_n_elems` — 4b call sites must consult both.
+- **Phase 4b scaffolding (DONE)** — `TRITON_METAL_MEPT` env flag,
+  `env_array` map, `_var_array(prefix, exprs, ty)` emitter, and
+  `_lookup_array(ssa_id) -> (name, n, ty)` reader. No op handler is
+  wired yet; flag-on default-route preserves byte-identical MSL output
+  (regression-tested by `test_mept_flag_on_preserves_existing_behavior`).
 
 ## What's blocked
 
@@ -61,20 +73,47 @@ For every tensor SSA value `%v : tensor<NxT, #layout>`:
 
 ## Implementation phases
 
-### 4a. Track elements-per-thread (~1 day)
+### 4a. Track elements-per-thread (~1 day) — **DONE**
 
-Add `self.env_n_elems: dict[int, int]` to `GenericLowerer`. Populate it
-when each tensor-producing op runs:
-- From tt.make_range / tt.splat / tt.broadcast / tt.expand_dims / tt.reshape:
-  recompute from the op's result `type_str` using `LinearLayout` /
-  `blocked_to_linear`.
-- For other ops: inherit from operand 0.
-- Default 1 for back-compat with the current single-scalar emission.
-
-Verify by adding a debug print and running the full test_core sweep — every
-tensor SSA should get a tracked n_elems value with no regressions.
+Status: landed. `self.env_n_elems` + `_track_n_elems` populate from the
+result `type_str` via `LinearLayout` / `blocked_to_linear`. The current
+plumbing covers ops that route through `_propagate_shape_from_type`;
+direct `env_shapes[]` writes (46 call sites: 32 in `generic_lowerer.py`,
+8 in `_lowerer_reduce.py`, 5 in `_lowerer_control.py`, 1 in
+`_device_func_lowerer.py`) bypass it and need
+backfill before 4b consumers can rely on the dict being complete. The
+4b backfill option: replace direct writes with helper calls; the safer
+option: have consumers (e.g. `_emit_binary` MEPT branch) call
+`_track_n_elems` defensively on operand SSA ids before consulting
+`env_n_elems`.
 
 ### 4b. Refactor `_var` / `_emit_passthrough` to optionally array-store (~3 days)
+
+**Scaffolding landed**: `TRITON_METAL_MEPT` flag, `env_array` map,
+`_var_array`, `_lookup_array`. Remaining work is integrating each op
+handler. Suggested order of integration (least → most surface):
+
+1. `_emit_passthrough` — pure book-keeping, no MSL emission needed
+   beyond propagating the `env_array` entry.
+2. `_emit_cast` — single-operand, single-result; wrap the existing
+   `static_cast<T>(a)` in a per-element loop.
+3. `_emit_unary` — same shape as cast.
+4. `_emit_binary` — two operands; both array form, or one array + one
+   broadcasted scalar (already handled via shape-elementwise propagation).
+5. tt.load / tt.store gather/scatter — see Phase 4c.
+
+For each handler, the wrap pattern is:
+```
+if self.mept_enabled:
+    n_a = self.env_n_elems.get(op_id_a, 1)
+    n_b = self.env_n_elems.get(op_id_b, 1)
+    n = max(n_a, n_b)
+    if n > 1:
+        # array form via _var_array
+        ...
+        return
+# else: scalar form (existing code unchanged)
+```
 
 Add `_var_array(name, exprs: list[str], ty)` that emits `T name[len(exprs)]`
 plus `name[i] = exprs[i]` assignments. The plain `_var` becomes a special

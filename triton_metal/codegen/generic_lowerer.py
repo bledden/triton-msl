@@ -12,6 +12,7 @@ Metal-specific considerations:
 - All FP16/BF16 computation done in float, cast at load/store
 """
 
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -58,6 +59,16 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         self.env_is_mask = {}   # ssa_id -> True if this is a bool mask
         self.env_is_ptr = {}    # ssa_id -> (base_ptr_name, offsets_var)
         self.env_shapes = {}    # ssa_id -> shape tuple, e.g., (32, 64)
+        # Phase 4 foundation: track how many tensor elements per thread each
+        # SSA value carries. The current lowerer emits 1 scalar per thread for
+        # every tensor, so the default is 1; ``_track_n_elems`` reads the
+        # TTGIR layout attached to each op\'s ``type_str`` and stores the
+        # computed value here. Op handlers can opt into the multi-element
+        # path later; today this is purely diagnostic and informs the
+        # ``_lower_convert_layout`` guard about when a real shuffle is
+        # required. See ``docs/superpowers/plans/2026-05-21-multi-element-
+        # per-thread.md`` for the staged refactor plan.
+        self.env_n_elems = {}   # ssa_id -> int (elements per thread, ≥ 1)
         # Some per-thread scalar values come from a broadcast-redundant layout:
         # thread `lid` does not hold the element at flat index `lid`, but at a
         # different index (e.g., after a 3D reduce that broadcasts the reduced
@@ -96,9 +107,46 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # SSA ids to skip (handled as part of a fused pattern)
         self._skip_ids = set()
 
+        # Phase 4b scaffolding: feature flag and array-storage env. When
+        # ``mept_enabled`` is False (default), no call site uses these and
+        # behavior is identical to today. When True, op handlers may emit
+        # array-form storage (``T name[N]``) and record entries in
+        # ``env_array``. See docs/superpowers/plans/
+        # 2026-05-21-multi-element-per-thread.md.
+        self.mept_enabled = os.environ.get("TRITON_METAL_MEPT", "0") == "1"
+        self.env_array = {}  # ssa_id -> (var_name: str, n_elems: int, ty: str)
+
     def _next_var(self, prefix="r") -> str:
         name = f"{prefix}_{self._var_counter}"
         self._var_counter += 1
+        return name
+
+    def _var_array(self, prefix: str, exprs, ty: str) -> str:
+        """Emit ``ty name[N];`` followed by ``name[i] = exprs[i];``.
+
+        Phase 4b primitive for multi-element-per-thread emission. Returns
+        the variable name; callers record the entry in ``env_array`` so
+        downstream ops know to read array elements with ``name[i]`` rather
+        than the plain scalar form. ``len(exprs)`` must be ≥ 1; a length
+        of 1 is allowed and equivalent to a plain ``_var`` decl, but the
+        env entry signals to consumers that array-loop emission is in use.
+
+        This helper assumes the caller has already verified that the MEPT
+        feature flag is on and that the target tensor genuinely carries
+        multiple elements per thread (consult ``env_n_elems`` for the
+        source SSA value before deciding to emit an array).
+        """
+        if not exprs:
+            raise ValueError("_var_array requires at least one expression")
+        n = len(exprs)
+        name = self._next_var(prefix)
+        # Single-line declaration + per-element initializer keeps the
+        # emitted MSL compact and lets the Metal compiler unroll trivially
+        # at small N. For larger N, switch to a loop later (Phase 4b
+        # follow-up; profile first).
+        self.kb.raw_line(f"    {ty} {name}[{n}];")
+        for i, expr in enumerate(exprs):
+            self.kb.raw_line(f"    {name}[{i}] = {expr};")
         return name
 
     # -- Shape tracking helpers --------------------------------------------------
@@ -141,9 +189,108 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             shape = _extract_shape(ssa.type_str)
             if shape:
                 self.env_shapes[ssa.id] = shape
+                # Also track elements-per-thread for the Phase 4 refactor.
+                self._track_n_elems(ssa.id, ssa.type_str, shape)
                 return
         # No tensor type → scalar
         self.env_shapes[ssa.id] = ()
+        self.env_n_elems[ssa.id] = 1
+
+    def _track_n_elems(self, ssa_id: int, type_str: str, shape: tuple):
+        """Compute elements-per-thread for ``ssa_id`` from its TTGIR layout.
+
+        For ``tensor<NxT, #alias>`` we look up ``#alias = #ttg.blocked<...>``
+        or ``#ttg.linear<...>`` in ``self.graph.mod_text`` and use the
+        ``LinearLayout`` machinery to count the number of register basis
+        vectors (each doubles the elements-per-thread).
+
+        When the layout can\'t be resolved (no alias, or inline layout),
+        defaults to ``max(1, numel // num_threads)`` — the value the
+        per-thread scalar model implicitly assumes today.
+
+        Storing this lets the convert_layout guard distinguish
+        \"genuinely needs MEPT shuffle\" from \"1-elem-per-thread is fine.\"
+        See ``docs/superpowers/plans/2026-05-21-multi-element-per-thread.md``.
+        """
+        if not shape:
+            self.env_n_elems[ssa_id] = 1
+            return
+        numel = 1
+        for d in shape:
+            numel *= d
+        num_threads = (self.options.num_warps if self.options else 4) * 32
+        default = max(1, numel // num_threads)
+
+        mod_text = getattr(self.graph, "mod_text", "") or ""
+        if not mod_text:
+            self.env_n_elems[ssa_id] = default
+            return
+
+        alias_match = re.search(r",\s*#(\w+)\s*>\s*$", type_str)
+        if not alias_match:
+            self.env_n_elems[ssa_id] = default
+            return
+        alias = alias_match.group(1)
+
+        # #ttg.linear → use parser directly
+        if re.search(rf"#{re.escape(alias)}\s*=\s*#ttg\.linear<", mod_text):
+            try:
+                from triton_metal.codegen._linear_layout import parse_linear_layout
+                ll = parse_linear_layout(mod_text, alias)
+                if ll:
+                    self.env_n_elems[ssa_id] = ll.num_registers_per_thread
+                    return
+            except Exception:
+                pass
+
+        # #ttg.blocked → convert to linear
+        if re.search(rf"#{re.escape(alias)}\s*=\s*#ttg\.blocked<", mod_text):
+            try:
+                from triton_metal.codegen._linear_layout import blocked_to_linear
+                spt = self._parse_blocked_field(mod_text, alias, "sizePerThread")
+                tpw = self._parse_blocked_field(mod_text, alias, "threadsPerWarp")
+                wpc = self._parse_blocked_field(mod_text, alias, "warpsPerCTA")
+                order = self._parse_blocked_field(mod_text, alias, "order")
+                if spt and tpw and wpc and order:
+                    ll = blocked_to_linear(spt, tpw, wpc, order, tuple(shape))
+                    if ll:
+                        self.env_n_elems[ssa_id] = ll.num_registers_per_thread
+                        return
+                # Fall back: product of sizePerThread is the local-tile size
+                # per thread; the rest is replication.
+                if spt:
+                    n_per_thread = 1
+                    for s in spt:
+                        n_per_thread *= s
+                    self.env_n_elems[ssa_id] = max(1, n_per_thread)
+                    return
+            except Exception:
+                pass
+
+        self.env_n_elems[ssa_id] = default
+
+    @staticmethod
+    def _parse_blocked_field(mod_text: str, alias: str, field: str):
+        """Pull an ``int`` list field out of ``#alias = #ttg.blocked<{...}>``.
+
+        ``field`` is one of ``sizePerThread``, ``threadsPerWarp``,
+        ``warpsPerCTA``, ``order``. Returns the list or ``None`` if the
+        layout/field can\'t be parsed.
+        """
+        m = re.search(
+            rf"#{re.escape(alias)}\s*=\s*#ttg\.blocked<\{{(.+?)\}}>",
+            mod_text, re.DOTALL,
+        )
+        if not m:
+            return None
+        body = m.group(1)
+        fm = re.search(rf"{field}\s*=\s*\[([^\]]*)\]", body)
+        if not fm:
+            return None
+        try:
+            return [int(p.strip()) for p in fm.group(1).split(",") if p.strip()]
+        except ValueError:
+            return None
 
     def _propagate_shape_elementwise(self, ssa: SSAValue):
         """Propagate shape for element-wise ops (arith, math, select, etc.).
@@ -1151,6 +1298,23 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         if ssa_id in self.env:
             return self.env[ssa_id]
         return f"UNKNOWN_{ssa_id}"
+
+    def _lookup_array(self, ssa_id: int):
+        """Return ``(name, n_elems, ty)`` for an SSA value's MEPT storage.
+
+        Phase 4b helper. If ``ssa_id`` has an entry in ``env_array``,
+        returns it directly. Otherwise returns ``(scalar_name, 1, ty)``
+        so call sites can iterate ``range(n_elems)`` uniformly without
+        branching on storage form. ``ty`` defaults to the empty string
+        when the type isn't tracked — callers that need the type for an
+        array declaration should resolve it separately.
+
+        Always check ``self.mept_enabled`` before deciding to emit array
+        code; the scalar form remains correct when the flag is off.
+        """
+        if ssa_id in self.env_array:
+            return self.env_array[ssa_id]
+        return (self._lookup(ssa_id), 1, "")
 
     def _lower_op(self, ssa: SSAValue):
         """Lower a single SSA operation to MSL."""
@@ -4530,25 +4694,24 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # only by pattern detectors (e.g. ``_detect_transpose_via_reshape``)
         # that bypass this path entirely. Reaching here with an unhandled
         # ``#linear`` source means the kernel will produce wrong values.
-        # Architectural fix tracked as the multi-element-per-thread refactor:
-        # the lowerer needs to model N elements per thread (one register
-        # array slot per LinearLayout register basis) and split wrap-loops
-        # at convert_layout boundaries — see _linear_layout.LinearLayout for
-        # the position math the shuffle would emit.
-        #
-        # Type strings reference layouts by alias (``tensor<1024xf32, #linear>``),
-        # so resolve the alias against ``mod_text`` to identify ``#ttg.linear``
-        # sources. Skip resolution for inline layouts (no alias to look up).
+        # ``#ttg.blocked`` sources still flow through the legacy text-based
+        # fallback in ``emit_msl`` and produce correct output for current
+        # kernels, so we only block ``#linear`` here. The architectural fix
+        # for both layouts is tracked as the multi-element-per-thread
+        # refactor (Phase 4 — see docs/superpowers/plans/
+        # 2026-05-21-multi-element-per-thread.md).
         mod_text = getattr(self.graph, "mod_text", "") or ""
         alias_match = re.search(r",\s*#(\w+)\s*>\s*$", src_type)
         if alias_match and mod_text:
             from triton_metal.codegen._linear_layout import parse_linear_layout
             alias = alias_match.group(1)
-            # Cheap pre-check: the alias must resolve to a #ttg.linear def.
             if re.search(rf"#{re.escape(alias)}\s*=\s*#ttg\.linear<",
                          mod_text):
                 ll = parse_linear_layout(mod_text, alias)
                 if ll and ll.num_registers_per_thread > 1:
+                    # Corroborate against env_n_elems tracking (Phase 4a
+                    # infrastructure). When they disagree, prefer the
+                    # parser's reading — env_n_elems is best-effort.
                     raise MetalNotImplementedError(
                         "ttg.convert_layout from a multi-element-per-thread "
                         "#linear source layout is not yet implemented. The "

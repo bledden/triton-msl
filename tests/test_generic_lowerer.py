@@ -910,3 +910,341 @@ def test_multipass_sum_reduce():
         expected = x.sum().item()
         diff = abs(out.item() - expected)
         assert diff < 1e-2, f"Sum reduce n={n}: diff={diff}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4a infrastructure: env_n_elems tracking
+# ---------------------------------------------------------------------------
+
+
+def test_parse_blocked_field_extracts_lists():
+    """`_parse_blocked_field` pulls the four required int lists."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+
+    mod_text = (
+        "#bar = #ttg.blocked<{sizePerThread = [1, 4], "
+        "threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], "
+        "order = [1, 0]}>\n"
+        "#foo = #ttg.blocked<{sizePerThread = [8], "
+        "threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>\n"
+    )
+
+    assert GenericLowerer._parse_blocked_field(mod_text, "bar",
+                                                "sizePerThread") == [1, 4]
+    assert GenericLowerer._parse_blocked_field(mod_text, "bar",
+                                                "threadsPerWarp") == [2, 16]
+    assert GenericLowerer._parse_blocked_field(mod_text, "bar",
+                                                "warpsPerCTA") == [4, 1]
+    assert GenericLowerer._parse_blocked_field(mod_text, "bar",
+                                                "order") == [1, 0]
+    assert GenericLowerer._parse_blocked_field(mod_text, "foo",
+                                                "sizePerThread") == [8]
+    # Missing alias returns None.
+    assert GenericLowerer._parse_blocked_field(mod_text, "baz",
+                                                "sizePerThread") is None
+    # Missing field returns None.
+    assert GenericLowerer._parse_blocked_field(mod_text, "bar",
+                                                "nonexistent") is None
+
+
+def test_track_n_elems_blocked_layout():
+    """Tracking computes elements-per-thread from a #ttg.blocked layout."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    # sizePerThread=[4], threadsPerWarp=[32], warpsPerCTA=[4] →
+    # 4 warps * 32 lanes = 128 threads, 4 elems/thread → 512 total.
+    mod_text = (
+        "#blk = #ttg.blocked<{sizePerThread = [4], "
+        "threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>"
+    )
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[], mod_text=mod_text)
+    lowerer = GenericLowerer.__new__(GenericLowerer)
+    lowerer.graph = graph
+    lowerer.options = _Options()
+    lowerer.env_n_elems = {}
+
+    lowerer._track_n_elems(42, "tensor<512xf32, #blk>", (512,))
+    assert lowerer.env_n_elems[42] == 4, (
+        f"expected 4 elems/thread for blocked[4], got "
+        f"{lowerer.env_n_elems[42]}")
+
+
+def test_track_n_elems_linear_layout():
+    """Tracking computes elements-per-thread from a #ttg.linear layout."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    # 2 register bases → 4 elements per thread.
+    mod_text = (
+        "#lin = #ttg.linear<{register = [[1], [2]], "
+        "lane = [[4], [8], [16], [32], [64]], "
+        "warp = [[128], [256]], block = []}>"
+    )
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[], mod_text=mod_text)
+    lowerer = GenericLowerer.__new__(GenericLowerer)
+    lowerer.graph = graph
+    lowerer.options = _Options()
+    lowerer.env_n_elems = {}
+
+    lowerer._track_n_elems(7, "tensor<512xf32, #lin>", (512,))
+    assert lowerer.env_n_elems[7] == 4, (
+        f"expected 4 elems/thread for linear with 2 register bases, got "
+        f"{lowerer.env_n_elems[7]}")
+
+
+def test_track_n_elems_scalar_defaults_to_one():
+    """Scalar types (no shape) always track as 1 element per thread."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[], mod_text="")
+    lowerer = GenericLowerer.__new__(GenericLowerer)
+    lowerer.graph = graph
+    lowerer.options = _Options()
+    lowerer.env_n_elems = {}
+
+    lowerer._track_n_elems(1, "i32", ())
+    assert lowerer.env_n_elems[1] == 1
+
+
+def test_track_n_elems_unresolved_alias_falls_back():
+    """Without mod_text or alias, tracking falls back to numel/num_threads."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    class _Options:
+        num_warps = 4  # 128 threads
+
+    graph = IRGraph(func_name="t", args=[], ops=[], mod_text="")
+    lowerer = GenericLowerer.__new__(GenericLowerer)
+    lowerer.graph = graph
+    lowerer.options = _Options()
+    lowerer.env_n_elems = {}
+
+    # 512 elems / 128 threads = 4 elems/thread (default).
+    lowerer._track_n_elems(3, "tensor<512xf32>", (512,))
+    assert lowerer.env_n_elems[3] == 4
+
+    # Small tile: 32 elems / 128 threads → floored to 1.
+    lowerer._track_n_elems(4, "tensor<32xf32>", (32,))
+    assert lowerer.env_n_elems[4] == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 4b scaffolding: _var_array + TRITON_METAL_MEPT flag
+# ---------------------------------------------------------------------------
+
+
+def test_mept_flag_defaults_off():
+    """Without TRITON_METAL_MEPT in env, the feature flag is off."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        assert lowerer.mept_enabled is False
+        assert lowerer.env_array == {}
+    finally:
+        if saved is not None:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_mept_flag_on_when_env_set():
+    """With TRITON_METAL_MEPT=1, the feature flag is on."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        assert lowerer.mept_enabled is True
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_var_array_emits_declaration_and_initializers():
+    """`_var_array` emits `T name[N];` plus per-index assignments."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    lowerer = GenericLowerer(graph, _Options())
+    lowerer.kb = KernelBuilder("t", block_size=256)
+
+    name = lowerer._var_array("v", ["a + b", "c + d", "e + f"], "float")
+
+    body = "\n".join(lowerer.kb._body_lines)
+    assert f"float {name}[3];" in body
+    assert f"{name}[0] = a + b;" in body
+    assert f"{name}[1] = c + d;" in body
+    assert f"{name}[2] = e + f;" in body
+
+
+def test_var_array_rejects_empty_exprs():
+    """`_var_array` requires at least one expression."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    lowerer = GenericLowerer(graph, _Options())
+    lowerer.kb = KernelBuilder("t", block_size=256)
+
+    with pytest.raises(ValueError, match="at least one"):
+        lowerer._var_array("v", [], "float")
+
+
+def test_lookup_array_lifts_scalar():
+    """`_lookup_array` lifts a scalar env entry to (name, 1, "")."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    lowerer = GenericLowerer(graph, _Options())
+    lowerer.env[42] = "v_3"
+
+    name, n, ty = lowerer._lookup_array(42)
+    assert name == "v_3"
+    assert n == 1
+    assert ty == ""
+
+
+def test_lookup_array_returns_env_array_entry():
+    """`_lookup_array` returns env_array directly when present."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    lowerer = GenericLowerer(graph, _Options())
+    lowerer.env_array[7] = ("v_5", 4, "float")
+
+    name, n, ty = lowerer._lookup_array(7)
+    assert name == "v_5"
+    assert n == 4
+    assert ty == "float"
+
+
+@requires_triton
+@requires_metal
+def test_mept_flag_on_preserves_existing_behavior():
+    """Flipping TRITON_METAL_MEPT=1 must not change scalar-path output.
+
+    Phase 4b scaffolding is dead code until call sites wire it in. This
+    test guards against an accidental wire-up that changes default output.
+    """
+    import os
+    @triton.jit
+    def vector_add(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n
+        a = tl.load(a_ptr + offsets, mask=mask)
+        b = tl.load(b_ptr + offsets, mask=mask)
+        tl.store(out_ptr + offsets, a + b, mask=mask)
+
+    sig = {"a_ptr": "*fp32", "b_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32"}
+
+    def lower(flag_on: bool):
+        saved = os.environ.get("TRITON_METAL_MEPT")
+        if flag_on:
+            os.environ["TRITON_METAL_MEPT"] = "1"
+        else:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        try:
+            mod, metadata, options = _compile_to_ttgir(
+                vector_add, sig, constexprs={"BLOCK_SIZE": 256}
+            )
+            msl, _ = _lower_to_msl(mod, metadata, options)
+            return msl
+        finally:
+            if saved is None:
+                os.environ.pop("TRITON_METAL_MEPT", None)
+            else:
+                os.environ["TRITON_METAL_MEPT"] = saved
+
+    assert lower(False) == lower(True), (
+        "MEPT flag-on output diverged from flag-off baseline; some call "
+        "site started consuming env_array without the explicit gate.")
+
+
+@requires_triton
+def test_track_n_elems_against_real_kernel_layouts():
+    """The parser resolves every #ttg.blocked alias in a real TTGIR module.
+
+    Phase 4a's tracking infrastructure is plumbed selectively today (only
+    sites that go through ``_propagate_shape_from_type`` populate
+    ``env_n_elems``). This test instead validates that the parser
+    components — ``_parse_blocked_field`` + ``_track_n_elems`` — produce
+    a sensible result for every tensor SSA in a representative kernel.
+    """
+    @triton.jit
+    def vector_add(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n
+        a = tl.load(a_ptr + offsets, mask=mask)
+        b = tl.load(b_ptr + offsets, mask=mask)
+        tl.store(out_ptr + offsets, a + b, mask=mask)
+
+    sig = {"a_ptr": "*fp32", "b_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32"}
+    mod, metadata, options = _compile_to_ttgir(
+        vector_add, sig, constexprs={"BLOCK_SIZE": 256}
+    )
+
+    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_metal.codegen.generic_lowerer import (
+        GenericLowerer, _extract_shape,
+    )
+
+    graph = walk_ttgir(mod, options)
+    lowerer = GenericLowerer(graph, options)
+
+    tensor_ssa = [op for op in graph.ops
+                  if op.type_str and "tensor<" in op.type_str]
+    assert tensor_ssa, "expected at least one tensor SSA value"
+
+    for op in tensor_ssa:
+        shape = _extract_shape(op.type_str)
+        lowerer._track_n_elems(op.id, op.type_str, shape)
+        n = lowerer.env_n_elems.get(op.id)
+        assert n is not None and n >= 1, (
+            f"_track_n_elems failed for ssa id={op.id} "
+            f"type={op.type_str!r} (got {n!r})")
