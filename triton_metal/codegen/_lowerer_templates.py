@@ -1855,8 +1855,19 @@ class _TemplateMixin:
         block_k = block_m
         self._matmul_block_size = block_m * block_n
 
+        # Output dtype can differ from input dtype (e.g. fp16 in / fp32 out).
+        # Without honoring this, ``make_matmul_kernel`` declares
+        # ``device <input_dtype>* C`` and Metal stores half values into
+        # what the caller allocated as float* — output looks like
+        # garbage when read back (saw a 7.6 trillion mismatch on
+        # ``test_simple_matmul[…-float16-float32]``).
+        out_dtype = dtype
+        if len(ptr_args) >= 3:
+            out_dtype = _mlir_to_triton_dtype(ptr_args[2].elem_type)
+
         msl = make_matmul_kernel(
-            block_m=block_m, block_n=block_n, block_k=block_k, dtype=dtype,
+            block_m=block_m, block_n=block_n, block_k=block_k,
+            dtype=dtype, out_dtype=out_dtype,
         )
 
         safe_name = _sanitize_msl_name(self.graph.func_name)

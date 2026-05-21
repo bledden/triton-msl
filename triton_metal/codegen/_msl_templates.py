@@ -444,7 +444,7 @@ def make_softmax_kernel(block_size=256, dtype="fp32"):
     return kb.build()
 
 
-def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32"):
+def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32", out_dtype=None):
     """Generate a tiled matrix multiplication kernel: C = A @ B.
 
     A is (M, K), B is (K, N), C is (M, N).
@@ -479,8 +479,13 @@ def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32"):
     kb = KernelBuilder("matmul_kernel", block_size=threads_per_tg)
     kb.add_ptr_arg("A", dtype=dtype, const=True)
     kb.add_ptr_arg("B", dtype=dtype, const=True)
-    # Output is always fp32 for FP8 inputs
-    out_dtype = "fp32" if fp8_input else dtype
+    # Output is always fp32 for FP8 inputs; otherwise honor the
+    # caller-supplied ``out_dtype`` (defaults to the input dtype for
+    # back-compat).
+    if fp8_input:
+        out_dtype = "fp32"
+    elif out_dtype is None:
+        out_dtype = dtype
     kb.add_ptr_arg("C", dtype=out_dtype, const=False)
     kb.add_scalar_arg("M", dtype="u32")
     kb.add_scalar_arg("N", dtype="u32")
