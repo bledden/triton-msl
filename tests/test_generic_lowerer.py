@@ -1146,6 +1146,58 @@ def test_lookup_array_lifts_scalar():
     assert ty == ""
 
 
+def test_emit_passthrough_propagates_env_array():
+    """`_emit_passthrough` carries env_array entry from src to dst."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    lowerer = GenericLowerer(graph, _Options())
+    lowerer.kb = KernelBuilder("t", block_size=256)
+
+    # Source SSA has both scalar env entry and array entry.
+    lowerer.env[100] = "v_scalar"
+    lowerer.env_array[100] = ("v_arr", 4, "float")
+
+    dst = SSAValue(id=200, name="v200", op="tt.bitcast",
+                   operand_ids=[100], attrs={}, type_str="tensor<512xf32>",
+                   elem_type="f32", is_tensor=True)
+    lowerer._emit_passthrough(dst)
+
+    # Both forms propagate.
+    assert lowerer.env[200] == "v_scalar"
+    assert lowerer.env_array[200] == ("v_arr", 4, "float")
+
+
+def test_emit_passthrough_no_env_array_when_src_has_none():
+    """Without a source env_array entry, dst gets none either."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    lowerer = GenericLowerer(graph, _Options())
+    lowerer.kb = KernelBuilder("t", block_size=256)
+
+    lowerer.env[100] = "v_scalar"
+    # Deliberately no env_array entry on src.
+
+    dst = SSAValue(id=200, name="v200", op="tt.bitcast",
+                   operand_ids=[100], attrs={}, type_str="tensor<512xf32>",
+                   elem_type="f32", is_tensor=True)
+    lowerer._emit_passthrough(dst)
+
+    assert lowerer.env[200] == "v_scalar"
+    assert 200 not in lowerer.env_array
+
+
 def test_lookup_array_returns_env_array_entry():
     """`_lookup_array` returns env_array directly when present."""
     from triton_metal.codegen.generic_lowerer import GenericLowerer

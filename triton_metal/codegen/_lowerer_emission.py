@@ -246,6 +246,13 @@ class _EmissionMixin:
             # Splat-ness survives passthrough.
             if src_id in self._is_splat:
                 self._is_splat.add(ssa.id)
+            # Phase 4b: MEPT array storage survives passthrough too. The
+            # same per-thread array layout applies to the result. Gated
+            # on the env_array entry (which only ever appears when a
+            # producer ran with TRITON_METAL_MEPT=1), so there's no flag
+            # check needed here: absent producers => absent entries.
+            if src_id in self.env_array:
+                self.env_array[ssa.id] = self.env_array[src_id]
 
 
     def _emit_cast(self, ssa: SSAValue, target_type: str, dtype: str = None):
