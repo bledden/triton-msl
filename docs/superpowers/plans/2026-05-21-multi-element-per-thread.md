@@ -30,6 +30,14 @@
   `_lookup_array(ssa_id) -> (name, n, ty)` reader. No op handler is
   wired yet; flag-on default-route preserves byte-identical MSL output
   (regression-tested by `test_mept_flag_on_preserves_existing_behavior`).
+- **Phase 4b consumer-side integration (DONE 2026-05-21)** — array path
+  wired into `_emit_passthrough` (book-keeping), `_emit_cast`,
+  `_emit_unary`, and `_emit_binary` (symmetric + broadcast asymmetric
+  cases via `_emit_binary_mept(read_a, read_b)` helper). All flag-gated;
+  flag-off byte-identical to before. Mismatched array lengths fall
+  through to scalar emission. 15 unit tests cover all paths. Still
+  needed for true elementwise coverage: `_emit_builtin_binary`,
+  `_emit_math_*`, `_emit_nan_propagating_minmax`, `_emit_uitofp`.
 
 ## What's blocked
 
