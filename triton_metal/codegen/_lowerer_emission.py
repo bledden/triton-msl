@@ -152,7 +152,19 @@ class _EmissionMixin:
         """Emit a unary operation: result = op(a)."""
         if not ssa.operand_ids:
             return
-        a = self._lookup(ssa.operand_ids[0])
+        src_id = ssa.operand_ids[0]
+        # Phase 4b: when MEPT is on and the source SSA carries an array,
+        # emit per-element unary ops into a parallel result array.
+        if self.mept_enabled and src_id in self.env_array:
+            src_name, n, _src_ty = self.env_array[src_id]
+            exprs = [f"{op_str}{src_name}[{i}]" for i in range(n)]
+            var_name = self._var_array("r", exprs, "float")
+            self.env[ssa.id] = var_name
+            self.env_array[ssa.id] = (var_name, n, "float")
+            self.env_types[ssa.id] = "fp32"
+            self._propagate_shape_elementwise(ssa)
+            return
+        a = self._lookup(src_id)
         var_name = self._next_var("r")
         self.kb.raw_line(f"    float {var_name} = {op_str}{a};")
         self.env[ssa.id] = var_name

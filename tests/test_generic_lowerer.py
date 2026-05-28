@@ -1214,6 +1214,79 @@ def test_emit_cast_emits_array_when_mept_on_and_src_is_array():
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
+def test_emit_unary_emits_array_when_mept_on_and_src_is_array():
+    """`_emit_unary` produces per-element unary ops when MEPT + array src."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "v_src"
+        lowerer.env_array[100] = ("v_src", 3, "float")
+
+        dst = SSAValue(id=200, name="v200", op="arith.negf",
+                       operand_ids=[100], attrs={},
+                       type_str="tensor<384xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._emit_unary(dst, "-")
+
+        name, n, ty = lowerer.env_array[200]
+        assert n == 3
+        body = "\n".join(lowerer.kb._body_lines)
+        assert f"float {name}[3];" in body
+        for i in range(3):
+            assert f"{name}[{i}] = -v_src[{i}];" in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_emit_unary_emits_scalar_when_mept_off():
+    """With MEPT off, `_emit_unary` keeps the existing scalar form."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "v_src"
+        lowerer.env_array[100] = ("v_src", 3, "float")
+
+        dst = SSAValue(id=200, name="v200", op="arith.negf",
+                       operand_ids=[100], attrs={},
+                       type_str="tensor<384xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._emit_unary(dst, "-")
+
+        assert 200 not in lowerer.env_array
+        body = "\n".join(lowerer.kb._body_lines)
+        assert "-v_src;" in body
+        assert "v_src[0]" not in body
+    finally:
+        if saved is not None:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 def test_emit_cast_emits_scalar_when_mept_off():
     """With MEPT off, `_emit_cast` keeps the existing scalar form."""
     import os
