@@ -30,14 +30,22 @@
   `_lookup_array(ssa_id) -> (name, n, ty)` reader. No op handler is
   wired yet; flag-on default-route preserves byte-identical MSL output
   (regression-tested by `test_mept_flag_on_preserves_existing_behavior`).
-- **Phase 4b consumer-side integration (DONE 2026-05-21)** — array path
-  wired into `_emit_passthrough` (book-keeping), `_emit_cast`,
-  `_emit_unary`, and `_emit_binary` (symmetric + broadcast asymmetric
-  cases via `_emit_binary_mept(read_a, read_b)` helper). All flag-gated;
-  flag-off byte-identical to before. Mismatched array lengths fall
-  through to scalar emission. 15 unit tests cover all paths. Still
-  needed for true elementwise coverage: `_emit_builtin_binary`,
-  `_emit_math_*`, `_emit_nan_propagating_minmax`, `_emit_uitofp`.
+- **Phase 4b consumer-side integration (DONE 2026-05-28)** — array
+  path wired into every elementwise emit helper:
+  - `_emit_passthrough` (book-keeping forward)
+  - `_emit_cast`, `_emit_uitofp`, `_emit_int_cast`
+  - `_emit_unary`, `_emit_binary` (symmetric + broadcast via
+    `_emit_binary_mept` / `_mept_binary_dispatch`)
+  - `_emit_builtin_binary`, `_emit_nan_propagating_minmax`
+  - `_lower_math` for the unary_map ops (exp/log/sqrt/abs/sin/cos/tanh/
+    floor/ceil/round + variants), `math.absi`, `math.fma`,
+    `math.powf` / `math.copysign` / `math.atan2`,
+    `math.roundeven` / `math.trunc`
+  27 unit tests. All flag-gated; flag-off byte-identical. `test_core`
+  sweep still 4325/0/5017 — no regressions from any of the wiring.
+  Still scalar-only: `math.erf` / `log1p` / `expm1` (multi-statement
+  chains; need their own array template). The consumer side is now
+  effectively complete for the elementwise op family.
 
 ## What's blocked
 
