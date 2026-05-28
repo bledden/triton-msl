@@ -1950,58 +1950,102 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         # Phase 4c: MEPT array load. When the pointer was assembled by
         # tt.addptr with an array offset, emit per-position reads into
-        # a result array. Honors mask + "other" (array or splat); FP8
-        # still falls back to scalar — its conversion chain has two
-        # statements per position which complicates the array form.
+        # a result array. Honors mask + "other" (array or splat). FP8
+        # loads emit two arrays (raw uchar + converted float) so the
+        # uchar→float conversion stays per-position.
         ptr_arr_info = self.env_ptr_array.get(ptr_id)
         if self.mept_enabled and ptr_arr_info is not None:
             dtype = _mlir_to_triton_dtype(ssa.elem_type)
-            from triton_metal.codegen.msl_builtins import is_fp8_type
-            if not is_fp8_type(dtype):
-                base_ptr, off_arr, n = ptr_arr_info
+            from triton_metal.codegen.msl_builtins import (
+                is_fp8_type, fp8_to_float_func,
+            )
+            base_ptr, off_arr, n = ptr_arr_info
+            is_fp8 = is_fp8_type(dtype)
+            if is_fp8:
+                self._inject_fp8_device_functions(dtype)
+                compute_type = "float"
+                zero = "0.0f"
+            else:
                 compute_type = _msl_compute_type(dtype)
                 zero = "0.0f" if dtype in ("fp32", "fp16", "bf16") else "0"
-                # Find mask + other operands the same way the scalar
-                # path does, but also accept array-form values.
-                mask_var = None
-                mask_is_array = False
-                other_val = zero
-                other_val_is_array = False
-                for op_id in ssa.operand_ids[1:]:
-                    if op_id in self.env_is_mask or self._is_mask(op_id):
-                        if op_id in self.env_array:
-                            mask_var, _mn, _ = self.env_array[op_id]
-                            mask_is_array = True
-                        else:
-                            mask_var = self._lookup(op_id)
-                    elif mask_var is not None:
-                        if op_id in self.env_array:
-                            other_val = self.env_array[op_id][0]
-                            other_val_is_array = True
-                        else:
-                            other_val = self._lookup(op_id)
-                exprs = []
+            # Find mask + other operands the same way the scalar
+            # path does, but also accept array-form values.
+            mask_var = None
+            mask_is_array = False
+            other_val = zero
+            other_val_is_array = False
+            for op_id in ssa.operand_ids[1:]:
+                if op_id in self.env_is_mask or self._is_mask(op_id):
+                    if op_id in self.env_array:
+                        mask_var, _mn, _ = self.env_array[op_id]
+                        mask_is_array = True
+                    else:
+                        mask_var = self._lookup(op_id)
+                elif mask_var is not None:
+                    if op_id in self.env_array:
+                        other_val = self.env_array[op_id][0]
+                        other_val_is_array = True
+                    else:
+                        other_val = self._lookup(op_id)
+            if is_fp8:
+                # Step 1: gather raw uchar values (mask-aware).
+                raw_exprs = []
                 for i in range(n):
                     pos = f"{base_ptr}[{off_arr}[{i}]]"
-                    loaded = f"static_cast<{compute_type}>({pos})"
                     if mask_var is None:
-                        exprs.append(loaded)
-                        continue
-                    mask_expr = (f"{mask_var}[{i}]" if mask_is_array
-                                 else mask_var)
-                    other_expr = (
-                        f"static_cast<{compute_type}>({other_val}[{i}])"
-                        if other_val_is_array
-                        else f"static_cast<{compute_type}>({other_val})"
-                    )
-                    exprs.append(
-                        f"{mask_expr} ? {loaded} : {other_expr}")
-                var_name = self._var_array("val", exprs, compute_type)
+                        raw_exprs.append(pos)
+                    else:
+                        mask_expr = (f"{mask_var}[{i}]" if mask_is_array
+                                     else mask_var)
+                        raw_exprs.append(f"{mask_expr} ? {pos} : uchar(0)")
+                raw_name = self._var_array("raw", raw_exprs, "uchar")
+                # Step 2: convert uchar → float per position. When
+                # masked, fall back to ``other``; when unmasked,
+                # convert all positions unconditionally.
+                to_float = fp8_to_float_func(dtype)
+                val_exprs = []
+                for i in range(n):
+                    convert = f"{to_float}({raw_name}[{i}])"
+                    if mask_var is None:
+                        val_exprs.append(convert)
+                    else:
+                        mask_expr = (f"{mask_var}[{i}]" if mask_is_array
+                                     else mask_var)
+                        other_expr = (
+                            f"static_cast<float>({other_val}[{i}])"
+                            if other_val_is_array
+                            else f"static_cast<float>({other_val})"
+                        )
+                        val_exprs.append(
+                            f"{mask_expr} ? {convert} : {other_expr}")
+                var_name = self._var_array("val", val_exprs, "float")
                 self.env[ssa.id] = var_name
-                self.env_array[ssa.id] = (var_name, n, compute_type)
+                self.env_array[ssa.id] = (var_name, n, "float")
                 self.env_types[ssa.id] = dtype
                 self._propagate_shape_from_type(ssa)
                 return
+            exprs = []
+            for i in range(n):
+                pos = f"{base_ptr}[{off_arr}[{i}]]"
+                loaded = f"static_cast<{compute_type}>({pos})"
+                if mask_var is None:
+                    exprs.append(loaded)
+                    continue
+                mask_expr = (f"{mask_var}[{i}]" if mask_is_array
+                             else mask_var)
+                other_expr = (
+                    f"static_cast<{compute_type}>({other_val}[{i}])"
+                    if other_val_is_array
+                    else f"static_cast<{compute_type}>({other_val})"
+                )
+                exprs.append(
+                    f"{mask_expr} ? {loaded} : {other_expr}")
+            var_name = self._var_array("val", exprs, compute_type)
+            self.env[ssa.id] = var_name
+            self.env_array[ssa.id] = (var_name, n, compute_type)
+            self.env_types[ssa.id] = dtype
+            self._propagate_shape_from_type(ssa)
+            return
 
         ptr_info = self.env_is_ptr.get(ptr_id)
 

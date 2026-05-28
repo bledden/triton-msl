@@ -2009,6 +2009,107 @@ def test_lower_load_array_with_scalar_mask_and_scalar_other():
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
+def test_lower_load_array_fp8_unmasked():
+    """FP8 array load emits raw[N] uchar gather + val[N] float convert."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env_ptr_array[100] = ("x_ptr", "off", 3)
+
+        load_ssa = SSAValue(
+            id=200, name="r200", op="tt.load",
+            operand_ids=[100], attrs={},
+            type_str="tensor<384xf8E4M3FN>",
+            elem_type="f8E4M3FN",
+            is_tensor=True,
+        )
+        lowerer._lower_load(load_ssa)
+
+        # Result is a float array.
+        val_name, n, ty = lowerer.env_array[200]
+        assert n == 3
+        assert ty == "float"
+        body = "\n".join(lowerer.kb._body_lines)
+        # Should have a uchar raw[3] and float val[3] declarations.
+        assert "uchar raw" in body
+        assert "float " + val_name in body
+        # Per-position load + convert (fp8e4m3 device fn).
+        for i in range(3):
+            assert f"x_ptr[off[{i}]]" in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_lower_load_array_fp8_with_array_mask_and_other():
+    """FP8 + array mask + array other emits the full conditional chain."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env_ptr_array[100] = ("x_ptr", "off", 2)
+        lowerer.env[101] = "msk"
+        lowerer.env_array[101] = ("msk", 2, "bool")
+        lowerer.env_is_mask[101] = True
+        lowerer.env[102] = "deflt"
+        lowerer.env_array[102] = ("deflt", 2, "float")
+
+        load_ssa = SSAValue(
+            id=200, name="r200", op="tt.load",
+            operand_ids=[100, 101, 102], attrs={},
+            type_str="tensor<256xf8E5M2>",
+            elem_type="f8E5M2",
+            is_tensor=True,
+        )
+        lowerer._lower_load(load_ssa)
+
+        val_name, n, ty = lowerer.env_array[200]
+        assert n == 2
+        assert ty == "float"
+        body = "\n".join(lowerer.kb._body_lines)
+        # Masked uchar gather.
+        for i in range(2):
+            assert (
+                f"msk[{i}] ? x_ptr[off[{i}]] : uchar(0)" in body
+            )
+        # Converted float (masked) with 'other' fallback.
+        for i in range(2):
+            assert (
+                f"msk[{i}] ? " in body
+                and f"static_cast<float>(deflt[{i}])" in body
+            )
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 def test_lower_store_array_path_scatters_to_env_ptr_array():
     """`_lower_store` writes val[i] -> base[off[i]] when MEPT round-trip."""
     import os
