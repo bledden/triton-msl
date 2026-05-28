@@ -1173,6 +1173,82 @@ def test_emit_passthrough_propagates_env_array():
     assert lowerer.env_array[200] == ("v_arr", 4, "float")
 
 
+def test_emit_cast_emits_array_when_mept_on_and_src_is_array():
+    """`_emit_cast` produces per-element casts when MEPT + array src."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "v_src"
+        lowerer.env_array[100] = ("v_src", 4, "half")
+
+        dst = SSAValue(id=200, name="v200", op="arith.extf",
+                       operand_ids=[100], attrs={},
+                       type_str="tensor<512xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._emit_cast(dst, "float", dtype="fp32")
+
+        # Result should be an array with per-element casts.
+        name, n, ty = lowerer.env_array[200]
+        assert n == 4
+        assert ty == "float"
+        body = "\n".join(lowerer.kb._body_lines)
+        assert f"float {name}[4];" in body
+        for i in range(4):
+            assert f"{name}[{i}] = static_cast<float>(v_src[{i}]);" in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_emit_cast_emits_scalar_when_mept_off():
+    """With MEPT off, `_emit_cast` keeps the existing scalar form."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "v_src"
+        # Even if env_array has an entry, flag-off ignores it.
+        lowerer.env_array[100] = ("v_src", 4, "half")
+
+        dst = SSAValue(id=200, name="v200", op="arith.extf",
+                       operand_ids=[100], attrs={},
+                       type_str="tensor<512xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._emit_cast(dst, "float", dtype="fp32")
+
+        assert 200 not in lowerer.env_array  # stayed scalar
+        body = "\n".join(lowerer.kb._body_lines)
+        assert "static_cast<float>(v_src)" in body
+        assert "v_src[0]" not in body
+    finally:
+        if saved is not None:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 def test_emit_passthrough_no_env_array_when_src_has_none():
     """Without a source env_array entry, dst gets none either."""
     from triton_metal.codegen.generic_lowerer import GenericLowerer

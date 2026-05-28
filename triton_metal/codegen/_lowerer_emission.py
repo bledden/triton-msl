@@ -260,17 +260,33 @@ class _EmissionMixin:
         if not ssa.operand_ids:
             return
         src_id = ssa.operand_ids[0]
+        # Resolve output dtype once so both array and scalar paths agree.
+        if dtype:
+            out_dtype = dtype
+        elif target_type == "float":
+            out_dtype = "fp32"
+        else:
+            out_dtype = (_mlir_to_triton_dtype(ssa.elem_type)
+                         if ssa.elem_type else "i32")
+        # Phase 4b: when MEPT is on and the source SSA carries an array,
+        # emit per-element cast into a parallel result array.
+        if self.mept_enabled and src_id in self.env_array:
+            src_name, n, _src_ty = self.env_array[src_id]
+            exprs = [f"static_cast<{target_type}>({src_name}[{i}])"
+                     for i in range(n)]
+            var_name = self._var_array("r", exprs, target_type)
+            self.env[ssa.id] = var_name
+            self.env_array[ssa.id] = (var_name, n, target_type)
+            self.env_types[ssa.id] = out_dtype
+            self._propagate_shape_elementwise(ssa)
+            if src_id in self._bcast_layout:
+                self._bcast_layout[ssa.id] = self._bcast_layout[src_id]
+            return
         a = self._lookup(src_id)
         var_name = self._next_var("r")
         self.kb.raw_line(f"    {target_type} {var_name} = static_cast<{target_type}>({a});")
         self.env[ssa.id] = var_name
-        if dtype:
-            self.env_types[ssa.id] = dtype
-        elif target_type == "float":
-            self.env_types[ssa.id] = "fp32"
-        else:
-            # Use the elem_type from MLIR when available
-            self.env_types[ssa.id] = _mlir_to_triton_dtype(ssa.elem_type) if ssa.elem_type else "i32"
+        self.env_types[ssa.id] = out_dtype
         # Shape: cast preserves shape from source operand
         self._propagate_shape_elementwise(ssa)
         # Propagate bcast layout — elementwise casts preserve the per-thread
