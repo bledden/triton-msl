@@ -3199,44 +3199,43 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = "fp32"
 
-        elif op == "math.powf":
+        elif op in ("math.powf", "math.copysign", "math.atan2"):
             if len(ssa.operand_ids) >= 2:
-                a = self._lookup(ssa.operand_ids[0])
-                b = self._lookup(ssa.operand_ids[1])
+                bin_fn = {"math.powf": "pow",
+                          "math.copysign": "copysign",
+                          "math.atan2": "atan2"}[op]
+                a_id, b_id = ssa.operand_ids[0], ssa.operand_ids[1]
+                a = self._lookup(a_id)
+                b = self._lookup(b_id)
+                # Phase 4b: MEPT array path via shared dispatcher.
+                def _make_expr(av, bv, _fn=bin_fn):
+                    return f"{_fn}({av}, {bv})"
+                if self._mept_binary_dispatch(
+                        ssa, a_id, b_id, a, b, _make_expr,
+                        "float", "fp32"):
+                    return
                 var_name = self._next_var("r")
-                self.kb.raw_line(f"    float {var_name} = pow({a}, {b});")
+                self.kb.raw_line(
+                    f"    float {var_name} = {bin_fn}({a}, {b});")
                 self.env[ssa.id] = var_name
                 self.env_types[ssa.id] = "fp32"
 
-        elif op == "math.copysign":
-            if len(ssa.operand_ids) >= 2:
-                a = self._lookup(ssa.operand_ids[0])
-                b = self._lookup(ssa.operand_ids[1])
-                var_name = self._next_var("r")
-                self.kb.raw_line(f"    float {var_name} = copysign({a}, {b});")
+        elif op in ("math.roundeven", "math.trunc"):
+            # Both are simple unary float ops with a different MSL name.
+            un_fn = {"math.roundeven": "rint",
+                     "math.trunc": "trunc"}[op]
+            src_id = ssa.operand_ids[0]
+            if self.mept_enabled and src_id in self.env_array:
+                src_name, n, _ = self.env_array[src_id]
+                exprs = [f"{un_fn}({src_name}[{i}])" for i in range(n)]
+                var_name = self._var_array("r", exprs, "float")
                 self.env[ssa.id] = var_name
+                self.env_array[ssa.id] = (var_name, n, "float")
                 self.env_types[ssa.id] = "fp32"
-
-        elif op == "math.atan2":
-            if len(ssa.operand_ids) >= 2:
-                a = self._lookup(ssa.operand_ids[0])
-                b = self._lookup(ssa.operand_ids[1])
-                var_name = self._next_var("r")
-                self.kb.raw_line(f"    float {var_name} = atan2({a}, {b});")
-                self.env[ssa.id] = var_name
-                self.env_types[ssa.id] = "fp32"
-
-        elif op == "math.roundeven":
-            a = self._lookup(ssa.operand_ids[0])
+                return
+            a = self._lookup(src_id)
             var_name = self._next_var("r")
-            self.kb.raw_line(f"    float {var_name} = rint({a});")
-            self.env[ssa.id] = var_name
-            self.env_types[ssa.id] = "fp32"
-
-        elif op == "math.trunc":
-            a = self._lookup(ssa.operand_ids[0])
-            var_name = self._next_var("r")
-            self.kb.raw_line(f"    float {var_name} = trunc({a});")
+            self.kb.raw_line(f"    float {var_name} = {un_fn}({a});")
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = "fp32"
 
