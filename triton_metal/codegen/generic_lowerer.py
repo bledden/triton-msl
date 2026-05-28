@@ -69,6 +69,13 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # required. See ``docs/superpowers/plans/2026-05-21-multi-element-
         # per-thread.md`` for the staged refactor plan.
         self.env_n_elems = {}   # ssa_id -> int (elements per thread, ≥ 1)
+        # Phase 4c: alongside env_n_elems, store the resolved
+        # ``LinearLayout`` when one is available. Consulted by MEPT
+        # producers (e.g. ``_lower_make_range``) to emit the correct
+        # per-register position math via ``msl_position_expr``. When
+        # absent (the synthetic / contiguous case), producers fall back
+        # to the simple ``lid*N + i`` formula.
+        self.env_layout = {}    # ssa_id -> LinearLayout
         # Some per-thread scalar values come from a broadcast-redundant layout:
         # thread `lid` does not hold the element at flat index `lid`, but at a
         # different index (e.g., after a 3D reduce that broadcasts the reduced
@@ -244,6 +251,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 ll = parse_linear_layout(mod_text, alias)
                 if ll:
                     self.env_n_elems[ssa_id] = ll.num_registers_per_thread
+                    self.env_layout[ssa_id] = ll
                     return
             except Exception:
                 pass
@@ -260,6 +268,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                     ll = blocked_to_linear(spt, tpw, wpc, order, tuple(shape))
                     if ll:
                         self.env_n_elems[ssa_id] = ll.num_registers_per_thread
+                        self.env_layout[ssa_id] = ll
                         return
                 # Fall back: product of sizePerThread is the local-tile size
                 # per thread; the rest is replication.
@@ -1579,19 +1588,38 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # Pure 1D case (original behavior)
         lid = self._lid_expr
         # Phase 4c: MEPT producer. When the result tensor carries >1
-        # elements per thread (contiguous within-thread layout — the
-        # simplest case), emit an array form: idx[i] = start + lid*N + i.
-        # More elaborate layouts (interleaved warps, multi-dim, non-
-        # default order) need LinearLayout.msl_position_expr from
-        # _linear_layout.py — deferred until those layouts appear in
-        # real kernels with TRITON_METAL_MEPT=1.
+        # elements per thread, emit an array form. If a resolved
+        # ``LinearLayout`` is available, use its register-basis
+        # position math (correct for any 1D layout, including
+        # interleaved warps and non-default order). Otherwise default
+        # to the contiguous formula ``idx[i] = start + lid*N + i``
+        # (valid for synthetic / default blocked layouts).
         n_per_thread = self.env_n_elems.get(ssa.id, 1)
         if self.mept_enabled and n_per_thread > 1:
-            exprs = [
-                f"{start}u + {lid} * {n_per_thread}u + {i}u" if start != 0
-                else f"{lid} * {n_per_thread}u + {i}u"
-                for i in range(n_per_thread)
-            ]
+            ll = self.env_layout.get(ssa.id)
+            if ll is not None and ll.num_registers_per_thread == n_per_thread:
+                # Compute lane / warp from lid:
+                #   lane = lid & 31u
+                #   warp = lid >> 5u
+                # The XOR-basis position(register=i, lane, warp) is the
+                # global element index this thread holds at register i.
+                exprs = []
+                for i in range(n_per_thread):
+                    pos_expr = ll.msl_position_expr(
+                        reg_var=f"{i}u",
+                        lane_var=f"({lid} & 31u)",
+                        warp_var=f"({lid} >> 5u)",
+                    )
+                    if start != 0:
+                        exprs.append(f"(uint)({start} + ({pos_expr}))")
+                    else:
+                        exprs.append(f"(uint)({pos_expr})")
+            else:
+                exprs = [
+                    f"{start}u + {lid} * {n_per_thread}u + {i}u" if start != 0
+                    else f"{lid} * {n_per_thread}u + {i}u"
+                    for i in range(n_per_thread)
+                ]
             var_name = self._var_array("idx", exprs, "uint")
             self.env[ssa.id] = var_name
             self.env_array[ssa.id] = (var_name, n_per_thread, "uint")

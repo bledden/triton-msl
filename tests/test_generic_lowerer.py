@@ -2226,6 +2226,69 @@ def test_lower_store_array_path_with_scalar_mask():
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
+def test_lower_make_range_uses_linear_layout_position_when_available():
+    """`_lower_make_range` consults env_layout for non-contiguous math."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_metal.codegen._linear_layout import LinearLayout
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[], block_size=512,
+                    num_warps=4)
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=512)
+        lowerer._is_2d = False
+        lowerer.effective_block_size = 128
+
+        # Build a 1D LinearLayout with 2 register bases [1, 2] (i.e. 4
+        # contiguous elements per thread, contiguous in the lowest two
+        # registers) and lane/warp bases extending from 4 onward.
+        ll = LinearLayout(
+            register_basis=[1, 2],
+            lane_basis=[4, 8, 16, 32, 64],
+            warp_basis=[128, 256],
+            block_basis=[],
+        )
+
+        rng = SSAValue(id=42, name="r42", op="tt.make_range",
+                       operand_ids=[], attrs={"start": 0, "end": 512},
+                       type_str="tensor<512xi32>", elem_type="i32",
+                       is_tensor=True)
+        lowerer.env_n_elems[42] = 4
+        lowerer.env_layout[42] = ll
+
+        lowerer._lower_make_range(rng)
+        assert 42 in lowerer.env_array
+        name, n, ty = lowerer.env_array[42]
+        assert n == 4
+
+        body = "\n".join(lowerer.kb._body_lines)
+        # The emitted formula must use XOR-basis position expressions.
+        # For register i, the contribution from register basis is
+        # ((-(int)((i_bit >> j) & 1u)) & basis_j) XORed across j.
+        # Position at reg=0 has no register contribution beyond
+        # the lane/warp terms; we just spot-check that the LL formula
+        # leaked into the emitted code instead of the simple lid*N+i.
+        assert f"uint {name}[4];" in body
+        # The simple fallback ``lid * 4u + 0u`` should NOT appear when
+        # the LL path is taken.
+        assert "lid * 4u + 0u" not in body
+        # XOR sign-mask pattern is unique to msl_position_expr.
+        assert " ^ " in body or "& 4)" in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 def test_lower_make_range_scalar_when_n_elems_is_one():
     """Even with MEPT on, n_elems=1 keeps the scalar form."""
     import os
