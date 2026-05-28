@@ -1911,6 +1911,104 @@ def test_lower_load_array_path_via_env_ptr_array():
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
+def test_lower_load_array_with_array_mask_and_other():
+    """`_lower_load` honors array-form mask + array-form other."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env_ptr_array[100] = ("x_ptr", "off", 3)
+        # Mask is an i1 env_array.
+        lowerer.env[101] = "msk"
+        lowerer.env_array[101] = ("msk", 3, "bool")
+        lowerer.env_is_mask[101] = True
+        # 'other' is an env_array.
+        lowerer.env[102] = "deflt"
+        lowerer.env_array[102] = ("deflt", 3, "float")
+
+        load_ssa = SSAValue(
+            id=200, name="r200", op="tt.load",
+            operand_ids=[100, 101, 102], attrs={},
+            type_str="tensor<384xf32>", elem_type="f32",
+            is_tensor=True,
+        )
+        lowerer._lower_load(load_ssa)
+
+        name, n, ty = lowerer.env_array[200]
+        assert n == 3
+        body = "\n".join(lowerer.kb._body_lines)
+        for i in range(3):
+            assert (
+                f"{name}[{i}] = msk[{i}] ? "
+                f"static_cast<float>(x_ptr[off[{i}]]) : "
+                f"static_cast<float>(deflt[{i}]);"
+            ) in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_lower_load_array_with_scalar_mask_and_scalar_other():
+    """Scalar mask broadcasts across array positions; scalar 'other'."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env_ptr_array[100] = ("x_ptr", "off", 2)
+        # Mask is a plain scalar (typical of splat-of-comparison).
+        lowerer.env[101] = "mask_scalar"
+        lowerer.env_is_mask[101] = True
+        # 'other' is a scalar constant.
+        lowerer.env[102] = "0.0f"
+
+        load_ssa = SSAValue(
+            id=200, name="r200", op="tt.load",
+            operand_ids=[100, 101, 102], attrs={},
+            type_str="tensor<256xf32>", elem_type="f32",
+            is_tensor=True,
+        )
+        lowerer._lower_load(load_ssa)
+
+        name, n, ty = lowerer.env_array[200]
+        assert n == 2
+        body = "\n".join(lowerer.kb._body_lines)
+        for i in range(2):
+            assert (
+                f"{name}[{i}] = mask_scalar ? "
+                f"static_cast<float>(x_ptr[off[{i}]]) : "
+                f"static_cast<float>(0.0f);"
+            ) in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 def test_lower_store_array_path_scatters_to_env_ptr_array():
     """`_lower_store` writes val[i] -> base[off[i]] when MEPT round-trip."""
     import os
@@ -2038,6 +2136,89 @@ def test_mept_round_trip_load_op_store():
                 f"out_ptr[{idx_name}[{i}]] = {neg_name}[{i}];"
                 in body
             )
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_lower_store_array_path_with_array_mask():
+    """`_lower_store` honors array-form mask (per-position if-write)."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env_ptr_array[100] = ("out_ptr", "off", 3)
+        lowerer.env[101] = "vals"
+        lowerer.env_array[101] = ("vals", 3, "float")
+        lowerer.env[102] = "msk"
+        lowerer.env_array[102] = ("msk", 3, "bool")
+        lowerer.env_is_mask[102] = True
+
+        store = SSAValue(
+            id=200, name="r200", op="tt.store",
+            operand_ids=[100, 101, 102], attrs={},
+            type_str="", elem_type="f32", is_tensor=False,
+        )
+        lowerer._lower_store(store)
+
+        body = "\n".join(lowerer.kb._body_lines)
+        for i in range(3):
+            assert f"if (msk[{i}]) {{" in body
+            assert f"out_ptr[off[{i}]] = vals[{i}];" in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_lower_store_array_path_with_scalar_mask():
+    """Scalar mask broadcasts across all per-position writes."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env_ptr_array[100] = ("out_ptr", "off", 2)
+        lowerer.env[101] = "vals"
+        lowerer.env_array[101] = ("vals", 2, "float")
+        lowerer.env[102] = "mask_scalar"
+        lowerer.env_is_mask[102] = True
+
+        store = SSAValue(
+            id=200, name="r200", op="tt.store",
+            operand_ids=[100, 101, 102], attrs={},
+            type_str="", elem_type="f32", is_tensor=False,
+        )
+        lowerer._lower_store(store)
+
+        body = "\n".join(lowerer.kb._body_lines)
+        for i in range(2):
+            assert "if (mask_scalar) {" in body
+            assert f"out_ptr[off[{i}]] = vals[{i}];" in body
     finally:
         if saved is None:
             os.environ.pop("TRITON_METAL_MEPT", None)

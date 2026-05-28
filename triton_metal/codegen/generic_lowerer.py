@@ -1922,21 +1922,52 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         # Phase 4c: MEPT array load. When the pointer was assembled by
         # tt.addptr with an array offset, emit per-position reads into
-        # a result array. Doesn\'t yet support FP8 / mask / "other" in
-        # the array path (multi-statement initialization + masking is
-        # a follow-up); falls back to scalar emission if those apply.
+        # a result array. Honors mask + "other" (array or splat); FP8
+        # still falls back to scalar — its conversion chain has two
+        # statements per position which complicates the array form.
         ptr_arr_info = self.env_ptr_array.get(ptr_id)
-        if (self.mept_enabled and ptr_arr_info is not None
-                and len(ssa.operand_ids) == 1):
-            base_ptr, off_arr, n = ptr_arr_info
+        if self.mept_enabled and ptr_arr_info is not None:
             dtype = _mlir_to_triton_dtype(ssa.elem_type)
             from triton_metal.codegen.msl_builtins import is_fp8_type
             if not is_fp8_type(dtype):
+                base_ptr, off_arr, n = ptr_arr_info
                 compute_type = _msl_compute_type(dtype)
-                exprs = [
-                    f"static_cast<{compute_type}>({base_ptr}[{off_arr}[{i}]])"
-                    for i in range(n)
-                ]
+                zero = "0.0f" if dtype in ("fp32", "fp16", "bf16") else "0"
+                # Find mask + other operands the same way the scalar
+                # path does, but also accept array-form values.
+                mask_var = None
+                mask_is_array = False
+                other_val = zero
+                other_val_is_array = False
+                for op_id in ssa.operand_ids[1:]:
+                    if op_id in self.env_is_mask or self._is_mask(op_id):
+                        if op_id in self.env_array:
+                            mask_var, _mn, _ = self.env_array[op_id]
+                            mask_is_array = True
+                        else:
+                            mask_var = self._lookup(op_id)
+                    elif mask_var is not None:
+                        if op_id in self.env_array:
+                            other_val = self.env_array[op_id][0]
+                            other_val_is_array = True
+                        else:
+                            other_val = self._lookup(op_id)
+                exprs = []
+                for i in range(n):
+                    pos = f"{base_ptr}[{off_arr}[{i}]]"
+                    loaded = f"static_cast<{compute_type}>({pos})"
+                    if mask_var is None:
+                        exprs.append(loaded)
+                        continue
+                    mask_expr = (f"{mask_var}[{i}]" if mask_is_array
+                                 else mask_var)
+                    other_expr = (
+                        f"static_cast<{compute_type}>({other_val}[{i}])"
+                        if other_val_is_array
+                        else f"static_cast<{compute_type}>({other_val})"
+                    )
+                    exprs.append(
+                        f"{mask_expr} ? {loaded} : {other_expr}")
                 var_name = self._var_array("val", exprs, compute_type)
                 self.env[ssa.id] = var_name
                 self.env_array[ssa.id] = (var_name, n, compute_type)
@@ -2045,20 +2076,38 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         # Phase 4c: MEPT array scatter. When the pointer was assembled
         # via a tt.addptr with an array offset AND the value is an
-        # env_array of matching length, emit per-position writes. Does
-        # not yet handle mask in the array path (follow-up).
+        # env_array of matching length, emit per-position writes.
+        # Honors an optional mask operand (array or scalar form).
         ptr_arr_info = self.env_ptr_array.get(ptr_id)
         val_arr_info = self.env_array.get(val_id)
         if (self.mept_enabled and ptr_arr_info is not None
                 and val_arr_info is not None
-                and ptr_arr_info[2] == val_arr_info[1]
-                and len(ssa.operand_ids) == 2):
+                and ptr_arr_info[2] == val_arr_info[1]):
             base_ptr, off_arr, n = ptr_arr_info
             val_arr, _vn, _vty = val_arr_info
+            # Optional mask is the third operand if present.
+            mask_var = None
+            mask_is_array = False
+            if len(ssa.operand_ids) >= 3:
+                mid = ssa.operand_ids[2]
+                if mid in self.env_is_mask or self._is_mask(mid):
+                    if mid in self.env_array:
+                        mask_var, _mn, _ = self.env_array[mid]
+                        mask_is_array = True
+                    else:
+                        mask_var = self._lookup(mid)
             for i in range(n):
-                self.kb.raw_line(
+                write = (
                     f"    {base_ptr}[{off_arr}[{i}]] = {val_arr}[{i}];"
                 )
+                if mask_var is None:
+                    self.kb.raw_line(write)
+                else:
+                    cond = (f"{mask_var}[{i}]" if mask_is_array
+                            else mask_var)
+                    self.kb.raw_line(f"    if ({cond}) {{")
+                    self.kb.raw_line(f"    " + write.lstrip())
+                    self.kb.raw_line(f"    }}")
             return
 
         # Check if the value to store is smem-backed with total > block_size
