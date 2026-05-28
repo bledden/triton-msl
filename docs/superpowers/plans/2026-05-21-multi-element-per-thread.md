@@ -167,13 +167,19 @@ A synthetic round-trip test
 `GenericLowerer` with the flag on and verifies the full array trail.
 
 What's left for full 4c:
-- Mask / "other" / FP8 in the array load path.
-- Mask in the array store path.
-- LinearLayout-aware position math for non-contiguous layouts (the
-  `LinearLayout.msl_position_expr` helper is already in place).
-- An actual end-to-end test driven from TTGIR (today no kernel
-  produces an `n_elems > 1` layout, so the path is exercised only via
-  hand-injection in unit tests).
+- ~~Mask / "other" in the array load path~~ — landed (b8531db).
+- ~~Mask in the array store path~~ — landed (b8531db).
+- ~~LinearLayout-aware position math~~ — landed (2ff262c): `env_layout`
+  tracks the resolved `LinearLayout`, `_lower_make_range` uses
+  `msl_position_expr` when available.
+- FP8 in array load (uchar→float two-statement chain).
+- A real TTGIR-driven exercise — **current blocker**: with our
+  default Metal compilation pipeline, kernels produce
+  `sizePerThread = [1]` (verified with `vector_add` at
+  `BLOCK_SIZE = 1024` and `4096`). To exercise MEPT in production,
+  the pipeline needs to be modified to request coalescing /
+  vectorization passes that emit `sizePerThread > 1` layouts. That
+  is a separate effort outside the lowerer rewrite.
 
 ### 4d. Convert_layout shuffle (~1 day)
 
