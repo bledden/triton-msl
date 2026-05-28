@@ -143,20 +143,37 @@ This is the biggest single chunk. Most op handlers (`_lower_arith_*`,
 `_lower_math_*`, `_emit_binary`, `_emit_unary`, etc.) need an "if my operand
 is an array, emit a `for` loop" branch.
 
-### 4c. tt.load / tt.store array gathers (~1 day)
+### 4c. tt.load / tt.store array gathers (~1 day) — **PARTIALLY DONE**
 
-Currently `tt.load` reads one element per thread at `ptr[offsets[lid]]`.
-For an array tensor result with `n_per_thread = 4`:
-```c
-T v[4];
-for (uint i = 0; i < 4; i++) {
-    uint pos = layout.position(i, lane, warp);  // pos in 1024-elem buffer
-    v[i] = (mask[i]) ? ptr[offsets[pos]] : other;
-}
-```
-The position formula comes from the result tensor's layout.
+Status: simplest case landed for the **contiguous 1D layout**:
 
-`tt.store` is symmetric.
+- `_lower_make_range` (commit 46f5362): when `env_n_elems[ssa.id] > 1`
+  and MEPT is on, emits `idx[N]` via `_var_array` with
+  `idx[i] = start + lid*N + i`. Defers more elaborate layouts (multi-
+  dim, interleaved warps, non-default order) to scalar fallback.
+- `_lower_addptr` (commit 04f35fa): when offset operand has `env_array`,
+  records `env_ptr_array[ssa.id] = (base_ptr, offset_array, n)`.
+  Handles array+array, scalar+array, bare-ptr+array parent forms.
+- `_lower_load` (commit 04f35fa): when ptr has `env_ptr_array`, emits
+  per-position `val[i] = static_cast<T>(base[off[i]])` into a fresh
+  `env_array`. Mask / "other" / FP8 paths fall back to scalar.
+- `_lower_store` (commit 04f35fa): when ptr has `env_ptr_array` and
+  the value has `env_array` of matching length, emits per-position
+  writes. Mask in array path is a follow-up.
+
+A synthetic round-trip test
+(`test_mept_round_trip_load_op_store`) exercises
+`make_range→addptr→load→unary→addptr→store` end-to-end inside one
+`GenericLowerer` with the flag on and verifies the full array trail.
+
+What's left for full 4c:
+- Mask / "other" / FP8 in the array load path.
+- Mask in the array store path.
+- LinearLayout-aware position math for non-contiguous layouts (the
+  `LinearLayout.msl_position_expr` helper is already in place).
+- An actual end-to-end test driven from TTGIR (today no kernel
+  produces an `n_elems > 1` layout, so the path is exercised only via
+  hand-injection in unit tests).
 
 ### 4d. Convert_layout shuffle (~1 day)
 
