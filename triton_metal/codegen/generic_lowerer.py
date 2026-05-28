@@ -1594,6 +1594,11 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # interleaved warps and non-default order). Otherwise default
         # to the contiguous formula ``idx[i] = start + lid*N + i``
         # (valid for synthetic / default blocked layouts).
+        # ``_lower_make_range`` writes env_shapes directly (not via
+        # ``_propagate_shape_from_type``), so ensure env_n_elems is
+        # populated from the result's TTGIR layout here.
+        if ssa.id not in self.env_n_elems and ssa.type_str:
+            self._track_n_elems(ssa.id, ssa.type_str, (end - start,))
         n_per_thread = self.env_n_elems.get(ssa.id, 1)
         if self.mept_enabled and n_per_thread > 1:
             ll = self.env_layout.get(ssa.id)
@@ -3192,6 +3197,26 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # zero-extended uint8 → uint32).
         is_unsigned = pred_name in ("ult", "ule", "ugt", "uge") if pred_name else False
         is_signed = pred_name in ("slt", "sle", "sgt", "sge") if pred_name else False
+
+        # Phase 4b/c: MEPT array path. Wraps the same cast convention
+        # (uint / int / none) per array position. Result is bool[N];
+        # downstream consumers (tt.load mask, tt.store mask, arith.andi
+        # on i1) read it as an env_array.
+        if is_unsigned:
+            def _make_expr(av, bv, _op=op_str):
+                return f"(uint){av} {_op} (uint){bv}"
+        elif is_signed:
+            def _make_expr(av, bv, _op=op_str):
+                return f"(int){av} {_op} (int){bv}"
+        else:
+            def _make_expr(av, bv, _op=op_str):
+                return f"{av} {_op} {bv}"
+        if self._mept_binary_dispatch(
+                ssa, ssa.operand_ids[0], ssa.operand_ids[1], a, b,
+                _make_expr, "bool", "i1"):
+            # _mept_binary_dispatch set env / env_array; mark as mask.
+            self.env_is_mask[ssa.id] = True
+            return
 
         var_name = self._next_var("mask")
         if is_unsigned:

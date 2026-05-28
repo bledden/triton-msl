@@ -2659,12 +2659,11 @@ def test_lookup_array_returns_env_array_entry():
 
 @requires_triton
 @requires_metal
-def test_mept_flag_on_preserves_existing_behavior():
-    """Flipping TRITON_METAL_MEPT=1 must not change scalar-path output.
-
-    Phase 4b scaffolding is dead code until call sites wire it in. This
-    test guards against an accidental wire-up that changes default output.
-    """
+def test_mept_flag_actually_changes_output_when_layout_supports_it():
+    """When the layout carries sizePerThread > 1, the MEPT flag should
+    actually flip the generated MSL from scalar form to array form. This
+    protects the inverse direction of the earlier guard (which checked
+    that the flag was dormant for layouts where MEPT couldn't apply)."""
     import os
     @triton.jit
     def vector_add(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
@@ -2694,9 +2693,18 @@ def test_mept_flag_on_preserves_existing_behavior():
             else:
                 os.environ["TRITON_METAL_MEPT"] = saved
 
-    assert lower(False) == lower(True), (
-        "MEPT flag-on output diverged from flag-off baseline; some call "
-        "site started consuming env_array without the explicit gate.")
+    off = lower(False)
+    on = lower(True)
+    # Flag-off: no per-position array declarations.
+    assert "idx_0[2]" not in off
+    assert "val_" not in off or "[2]" not in off
+    # Flag-on: array form must appear at make_range / load / store.
+    assert "[2];" in on, (
+        f"Expected per-position array decl in MEPT-on MSL, got:\n{on}"
+    )
+    # Both paths must compile.
+    assert _validate_msl_compiles(off), "Scalar path MSL failed to compile"
+    assert _validate_msl_compiles(on), "MEPT array path MSL failed to compile"
 
 
 @requires_triton
