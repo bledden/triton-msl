@@ -1612,6 +1612,88 @@ def test_emit_int_cast_array_path():
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
+def test_lower_math_unary_array_path():
+    """`_lower_math` unary ops emit per-position calls when MEPT on."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "v_src"
+        lowerer.env_array[100] = ("v_src", 3, "float")
+
+        dst = SSAValue(id=200, name="v200", op="math.exp",
+                       operand_ids=[100], attrs={},
+                       type_str="tensor<384xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._lower_math(dst)
+
+        name, n, ty = lowerer.env_array[200]
+        assert n == 3
+        body = "\n".join(lowerer.kb._body_lines)
+        for i in range(3):
+            assert f"{name}[{i}] = exp(v_src[{i}]);" in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_lower_math_fma_array_path():
+    """`_lower_math` fma emits per-position fma(a, b, c) when MEPT on."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "a"
+        lowerer.env[101] = "b"
+        lowerer.env[102] = "c_scalar"
+        lowerer.env_array[100] = ("a", 2, "float")
+        lowerer.env_array[101] = ("b", 2, "float")
+        # c is a scalar — broadcast it.
+
+        dst = SSAValue(id=200, name="v200", op="math.fma",
+                       operand_ids=[100, 101, 102], attrs={},
+                       type_str="tensor<256xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._lower_math(dst)
+
+        name, n, ty = lowerer.env_array[200]
+        assert n == 2
+        body = "\n".join(lowerer.kb._body_lines)
+        for i in range(2):
+            assert (
+                f"{name}[{i}] = fma(a[{i}], b[{i}], c_scalar);" in body
+            )
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 def test_emit_binary_mismatched_array_lengths_falls_through():
     """Different-length arrays aren't supported — falls back to scalar."""
     import os

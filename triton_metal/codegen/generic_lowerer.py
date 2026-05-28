@@ -3106,8 +3106,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         }
 
         if op in unary_map:
-            a = self._lookup(ssa.operand_ids[0])
+            src_id = ssa.operand_ids[0]
             fn = unary_map[op]
+            # Phase 4b: MEPT array path.
+            if self.mept_enabled and src_id in self.env_array:
+                src_name, n, _ = self.env_array[src_id]
+                exprs = [f"{fn}({src_name}[{i}])" for i in range(n)]
+                var_name = self._var_array("r", exprs, "float")
+                self.env[ssa.id] = var_name
+                self.env_array[ssa.id] = (var_name, n, "float")
+                self.env_types[ssa.id] = "fp32"
+                return
+            a = self._lookup(src_id)
             var_name = self._next_var("r")
             self.kb.raw_line(f"    float {var_name} = {fn}({a});")
             self.env[ssa.id] = var_name
@@ -3115,18 +3125,57 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         elif op == "math.absi":
             # Integer absolute value
-            a = self._lookup(ssa.operand_ids[0])
-            var_name = self._next_var("r")
+            src_id = ssa.operand_ids[0]
             ty, dtype = _msl_int_type(ssa.elem_type, unsigned=False)
+            if self.mept_enabled and src_id in self.env_array:
+                src_name, n, _ = self.env_array[src_id]
+                exprs = [f"abs({src_name}[{i}])" for i in range(n)]
+                var_name = self._var_array("r", exprs, ty)
+                self.env[ssa.id] = var_name
+                self.env_array[ssa.id] = (var_name, n, ty)
+                self.env_types[ssa.id] = dtype
+                return
+            a = self._lookup(src_id)
+            var_name = self._next_var("r")
             self.kb.raw_line(f"    {ty} {var_name} = abs({a});")
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = dtype
 
         elif op == "math.fma":
             if len(ssa.operand_ids) >= 3:
-                a = self._lookup(ssa.operand_ids[0])
-                b = self._lookup(ssa.operand_ids[1])
-                c = self._lookup(ssa.operand_ids[2])
+                a_id, b_id, c_id = ssa.operand_ids[:3]
+                # Phase 4b: ternary MEPT — require all-or-nothing array
+                # form. If any operand is an array, all three must be
+                # arrays of the same length (or scalar to broadcast).
+                if self.mept_enabled and (
+                    a_id in self.env_array
+                    or b_id in self.env_array
+                    or c_id in self.env_array
+                ):
+                    a = self._lookup(a_id)
+                    b = self._lookup(b_id)
+                    c = self._lookup(c_id)
+                    arrs = [self.env_array.get(x) for x in (a_id, b_id, c_id)]
+                    ns = [arr[1] for arr in arrs if arr is not None]
+                    n = ns[0] if ns else 1
+                    if all((arr is None or arr[1] == n) for arr in arrs):
+                        def _read(i, sid, scalar):
+                            arr = self.env_array.get(sid)
+                            return f"{arr[0]}[{i}]" if arr else scalar
+                        exprs = [
+                            f"fma({_read(i, a_id, a)}, "
+                            f"{_read(i, b_id, b)}, "
+                            f"{_read(i, c_id, c)})"
+                            for i in range(n)
+                        ]
+                        var_name = self._var_array("r", exprs, "float")
+                        self.env[ssa.id] = var_name
+                        self.env_array[ssa.id] = (var_name, n, "float")
+                        self.env_types[ssa.id] = "fp32"
+                        return
+                a = self._lookup(a_id)
+                b = self._lookup(b_id)
+                c = self._lookup(c_id)
                 var_name = self._next_var("r")
                 self.kb.raw_line(f"    float {var_name} = fma({a}, {b}, {c});")
                 self.env[ssa.id] = var_name
