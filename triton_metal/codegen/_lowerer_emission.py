@@ -24,6 +24,47 @@ from triton_metal.codegen._lowerer_helpers import (
 class _EmissionMixin:
     """Low-level MSL emit helpers used by ``GenericLowerer``."""
 
+    def _emit_binary_mept(self, ssa: SSAValue, op_str: str,
+                          force_unsigned: bool, n: int,
+                          read_a, read_b):
+        """Phase 4b helper: emit ``a op b`` per array position.
+
+        ``read_a(i)`` / ``read_b(i)`` return the MSL expression for the
+        i-th element of each operand (e.g. ``"a[i]"`` for an array, or a
+        plain scalar name for a broadcast operand). Centralizes the type
+        / splat / bcast bookkeeping so the call sites stay short.
+        """
+        is_float = self._is_float_op(ssa)
+        if is_float:
+            ty, dtype = "float", "fp32"
+        elif force_unsigned:
+            ty, dtype = _msl_int_type(ssa.elem_type, unsigned=True)
+        else:
+            ty, dtype = _msl_int_type(ssa.elem_type, unsigned=False)
+        if force_unsigned and not is_float:
+            unsigned_ty, _ = _msl_int_type(ssa.elem_type, unsigned=True)
+            exprs = [
+                f"({unsigned_ty}){read_a(i)} {op_str} "
+                f"({unsigned_ty}){read_b(i)}"
+                for i in range(n)
+            ]
+        else:
+            exprs = [f"{read_a(i)} {op_str} {read_b(i)}" for i in range(n)]
+        var_name = self._var_array("r", exprs, ty)
+        self.env[ssa.id] = var_name
+        self.env_array[ssa.id] = (var_name, n, ty)
+        self.env_types[ssa.id] = dtype
+        self._propagate_shape_elementwise(ssa)
+        if ssa.elem_type == "i1" and ssa.op in (
+            "arith.andi", "arith.ori", "arith.xori"
+        ):
+            self.env_is_mask[ssa.id] = True
+        if (ssa.operand_ids[0] in self._is_splat
+                and ssa.operand_ids[1] in self._is_splat):
+            self._is_splat.add(ssa.id)
+        self._propagate_bcast_layout_binary(ssa)
+
+
     def _emit_binary(self, ssa: SSAValue, op_str: str, force_unsigned=False):
         """Emit a binary operation: result = a op b.
 
@@ -39,48 +80,51 @@ class _EmissionMixin:
         a = self._lookup(ssa.operand_ids[0])
         b = self._lookup(ssa.operand_ids[1])
 
-        # Phase 4b: MEPT array path. Symmetric case only (both operands
-        # array, same length); broadcast case is a follow-up. The smem
-        # path below (for oversized iter_args) is mutually exclusive
-        # with MEPT in current code — register arrays vs threadgroup
-        # storage — so short-circuit here.
+        # Phase 4b: MEPT array path. Handles two cases:
+        #   (1) Symmetric: both operands carry env_array entries of the
+        #       same length — emit per-element op.
+        #   (2) Broadcast: one operand is an array, the other is a
+        #       per-thread scalar (typically a splat or constant) —
+        #       reuse the scalar at every array position.
+        # The smem path below (for oversized iter_args) is mutually
+        # exclusive with MEPT in current code (register arrays vs
+        # threadgroup storage), so short-circuit here.
         a_id, b_id = ssa.operand_ids[0], ssa.operand_ids[1]
         a_arr = self.env_array.get(a_id)
         b_arr = self.env_array.get(b_id)
-        if (self.mept_enabled and a_arr is not None and b_arr is not None
-                and a_arr[1] == b_arr[1]):
-            is_float = self._is_float_op(ssa)
-            if is_float:
-                ty, dtype = "float", "fp32"
-            elif force_unsigned:
-                ty, dtype = _msl_int_type(ssa.elem_type, unsigned=True)
-            else:
-                ty, dtype = _msl_int_type(ssa.elem_type, unsigned=False)
-            a_name, n, _ = a_arr
-            b_name = b_arr[0]
-            if force_unsigned and not is_float:
-                unsigned_ty, _ud = _msl_int_type(ssa.elem_type, unsigned=True)
-                exprs = [
-                    f"({unsigned_ty}){a_name}[{i}] {op_str} "
-                    f"({unsigned_ty}){b_name}[{i}]"
-                    for i in range(n)
-                ]
-            else:
-                exprs = [f"{a_name}[{i}] {op_str} {b_name}[{i}]"
-                         for i in range(n)]
-            var_name = self._var_array("r", exprs, ty)
-            self.env[ssa.id] = var_name
-            self.env_array[ssa.id] = (var_name, n, ty)
-            self.env_types[ssa.id] = dtype
-            self._propagate_shape_elementwise(ssa)
-            if ssa.elem_type == "i1" and ssa.op in (
-                "arith.andi", "arith.ori", "arith.xori"
-            ):
-                self.env_is_mask[ssa.id] = True
-            if (a_id in self._is_splat and b_id in self._is_splat):
-                self._is_splat.add(ssa.id)
-            self._propagate_bcast_layout_binary(ssa)
-            return
+        if self.mept_enabled and (a_arr is not None or b_arr is not None):
+            # Determine the array length n; require lengths to match if
+            # both operands are arrays (skip asymmetric-length cases —
+            # fall back to scalar emission below).
+            if a_arr is not None and b_arr is not None:
+                if a_arr[1] != b_arr[1]:
+                    # Mismatched lengths — fall through to scalar.
+                    pass
+                else:
+                    n = a_arr[1]
+                    self._emit_binary_mept(
+                        ssa, op_str, force_unsigned, n,
+                        lambda i, an=a_arr[0]: f"{an}[{i}]",
+                        lambda i, bn=b_arr[0]: f"{bn}[{i}]",
+                    )
+                    return
+            elif a_arr is not None:
+                n = a_arr[1]
+                # b is a scalar; broadcast it across the array positions.
+                self._emit_binary_mept(
+                    ssa, op_str, force_unsigned, n,
+                    lambda i, an=a_arr[0]: f"{an}[{i}]",
+                    lambda i, bv=b: bv,
+                )
+                return
+            else:  # b_arr is not None
+                n = b_arr[1]
+                self._emit_binary_mept(
+                    ssa, op_str, force_unsigned, n,
+                    lambda i, av=a: av,
+                    lambda i, bn=b_arr[0]: f"{bn}[{i}]",
+                )
+                return
 
         bs = self.effective_block_size
 
