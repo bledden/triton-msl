@@ -24,32 +24,24 @@ from triton_metal.codegen._lowerer_helpers import (
 class _EmissionMixin:
     """Low-level MSL emit helpers used by ``GenericLowerer``."""
 
-    def _emit_binary_mept(self, ssa: SSAValue, op_str: str,
-                          force_unsigned: bool, n: int,
-                          read_a, read_b):
-        """Phase 4b helper: emit ``a op b`` per array position.
+    def _emit_binary_mept(self, ssa: SSAValue, n: int,
+                          read_a, read_b, make_expr,
+                          ty: str, dtype: str):
+        """Phase 4b helper: emit a binary op per array position.
 
         ``read_a(i)`` / ``read_b(i)`` return the MSL expression for the
         i-th element of each operand (e.g. ``"a[i]"`` for an array, or a
-        plain scalar name for a broadcast operand). Centralizes the type
-        / splat / bcast bookkeeping so the call sites stay short.
+        plain scalar name for a broadcast operand). ``make_expr(a, b)``
+        builds the per-position expression (e.g. ``"{a} + {b}"`` for
+        infix, ``"fn({a}, {b})"`` for builtin, ``"(isnan({a}) ...) ?
+        NAN : fn(...)"`` for nan-propagating). ``ty`` / ``dtype`` are
+        the result MSL type and triton dtype.
+
+        Centralizes env / shape / mask / splat / bcast bookkeeping so
+        callers (``_emit_binary``, ``_emit_builtin_binary``,
+        ``_emit_nan_propagating_minmax``) stay short.
         """
-        is_float = self._is_float_op(ssa)
-        if is_float:
-            ty, dtype = "float", "fp32"
-        elif force_unsigned:
-            ty, dtype = _msl_int_type(ssa.elem_type, unsigned=True)
-        else:
-            ty, dtype = _msl_int_type(ssa.elem_type, unsigned=False)
-        if force_unsigned and not is_float:
-            unsigned_ty, _ = _msl_int_type(ssa.elem_type, unsigned=True)
-            exprs = [
-                f"({unsigned_ty}){read_a(i)} {op_str} "
-                f"({unsigned_ty}){read_b(i)}"
-                for i in range(n)
-            ]
-        else:
-            exprs = [f"{read_a(i)} {op_str} {read_b(i)}" for i in range(n)]
+        exprs = [make_expr(read_a(i), read_b(i)) for i in range(n)]
         var_name = self._var_array("r", exprs, ty)
         self.env[ssa.id] = var_name
         self.env_array[ssa.id] = (var_name, n, ty)
@@ -63,6 +55,42 @@ class _EmissionMixin:
                 and ssa.operand_ids[1] in self._is_splat):
             self._is_splat.add(ssa.id)
         self._propagate_bcast_layout_binary(ssa)
+
+    def _mept_binary_dispatch(self, ssa: SSAValue, a_id: int, b_id: int,
+                              a: str, b: str, make_expr,
+                              ty: str, dtype: str) -> bool:
+        """Phase 4b dispatch: if at least one operand is an array, emit
+        a MEPT array result and return True. Otherwise return False so
+        the caller continues with its scalar path.
+
+        ``make_expr(a_expr, b_expr)`` builds the per-position MSL
+        expression. ``ty`` / ``dtype`` are the result MSL type / triton
+        dtype. ``a`` / ``b`` are the scalar lookups (used as the operand
+        expression when that side isn\'t an array).
+        """
+        if not self.mept_enabled:
+            return False
+        a_arr = self.env_array.get(a_id)
+        b_arr = self.env_array.get(b_id)
+        if a_arr is None and b_arr is None:
+            return False
+        if a_arr is not None and b_arr is not None:
+            if a_arr[1] != b_arr[1]:
+                # Mismatched lengths — fall back to scalar.
+                return False
+            n = a_arr[1]
+            read_a = lambda i, an=a_arr[0]: f"{an}[{i}]"
+            read_b = lambda i, bn=b_arr[0]: f"{bn}[{i}]"
+        elif a_arr is not None:
+            n = a_arr[1]
+            read_a = lambda i, an=a_arr[0]: f"{an}[{i}]"
+            read_b = lambda i, bv=b: bv
+        else:  # b_arr is not None
+            n = b_arr[1]
+            read_a = lambda i, av=a: av
+            read_b = lambda i, bn=b_arr[0]: f"{bn}[{i}]"
+        self._emit_binary_mept(ssa, n, read_a, read_b, make_expr, ty, dtype)
+        return True
 
 
     def _emit_binary(self, ssa: SSAValue, op_str: str, force_unsigned=False):
@@ -80,51 +108,29 @@ class _EmissionMixin:
         a = self._lookup(ssa.operand_ids[0])
         b = self._lookup(ssa.operand_ids[1])
 
-        # Phase 4b: MEPT array path. Handles two cases:
-        #   (1) Symmetric: both operands carry env_array entries of the
-        #       same length — emit per-element op.
-        #   (2) Broadcast: one operand is an array, the other is a
-        #       per-thread scalar (typically a splat or constant) —
-        #       reuse the scalar at every array position.
-        # The smem path below (for oversized iter_args) is mutually
+        # Phase 4b: MEPT array path. ``_mept_binary_dispatch`` handles
+        # both symmetric (array op array) and broadcast (array op scalar)
+        # cases. The smem path below (for oversized iter_args) is mutually
         # exclusive with MEPT in current code (register arrays vs
         # threadgroup storage), so short-circuit here.
-        a_id, b_id = ssa.operand_ids[0], ssa.operand_ids[1]
-        a_arr = self.env_array.get(a_id)
-        b_arr = self.env_array.get(b_id)
-        if self.mept_enabled and (a_arr is not None or b_arr is not None):
-            # Determine the array length n; require lengths to match if
-            # both operands are arrays (skip asymmetric-length cases —
-            # fall back to scalar emission below).
-            if a_arr is not None and b_arr is not None:
-                if a_arr[1] != b_arr[1]:
-                    # Mismatched lengths — fall through to scalar.
-                    pass
-                else:
-                    n = a_arr[1]
-                    self._emit_binary_mept(
-                        ssa, op_str, force_unsigned, n,
-                        lambda i, an=a_arr[0]: f"{an}[{i}]",
-                        lambda i, bn=b_arr[0]: f"{bn}[{i}]",
-                    )
-                    return
-            elif a_arr is not None:
-                n = a_arr[1]
-                # b is a scalar; broadcast it across the array positions.
-                self._emit_binary_mept(
-                    ssa, op_str, force_unsigned, n,
-                    lambda i, an=a_arr[0]: f"{an}[{i}]",
-                    lambda i, bv=b: bv,
-                )
-                return
-            else:  # b_arr is not None
-                n = b_arr[1]
-                self._emit_binary_mept(
-                    ssa, op_str, force_unsigned, n,
-                    lambda i, av=a: av,
-                    lambda i, bn=b_arr[0]: f"{bn}[{i}]",
-                )
-                return
+        is_float = self._is_float_op(ssa)
+        if is_float:
+            mept_ty, mept_dtype = "float", "fp32"
+        elif force_unsigned:
+            mept_ty, mept_dtype = _msl_int_type(ssa.elem_type, unsigned=True)
+        else:
+            mept_ty, mept_dtype = _msl_int_type(ssa.elem_type, unsigned=False)
+        if force_unsigned and not is_float:
+            unsigned_ty, _ud = _msl_int_type(ssa.elem_type, unsigned=True)
+            def _make_expr(av, bv, _u=unsigned_ty, _op=op_str):
+                return f"({_u}){av} {_op} ({_u}){bv}"
+        else:
+            def _make_expr(av, bv, _op=op_str):
+                return f"{av} {_op} {bv}"
+        if self._mept_binary_dispatch(
+                ssa, ssa.operand_ids[0], ssa.operand_ids[1], a, b,
+                _make_expr, mept_ty, mept_dtype):
+            return
 
         bs = self.effective_block_size
 
@@ -267,7 +273,6 @@ class _EmissionMixin:
             return
         a = self._lookup(ssa.operand_ids[0])
         b = self._lookup(ssa.operand_ids[1])
-        var_name = self._next_var("r")
         is_float = self._is_float_op(ssa)
         if is_float:
             ty = "float"
@@ -276,6 +281,24 @@ class _EmissionMixin:
             ty, dtype = _msl_int_type(ssa.elem_type, unsigned=True)
         else:
             ty, dtype = _msl_int_type(ssa.elem_type, unsigned=False)
+
+        # Phase 4b: MEPT array path via shared dispatcher.
+        if force_unsigned and not is_float:
+            unsigned_ty, _ = _msl_int_type(ssa.elem_type, unsigned=True)
+            def _make_expr(av, bv, _u=unsigned_ty, _fn=fn_name):
+                return f"{_fn}(({_u}){av}, ({_u}){bv})"
+        elif not is_float:
+            def _make_expr(av, bv, _t=ty, _fn=fn_name):
+                return f"{_fn}(({_t}){av}, ({_t}){bv})"
+        else:
+            def _make_expr(av, bv, _fn=fn_name):
+                return f"{_fn}({av}, {bv})"
+        if self._mept_binary_dispatch(
+                ssa, ssa.operand_ids[0], ssa.operand_ids[1], a, b,
+                _make_expr, ty, dtype):
+            return
+
+        var_name = self._next_var("r")
         if force_unsigned and not is_float:
             unsigned_ty, _ = _msl_int_type(ssa.elem_type, unsigned=True)
             self.kb.raw_line(f"    {ty} {var_name} = {fn_name}(({unsigned_ty}){a}, ({unsigned_ty}){b});")
@@ -299,6 +322,15 @@ class _EmissionMixin:
             return
         a = self._lookup(ssa.operand_ids[0])
         b = self._lookup(ssa.operand_ids[1])
+
+        # Phase 4b: MEPT array path via shared dispatcher.
+        def _make_expr(av, bv, _fn=fn_name):
+            return f"(isnan({av}) || isnan({bv})) ? NAN : {_fn}({av}, {bv})"
+        if self._mept_binary_dispatch(
+                ssa, ssa.operand_ids[0], ssa.operand_ids[1], a, b,
+                _make_expr, "float", "fp32"):
+            return
+
         var_name = self._next_var("r")
         self.kb.raw_line(
             f"    float {var_name} = (isnan({a}) || isnan({b})) "
@@ -407,28 +439,36 @@ class _EmissionMixin:
             return
         src_id = ssa.operand_ids[0]
         a = self._lookup(src_id)
-        var_name = self._next_var("r")
         # Determine the source integer type so we can cast to unsigned first
         src_dtype = self.env_types.get(src_id, "i32")
         if src_dtype in _UINT_TYPE_MAP:
-            # Source is already tracked as unsigned — direct cast is fine
-            # But the MSL variable may still be signed, so always go through unsigned
             src_unsigned_ty, _ = _UINT_TYPE_MAP[src_dtype]
-            self.kb.raw_line(
-                f"    float {var_name} = static_cast<float>"
-                f"(static_cast<{src_unsigned_ty}>({a}));"
-            )
+            needs_unsigned_step = True
         elif src_dtype.startswith("u"):
-            # Source is already unsigned (u8, u16, etc.) — direct cast is fine
-            self.kb.raw_line(f"    float {var_name} = static_cast<float>({a});")
+            src_unsigned_ty = None
+            needs_unsigned_step = False
         else:
-            # Source is a signed integer type (i8, i16, etc.) — cast via unsigned
-            # to get the correct unsigned interpretation
             src_unsigned_ty, _ = _msl_int_type(src_dtype, unsigned=True)
-            self.kb.raw_line(
-                f"    float {var_name} = static_cast<float>"
-                f"(static_cast<{src_unsigned_ty}>({a}));"
-            )
+            needs_unsigned_step = True
+        def _conv(expr):
+            if needs_unsigned_step:
+                return (f"static_cast<float>(static_cast<"
+                        f"{src_unsigned_ty}>({expr}))")
+            return f"static_cast<float>({expr})"
+
+        # Phase 4b: MEPT array path.
+        if self.mept_enabled and src_id in self.env_array:
+            src_name, n, _src_ty = self.env_array[src_id]
+            exprs = [_conv(f"{src_name}[{i}]") for i in range(n)]
+            var_name = self._var_array("r", exprs, "float")
+            self.env[ssa.id] = var_name
+            self.env_array[ssa.id] = (var_name, n, "float")
+            self.env_types[ssa.id] = "fp32"
+            self._propagate_shape_elementwise(ssa)
+            return
+
+        var_name = self._next_var("r")
+        self.kb.raw_line(f"    float {var_name} = {_conv(a)};")
         self.env[ssa.id] = var_name
         self.env_types[ssa.id] = "fp32"
         # Shape: uitofp preserves shape
@@ -452,32 +492,38 @@ class _EmissionMixin:
         a = self._lookup(src_id)
         # Determine the target type from the MLIR result type
         msl_ty, dtype = _msl_int_type(ssa.elem_type, unsigned=unsigned)
-        var_name = self._next_var("r")
 
+        # Build the per-element conversion expression once and reuse for
+        # scalar / array paths.
         if unsigned and ssa.op == "arith.extui":
-            # For unsigned extension, first cast source to unsigned of same
-            # width to prevent sign extension, then extend to target width.
             src_dtype = self.env_types.get(src_id, "i32")
-            # Get unsigned version of source type
-            src_unsigned_ty, _ = _msl_int_type(src_dtype, unsigned=True)
-            self.kb.raw_line(
-                f"    {msl_ty} {var_name} = static_cast<{msl_ty}>"
-                f"(static_cast<{src_unsigned_ty}>({a}));"
-            )
-        elif ssa.op == "arith.trunci":
-            # For integer truncation to narrow types (char, short), the source
-            # may actually be a float (e.g. from simd_sum which always returns
-            # float). Direct float→char saturates in Metal. Cast through int
-            # first: float→int (truncates) → char (wraps modularly).
-            if msl_ty in ("char", "short", "uchar", "ushort"):
-                self.kb.raw_line(
-                    f"    {msl_ty} {var_name} = static_cast<{msl_ty}>"
-                    f"(static_cast<int>({a}));")
-            else:
-                self.kb.raw_line(f"    {msl_ty} {var_name} = static_cast<{msl_ty}>({a});")
+            src_unsigned_ty, _u = _msl_int_type(src_dtype, unsigned=True)
+            def _conv(expr, _msl_ty=msl_ty, _su=src_unsigned_ty):
+                return (f"static_cast<{_msl_ty}>(static_cast<"
+                        f"{_su}>({expr}))")
+        elif ssa.op == "arith.trunci" and msl_ty in (
+                "char", "short", "uchar", "ushort"):
+            def _conv(expr, _msl_ty=msl_ty):
+                return (f"static_cast<{_msl_ty}>(static_cast<int>({expr}))")
         else:
-            self.kb.raw_line(f"    {msl_ty} {var_name} = static_cast<{msl_ty}>({a});")
+            def _conv(expr, _msl_ty=msl_ty):
+                return f"static_cast<{_msl_ty}>({expr})"
 
+        # Phase 4b: MEPT array path.
+        if self.mept_enabled and src_id in self.env_array:
+            src_name, n, _src_ty = self.env_array[src_id]
+            exprs = [_conv(f"{src_name}[{i}]") for i in range(n)]
+            var_name = self._var_array("r", exprs, msl_ty)
+            self.env[ssa.id] = var_name
+            self.env_array[ssa.id] = (var_name, n, msl_ty)
+            self.env_types[ssa.id] = dtype
+            if src_id in self.env_is_mask:
+                self.env_is_mask[ssa.id] = True
+            self._propagate_shape_elementwise(ssa)
+            return
+
+        var_name = self._next_var("r")
+        self.kb.raw_line(f"    {msl_ty} {var_name} = {_conv(a)};")
         self.env[ssa.id] = var_name
         self.env_types[ssa.id] = dtype
         # Propagate ptr/mask info
