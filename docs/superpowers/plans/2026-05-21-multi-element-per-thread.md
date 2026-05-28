@@ -169,17 +169,27 @@ A synthetic round-trip test
 What's left for full 4c:
 - ~~Mask / "other" in the array load path~~ — landed (b8531db).
 - ~~Mask in the array store path~~ — landed (b8531db).
-- ~~LinearLayout-aware position math~~ — landed (2ff262c): `env_layout`
-  tracks the resolved `LinearLayout`, `_lower_make_range` uses
-  `msl_position_expr` when available.
-- FP8 in array load (uchar→float two-statement chain).
-- A real TTGIR-driven exercise — **current blocker**: with our
-  default Metal compilation pipeline, kernels produce
-  `sizePerThread = [1]` (verified with `vector_add` at
-  `BLOCK_SIZE = 1024` and `4096`). To exercise MEPT in production,
-  the pipeline needs to be modified to request coalescing /
-  vectorization passes that emit `sizePerThread > 1` layouts. That
-  is a separate effort outside the lowerer rewrite.
+- ~~LinearLayout-aware position math~~ — landed (2ff262c).
+- ~~FP8 in array load~~ — landed (ccaa077): two-array form for raw
+  uchar gather + per-position float conversion.
+- ~~Real TTGIR-driven exercise~~ — landed (4fd92cb): the Triton JIT
+  runtime adds `tt.divisibility=16` to pointer args automatically,
+  which causes the existing coalesce pass to emit
+  `sizePerThread=[4]` on default Apple configs (4 warps × 32 lanes).
+  Bridging two final wires (`_track_n_elems` from `_lower_make_range`,
+  and `_mept_binary_dispatch` from `_lower_cmpi`) lets a stock
+  vector_add through the JIT path produce the full MEPT array form
+  end-to-end. Max diff vs PyTorch: 0.000000.
+
+Phase 4c is effectively complete. Remaining for full Phase 4:
+- 4e: array reductions / scans (covered by existing `_lowerer_reduce.py`
+  for scalar; needs an array-aware variant for the per-thread fold).
+- 4f: C++ side mirror changes (`ReduceOpConversion` /
+  `DotOpConversion` / `ConvertLayoutOp` — these only matter for the
+  `TRITON_METAL_USE_CPP=1` path).
+- 4g: pattern-detector deprecation (only after 4f).
+- Performance optimization: wrap-loop is redundant inside MEPT tiles;
+  could be elided to avoid 4× wasted work on already-masked positions.
 
 ### 4d. Convert_layout shuffle (~1 day)
 
