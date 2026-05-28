@@ -115,6 +115,11 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # 2026-05-21-multi-element-per-thread.md.
         self.mept_enabled = os.environ.get("TRITON_METAL_MEPT", "0") == "1"
         self.env_array = {}  # ssa_id -> (var_name: str, n_elems: int, ty: str)
+        # Phase 4c: parallel to env_is_ptr but for the case where the
+        # tt.addptr offset is an env_array. Maps ssa_id -> (base_ptr,
+        # offset_array_var, n) so tt.load / tt.store can emit per-position
+        # memory accesses.
+        self.env_ptr_array = {}
 
     def _next_var(self, prefix="r") -> str:
         name = f"{prefix}_{self._var_counter}"
@@ -1834,7 +1839,57 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         """
         if len(ssa.operand_ids) >= 2:
             ptr_id = ssa.operand_ids[0]
-            offset_var = self._lookup(ssa.operand_ids[1])
+            offset_id = ssa.operand_ids[1]
+            offset_var = self._lookup(offset_id)
+
+            # Phase 4c: MEPT array-of-offsets. If the offset operand is
+            # an env_array, record env_ptr_array so tt.load / tt.store
+            # can emit per-position accesses. The base pointer is always
+            # scalar (one buffer); only the offset varies per array slot.
+            if (self.mept_enabled
+                    and offset_id in self.env_array):
+                offset_arr, n, _ = self.env_array[offset_id]
+                # Chained addptr with array offset: combine with any
+                # existing scalar parent offset.
+                parent_ptr_info = self.env_is_ptr.get(ptr_id)
+                parent_ptr_array = self.env_ptr_array.get(ptr_id)
+                if parent_ptr_array:
+                    base_ptr, parent_arr, parent_n = parent_ptr_array
+                    if parent_n == n:
+                        # Both array: produce a combined-offset array.
+                        combined_exprs = [
+                            f"{parent_arr}[{i}] + {offset_arr}[{i}]"
+                            for i in range(n)
+                        ]
+                        combined_name = self._var_array(
+                            "off", combined_exprs, "uint")
+                        self.env_ptr_array[ssa.id] = (
+                            base_ptr, combined_name, n)
+                        # env[ssa.id] is mostly informational here;
+                        # tt.load reads env_ptr_array directly.
+                        self.env[ssa.id] = (
+                            f"{base_ptr}[{combined_name}[0]]")
+                        self._propagate_shape_elementwise(ssa)
+                        return
+                if parent_ptr_info:
+                    base_ptr, existing_offset = parent_ptr_info
+                    combined_exprs = [
+                        f"{existing_offset} + {offset_arr}[{i}]"
+                        for i in range(n)
+                    ]
+                    combined_name = self._var_array(
+                        "off", combined_exprs, "uint")
+                    self.env_ptr_array[ssa.id] = (base_ptr, combined_name, n)
+                    self.env[ssa.id] = (
+                        f"{base_ptr}[{combined_name}[0]]")
+                    self._propagate_shape_elementwise(ssa)
+                    return
+                # No parent — base pointer is the operand directly.
+                ptr_var = self._lookup(ptr_id)
+                self.env_ptr_array[ssa.id] = (ptr_var, offset_arr, n)
+                self.env[ssa.id] = f"{ptr_var}[{offset_arr}[0]]"
+                self._propagate_shape_elementwise(ssa)
+                return
 
             # Check if this is a chained addptr (ptr_id is itself an addptr result)
             parent_ptr_info = self.env_is_ptr.get(ptr_id)
@@ -1864,6 +1919,31 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             return
 
         ptr_id = ssa.operand_ids[0]
+
+        # Phase 4c: MEPT array load. When the pointer was assembled by
+        # tt.addptr with an array offset, emit per-position reads into
+        # a result array. Doesn\'t yet support FP8 / mask / "other" in
+        # the array path (multi-statement initialization + masking is
+        # a follow-up); falls back to scalar emission if those apply.
+        ptr_arr_info = self.env_ptr_array.get(ptr_id)
+        if (self.mept_enabled and ptr_arr_info is not None
+                and len(ssa.operand_ids) == 1):
+            base_ptr, off_arr, n = ptr_arr_info
+            dtype = _mlir_to_triton_dtype(ssa.elem_type)
+            from triton_metal.codegen.msl_builtins import is_fp8_type
+            if not is_fp8_type(dtype):
+                compute_type = _msl_compute_type(dtype)
+                exprs = [
+                    f"static_cast<{compute_type}>({base_ptr}[{off_arr}[{i}]])"
+                    for i in range(n)
+                ]
+                var_name = self._var_array("val", exprs, compute_type)
+                self.env[ssa.id] = var_name
+                self.env_array[ssa.id] = (var_name, n, compute_type)
+                self.env_types[ssa.id] = dtype
+                self._propagate_shape_from_type(ssa)
+                return
+
         ptr_info = self.env_is_ptr.get(ptr_id)
 
         if ptr_info:
@@ -1962,6 +2042,24 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         ptr_id = ssa.operand_ids[0]
         val_id = ssa.operand_ids[1]
+
+        # Phase 4c: MEPT array scatter. When the pointer was assembled
+        # via a tt.addptr with an array offset AND the value is an
+        # env_array of matching length, emit per-position writes. Does
+        # not yet handle mask in the array path (follow-up).
+        ptr_arr_info = self.env_ptr_array.get(ptr_id)
+        val_arr_info = self.env_array.get(val_id)
+        if (self.mept_enabled and ptr_arr_info is not None
+                and val_arr_info is not None
+                and ptr_arr_info[2] == val_arr_info[1]
+                and len(ssa.operand_ids) == 2):
+            base_ptr, off_arr, n = ptr_arr_info
+            val_arr, _vn, _vty = val_arr_info
+            for i in range(n):
+                self.kb.raw_line(
+                    f"    {base_ptr}[{off_arr}[{i}]] = {val_arr}[{i}];"
+                )
+            return
 
         # Check if the value to store is smem-backed with total > block_size
         smem_descs = getattr(self, '_shared_mem_descs', {})
