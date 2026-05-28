@@ -1694,6 +1694,130 @@ def test_lower_math_fma_array_path():
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
+def test_lower_make_range_emits_array_when_mept_and_n_elems():
+    """`_lower_make_range` produces idx[N] when MEPT on + n_elems > 1."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[],
+                    block_size=512, num_warps=4)
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=512)
+        # Required state for _lower_make_range's pure-1D branch.
+        lowerer._is_2d = False
+        # _lid_expr is a property returning "lid" by default.
+        lowerer.effective_block_size = 128  # num_warps*32
+
+        # Hand-inject n_elems = 4 (would normally come from layout
+        # tracking once the producer layout includes sizePerThread=4).
+        range_ssa = SSAValue(id=42, name="r42", op="tt.make_range",
+                             operand_ids=[],
+                             attrs={"start": 0, "end": 512},
+                             type_str="tensor<512xi32>", elem_type="i32",
+                             is_tensor=True)
+        lowerer.env_n_elems[42] = 4
+
+        lowerer._lower_make_range(range_ssa)
+
+        name, n, ty = lowerer.env_array[42]
+        assert n == 4
+        assert ty == "uint"
+        body = "\n".join(lowerer.kb._body_lines)
+        assert f"uint {name}[4];" in body
+        for i in range(4):
+            assert f"{name}[{i}] = lid * 4u + {i}u;" in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_lower_make_range_scalar_when_mept_off():
+    """`_lower_make_range` keeps existing scalar form when MEPT off."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[],
+                    block_size=512, num_warps=4)
+    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=512)
+        lowerer._is_2d = False
+        # _lid_expr is a property returning "lid" by default.
+        lowerer.effective_block_size = 128
+
+        range_ssa = SSAValue(id=42, name="r42", op="tt.make_range",
+                             operand_ids=[],
+                             attrs={"start": 0, "end": 512},
+                             type_str="tensor<512xi32>", elem_type="i32",
+                             is_tensor=True)
+        # Even with n_elems hint, flag-off ignores it.
+        lowerer.env_n_elems[42] = 4
+
+        lowerer._lower_make_range(range_ssa)
+
+        assert 42 not in lowerer.env_array
+        # env[42] should be the scalar lid (start=0 fast path).
+        assert lowerer.env[42] == "lid"
+    finally:
+        if saved is not None:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_lower_make_range_scalar_when_n_elems_is_one():
+    """Even with MEPT on, n_elems=1 keeps the scalar form."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[],
+                    block_size=128, num_warps=4)
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=128)
+        lowerer._is_2d = False
+        # _lid_expr is a property returning "lid" by default.
+        lowerer.effective_block_size = 128
+
+        range_ssa = SSAValue(id=42, name="r42", op="tt.make_range",
+                             operand_ids=[],
+                             attrs={"start": 0, "end": 128},
+                             type_str="tensor<128xi32>", elem_type="i32",
+                             is_tensor=True)
+        lowerer.env_n_elems[42] = 1
+
+        lowerer._lower_make_range(range_ssa)
+
+        assert 42 not in lowerer.env_array
+        assert lowerer.env[42] == "lid"
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 def test_lower_math_binary_array_path():
     """`_lower_math` binary fns (pow, copysign, atan2) take array path."""
     import os

@@ -1573,6 +1573,26 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         # Pure 1D case (original behavior)
         lid = self._lid_expr
+        # Phase 4c: MEPT producer. When the result tensor carries >1
+        # elements per thread (contiguous within-thread layout — the
+        # simplest case), emit an array form: idx[i] = start + lid*N + i.
+        # More elaborate layouts (interleaved warps, multi-dim, non-
+        # default order) need LinearLayout.msl_position_expr from
+        # _linear_layout.py — deferred until those layouts appear in
+        # real kernels with TRITON_METAL_MEPT=1.
+        n_per_thread = self.env_n_elems.get(ssa.id, 1)
+        if self.mept_enabled and n_per_thread > 1:
+            exprs = [
+                f"{start}u + {lid} * {n_per_thread}u + {i}u" if start != 0
+                else f"{lid} * {n_per_thread}u + {i}u"
+                for i in range(n_per_thread)
+            ]
+            var_name = self._var_array("idx", exprs, "uint")
+            self.env[ssa.id] = var_name
+            self.env_array[ssa.id] = (var_name, n_per_thread, "uint")
+            self.env_types[ssa.id] = "i32"
+            self.env_shapes[ssa.id] = (end - start,)
+            return
         if start != 0:
             var_name = self._next_var("range")
             self.kb.raw_line(f"    uint {var_name} = {lid} + {start}u;")
