@@ -1253,6 +1253,122 @@ def test_emit_unary_emits_array_when_mept_on_and_src_is_array():
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
+def test_emit_binary_emits_array_when_both_operands_are_arrays():
+    """`_emit_binary` produces per-element binary ops when both src arrays."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "a"
+        lowerer.env[101] = "b"
+        lowerer.env_array[100] = ("a", 4, "float")
+        lowerer.env_array[101] = ("b", 4, "float")
+        lowerer.effective_block_size = 256
+
+        dst = SSAValue(id=200, name="v200", op="arith.addf",
+                       operand_ids=[100, 101], attrs={},
+                       type_str="tensor<512xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._emit_binary(dst, "+")
+
+        name, n, ty = lowerer.env_array[200]
+        assert n == 4
+        body = "\n".join(lowerer.kb._body_lines)
+        assert f"float {name}[4];" in body
+        for i in range(4):
+            assert f"{name}[{i}] = a[{i}] + b[{i}];" in body
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_emit_binary_emits_scalar_when_mept_off():
+    """Flag-off keeps scalar form even if env_array is populated."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "a"
+        lowerer.env[101] = "b"
+        lowerer.env_array[100] = ("a", 4, "float")
+        lowerer.env_array[101] = ("b", 4, "float")
+        lowerer.effective_block_size = 256
+
+        dst = SSAValue(id=200, name="v200", op="arith.addf",
+                       operand_ids=[100, 101], attrs={},
+                       type_str="tensor<512xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._emit_binary(dst, "+")
+
+        assert 200 not in lowerer.env_array
+        body = "\n".join(lowerer.kb._body_lines)
+        assert "= a + b;" in body
+    finally:
+        if saved is not None:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_emit_binary_falls_back_when_only_one_operand_is_array():
+    """Mixed array+scalar case isn't handled yet — falls back to scalar."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=256)
+
+        lowerer.env[100] = "a"
+        lowerer.env[101] = "b_scalar"
+        lowerer.env_array[100] = ("a", 4, "float")
+        # No env_array for 101 — scalar.
+        lowerer.effective_block_size = 256
+
+        dst = SSAValue(id=200, name="v200", op="arith.addf",
+                       operand_ids=[100, 101], attrs={},
+                       type_str="tensor<512xf32>", elem_type="f32",
+                       is_tensor=True)
+        lowerer._emit_binary(dst, "+")
+
+        # Asymmetric case falls back to scalar emission (legacy path).
+        assert 200 not in lowerer.env_array
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 def test_emit_unary_emits_scalar_when_mept_off():
     """With MEPT off, `_emit_unary` keeps the existing scalar form."""
     import os

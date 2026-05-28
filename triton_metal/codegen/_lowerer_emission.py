@@ -38,6 +38,50 @@ class _EmissionMixin:
             return
         a = self._lookup(ssa.operand_ids[0])
         b = self._lookup(ssa.operand_ids[1])
+
+        # Phase 4b: MEPT array path. Symmetric case only (both operands
+        # array, same length); broadcast case is a follow-up. The smem
+        # path below (for oversized iter_args) is mutually exclusive
+        # with MEPT in current code — register arrays vs threadgroup
+        # storage — so short-circuit here.
+        a_id, b_id = ssa.operand_ids[0], ssa.operand_ids[1]
+        a_arr = self.env_array.get(a_id)
+        b_arr = self.env_array.get(b_id)
+        if (self.mept_enabled and a_arr is not None and b_arr is not None
+                and a_arr[1] == b_arr[1]):
+            is_float = self._is_float_op(ssa)
+            if is_float:
+                ty, dtype = "float", "fp32"
+            elif force_unsigned:
+                ty, dtype = _msl_int_type(ssa.elem_type, unsigned=True)
+            else:
+                ty, dtype = _msl_int_type(ssa.elem_type, unsigned=False)
+            a_name, n, _ = a_arr
+            b_name = b_arr[0]
+            if force_unsigned and not is_float:
+                unsigned_ty, _ud = _msl_int_type(ssa.elem_type, unsigned=True)
+                exprs = [
+                    f"({unsigned_ty}){a_name}[{i}] {op_str} "
+                    f"({unsigned_ty}){b_name}[{i}]"
+                    for i in range(n)
+                ]
+            else:
+                exprs = [f"{a_name}[{i}] {op_str} {b_name}[{i}]"
+                         for i in range(n)]
+            var_name = self._var_array("r", exprs, ty)
+            self.env[ssa.id] = var_name
+            self.env_array[ssa.id] = (var_name, n, ty)
+            self.env_types[ssa.id] = dtype
+            self._propagate_shape_elementwise(ssa)
+            if ssa.elem_type == "i1" and ssa.op in (
+                "arith.andi", "arith.ori", "arith.xori"
+            ):
+                self.env_is_mask[ssa.id] = True
+            if (a_id in self._is_splat and b_id in self._is_splat):
+                self._is_splat.add(ssa.id)
+            self._propagate_bcast_layout_binary(ssa)
+            return
+
         bs = self.effective_block_size
 
         # Check if either operand is a shared-memory-backed oversized array.
