@@ -2738,6 +2738,91 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
     assert _validate_msl_compiles(on), "MEPT array path MSL failed to compile"
 
 
+def test_mept_reduce_fold_emits_per_thread_fold():
+    """`_mept_reduce_fold` collapses arr[0..n-1] with the combine op."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    lowerer = GenericLowerer(graph, _Options())
+    lowerer.kb = KernelBuilder("t", block_size=128)
+
+    # sum fold
+    fv = lowerer._mept_reduce_fold("v", 4, "sum", "float")
+    body = "\n".join(lowerer.kb._body_lines)
+    assert f"float {fv} = v[0];" in body
+    assert f"{fv} = {fv} + v[1];" in body
+    assert f"{fv} = {fv} + v[2];" in body
+    assert f"{fv} = {fv} + v[3];" in body
+
+    # max fold
+    lowerer.kb = KernelBuilder("t", block_size=128)
+    fv2 = lowerer._mept_reduce_fold("w", 3, "max", "float")
+    body2 = "\n".join(lowerer.kb._body_lines)
+    assert f"float {fv2} = w[0];" in body2
+    assert f"{fv2} = max({fv2}, w[1]);" in body2
+    assert f"{fv2} = max({fv2}, w[2]);" in body2
+
+    # xor fold (int)
+    lowerer.kb = KernelBuilder("t", block_size=128)
+    fv3 = lowerer._mept_reduce_fold("x", 2, "xor", "int")
+    body3 = "\n".join(lowerer.kb._body_lines)
+    assert f"int {fv3} = x[0];" in body3
+    assert f"{fv3} = {fv3} ^ x[1];" in body3
+
+
+def test_mept_reduce_uses_fold_when_operand_is_array():
+    """`_lower_reduce` folds an env_array operand then 1-D reduces."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        lowerer.kb = KernelBuilder("t", block_size=128)
+        lowerer._is_2d = False
+
+        # Operand 50 is a float register array of 4 (e.g. from a MEPT load).
+        lowerer.env[50] = "vals"
+        lowerer.env_array[50] = ("vals", 4, "float")
+        lowerer.env_types[50] = "fp32"
+
+        # tt.reduce with a sum body.
+        add_body = SSAValue(id=51, name="b51", op="arith.addf",
+                            operand_ids=[], attrs={}, type_str="f32",
+                            elem_type="f32", is_tensor=False)
+        red = SSAValue(id=52, name="r52", op="tt.reduce",
+                       operand_ids=[50], attrs={"axis": 0},
+                       type_str="f32", elem_type="f32", is_tensor=False,
+                       region_ops=[add_body])
+        lowerer._lower_reduce(red)
+
+        body = "\n".join(lowerer.kb._body_lines)
+        # The fold must appear (per-thread partial), then a threadgroup
+        # reduce (simd_sum) over the partials.
+        assert "= vals[0];" in body
+        assert "+ vals[1]" in body
+        assert "simd_sum" in body
+        # The reduce result is registered for downstream consumers.
+        assert 52 in lowerer.env
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
 @requires_triton
 @requires_metal
 def test_mept_bf16_store_casts_to_buffer_dtype():

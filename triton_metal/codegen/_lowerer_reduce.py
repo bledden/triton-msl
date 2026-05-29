@@ -27,6 +27,31 @@ from triton_metal.codegen._lowerer_helpers import _mlir_to_triton_dtype
 class _ReduceScanMixin:
     """``tt.reduce`` and ``tt.scan`` lowering for ``GenericLowerer``."""
 
+    def _mept_reduce_fold(self, arr_name: str, n: int, combine_op: str,
+                          msl_type: str) -> str:
+        """Phase 4e: fold a per-thread register array to a scalar partial.
+
+        ``arr_name[0..n-1]`` are this thread's elements (single-pass MEPT,
+        so they are the thread's full share of the tile). Folding with the
+        reduce's combine op produces one partial per thread; the existing
+        cross-thread SIMD/threadgroup reduce then finishes the job. This is
+        the array-form analogue of the multipass wrap-loop accumulator.
+        """
+        combine = {
+            "sum": lambda a, b: f"{a} + {b}",
+            "max": lambda a, b: f"max({a}, {b})",
+            "min": lambda a, b: f"min({a}, {b})",
+            "xor": lambda a, b: f"{a} ^ {b}",
+            "and": lambda a, b: f"{a} & {b}",
+            "or":  lambda a, b: f"{a} | {b}",
+        }.get(combine_op, lambda a, b: f"{a} + {b}")
+        fold_var = self._next_var("fold")
+        self.kb.raw_line(f"    {msl_type} {fold_var} = {arr_name}[0];")
+        for i in range(1, n):
+            self.kb.raw_line(
+                f"    {fold_var} = {combine(fold_var, f'{arr_name}[{i}]')};")
+        return fold_var
+
     def _get_reduce_combine_info(self, ssa):
         """Extract combine op and identity from a tt.reduce's body region.
 
@@ -261,6 +286,21 @@ class _ReduceScanMixin:
         input_shape = self.env_shapes.get(ssa.operand_ids[0])
         if not input_shape:
             input_shape = _extract_shape(self._find_op_type_str(ssa.operand_ids[0]))
+
+        # Phase 4e: MEPT array operand. Fold this thread's register array to
+        # a scalar partial with the combine op, then run the existing 1-D
+        # cross-thread reduce on that partial. Only the 1-D full-reduce case
+        # is handled today — MEPT activation never routes multi-dim / axis
+        # reduces here (the prescan requires a 1-D reduce for MEPT-reduce
+        # eligibility), so folding to 1-D and skipping the multi-dim
+        # dispatch is correct.
+        mept_arr = (self.env_array.get(ssa.operand_ids[0])
+                    if getattr(self, "mept_enabled", False) else None)
+        if mept_arr is not None:
+            arr_name, n_arr, _arr_ty = mept_arr
+            input_var = self._mept_reduce_fold(
+                arr_name, n_arr, combine_op, msl_type)
+            input_shape = None  # already folded to one element per thread
 
         if input_shape and len(input_shape) == 3:
             self._lower_reduce_3d(ssa, input_var, axis, combine_op,

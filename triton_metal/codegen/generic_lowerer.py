@@ -667,6 +667,38 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             s.op in _MEPT_SAFE_OPS for s in all_ops_iter
         ) and not any(_op_is_fp8(s) for s in all_ops_iter)
 
+        # Phase 4e: is this kernel eligible for single-pass MEPT *with* a
+        # 1-D full reduce? The reduce operand (a per-thread register array)
+        # is folded to a scalar partial, then the existing cross-thread
+        # SIMD/threadgroup reduce finishes. Only safe when:
+        #   - every TOP-LEVEL op is array-wired or tt.reduce (reduce *body*
+        #     ops are the combiner, parsed separately, not lowered as array
+        #     ops — so they are not checked here),
+        #   - every reduce is a single-result 1-D full reduce (multi-dim /
+        #     axis / argmin-max reduces need the unimplemented multi-dim
+        #     fold and stay on the multipass path),
+        #   - no fp8.
+        _top_ops = self.graph.ops
+
+        def _reduce_is_1d_full(r):
+            if r.result_ids and len(r.result_ids) >= 2:
+                return False  # multi-value (argmin/argmax/Welford)
+            if not r.operand_ids:
+                return False
+            t = self._find_op_type_str(r.operand_ids[0])
+            shp = _extract_shape(t) if t else None
+            return shp is not None and len(shp) == 1
+
+        mept_reduce_eligible = (
+            self.mept_enabled
+            and any(s.op == "tt.reduce" for s in _top_ops)
+            and all(s.op in _MEPT_SAFE_OPS or s.op == "tt.reduce"
+                    for s in _top_ops)
+            and all(_reduce_is_1d_full(s) for s in _top_ops
+                    if s.op == "tt.reduce")
+            and not any(_op_is_fp8(s) for s in all_ops_iter)
+        )
+
         # Detect if this 2D kernel has axis-specific reductions that produce
         # per-row/per-column results (not full-array reductions).
         # Multipass is incompatible with these because the per-thread
@@ -739,7 +771,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             # block_size with one element per thread.
             pass
         elif size_per_thread > 1 and block_size > num_threads:
-            if has_reduce_ops:
+            if (mept_reduce_eligible
+                    and num_threads * size_per_thread == block_size):
+                # Phase 4e MEPT-reduce single-pass: each thread loads its
+                # ``size_per_thread`` elements as a register array, folds
+                # them to a scalar partial (_mept_reduce_fold), then the
+                # existing cross-thread reduce finishes. Replaces the
+                # multipass wrap-loop for eligible 1-D full reduces. The
+                # default flag-off path still uses multipass below.
+                self._total_elements = block_size
+                block_size = num_threads
+                self._mept_single_pass = True
+            elif has_reduce_ops:
                 use_multipass = True
                 self._total_elements = block_size
                 block_size = num_threads
