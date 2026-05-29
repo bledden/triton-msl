@@ -45,11 +45,20 @@ class _ReduceScanMixin:
             "and": lambda a, b: f"{a} & {b}",
             "or":  lambda a, b: f"{a} | {b}",
         }.get(combine_op, lambda a, b: f"{a} + {b}")
+        # Cast each array read to ``msl_type`` so both combine operands have
+        # the same type. Without this, an unsigned array (uint8/uint16) mixed
+        # with an int ``fold_var`` makes MSL's max/min overload resolution
+        # ambiguous (int vs uint candidates). Casting to msl_type also
+        # matches the downstream threadgroup_reduce, which receives the
+        # folded value at this same type — and mirrors the scalar path,
+        # which reduces unsigned narrow ints in signed int32 (they fit).
+        def _read(i):
+            return f"({msl_type}){arr_name}[{i}]"
         fold_var = self._next_var("fold")
-        self.kb.raw_line(f"    {msl_type} {fold_var} = {arr_name}[0];")
+        self.kb.raw_line(f"    {msl_type} {fold_var} = {_read(0)};")
         for i in range(1, n):
             self.kb.raw_line(
-                f"    {fold_var} = {combine(fold_var, f'{arr_name}[{i}]')};")
+                f"    {fold_var} = {combine(fold_var, _read(i))};")
         return fold_var
 
     def _get_reduce_combine_info(self, ssa):

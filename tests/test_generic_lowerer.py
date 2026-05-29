@@ -2751,28 +2751,28 @@ def test_mept_reduce_fold_emits_per_thread_fold():
     lowerer = GenericLowerer(graph, _Options())
     lowerer.kb = KernelBuilder("t", block_size=128)
 
-    # sum fold
+    # sum fold (reads cast to msl_type to avoid overload ambiguity)
     fv = lowerer._mept_reduce_fold("v", 4, "sum", "float")
     body = "\n".join(lowerer.kb._body_lines)
-    assert f"float {fv} = v[0];" in body
-    assert f"{fv} = {fv} + v[1];" in body
-    assert f"{fv} = {fv} + v[2];" in body
-    assert f"{fv} = {fv} + v[3];" in body
+    assert f"float {fv} = (float)v[0];" in body
+    assert f"{fv} = {fv} + (float)v[1];" in body
+    assert f"{fv} = {fv} + (float)v[2];" in body
+    assert f"{fv} = {fv} + (float)v[3];" in body
 
     # max fold
     lowerer.kb = KernelBuilder("t", block_size=128)
     fv2 = lowerer._mept_reduce_fold("w", 3, "max", "float")
     body2 = "\n".join(lowerer.kb._body_lines)
-    assert f"float {fv2} = w[0];" in body2
-    assert f"{fv2} = max({fv2}, w[1]);" in body2
-    assert f"{fv2} = max({fv2}, w[2]);" in body2
+    assert f"float {fv2} = (float)w[0];" in body2
+    assert f"{fv2} = max({fv2}, (float)w[1]);" in body2
+    assert f"{fv2} = max({fv2}, (float)w[2]);" in body2
 
-    # xor fold (int)
+    # xor fold (int) — the int cast disambiguates unsigned arrays.
     lowerer.kb = KernelBuilder("t", block_size=128)
     fv3 = lowerer._mept_reduce_fold("x", 2, "xor", "int")
     body3 = "\n".join(lowerer.kb._body_lines)
-    assert f"int {fv3} = x[0];" in body3
-    assert f"{fv3} = {fv3} ^ x[1];" in body3
+    assert f"int {fv3} = (int)x[0];" in body3
+    assert f"{fv3} = {fv3} ^ (int)x[1];" in body3
 
 
 def test_mept_reduce_uses_fold_when_operand_is_array():
@@ -2810,9 +2810,9 @@ def test_mept_reduce_uses_fold_when_operand_is_array():
 
         body = "\n".join(lowerer.kb._body_lines)
         # The fold must appear (per-thread partial), then a threadgroup
-        # reduce (simd_sum) over the partials.
-        assert "= vals[0];" in body
-        assert "+ vals[1]" in body
+        # reduce (simd_sum) over the partials. Reads are cast to msl_type.
+        assert "= (float)vals[0];" in body
+        assert "+ (float)vals[1]" in body
         assert "simd_sum" in body
         # The reduce result is registered for downstream consumers.
         assert 52 in lowerer.env
