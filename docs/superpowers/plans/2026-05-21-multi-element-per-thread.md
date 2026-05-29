@@ -263,20 +263,37 @@ path keeps the multipass wrap-loop. Verified end-to-end (sum/max,
 n=256..2048, all match PyTorch). Multi-dim / axis / argmin-max reduces
 stay on multipass (excluded by the 1-D-full eligibility check).
 
-### 4d + 4e-2 (convert_layout shuffle + multi-dim reduce): assessed OUT OF SCOPE for MEPT
+### 4d. Convert_layout shuffle — **DONE** (commit 4d75918)
 
-`test_chained_reductions` — the target for 4d/4e-2 — operates on
-**65,536 / 131,072-element** 5-D tensors with a permute and a triple
-reduce. At that scale MEPT's single-pass tile model does not apply: 128
-threads would need ~512 registers each, and the permute requires
-layout-aware convert_layout shuffles across a tensor that doesn't fit in
-a threadgroup. This is a **cooperative / wrap-loop** problem, not a
-register-array one — it belongs to a separate large effort, not Phase 4.
-Since the 4d shuffle's only consumer was the multi-dim reduce path
-(4e-2), building it speculatively would be dead code, so both are
-deferred. The 4d shuffle mechanism (`LinearLayout.msl_position_expr`)
-remains available if a future, threadgroup-sized multi-element
-convert_layout case arises.
+Implemented as the general MEPT layout-redistribution primitive (not
+deferred). `_lower_convert_layout_mept_shuffle`: when the source is a
+register array and both src/dst layouts resolve to LinearLayouts of
+equal total size, each thread writes its source-register elements to a
+threadgroup buffer at `src_layout.position(reg, lane, warp)`, barriers,
+then reads its destination-register elements from
+`dst_layout.position(...)`. `ttg.convert_layout` is admitted to MEPT
+eligibility only when `_convert_resolves` proves both layouts resolve
+(new `_resolve_linear_layout` helper), so the shuffle never sees an
+array it can't place. Unit-tested with a genuine two-layout
+redistribution; full MEPT-on sweep stays 4325/0.
+
+**Reachability finding (empirical):** a MEPT-on sweep with shuffle
+hit-logging showed the shuffle **never fires in test_core** —
+`convert_layout` there co-occurs only with MEPT-disqualifying barriers
+(reduce/trans/dot), so no MEPT-eligible kernel carries a multi-element
+convert_layout. 4d is therefore correct, validated infrastructure and
+the prerequisite for pattern-detector deprecation (4g), but is not
+exercised by the current test corpus. It engages for any future
+threadgroup-scale multi-element layout change.
+
+### 4e-2 (multi-dim / axis reduce, test_chained_reductions): OUT OF SCOPE for MEPT
+
+`test_chained_reductions` operates on **65,536 / 131,072-element** 5-D
+tensors with a permute and a triple reduce. At that scale MEPT's
+single-pass tile model does not apply (128 threads × ~512 registers),
+and the permute needs cooperative layout shuffles across a tensor that
+doesn't fit in a threadgroup. This is a **cooperative / wrap-loop**
+problem, a separate large effort, not Phase 4.
 
 Phase 4c is complete. Remaining for full Phase 4:
 - 4e: array reductions / scans (covered by existing `_lowerer_reduce.py`
