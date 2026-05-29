@@ -332,6 +332,44 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         self.env_n_elems[ssa_id] = default
 
+    def _resolve_linear_layout(self, type_str: str, shape: tuple):
+        """Resolve a ``tensor<NxT, #alias>`` type to a ``LinearLayout``.
+
+        Returns the ``LinearLayout`` for the layout aliased in ``type_str``
+        (``#ttg.linear`` directly, ``#ttg.blocked`` via ``blocked_to_linear``)
+        or ``None`` if it can't be resolved (no alias, inline layout, parse
+        failure). Used by the Phase 4d ``convert_layout`` shuffle to obtain
+        both the source and destination layouts. Mirrors the resolution in
+        ``_track_n_elems`` but returns the layout instead of just the count.
+        """
+        mod_text = getattr(self.graph, "mod_text", "") or ""
+        if not mod_text or not type_str:
+            return None
+        alias_match = re.search(r",\s*#(\w+)\s*>\s*$", type_str)
+        if not alias_match:
+            return None
+        alias = alias_match.group(1)
+        try:
+            if re.search(rf"#{re.escape(alias)}\s*=\s*#ttg\.linear<", mod_text):
+                from triton_metal.codegen._linear_layout import (
+                    parse_linear_layout,
+                )
+                return parse_linear_layout(mod_text, alias)
+            if re.search(rf"#{re.escape(alias)}\s*=\s*#ttg\.blocked<",
+                         mod_text):
+                from triton_metal.codegen._linear_layout import (
+                    blocked_to_linear,
+                )
+                spt = self._parse_blocked_field(mod_text, alias, "sizePerThread")
+                tpw = self._parse_blocked_field(mod_text, alias, "threadsPerWarp")
+                wpc = self._parse_blocked_field(mod_text, alias, "warpsPerCTA")
+                order = self._parse_blocked_field(mod_text, alias, "order")
+                if spt and tpw and wpc and order:
+                    return blocked_to_linear(spt, tpw, wpc, order, tuple(shape))
+        except Exception:
+            return None
+        return None
+
     @staticmethod
     def _parse_blocked_field(mod_text: str, alias: str, field: str):
         """Pull an ``int`` list field out of ``#alias = #ttg.blocked<{...}>``.
@@ -663,8 +701,35 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 return False
             return _is_fp8(_mlir_to_triton_dtype(s.elem_type))
 
+        # Phase 4d: ttg.convert_layout is MEPT-safe when both its source and
+        # destination layouts resolve to LinearLayouts of the same total size
+        # — the shuffle (_lower_convert_layout_mept_shuffle) can then
+        # redistribute the register array. Multi-element converts get the
+        # shuffle; scalar (1-elem) converts stay a passthrough (no env_array).
+        # Gating eligibility on resolution guarantees the shuffle never sees
+        # an array it can't place.
+        def _convert_resolves(s):
+            if not s.operand_ids:
+                return False
+            src_t = self._find_op_type_str(s.operand_ids[0]) or ""
+            src_sh = _extract_shape(src_t)
+            dst_sh = _extract_shape(s.type_str or "")
+            if not src_sh or not dst_sh:
+                return False
+            sll = self._resolve_linear_layout(src_t, src_sh)
+            dll = self._resolve_linear_layout(s.type_str or "", dst_sh)
+            return (sll is not None and dll is not None
+                    and sll.total_elements == dll.total_elements)
+
+        def _op_mept_ok(s):
+            if s.op in _MEPT_SAFE_OPS:
+                return True
+            if s.op == "ttg.convert_layout":
+                return _convert_resolves(s)
+            return False
+
         mept_kernel_safe = self.mept_enabled and all(
-            s.op in _MEPT_SAFE_OPS for s in all_ops_iter
+            _op_mept_ok(s) for s in all_ops_iter
         ) and not any(_op_is_fp8(s) for s in all_ops_iter)
 
         # Phase 4e: is this kernel eligible for single-pass MEPT *with* a
@@ -692,7 +757,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         mept_reduce_eligible = (
             self.mept_enabled
             and any(s.op == "tt.reduce" for s in _top_ops)
-            and all(s.op in _MEPT_SAFE_OPS or s.op == "tt.reduce"
+            and all(_op_mept_ok(s) or s.op == "tt.reduce"
                     for s in _top_ops)
             and all(_reduce_is_1d_full(s) for s in _top_ops
                     if s.op == "tt.reduce")
@@ -5096,6 +5161,65 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             # Other ttg ops: passthrough
             self._emit_passthrough(ssa)
 
+    def _lower_convert_layout_mept_shuffle(self, ssa, src_type, dest_type,
+                                           src_shape, N) -> bool:
+        """Phase 4d: redistribute a per-thread register array via threadgroup
+        memory according to source/destination LinearLayouts.
+
+        Returns True if the shuffle was emitted, False if a layout couldn't be
+        resolved (caller falls back). The element identity is preserved: each
+        thread writes its source-register elements to the shared buffer at
+        ``src_layout.position(reg, lane, warp)``, a barrier orders the
+        exchange, then each thread reads its destination-register elements
+        from ``dst_layout.position(reg, lane, warp)``. ``msl_position_expr``
+        emits the XOR-basis index for each register.
+        """
+        src_id = ssa.operand_ids[0]
+        src_arr, n_src, arr_ty = self.env_array[src_id]
+        src_ll = self.env_layout.get(src_id)
+        if src_ll is None:
+            src_ll = self._resolve_linear_layout(src_type, src_shape)
+        dst_ll = self._resolve_linear_layout(dest_type, src_shape)
+        if src_ll is None or dst_ll is None:
+            return False
+        # Sanity: the source array length must match the source layout's
+        # register count, and the layouts must describe the same tensor.
+        if (src_ll.num_registers_per_thread != n_src
+                or src_ll.total_elements != dst_ll.total_elements):
+            return False
+        n_dst = dst_ll.num_registers_per_thread
+
+        # Shared buffer holds the whole tile in compute form (float for
+        # fp/bf, int for integer), matching the existing convert_layout path.
+        src_dtype = self.env_types.get(src_id, "fp32")
+        is_int = not (src_dtype.startswith("fp") or src_dtype.startswith("bf"))
+        shared_dtype = "i32" if is_int else "fp32"
+        shared_name = f"shuf_{self._shared_counter}"
+        self._shared_counter += 1
+        self.kb.declare_threadgroup_array(shared_name, dtype=shared_dtype,
+                                          size=N)
+
+        lane = "(lid & 31u)"
+        warp = "(lid >> 5u)"
+        # Barrier before writing in case the buffer aliases an earlier shuffle.
+        self.kb.raw_line(
+            "    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        for i in range(n_src):
+            pos = src_ll.msl_position_expr(f"{i}u", lane, warp)
+            self.kb.raw_line(f"    {shared_name}[{pos}] = {src_arr}[{i}];")
+        self.kb.raw_line(
+            "    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        read_exprs = [
+            f"{shared_name}[{dst_ll.msl_position_expr(f'{j}u', lane, warp)}]"
+            for j in range(n_dst)
+        ]
+        out_var = self._var_array("shuf", read_exprs, arr_ty)
+        self.env[ssa.id] = out_var
+        self.env_array[ssa.id] = (out_var, n_dst, arr_ty)
+        self.env_types[ssa.id] = src_dtype
+        self._propagate_shape_from_type(ssa)
+        return True
+
     def _lower_convert_layout(self, ssa: SSAValue):
         """ttg.convert_layout → shared memory redistribution.
 
@@ -5148,6 +5272,26 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         dest_type = ssa.type_str or ""
         needs_redistribute = ("ttg.slice" in src_type
                               and "ttg.slice" not in dest_type)
+
+        # Phase 4d: MEPT array shuffle. When the source value is a per-thread
+        # register array and both layouts resolve to LinearLayouts, redistribute
+        # the elements through threadgroup memory using the XOR-basis position
+        # math. Each thread writes its source-register elements at their
+        # src-layout positions, barriers, then reads its dest-register elements
+        # from their dst-layout positions. This is the general layout-change
+        # primitive for MEPT (and the eventual replacement for the targeted
+        # transpose/interleave pattern detectors — Phase 4g).
+        if (getattr(self, "mept_enabled", False)
+                and ssa.operand_ids[0] in self.env_array):
+            shuffled = self._lower_convert_layout_mept_shuffle(
+                ssa, src_type, dest_type, src_shape, N)
+            if shuffled:
+                return
+            # If the shuffle couldn't resolve a layout, fall through. The
+            # prescan eligibility check (_mept_convert_safe) guarantees this
+            # path only carries an env_array when both layouts resolve, so a
+            # fall-through here means a non-MEPT array (shouldn't happen) — the
+            # passthrough below preserves the old behavior.
 
         # Multi-element-per-thread #linear source layouts are handled today
         # only by pattern detectors (e.g. ``_detect_transpose_via_reshape``)

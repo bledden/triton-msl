@@ -2738,6 +2738,75 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
     assert _validate_msl_compiles(on), "MEPT array path MSL failed to compile"
 
 
+def test_mept_convert_layout_shuffle_emits_position_redistribution():
+    """`_lower_convert_layout` shuffles a register array via shared memory
+    using src/dst LinearLayout positions."""
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_metal.codegen._linear_layout import LinearLayout
+
+    class _Options:
+        num_warps = 4
+
+    # Two 1-D linear layouts over 512 elements, 4 regs/thread (128 threads).
+    # src: contiguous within thread (reg basis [1,2]); dst: a different
+    # register assignment (reg basis [256, 1]) — a genuine redistribution.
+    src_ll = LinearLayout(register_basis=[1, 2],
+                          lane_basis=[4, 8, 16, 32, 64],
+                          warp_basis=[128, 256], block_basis=[])
+    dst_ll = LinearLayout(register_basis=[256, 1],
+                          lane_basis=[2, 4, 8, 16, 32],
+                          warp_basis=[64, 128], block_basis=[])
+    assert src_ll.total_elements == 512 == dst_ll.total_elements
+
+    mod_text = (
+        "#src = #ttg.linear<{register = [[1], [2]], "
+        "lane = [[4], [8], [16], [32], [64]], warp = [[128], [256]], "
+        "block = []}>\n"
+        "#dst = #ttg.linear<{register = [[256], [1]], "
+        "lane = [[2], [4], [8], [16], [32]], warp = [[64], [128]], "
+        "block = []}>"
+    )
+    graph = IRGraph(func_name="t", args=[], ops=[], mod_text=mod_text)
+    lowerer = GenericLowerer(graph, _Options())
+    lowerer.kb = KernelBuilder("t", block_size=128)
+    lowerer.mept_enabled = True
+
+    # Source value is a register array of 4 with a resolved src layout.
+    lowerer.env[100] = "v"
+    lowerer.env_array[100] = ("v", 4, "float")
+    lowerer.env_layout[100] = src_ll
+    lowerer.env_types[100] = "fp32"
+
+    cvt = SSAValue(id=200, name="r200", op="ttg.convert_layout",
+                   operand_ids=[100], attrs={},
+                   type_str="tensor<512xf32, #dst>", elem_type="f32",
+                   is_tensor=True)
+    # Source op so _find_op_type_str / src_type resolution works.
+    src_op = SSAValue(id=100, name="v", op="tt.load", operand_ids=[],
+                      attrs={}, type_str="tensor<512xf32, #src>",
+                      elem_type="f32", is_tensor=True)
+    graph.ops = [src_op, cvt]
+
+    lowerer._lower_convert_layout(cvt)
+
+    body = "\n".join(lowerer.kb._body_lines)
+    # Shared buffer declared, barriered write then read.
+    assert "shuf_" in body
+    assert "threadgroup_barrier" in body
+    # Result is a register array of 4 (dst register count).
+    name, n, ty = lowerer.env_array[200]
+    assert n == 4
+    # Write phase indexes shared by src positions; read by dst positions.
+    # reg 0 of dst basis [256,1]: position(reg=0)=0 contribution from reg,
+    # so the read of element 0 includes the lane/warp XOR terms.
+    assert "= v[0];" in body
+    assert "= v[3];" in body
+    # The read assigns from shared buffer into the new array.
+    assert f"{name}[0] = shuf_" in body
+
+
 def test_mept_reduce_fold_emits_per_thread_fold():
     """`_mept_reduce_fold` collapses arr[0..n-1] with the combine op."""
     from triton_metal.codegen.generic_lowerer import GenericLowerer
