@@ -380,3 +380,64 @@ Specific tests that should turn green at each phase:
 - C++ rewrite of `ElementwiseOpToLLVM.cpp` (already handles per-thread
   scalars and is unrelated to MEPT).
 - AOT compilation for MEPT kernels. Existing AOT path is unchanged.
+
+## Skip-list audit (2026-05-29)
+
+Categorized every entry in `conftest_metal` UNIMPLEMENTED/UNSUPPORTED.
+`test_chained_reductions` taught us "out of scope" can be a mislabel, so
+this separates genuinely-blocked from potentially-tractable.
+
+**Genuinely blocked — correctly skip-listed (do NOT pursue):**
+- Apple hardware gaps: fp8 bias variants / e2m1 / fp64 / tf32 / bf16xN
+  precisions; FTZ subnormal tests (Apple preserves IEEE subnormals); fp8
+  exhaustive bit-exact downcast (emulation-precision exercise).
+- No Metal device printf/abort: test_print, test_assert, test_device_assert,
+  test_sanitize_int_*_overflow.
+- NVIDIA-pipeline-specific: test_compile_only_*, test_link_extern_libs,
+  test_nvidia_tool, test_fn_dump, test_triton_debuginfo_on, test_remark_*,
+  test_mma_remark, test_perf_warning, test_triton_reproducer_path,
+  test_pipeline_matmul, test_indirect_matmul.
+- Upstream tool bugs (NOT Metal): Gluon-translator / Py3.14 slicing tests
+  (test_slice_kernel_*, test_split, test_reduce_to_scalar, test_atomic_add,
+  test_cat, test_triton_reshape_trans, test_simple_kernel), test_compile_module*
+  (CPython 3.14 private symbols).
+- Hardware/runtime: test_tma, test_tensor_descriptor, test_for_iv (no GPU
+  int64), test_atomic_cas (2000-threadgroup global lock), test_scaled_dot.
+
+**Potentially tractable — worth an empirical probe (like chained_reductions):**
+1. test_dot_mulbroadcasted — constexpr N-stride in K-loop matmul template
+   (pointer roles already fixed). [task (b)]
+2. test_trans_4d — 4-D transpose; the chained-reductions permute index-math
+   machinery may now make this reachable.
+3. test_map_elementwise_pack / test_map_elementwise_multiple_outputs —
+   multi-output elementwise; medium.
+4. test_cat_nd — tuple-arg handling.
+5. test_nested_if_else_return / test_tl_range_fuse* — control-flow / loop
+   fusion; medium-hard.
+
+Empirical probe results appended below as they're run.
+
+### Audit empirical probes (2026-05-29)
+
+Ran the "potentially tractable" shortlist to get real failure modes
+(chained_reductions taught us to measure, not assume):
+- **test_trans_4d**: 4/96 pass, 92 fail — genuine 4-D transpose gap
+  (easy configs only). Not a quick win.
+- **test_map_elementwise_pack / multiple_outputs**: MSL compile errors —
+  multi-output / pack codegen gap.
+- **test_cat_nd**: 10/10 fail — N-D concatenation gap.
+Conclusion: chained_reductions was the exception. These are substantial
+multi-config feature efforts, correctly skip-listed. Only
+test_dot_mulbroadcasted remains a contained candidate.
+
+### MEPT performance (2026-05-29)
+
+Benchmarked MEPT on vs off (1M-element tiled kernels, BLOCK=512 so MEPT
+fires per threadgroup):
+- vadd (mul-add):   off 224.6us / on 209.9us
+- elemchain (exp+sqrt): off 198.8us / on 201.3us
+Opposite-direction deltas within run-to-run noise; times are launch/sync-
+overhead-dominated and the memory-bound work is identical either way.
+**MEPT is performance-neutral** for elementwise/memory-bound kernels — a
+correctness/programming-model feature, not a measured speedup. This
+further weakens the case for the 4f C++ mirror.
