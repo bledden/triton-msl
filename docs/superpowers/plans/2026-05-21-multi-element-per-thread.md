@@ -181,6 +181,41 @@ What's left for full 4c:
   vector_add through the JIT path produce the full MEPT array form
   end-to-end. Max diff vs PyTorch: 0.000000.
 
+### 4c-bugfix: MEPT / wrap-loop double-count (commit 6238113)
+
+A latent bug surfaced when validating the MEPT-on path on real JIT
+kernels: the MEPT array and the legacy wrap-loop are two encodings of
+the same "N elements per thread" idea and were composing
+multiplicatively. `_lower_make_range` emitted `idx[i] = _loop_e*N + i`
+*inside* a `for (_loop_e = lid; _loop_e < total; _loop_e += num_threads)`
+loop — but `_loop_e` already strides over the threads, so the `*N` was a
+second, redundant multiplication. Index reached `(total-1)*N + (N-1)`,
+an N× out-of-bounds overrun.
+
+Why it wasn't caught earlier: Apple GPUs tolerate moderate OOB
+device-buffer access (no hard fault), and for masked/simple copies the
+in-bounds region is still written correctly by each thread's *first*
+loop iteration, so outputs matched PyTorch. The bug is real for
+reductions/atomics (executed N× too often) and wasteful (N× work)
+everywhere.
+
+Fix (both MEPT-gated, default path untouched):
+- Prescan: when `mept_enabled and num_threads*sizePerThread == total`,
+  suppress the wrap-loop (single pass; the array is the multiplicity).
+- `_lower_make_range`: gate the MEPT array path on
+  `not getattr(self, "_needs_wrapping", False)`. Multi-pass tiles fall
+  back to the scalar wrap-loop.
+
+Regression test: `test_mept_no_double_count_with_wrap_loop`. Verified
+end-to-end via the JIT path across n=128…4096, masked/unmasked, all
+max-diff 0.
+
+Note: the `waitUntilCompleted` hang seen during the first MEPT-on sweep
+was NOT this bug faulting the GPU — it was a prior `kill -9` of an
+in-flight GPU sweep wedging the Metal command queue, inherited by the
+next process. Confirmed: an isolated unmasked-OOB MEPT kernel runs
+clean in 0.7s, and the GPU was not wedged afterward.
+
 Phase 4c is effectively complete. Remaining for full Phase 4:
 - 4e: array reductions / scans (covered by existing `_lowerer_reduce.py`
   for scalar; needs an array-aware variant for the per-thread fold).
