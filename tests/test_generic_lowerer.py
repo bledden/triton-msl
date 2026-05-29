@@ -2708,6 +2708,85 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
 
 
 @requires_triton
+@requires_metal
+def test_mept_no_double_count_with_wrap_loop():
+    """Regression: MEPT array + wrap-loop must not double-count indices.
+
+    With sizePerThread=4 and a 512-element tile (128 threads), the OLD
+    code emitted `for (_loop_e ...) { idx[i] = _loop_e*4 + i; }`. That
+    double-counts: the wrap-loop already strides `_loop_e` over the 128
+    threads to cover all 512 elements, so multiplying by 4 again pushed
+    idx to 2047 in a 512-element buffer — a 4x out-of-bounds overrun
+    (benign for masked copies on Apple GPUs, but wrong for reductions /
+    atomics and wasteful everywhere). The fix makes MEPT and the
+    wrap-loop mutually exclusive: when the tile is exactly covered
+    (num_threads * sizePerThread == total), MEPT runs single-pass with
+    idx[i] = lid*N + i and NO wrap-loop.
+    """
+    import os
+    from triton.compiler import ASTSource
+    from triton.backends.compiler import GPUTarget
+    from triton._C.libtriton import ir
+    from triton_metal.backend.compiler import MetalBackend
+    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+
+    @triton.jit
+    def copy_unmasked(x_ptr, o_ptr, BLOCK: tl.constexpr):
+        off = tl.arange(0, BLOCK)
+        x = tl.load(x_ptr + off)        # NO mask -> OOB would actually run
+        tl.store(o_ptr + off, x + 1.0)  # NO mask
+
+    def lower_with_mept():
+        target = GPUTarget("metal", "apple-m4", 32)
+        backend = MetalBackend(target)
+        options = backend.parse_options({})
+        sig = {"x_ptr": "*fp32", "o_ptr": "*fp32"}
+        # Divisibility hints (what the JIT runtime adds) -> coalesce emits
+        # sizePerThread=[4] on default Apple configs.
+        attrs = {(0,): [("tt.divisibility", 16)],
+                 (1,): [("tt.divisibility", 16)]}
+        src = ASTSource(fn=copy_unmasked, signature=sig,
+                        constexprs={"BLOCK": 512}, attrs=attrs)
+        context = ir.context()
+        ir.load_dialects(context)
+        cg = backend.get_codegen_implementation(options)
+        mm = backend.get_module_map()
+        mod = src.make_ir(target, options, cg, mm, context)
+        meta = {}
+        mod = backend.make_ttir(mod, meta, options)
+        mod = backend.make_ttgir(mod, meta, options)
+        graph = walk_ttgir(mod, options)
+        lowerer = GenericLowerer(graph, options)
+        return lowerer.lower()
+
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        msl = lower_with_mept()
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+    # MEPT must be active (sizePerThread=4 -> array form present).
+    assert "[4]" in msl, f"expected MEPT array form, got:\n{msl}"
+    # The double-count signature must be ABSENT.
+    assert "_loop_e * 4" not in msl, (
+        f"double-count: make_range multiplies the wrap-loop variable:\n{msl}"
+    )
+    # No wrap-loop at all — MEPT covers the tile in one pass.
+    assert "for (uint _loop_e" not in msl, (
+        f"wrap-loop must be suppressed when MEPT covers the tile:\n{msl}"
+    )
+    # Correct single-pass index uses the raw thread id.
+    assert "lid * 4u" in msl, f"expected lid*4 single-pass index:\n{msl}"
+    # And it must compile.
+    assert _validate_msl_compiles(msl), "MEPT single-pass MSL failed to compile"
+
+
+@requires_triton
 def test_track_n_elems_against_real_kernel_layouts():
     """The parser resolves every #ttg.blocked alias in a real TTGIR module.
 

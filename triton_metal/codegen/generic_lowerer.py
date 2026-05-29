@@ -674,6 +674,21 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 use_multipass = True
                 self._total_elements = block_size
                 block_size = num_threads
+            elif (self.mept_enabled and not has_barrier_ops
+                  and num_threads * size_per_thread == block_size):
+                # Phase 4c MEPT single-pass: each of ``num_threads`` threads
+                # owns ``size_per_thread`` contiguous elements via a register
+                # array (idx[i] = lid*N + i). One pass covers the whole tile,
+                # so NO wrap-loop — the array IS the per-thread multiplicity.
+                # Enabling _needs_wrapping here would double-count: the
+                # wrap-loop strides _loop_e over threads AND the array
+                # multiplies by N, producing N x out-of-bounds indices.
+                # Only safe when the tile is exactly covered in one pass;
+                # otherwise fall through to the scalar wrapping path (which
+                # the MEPT producers detect via _needs_wrapping and skip).
+                self._total_elements = block_size
+                block_size = num_threads
+                # _needs_wrapping intentionally stays False.
             elif not has_barrier_ops:
                 self._needs_wrapping = True
                 self._total_elements = block_size
@@ -1600,7 +1615,15 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         if ssa.id not in self.env_n_elems and ssa.type_str:
             self._track_n_elems(ssa.id, ssa.type_str, (end - start,))
         n_per_thread = self.env_n_elems.get(ssa.id, 1)
-        if self.mept_enabled and n_per_thread > 1:
+        # The MEPT array path is mutually exclusive with the wrap-loop:
+        # both encode "N elements per thread", so emitting an array while
+        # a wrap-loop also strides over threads double-counts (idx grows
+        # N x out of bounds). The prescan only suppresses the wrap-loop
+        # for MEPT when the tile is exactly covered in one pass; if a
+        # wrap-loop is still active (multi-pass tiles), fall back to the
+        # scalar make_range below.
+        if (self.mept_enabled and n_per_thread > 1
+                and not getattr(self, "_needs_wrapping", False)):
             ll = self.env_layout.get(ssa.id)
             if ll is not None and ll.num_registers_per_thread == n_per_thread:
                 # Compute lane / warp from lid:
