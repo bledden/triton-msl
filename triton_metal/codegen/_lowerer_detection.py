@@ -510,6 +510,203 @@ class _DetectionMixin:
         }
 
 
+    def _detect_permute_chained_reduce(self):
+        """Detect ``load(In) -> trans(perm) -> sum-reduce* -> store(Out)``.
+
+        This is ``test_chained_reductions``: a large N-D tensor is loaded
+        contiguously, permuted, reduced over several axes (sum), and the
+        small result is stored contiguously. Materializing the permute is
+        infeasible (the tensor exceeds threadgroup memory), so the template
+        fuses the permute into the reduction index math: each input element
+        maps to exactly one output cell (determined statically from the
+        permute + reduce axes), and the kernel cooperatively scatter-adds
+        each input into a tiny threadgroup accumulator.
+
+        Returns an info dict (in_shape, surviving original axes, strides,
+        In/Out args, elem dtype, totals) or ``None`` if the kernel deviates
+        from the canonical pattern. Conservative: integer sum reduce only
+        (uses ``atomic_int``); anything else falls through.
+        """
+        op_by_id = {}
+        for s in self.graph.ops:
+            op_by_id[s.id] = s
+
+        # 1) Find the single tt.store and the single tt.trans.
+        stores = [s for s in self.graph.ops if s.op == "tt.store"]
+        transes = [s for s in self.graph.ops if s.op == "tt.trans"]
+        loads = [s for s in self.graph.ops if s.op == "tt.load"]
+        if len(stores) != 1 or len(transes) != 1 or len(loads) != 1:
+            return None
+        # No control flow / programs — single-threadgroup cooperative kernel.
+        if any(s.op in ("scf.for", "scf.while", "scf.if",
+                        "tt.get_num_programs", "tt.get_program_id")
+               for s in self.graph.ops):
+            return None
+        store = stores[0]
+        trans = transes[0]
+        load = loads[0]
+        if len(store.operand_ids) < 2:
+            return None
+
+        # 2) The stored value must be a chain of sum-reduces ending at trans.
+        def _is_sum_reduce(r):
+            if r.op != "tt.reduce" or not r.operand_ids:
+                return False
+            if r.result_ids and len(r.result_ids) >= 2:
+                return False  # argmin/argmax
+            body_ops = r.region_ops or []
+            adds = [b for b in body_ops
+                    if b.op in ("arith.addi", "arith.addf")]
+            return len(adds) >= 1 and all(
+                b.op in ("arith.addi", "arith.addf", "tt.reduce.return")
+                for b in body_ops)
+
+        # Skip dtype/layout passthroughs (e.g. the i32->i64 arith.extsi that
+        # an int sum promotes to, or a ttg.convert_layout / reshape) between
+        # the store value and the reduce chain.
+        _PASS = ("arith.extsi", "arith.extui", "arith.trunci",
+                 "ttg.convert_layout", "tt.reshape", "arith.bitcast")
+
+        def _skip_pass(op):
+            seen = 0
+            while (op is not None and op.op in _PASS and op.operand_ids
+                   and seen < 8):
+                op = op_by_id.get(op.operand_ids[0])
+                seen += 1
+            return op
+
+        red_axes = []  # sequential reduce axes (in application order)
+        cur = _skip_pass(op_by_id.get(store.operand_ids[1]))
+        while cur is not None and cur.op == "tt.reduce":
+            if not _is_sum_reduce(cur):
+                return None
+            red_axes.append(cur.attrs.get("axis", 0))
+            cur = _skip_pass(op_by_id.get(cur.operand_ids[0])
+                             if cur.operand_ids else None)
+        # ``cur`` should now be the trans; reduces were collected innermost
+        # last, so reverse to application (outermost-first) order.
+        red_axes = red_axes[::-1]
+        if cur is None or cur.id != trans.id or not red_axes:
+            return None
+
+        # 3) The trans operand must be the load; the load must be a
+        #    contiguous identity gather In[i] (addptr(splat(In), reshape(
+        #    make_range(0..TOTAL)))).
+        if not trans.operand_ids or trans.operand_ids[0] != load.id:
+            return None
+        in_arg = self._trace_ptr_source(load.operand_ids[0], op_by_id)
+        out_arg = self._trace_ptr_source(store.operand_ids[0], op_by_id)
+        if in_arg is None or out_arg is None or in_arg.name == out_arg.name:
+            return None
+        if not self._is_contiguous_range_gather(load.operand_ids[0], op_by_id):
+            return None
+        if not self._is_contiguous_range_gather(store.operand_ids[0],
+                                                op_by_id):
+            return None
+
+        # 4) Shapes + permutation.
+        in_shape = _extract_shape(self._find_op_type_str(trans.operand_ids[0])
+                                  or "")
+        if not in_shape or len(in_shape) < 2:
+            return None
+        rank = len(in_shape)
+        order = self._parse_trans_order(trans, rank)
+        if order is None or sorted(order) != list(range(rank)):
+            return None
+        for ax in red_axes:
+            if not isinstance(ax, int):
+                return None
+
+        # 5) Fuse: track which ORIGINAL axis each current-tensor axis maps to
+        #    as the sequential reduces remove axes. permuted axis k -> orig
+        #    order[k]; reduces then drop entries.
+        cur_axes = list(order)  # current-tensor axis -> original axis id
+        for ax in red_axes:
+            if ax < 0 or ax >= len(cur_axes):
+                return None
+            del cur_axes[ax]
+        surviving = cur_axes  # original axes, in output order
+        if not surviving:
+            return None
+
+        # 6) dtype: integer sum only (atomic_int).
+        elem = load.elem_type or "i32"
+        dtype = _mlir_to_triton_dtype(elem)
+        if not (dtype.startswith("i") or dtype.startswith("u")):
+            return None
+
+        # Row-major strides over the original shape and the output shape.
+        in_strides = [1] * rank
+        for i in range(rank - 2, -1, -1):
+            in_strides[i] = in_strides[i + 1] * in_shape[i + 1]
+        out_shape = [in_shape[a] for a in surviving]
+        out_strides = [1] * len(out_shape)
+        for i in range(len(out_shape) - 2, -1, -1):
+            out_strides[i] = out_strides[i + 1] * out_shape[i + 1]
+
+        total = 1
+        for d in in_shape:
+            total *= d
+        out_total = 1
+        for d in out_shape:
+            out_total *= d
+
+        return {
+            "in_arg": in_arg.name,
+            "out_arg": out_arg.name,
+            "elem": elem,
+            "out_elem": out_arg.elem_type or elem,
+            "total": total,
+            "out_total": out_total,
+            # per surviving output axis k: (input row-major stride of the
+            # original axis, that axis's size, output row-major stride)
+            "surviving": [
+                (in_strides[surviving[k]], in_shape[surviving[k]],
+                 out_strides[k])
+                for k in range(len(surviving))
+            ],
+        }
+
+    def _parse_trans_order(self, trans, rank):
+        """Parse a ``tt.trans`` permutation order from the module text.
+
+        The walker leaves ``attrs['order'] = None`` (array attrs aren't
+        exposed via bindings), so recover it from ``order = array<i32: ...>``
+        in ``mod_text``. Returns a list of ``rank`` ints or ``None``.
+        """
+        o = trans.attrs.get("order")
+        if isinstance(o, (list, tuple)) and len(o) == rank:
+            return list(o)
+        mod_text = getattr(self.graph, "mod_text", "") or ""
+        matches = re.findall(r"tt\.trans[^\n]*?order\s*=\s*array<i32:\s*"
+                             r"([0-9,\s]+)>", mod_text)
+        for m in matches:
+            vals = [int(x) for x in m.split(",") if x.strip()]
+            if len(vals) == rank:
+                return vals
+        return None
+
+    def _is_contiguous_range_gather(self, ptr_id, op_by_id):
+        """True if ``ptr_id`` is ``addptr(splat(P), reshape?(make_range(0..N)))``
+        — i.e. the i-th lane addresses ``P[i]`` (an identity/contiguous gather
+        or scatter). Walks the offset operand back to a 0-based tt.make_range.
+        """
+        op = op_by_id.get(ptr_id)
+        if op is None or op.op != "tt.addptr" or len(op.operand_ids) < 2:
+            return False
+        off = op_by_id.get(op.operand_ids[1])
+        seen = 0
+        while off is not None and seen < 8:
+            seen += 1
+            if off.op == "tt.make_range":
+                return int(off.attrs.get("start", 0)) == 0
+            if off.op in ("tt.reshape", "ttg.convert_layout", "arith.extsi"):
+                off = (op_by_id.get(off.operand_ids[0])
+                       if off.operand_ids else None)
+                continue
+            return False
+        return False
+
     def _detect_3d_reduce(self):
         """Detect if this kernel is a simple 3D reduce that needs a template.
 

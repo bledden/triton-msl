@@ -92,6 +92,41 @@ def _validate_msl_compiles(msl_src: str):
 
 @requires_triton
 @requires_metal
+@pytest.mark.parametrize("in_shape,perm,red_dims", [
+    ((4, 32, 32, 4, 2), [2, 1, 0, 3, 4], [3, 1, 0]),
+    ((8, 2, 32, 4, 16), [4, 0, 1, 3, 2], [0, 2, 0]),
+])
+def test_permute_chained_reduce_matches_torch(in_shape, perm, red_dims):
+    """Fused permute + chained sum-reduce (test_chained_reductions shape)
+    produces exact integer results via the cooperative scatter-reduce."""
+    import torch
+
+    @triton.jit
+    def kernel(In, Out, dim_0: tl.constexpr, dim_1: tl.constexpr,
+               dim_2: tl.constexpr, dim_3: tl.constexpr, dim_4: tl.constexpr,
+               perm_0: tl.constexpr, perm_1: tl.constexpr, perm_2: tl.constexpr,
+               perm_3: tl.constexpr, perm_4: tl.constexpr,
+               red_dim_0: tl.constexpr, red_dim_1: tl.constexpr,
+               red_dim_2: tl.constexpr):
+        idx = tl.arange(0, dim_0 * dim_1 * dim_2 * dim_3 * dim_4)
+        idx = idx.reshape(dim_0, dim_1, dim_2, dim_3, dim_4)
+        vals = tl.load(In + idx)
+        vals = tl.permute(vals, [perm_0, perm_1, perm_2, perm_3, perm_4])
+        r = tl.sum(tl.sum(tl.sum(vals, red_dim_0), red_dim_1), red_dim_2)
+        st_idx = tl.arange(0, r.shape[0] * r.shape[1]).reshape(r.shape)
+        tl.store(Out + st_idx, r)
+
+    inp = torch.randint(0, 1000, in_shape, dtype=torch.int32, device="cpu")
+    temp = torch.permute(inp, perm).contiguous()
+    ref = torch.sum(torch.sum(torch.sum(temp, red_dims[0]), red_dims[1]),
+                    red_dims[2])
+    out = torch.empty_like(ref)
+    kernel[(1,)](inp, out, *in_shape, *perm, *red_dims)
+    assert torch.all(ref == out), f"mismatch: ref={ref}\nout={out}"
+
+
+@requires_triton
+@requires_metal
 def test_lower_vector_add():
     """Generic lowerer produces valid MSL for vector_add."""
     @triton.jit

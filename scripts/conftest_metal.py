@@ -209,7 +209,7 @@ UNIMPLEMENTED_FEATURES = {
     # "test_split",  # Enabled: tt.split shared memory de-interleave
     # "test_split_to_scalar",  # Enabled: scalar split
     # Chained reductions — multi-dim reduce
-    "test_chained_reductions",
+    # "test_chained_reductions",  # Enabled: fused permute+chained-reduce
     # Map elementwise — pack and multiple outputs not implemented
     "test_map_elementwise_pack",
     "test_map_elementwise_multiple_outputs",

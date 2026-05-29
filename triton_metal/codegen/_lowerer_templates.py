@@ -829,6 +829,76 @@ class _TemplateMixin:
         lines.append("")
         return "\n".join(lines)
 
+    def _lower_permute_chained_reduce_template(self, info) -> str:
+        """Emit a fused permute+chained-sum-reduce cooperative kernel.
+
+        The permute is never materialized. Each input element ``In[i]`` maps
+        to exactly one output cell (the surviving original-axis coordinates,
+        computed from the permute + reduce axes at detect time). 1024 threads
+        cooperatively scatter-add the inputs into a tiny threadgroup atomic
+        accumulator, then write it out. Correct for sum reductions of integer
+        tensors (the test_chained_reductions case).
+        """
+        in_arg = info["in_arg"]
+        out_arg = info["out_arg"]
+        out_elem = info.get("out_elem", info["elem"])
+        total = info["total"]
+        out_total = info["out_total"]
+        surviving = info["surviving"]  # [(in_stride, size, out_stride), ...]
+
+        msl_type = triton_type_to_msl(out_elem)
+        safe_name = _sanitize_msl_name(self.graph.func_name)
+        num_warps = self.options.num_warps if self.options else 4
+        threads = num_warps * 32
+
+        arg_decls = []
+        for i, arg in enumerate(self.graph.args):
+            if arg.is_ptr:
+                arg_msl_type = triton_type_to_msl(arg.elem_type)
+                arg_decls.append(
+                    f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+            else:
+                arg_msl_type = (triton_type_to_msl(arg.elem_type)
+                                if arg.elem_type else "int")
+                arg_decls.append(
+                    f"    constant {arg_msl_type}& {arg.name} [[buffer({i})]]")
+
+        # out_cell(i) = sum_k ((i / in_stride_k) % size_k) * out_stride_k
+        oc_terms = []
+        for (in_s, size, out_s) in surviving:
+            coord = f"((i / {in_s}u) % {size}u)"
+            oc_terms.append(coord if out_s == 1 else f"{coord} * {out_s}u")
+        oc_expr = " + ".join(oc_terms) if oc_terms else "0u"
+
+        lines = []
+        lines.append("#include <metal_stdlib>")
+        lines.append("using namespace metal;")
+        lines.append("")
+        lines.append(f"kernel void {safe_name}(")
+        lines.append(",\n".join(arg_decls) + ",")
+        lines.append("    uint pid [[threadgroup_position_in_grid]],")
+        lines.append("    uint lid [[thread_position_in_threadgroup]],")
+        lines.append("    uint tid [[thread_position_in_grid]]")
+        lines.append(") {")
+        lines.append(f"    threadgroup atomic_int _acc[{out_total}];")
+        lines.append(f"    for (uint e = lid; e < {out_total}u; e += {threads}u) {{")
+        lines.append("        atomic_store_explicit(&_acc[e], 0, memory_order_relaxed);")
+        lines.append("    }")
+        lines.append("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        lines.append(f"    for (uint i = lid; i < {total}u; i += {threads}u) {{")
+        lines.append(f"        uint _oc = {oc_expr};")
+        lines.append(f"        atomic_fetch_add_explicit(&_acc[_oc], "
+                     f"(int){in_arg}[i], memory_order_relaxed);")
+        lines.append("    }")
+        lines.append("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        lines.append(f"    for (uint e = lid; e < {out_total}u; e += {threads}u) {{")
+        lines.append(f"        {out_arg}[e] = ({msl_type})atomic_load_explicit("
+                     "&_acc[e], memory_order_relaxed);")
+        lines.append("    }")
+        lines.append("}")
+        lines.append("")
+        return "\n".join(lines)
+
     def _lower_matmul_softmax_template(self, info) -> str:
         """Emit a fused matmul + row-softmax kernel.
 

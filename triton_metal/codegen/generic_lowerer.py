@@ -604,6 +604,19 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             # _prescan_stores already ran inside _detect_row_wise_sort
             return msl
 
+        # Check for permute + chained sum-reduce (test_chained_reductions):
+        # a large N-D tensor permuted then reduced over several axes into a
+        # tiny output. Fuse the permute into the reduction index math and
+        # cooperatively scatter-add — materializing the permute would exceed
+        # threadgroup memory. Must run before _detect_3d_reduce (multi-reduce).
+        pcr_info = self._detect_permute_chained_reduce()
+        if pcr_info:
+            msl = self._lower_permute_chained_reduce_template(pcr_info)
+            self.effective_block_size = (
+                (self.options.num_warps if self.options else 4) * 32)
+            self._prescan_stores()
+            return msl
+
         # Check for 3D reduce — switch to prebuilt template
         reduce_3d_info = self._detect_3d_reduce()
         if reduce_3d_info:
@@ -930,6 +943,31 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         msl = self.kb.build()
         msl = _alias_shared_memory(msl)
+
+        # Safety net: the generic op-by-op path must never silently emit a
+        # kernel that has no memory writes when the graph clearly has a
+        # tt.store/tt.atomic_* — that compiles but produces zeros (this is
+        # exactly how the unhandled N-D permute+reduce pattern manifested
+        # before its template existed). Detecting it here marks the output
+        # UNSUPPORTED so ``emit_msl`` falls back to the legacy parser instead
+        # of returning a silently-wrong kernel. Templates return earlier, so
+        # this only guards the generic path.
+        graph_has_store = any(
+            op.op in ("tt.store", "tt.atomic_rmw", "tt.atomic_cas")
+            for op in self.graph.ops
+        )
+        body_writes = (
+            "UNSUPPORTED" in msl
+            or re.search(r"\[[^\]]+\]\s*=", msl) is not None  # buf[idx] = ...
+            or "atomic_store" in msl or "atomic_fetch" in msl
+        )
+        if graph_has_store and not body_writes:
+            self.kb.comment(
+                "UNSUPPORTED: generic lowering produced no memory writes "
+                "for a kernel that stores (e.g. an unhandled N-D "
+                "permute/reduce) — falling back to the legacy parser.")
+            msl = self.kb.build()
+            msl = _alias_shared_memory(msl)
         return msl
 
     def get_output_arg_indices(self):
