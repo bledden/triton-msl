@@ -250,6 +250,34 @@ Regression tests: `test_mept_bf16_store_casts_to_buffer_dtype`,
 `test_mept_no_double_count_with_wrap_loop`,
 `test_mept_flag_actually_changes_output_when_layout_supports_it`.
 
+### 4e (1-D reduce): MEPT per-thread array fold — **DONE** (commit 010540b)
+
+Reduction kernels can now use the array-form model. When a kernel is
+MEPT-reduce-eligible (every top-level op array-wired or tt.reduce, every
+reduce a single-result **1-D full reduce**, no fp8, exact single-pass
+cover), the prescan routes it to single-pass MEPT: each thread loads its
+`sizePerThread` elements as a register array, `_mept_reduce_fold`
+collapses them to a scalar partial with the combine op, then the
+existing SIMD/threadgroup cross-thread reduce finishes. The flag-off
+path keeps the multipass wrap-loop. Verified end-to-end (sum/max,
+n=256..2048, all match PyTorch). Multi-dim / axis / argmin-max reduces
+stay on multipass (excluded by the 1-D-full eligibility check).
+
+### 4d + 4e-2 (convert_layout shuffle + multi-dim reduce): assessed OUT OF SCOPE for MEPT
+
+`test_chained_reductions` — the target for 4d/4e-2 — operates on
+**65,536 / 131,072-element** 5-D tensors with a permute and a triple
+reduce. At that scale MEPT's single-pass tile model does not apply: 128
+threads would need ~512 registers each, and the permute requires
+layout-aware convert_layout shuffles across a tensor that doesn't fit in
+a threadgroup. This is a **cooperative / wrap-loop** problem, not a
+register-array one — it belongs to a separate large effort, not Phase 4.
+Since the 4d shuffle's only consumer was the multi-dim reduce path
+(4e-2), building it speculatively would be dead code, so both are
+deferred. The 4d shuffle mechanism (`LinearLayout.msl_position_expr`)
+remains available if a future, threadgroup-sized multi-element
+convert_layout case arises.
+
 Phase 4c is complete. Remaining for full Phase 4:
 - 4e: array reductions / scans (covered by existing `_lowerer_reduce.py`
   for scalar; needs an array-aware variant for the per-thread fold).
