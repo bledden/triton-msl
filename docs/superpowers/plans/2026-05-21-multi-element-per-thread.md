@@ -216,7 +216,38 @@ in-flight GPU sweep wedging the Metal command queue, inherited by the
 next process. Confirmed: an isolated unmasked-OOB MEPT kernel runs
 clean in 0.7s, and the GPU was not wedged afterward.
 
-Phase 4c is effectively complete. Remaining for full Phase 4:
+### 4c-validation: full MEPT-on test_core sweep + activation hardening
+
+Validating the MEPT-on path against the whole test_core suite drove it
+from "works on hand-picked kernels" to "safe to enable globally":
+
+- **v1 (after double-count fix): 101 failures.** Activation was too
+  broad — MEPT fired for any kernel reaching the make_range array path,
+  including reductions (36 test_reduce1d: use_multipass leaves
+  _needs_wrapping=False, so the old gate let MEPT in), arith.select
+  (test_where), atomics, indirect scatter, shape ops, fp8.
+- **Fix → default-deny activation (commit 9708ef1):** `_mept_single_pass`
+  is set only when the prescan proves the whole kernel safe — every op
+  in `_MEPT_SAFE_OPS`, no fp8, no barriers, exact single-pass tile
+  cover. make_range gates on this single flag (the MEPT chain root), so
+  unsupported kernels fall back to scalar (always correct).
+- **v2: 14 failures**, all genuine MEPT-path codegen gaps:
+  - 10 test_masked_load + 2 test_addptr (all bf16): MEPT store didn't
+    cast float→bfloat (MSL narrows float→half implicitly but not
+    →bfloat). Fixed (e0b7d6e) by casting each element via
+    `_fp8_cast_val`, deriving store_dtype from the base buffer arg
+    (the MEPT pointer is in env_ptr_array, invisible to
+    _trace_ptr_dtype).
+  - 2 test_abs_fp8: the fp8 exclusion checked `"fp8" in elem_type`, but
+    MLIR fp8 types are spelled `f8E4M3FN`/`f8E5M2`. Fixed (e0b7d6e) via
+    `_mlir_to_triton_dtype` + `is_fp8_type`.
+- **v3: target 0 failures** (matching the 4325 flag-off baseline).
+
+Regression tests: `test_mept_bf16_store_casts_to_buffer_dtype`,
+`test_mept_no_double_count_with_wrap_loop`,
+`test_mept_flag_actually_changes_output_when_layout_supports_it`.
+
+Phase 4c is complete. Remaining for full Phase 4:
 - 4e: array reductions / scans (covered by existing `_lowerer_reduce.py`
   for scalar; needs an array-aware variant for the per-thread fold).
 - 4f: C++ side mirror changes (`ReduceOpConversion` /
