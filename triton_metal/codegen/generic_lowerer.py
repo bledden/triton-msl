@@ -656,11 +656,16 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # every op must be array-wired and no fp8 dtype may appear (fp8
         # truncf emits a scalar conversion chain). Computed here; combined
         # with the exact-cover + no-barrier checks at the wrapping decision.
+        from triton_metal.codegen.msl_builtins import is_fp8_type as _is_fp8
+
+        def _op_is_fp8(s):
+            if not s.elem_type:
+                return False
+            return _is_fp8(_mlir_to_triton_dtype(s.elem_type))
+
         mept_kernel_safe = self.mept_enabled and all(
             s.op in _MEPT_SAFE_OPS for s in all_ops_iter
-        ) and not any(
-            "fp8" in (s.elem_type or "").lower() for s in all_ops_iter
-        )
+        ) and not any(_op_is_fp8(s) for s in all_ops_iter)
 
         # Detect if this 2D kernel has axis-specific reductions that produce
         # per-row/per-column results (not full-array reductions).
@@ -2263,18 +2268,27 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                         mask_is_array = True
                     else:
                         mask_var = self._lookup(mid)
+            # Cast each value to the buffer element type, exactly as the
+            # scalar store does. Values are computed in `float`; narrowing
+            # to bf16 (and fp8) needs an explicit cast — MSL won't
+            # implicitly convert float -> bfloat (it does for half, which
+            # is why only bf16 surfaced this). The MEPT pointer lives in
+            # env_ptr_array (not env_is_ptr), so _trace_ptr_dtype can't
+            # see it — derive the dtype from the base buffer arg directly.
+            store_dtype = "fp32"
+            for arg in self.graph.args:
+                if arg.name == base_ptr and arg.is_ptr:
+                    store_dtype = _mlir_to_triton_dtype(arg.elem_type)
+                    break
             for i in range(n):
-                write = (
-                    f"    {base_ptr}[{off_arr}[{i}]] = {val_arr}[{i}];"
-                )
+                cast_val = self._fp8_cast_val(f"{val_arr}[{i}]", store_dtype)
+                write = f"{base_ptr}[{off_arr}[{i}]] = {cast_val};"
                 if mask_var is None:
-                    self.kb.raw_line(write)
+                    self.kb.raw_line(f"    {write}")
                 else:
                     cond = (f"{mask_var}[{i}]" if mask_is_array
                             else mask_var)
-                    self.kb.raw_line(f"    if ({cond}) {{")
-                    self.kb.raw_line(f"    " + write.lstrip())
-                    self.kb.raw_line(f"    }}")
+                    self.kb.raw_line(f"    if ({cond}) {{ {write} }}")
             return
 
         # Check if the value to store is smem-backed with total > block_size

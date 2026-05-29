@@ -2740,6 +2740,65 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
 
 @requires_triton
 @requires_metal
+def test_mept_bf16_store_casts_to_buffer_dtype():
+    """MEPT store of a float-computed array into a bf16 buffer must cast.
+
+    MSL implicitly narrows float->half but NOT float->bfloat, so a bf16
+    output buffer needs an explicit static_cast<bfloat> per array element
+    (matching the scalar store path). Regression for the 10 bf16
+    test_masked_load failures.
+    """
+    import os
+    from triton.compiler import ASTSource
+    from triton.backends.compiler import GPUTarget
+    from triton._C.libtriton import ir
+    from triton_metal.backend.compiler import MetalBackend
+    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+
+    @triton.jit
+    def add1_bf16(x_ptr, o_ptr, BLOCK: tl.constexpr):
+        off = tl.arange(0, BLOCK)
+        x = tl.load(x_ptr + off)
+        tl.store(o_ptr + off, x + 1.0)
+
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "1"
+    try:
+        target = GPUTarget("metal", "apple-m4", 32)
+        backend = MetalBackend(target)
+        options = backend.parse_options({})
+        sig = {"x_ptr": "*bf16", "o_ptr": "*bf16"}
+        attrs = {(0,): [("tt.divisibility", 16)],
+                 (1,): [("tt.divisibility", 16)]}
+        src = ASTSource(fn=add1_bf16, signature=sig,
+                        constexprs={"BLOCK": 512}, attrs=attrs)
+        context = ir.context()
+        ir.load_dialects(context)
+        cg = backend.get_codegen_implementation(options)
+        mm = backend.get_module_map()
+        mod = src.make_ir(target, options, cg, mm, context)
+        meta = {}
+        mod = backend.make_ttir(mod, meta, options)
+        mod = backend.make_ttgir(mod, meta, options)
+        graph = walk_ttgir(mod, options)
+        msl = GenericLowerer(graph, options).lower()
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+    # MEPT active (array form), store casts to bfloat, and it compiles.
+    assert "[4];" in msl, f"expected MEPT array form, got:\n{msl}"
+    assert "static_cast<bfloat>" in msl, (
+        f"bf16 store must cast float->bfloat, got:\n{msl}"
+    )
+    assert _validate_msl_compiles(msl), "bf16 MEPT MSL failed to compile"
+
+
+@requires_triton
+@requires_metal
 def test_mept_no_double_count_with_wrap_loop():
     """Regression: MEPT array + wrap-loop must not double-count indices.
 
