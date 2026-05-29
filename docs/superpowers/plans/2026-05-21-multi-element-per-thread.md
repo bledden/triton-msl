@@ -241,7 +241,10 @@ from "works on hand-picked kernels" to "safe to enable globally":
   - 2 test_abs_fp8: the fp8 exclusion checked `"fp8" in elem_type`, but
     MLIR fp8 types are spelled `f8E4M3FN`/`f8E5M2`. Fixed (e0b7d6e) via
     `_mlir_to_triton_dtype` + `is_fp8_type`.
-- **v3: target 0 failures** (matching the 4325 flag-off baseline).
+- **v3: 0 failures — `4325 passed / 5017 skipped / 0 failed`**, byte-for-
+  byte matching the flag-off baseline. MEPT-on is now correct on the
+  entire test_core suite; unsupported kernels fall back to scalar, the
+  contiguous-elementwise kernels run the array form and still pass.
 
 Regression tests: `test_mept_bf16_store_casts_to_buffer_dtype`,
 `test_mept_no_double_count_with_wrap_loop`,
