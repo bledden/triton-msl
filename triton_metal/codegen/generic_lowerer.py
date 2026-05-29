@@ -945,27 +945,32 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         msl = _alias_shared_memory(msl)
 
         # Safety net: the generic op-by-op path must never silently emit a
-        # kernel that has no memory writes when the graph clearly has a
-        # tt.store/tt.atomic_* — that compiles but produces zeros (this is
-        # exactly how the unhandled N-D permute+reduce pattern manifested
-        # before its template existed). Detecting it here marks the output
-        # UNSUPPORTED so ``emit_msl`` falls back to the legacy parser instead
-        # of returning a silently-wrong kernel. Templates return earlier, so
-        # this only guards the generic path.
+        # kernel with an *empty body* when the graph clearly has a
+        # tt.store/tt.atomic_* — that compiles but produces zeros (exactly
+        # how the unhandled N-D permute+reduce pattern manifested before its
+        # template existed: ``kernel void k(...) { }``). Marking it
+        # UNSUPPORTED makes ``emit_msl`` fall back to the legacy parser
+        # instead of returning silently-wrong output. Templates return
+        # earlier, so this only guards the generic path.
+        #
+        # The check is intentionally narrow — *no emitted statements at all*
+        # — rather than "no recognized write": atomic kernels write via
+        # ``atomic_compare_exchange_weak_explicit`` / ``atomic_load_explicit``
+        # CAS loops (no ``[idx] =`` and no ``atomic_store``/``_fetch``), and
+        # an over-broad heuristic wrongly forced them to the legacy parser
+        # (regressed 106 atomic tests). A truly empty body has zero
+        # statement lines; any real kernel has many.
         graph_has_store = any(
             op.op in ("tt.store", "tt.atomic_rmw", "tt.atomic_cas")
             for op in self.graph.ops
         )
-        body_writes = (
-            "UNSUPPORTED" in msl
-            or re.search(r"\[[^\]]+\]\s*=", msl) is not None  # buf[idx] = ...
-            or "atomic_store" in msl or "atomic_fetch" in msl
-        )
-        if graph_has_store and not body_writes:
+        body_lines = getattr(self.kb, "_body_lines", [])
+        body_has_stmt = any(";" in ln for ln in body_lines)
+        if graph_has_store and not body_has_stmt:
             self.kb.comment(
-                "UNSUPPORTED: generic lowering produced no memory writes "
-                "for a kernel that stores (e.g. an unhandled N-D "
-                "permute/reduce) — falling back to the legacy parser.")
+                "UNSUPPORTED: generic lowering produced an empty body for a "
+                "kernel that stores (e.g. an unhandled N-D permute/reduce) — "
+                "falling back to the legacy parser.")
             msl = self.kb.build()
             msl = _alias_shared_memory(msl)
         return msl
