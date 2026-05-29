@@ -441,3 +441,19 @@ overhead-dominated and the memory-bound work is identical either way.
 **MEPT is performance-neutral** for elementwise/memory-bound kernels — a
 correctness/programming-model feature, not a measured speedup. This
 further weakens the case for the 4f C++ mirror.
+
+### (b) test_dot_mulbroadcasted — investigated, genuinely hard (left skip-listed)
+
+Triton canonicalizes the broadcast-mul-reduce (`tl.sum(expand(x)*expand(y))`)
+into a real `tt.dot` in TTGIR, so `_detect_simple_dot` matches and routes
+to the simdgroup matmul template — but the output is **98% wrong**. Root
+cause: the kernel bakes the full M=256/N=192 and the row strides
+(A=K=160, B=N=192, C=N=192) as constexpr *arithmetic inside the addptr
+index expressions* (e.g. `offm*K`, `pidm*BM*N + offm*N`), not as stride
+args. The detector recovers only BLOCK_M/N/K (=128/32/32) from the dot
+operand shapes; it has no N=192, so the template addresses B/C with the
+wrong stride. Fixing requires reverse-engineering strides from constexpr
+index arithmetic — brittle, kernel-specific, for a single float32 test
+the upstream note already calls "uncommon in production workloads."
+Decision: **not worth it** — no clean insight (unlike chained_reductions),
+low ROI. Left skip-listed.
