@@ -1724,6 +1724,8 @@ def test_lower_make_range_emits_array_when_mept_and_n_elems():
                              type_str="tensor<512xi32>", elem_type="i32",
                              is_tensor=True)
         lowerer.env_n_elems[42] = 4
+        # Prescan normally sets this; we drive make_range directly.
+        lowerer._mept_single_pass = True
 
         lowerer._lower_make_range(range_ssa)
 
@@ -2173,6 +2175,8 @@ def test_mept_round_trip_load_op_store():
         # Two input pointer SSA values (bare buffers).
         lowerer.env[1] = "x_ptr"
         lowerer.env[2] = "out_ptr"
+        # Prescan normally sets this; we drive the ops directly.
+        lowerer._mept_single_pass = True
 
         # 1) make_range → idx[4]
         rng = SSAValue(id=10, name="r10", op="tt.make_range",
@@ -2364,6 +2368,8 @@ def test_lower_make_range_uses_linear_layout_position_when_available():
                        is_tensor=True)
         lowerer.env_n_elems[42] = 4
         lowerer.env_layout[42] = ll
+        # Prescan normally sets this; we drive make_range directly.
+        lowerer._mept_single_pass = True
 
         lowerer._lower_make_range(rng)
         assert 42 in lowerer.env_array
@@ -2660,11 +2666,22 @@ def test_lookup_array_returns_env_array_entry():
 @requires_triton
 @requires_metal
 def test_mept_flag_actually_changes_output_when_layout_supports_it():
-    """When the layout carries sizePerThread > 1, the MEPT flag should
-    actually flip the generated MSL from scalar form to array form. This
-    protects the inverse direction of the earlier guard (which checked
-    that the flag was dormant for layouts where MEPT couldn't apply)."""
+    """When the layout genuinely carries sizePerThread > 1, the MEPT flag
+    flips the generated MSL from scalar form to single-pass array form.
+
+    A real sizePerThread > 1 layout requires divisibility hints (which the
+    JIT runtime adds automatically) so the coalesce pass packs multiple
+    contiguous elements per thread. Without them the layout is
+    sizePerThread=1 and MEPT correctly stays dormant.
+    """
     import os
+    from triton.compiler import ASTSource
+    from triton.backends.compiler import GPUTarget
+    from triton._C.libtriton import ir
+    from triton_metal.backend.compiler import MetalBackend
+    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+
     @triton.jit
     def vector_add(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
         offsets = tl.arange(0, BLOCK_SIZE)
@@ -2673,8 +2690,6 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
         b = tl.load(b_ptr + offsets, mask=mask)
         tl.store(out_ptr + offsets, a + b, mask=mask)
 
-    sig = {"a_ptr": "*fp32", "b_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32"}
-
     def lower(flag_on: bool):
         saved = os.environ.get("TRITON_METAL_MEPT")
         if flag_on:
@@ -2682,11 +2697,26 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
         else:
             os.environ.pop("TRITON_METAL_MEPT", None)
         try:
-            mod, metadata, options = _compile_to_ttgir(
-                vector_add, sig, constexprs={"BLOCK_SIZE": 256}
-            )
-            msl, _ = _lower_to_msl(mod, metadata, options)
-            return msl
+            target = GPUTarget("metal", "apple-m4", 32)
+            backend = MetalBackend(target)
+            options = backend.parse_options({})
+            sig = {"a_ptr": "*fp32", "b_ptr": "*fp32",
+                   "out_ptr": "*fp32", "n": "i32"}
+            attrs = {(0,): [("tt.divisibility", 16)],
+                     (1,): [("tt.divisibility", 16)],
+                     (2,): [("tt.divisibility", 16)]}
+            src = ASTSource(fn=vector_add, signature=sig,
+                            constexprs={"BLOCK_SIZE": 512}, attrs=attrs)
+            context = ir.context()
+            ir.load_dialects(context)
+            cg = backend.get_codegen_implementation(options)
+            mm = backend.get_module_map()
+            mod = src.make_ir(target, options, cg, mm, context)
+            meta = {}
+            mod = backend.make_ttir(mod, meta, options)
+            mod = backend.make_ttgir(mod, meta, options)
+            graph = walk_ttgir(mod, options)
+            return GenericLowerer(graph, options).lower()
         finally:
             if saved is None:
                 os.environ.pop("TRITON_METAL_MEPT", None)
@@ -2695,13 +2725,14 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
 
     off = lower(False)
     on = lower(True)
-    # Flag-off: no per-position array declarations.
-    assert "idx_0[2]" not in off
-    assert "val_" not in off or "[2]" not in off
-    # Flag-on: array form must appear at make_range / load / store.
-    assert "[2];" in on, (
+    # Flag-off: scalar form, no per-position array declarations.
+    assert "[4];" not in off, f"flag-off should be scalar, got:\n{off}"
+    # Flag-on: single-pass array form must appear.
+    assert "[4];" in on, (
         f"Expected per-position array decl in MEPT-on MSL, got:\n{on}"
     )
+    # And no wrap-loop double-count.
+    assert "_loop_e * 4" not in on
     # Both paths must compile.
     assert _validate_msl_compiles(off), "Scalar path MSL failed to compile"
     assert _validate_msl_compiles(on), "MEPT array path MSL failed to compile"

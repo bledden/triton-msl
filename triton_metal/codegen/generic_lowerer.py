@@ -45,6 +45,55 @@ from triton_metal.codegen._lowerer_control import _ControlFlowMixin
 
 
 # ---------------------------------------------------------------------------
+# Multi-element-per-thread (MEPT) op whitelist
+# ---------------------------------------------------------------------------
+#
+# MEPT single-pass activation is *default-deny*: it fires only for kernels
+# composed entirely of ops whose array-form lowering is verified wired (see
+# Phase 4b/4c). Any op outside this set forces the scalar wrap-loop path,
+# which is always correct. A too-narrow set merely forgoes the MEPT speedup
+# (still correct); a too-wide set would risk an op consuming a register
+# array it can't handle (wrong results). Err narrow.
+#
+# Deliberately EXCLUDED (not array-wired): arith.cmpf, arith.select,
+# arith.bitcast, math.erf/log1p/expm1, every shape op (tt.trans/join/cat/
+# split/gather/broadcast/expand_dims/reshape), atomics, reduce/scan/
+# histogram, tt.dot, control flow (scf.*), ttg.*. FP8 kernels are excluded
+# separately (fp8 truncf emits a scalar conversion chain).
+_MEPT_SAFE_OPS = frozenset({
+    # producers / memory (wired array path)
+    "tt.make_range", "tt.addptr", "tt.load", "tt.store",
+    # scalar / broadcast operands (never produce a register array)
+    "tt.get_program_id", "tt.get_num_programs", "arith.constant",
+    "tt.splat", "tt.return",
+    # elementwise binary -> _emit_binary / _emit_builtin_binary /
+    # _emit_nan_propagating_minmax (all route through _mept_binary_dispatch)
+    "arith.addf", "arith.addi", "arith.subf", "arith.subi",
+    "arith.mulf", "arith.muli", "arith.divf", "arith.divsi", "arith.divui",
+    "arith.remsi", "arith.remui", "arith.remf",
+    "arith.maxf", "arith.maxsi", "arith.maxui",
+    "arith.minf", "arith.minsi", "arith.minui",
+    "arith.maxnumf", "arith.minnumf", "arith.maximumf", "arith.minimumf",
+    "arith.andi", "arith.ori", "arith.xori",
+    "arith.shli", "arith.shrsi", "arith.shrui",
+    # comparison (only cmpi is array-wired; cmpf is NOT)
+    "arith.cmpi",
+    # unary
+    "arith.negf",
+    # casts (passthrough or _emit_cast / _emit_int_cast / _emit_uitofp)
+    "arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp",
+    "arith.fptosi", "arith.fptoui", "arith.extsi", "arith.extui",
+    "arith.trunci", "arith.index_cast", "arith.index_castui",
+    # math (array-wired in _lower_math)
+    "math.exp", "math.exp2", "math.log", "math.log2", "math.sqrt",
+    "math.rsqrt", "math.abs", "math.absf", "math.absi", "math.sin",
+    "math.cos", "math.tanh", "math.floor", "math.ceil", "math.round",
+    "math.fma", "math.powf", "math.copysign", "math.atan2",
+    "math.roundeven", "math.trunc",
+})
+
+
+# ---------------------------------------------------------------------------
 # Generic Lowerer
 # ---------------------------------------------------------------------------
 
@@ -561,6 +610,11 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # each thread processes multiple elements.
         self._needs_wrapping = False
         self._total_elements = block_size
+        # Phase 4c: set True only when the prescan proves this kernel is
+        # safe for single-pass MEPT (exact tile cover, no barriers, every
+        # op in _MEPT_SAFE_OPS, no fp8). The MEPT producers (make_range)
+        # gate on this flag, so it controls the whole MEPT chain.
+        self._mept_single_pass = False
 
         # Determine optimal thread count from TTGIR layout.
         # When sizePerThread > 1, Triton expects fewer threads each handling
@@ -597,6 +651,16 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             for ssa in all_ops_iter
         )
         num_threads = self.graph.num_warps * 32
+
+        # Phase 4c: is this kernel safe for single-pass MEPT? Default-deny —
+        # every op must be array-wired and no fp8 dtype may appear (fp8
+        # truncf emits a scalar conversion chain). Computed here; combined
+        # with the exact-cover + no-barrier checks at the wrapping decision.
+        mept_kernel_safe = self.mept_enabled and all(
+            s.op in _MEPT_SAFE_OPS for s in all_ops_iter
+        ) and not any(
+            "fp8" in (s.elem_type or "").lower() for s in all_ops_iter
+        )
 
         # Detect if this 2D kernel has axis-specific reductions that produce
         # per-row/per-column results (not full-array reductions).
@@ -674,7 +738,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 use_multipass = True
                 self._total_elements = block_size
                 block_size = num_threads
-            elif (self.mept_enabled and not has_barrier_ops
+            elif (mept_kernel_safe and not has_barrier_ops
                   and num_threads * size_per_thread == block_size):
                 # Phase 4c MEPT single-pass: each of ``num_threads`` threads
                 # owns ``size_per_thread`` contiguous elements via a register
@@ -683,11 +747,12 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 # Enabling _needs_wrapping here would double-count: the
                 # wrap-loop strides _loop_e over threads AND the array
                 # multiplies by N, producing N x out-of-bounds indices.
-                # Only safe when the tile is exactly covered in one pass;
-                # otherwise fall through to the scalar wrapping path (which
-                # the MEPT producers detect via _needs_wrapping and skip).
+                # ``mept_kernel_safe`` guarantees every op in the kernel is
+                # array-wired, so the whole MEPT chain is correct; anything
+                # else falls through to the scalar wrapping path below.
                 self._total_elements = block_size
                 block_size = num_threads
+                self._mept_single_pass = True
                 # _needs_wrapping intentionally stays False.
             elif not has_barrier_ops:
                 self._needs_wrapping = True
@@ -1615,15 +1680,17 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         if ssa.id not in self.env_n_elems and ssa.type_str:
             self._track_n_elems(ssa.id, ssa.type_str, (end - start,))
         n_per_thread = self.env_n_elems.get(ssa.id, 1)
-        # The MEPT array path is mutually exclusive with the wrap-loop:
-        # both encode "N elements per thread", so emitting an array while
-        # a wrap-loop also strides over threads double-counts (idx grows
-        # N x out of bounds). The prescan only suppresses the wrap-loop
-        # for MEPT when the tile is exactly covered in one pass; if a
-        # wrap-loop is still active (multi-pass tiles), fall back to the
-        # scalar make_range below.
-        if (self.mept_enabled and n_per_thread > 1
-                and not getattr(self, "_needs_wrapping", False)):
+        # The MEPT array path activates ONLY when the prescan proved this
+        # kernel is single-pass MEPT-safe (exact tile cover, no barriers,
+        # every op array-wired, no fp8). That flag is the sole gate for
+        # the whole MEPT chain: if make_range stays scalar, no env_array
+        # propagates and every downstream consumer stays scalar too.
+        # This is what keeps MEPT from firing inside reduction/multipass
+        # kernels (where _needs_wrapping is False but the array form is
+        # unsupported) or kernels containing unwired ops (select, atomics,
+        # shape ops, ...).
+        if (n_per_thread > 1
+                and getattr(self, "_mept_single_pass", False)):
             ll = self.env_layout.get(ssa.id)
             if ll is not None and ll.num_registers_per_thread == n_per_thread:
                 # Compute lane / warp from lid:
