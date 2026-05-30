@@ -628,6 +628,32 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                             "product would be wrong (test_join_with_mma).",
                             op_name="tt.dot")
 
+        # (e) Unstructured kernel-level control flow (cf.cond_br / cf.br at the
+        # top level of the kernel body). These appear when a kernel takes a
+        # *void* early return mid-body (`return` with no value, e.g.
+        #     if cond: ... else: return
+        # ). Triton lowers that to the `cf` dialect rather than structured
+        # `scf.if`, and `_lower_op_dispatch` has no handler for `cf.cond_br` /
+        # `cf.br`, so the branch is silently dropped and the wrong value
+        # reaches the store (test_nested_if_else_return: returns -1 for 1).
+        #
+        # Scope: only TOP-LEVEL ops are inspected (``self.graph.ops``), not the
+        # recursive ``all_ops``. ``tt.map_elementwise`` bodies also use
+        # cf.cond_br, but those live in the op's ``region_ops`` and ARE handled
+        # (``_lower_map_elementwise_cond_br``), so they must not be refused.
+        # Function-level early returns that yield a value (test_if_call[jit_if])
+        # inline to structured scf.if and never produce top-level cf.* — they
+        # are untouched.
+        for s in self.graph.ops:
+            if s.op in ("cf.cond_br", "cf.br"):
+                raise MetalNonRecoverableError(
+                    "unstructured kernel-level control flow "
+                    f"('{s.op}', produced by a void early `return` mid-kernel) "
+                    "has no Metal lowering — the branch would be dropped and "
+                    "the wrong value stored (test_nested_if_else_return). "
+                    "Structured control flow (scf.if) and value-returning "
+                    "early returns are supported.", op_name=s.op)
+
     def lower(self) -> str:
         """Lower the IRGraph to MSL source code."""
         # Integrity prescan (PR1): some ops have no correct lowering on this

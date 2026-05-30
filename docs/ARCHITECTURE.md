@@ -124,29 +124,43 @@ for.** Two distinct "I can't lower this" signals make that precise:
   - a rank≥2 `tt.cat` / `tt.join` — the generic concat/join handlers are
     1-D only and would mis-lay-out an N-D concat (`test_cat_nd`);
   - `tt.dot` inside a noinline device function — the device-function lowerer
-    has no cooperative-MMA path (`test_noinline[shared]`, when the callee is
-    *not* inlined);
+    has no cooperative-MMA path, so the result is zeros (`test_noinline[shared]`);
   - a `tt.join` result feeding `tt.dot` through SSA value-passing
-    (`test_join_with_mma`, when the join reaches the dot directly).
+    (`test_join_with_mma`; this kernel is also caught earlier as a rank≥2
+    join, but the forward-trace guard covers the general case);
+  - unstructured kernel-level control flow — a top-level `cf.cond_br` / `cf.br`
+    produced by a *void* early `return` mid-kernel. `_lower_op_dispatch` has no
+    handler for the `cf` dialect; before the guard the legacy parser silently
+    dropped the branch (and, for `test_constexpr_if_return`, also dropped the
+    `atomic_add` and wrote out of bounds — see below). Refused now
+    (`test_nested_if_else_return`, `test_constexpr_if_return`). Structured
+    control flow (`scf.if`) and value-returning early returns — which inline to
+    `scf.if` (`test_if_call[jit_if]`) — are supported and untouched.
 
-**Known silent-wrong residuals (tracked, pre-release).** Three skip-listed
-patterns are *still* silent-wrong because their wrong output is
-structure-dependent and a clean refusal could not yet be written without
-risking the matching supported case:
-  - `test_noinline[shared]` at `num_warps=1`: the device function is inlined,
-    so the dot becomes a top-level `z = dot(z, z)` aliasing the output
-    tensor, which the matmul template mis-handles (returns zeros). The
-    refusal above catches the *non-inlined* form but not this one.
-  - `test_join_with_mma`: the join reaches the dot through a memory
-    round-trip (store/load), not a direct SSA chain, so the forward-trace
-    refusal does not fire.
-  - `test_nested_if_else_return`: nested early-returns lower to unstructured
-    `cf.cond_br` control flow the block-based lowerer mis-orders (returns a
-    sentinel). `test_if_call` (simpler CF) is correct, so a blanket refusal
-    would over-reject.
-These need either a memory-aliasing-aware dot precondition or a CF-shape
-validator; both are scoped to land before a stable release. They are
-documented here so the gap is visible rather than hidden.
+**Silent-wrong residuals: none.** Every skip-listed pattern that was once a
+silent-wrong producer is now a refusal (the six cases above). The three that
+were hardest to classify were each re-verified with a fresh compile cache to
+avoid a stale-cache false negative:
+  - `test_noinline[shared]` (`num_warps=1`) — the `tt.dot` stays a noinline
+    call (it is *not* inlined to a top-level dot), so the noinline-dot guard
+    catches it.
+  - `test_join_with_mma` — the join operand is rank-2, so the N-D-join guard
+    catches it before the forward-trace guard is even needed.
+  - `test_nested_if_else_return` — the void early return lowers to a top-level
+    `cf.cond_br`, now refused by the unstructured-control-flow guard.
+These remain skip-listed as genuine feature gaps (a real fix means a
+device-function MMA path, a layout-aware join→dot, and a `cf`-dialect lowerer
+respectively), but none returns wrong numbers: each fails loudly instead.
+
+Adding the `cf.cond_br` guard also exposed a **false pass**:
+`test_constexpr_if_return` shares the same void-early-return shape, so the
+legacy parser had been emitting `Out = pid + 0` for it — dropping the
+`atomic_add`, dropping the early return, and writing out of bounds — yet the
+test only asserts `out >= 0`, which `pid + 0` happens to satisfy. The guard
+turned that silent garbage into a clear refusal; the test is now skip-listed
+with that rationale rather than passing on a loose assertion. This is the
+point of the integrity prescan: a test passing is not the same as a kernel
+being correct, and a loud refusal surfaces the difference.
 
 A heuristic text parser cannot be *proven* correct for arbitrary kernels, so
 the legacy fallback is deliberately load-bearing for as few kernels as

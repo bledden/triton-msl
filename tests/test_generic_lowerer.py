@@ -186,6 +186,83 @@ def test_constexpr_dim_matmul_refuses_not_silently_wrong():
 
 
 @requires_triton
+def test_unstructured_cf_refuses_not_silently_wrong():
+    """Integrity (PR1): a void early `return` mid-kernel lowers to top-level
+    `cf.cond_br` (unstructured control flow). `_lower_op_dispatch` has no
+    handler for the `cf` dialect, so the branch is silently dropped and the
+    wrong value is stored — `test_nested_if_else_return` returned -1 for 1.
+    The lowerer must RAISE MetalNonRecoverableError instead.
+
+    Counter-check: a value-returning early return (the `test_if_call[jit_if]`
+    shape) inlines to structured `scf.if`, produces NO top-level `cf.*`, and
+    must still compile cleanly — the guard must not over-reject it.
+    """
+    from triton.compiler import ASTSource
+    from triton.backends.compiler import GPUTarget
+    from triton._C.libtriton import ir
+    from triton_metal.backend.compiler import MetalBackend
+    from triton_metal.codegen.msl_emitter import emit_msl
+    from triton_metal.errors import MetalNonRecoverableError
+
+    def _emit(fn, sig):
+        target = GPUTarget("metal", "apple-m4", 32)
+        backend = MetalBackend(target)
+        options = backend.parse_options({})
+        src = ASTSource(fn=fn, signature=sig, constexprs={})
+        ctx = ir.context()
+        ir.load_dialects(ctx)
+        mod = src.make_ir(target, options,
+                          backend.get_codegen_implementation(options),
+                          backend.get_module_map(), ctx)
+        meta = {}
+        mod = backend.make_ttir(mod, meta, options)
+        mod = backend.make_ttgir(mod, meta, options)
+        return emit_msl(mod, meta, options)
+
+    # Void early return → unstructured cf.cond_br → must refuse.
+    @triton.jit
+    def nested(Cond1, Cond2, Cond3, Val1, Val2, Val3, Out):
+        val = 0
+        if tl.load(Cond1):
+            if tl.load(Cond2):
+                val = tl.load(Val1)
+            else:
+                return
+        else:
+            if tl.load(Cond3):
+                val = tl.load(Val2)
+            else:
+                val = tl.load(Val3)
+        tl.store(Out, val)
+
+    sig = {k: "*i32" for k in
+           ("Cond1", "Cond2", "Cond3", "Val1", "Val2", "Val3", "Out")}
+    with pytest.raises(MetalNonRecoverableError, match="control flow"):
+        _emit(nested, sig)
+
+    # Value-returning early return inlines to scf.if — must NOT be refused.
+    @triton.jit
+    def add_fn_return(x, pid):
+        if pid == 0:
+            return x + 1
+        else:
+            return x + 2
+
+    @triton.jit
+    def jit_if(Out):
+        pid = tl.program_id(0)
+        o = tl.load(Out)
+        a = o
+        if pid == 0:
+            a = o
+            a = add_fn_return(a, pid)
+        tl.store(Out, a)
+
+    msl = _emit(jit_if, {"Out": "*i32"})  # must not raise
+    assert "UNSUPPORTED" not in msl
+
+
+@requires_triton
 @requires_metal
 @pytest.mark.parametrize("in_shape,perm,red_dims", [
     ((4, 32, 32, 4, 2), [2, 1, 0, 3, 4], [3, 1, 0]),

@@ -394,8 +394,19 @@ UNIMPLEMENTED_FEATURES = {
     "test_for_iv",
     # "test_if_call[jit_if]",  # Enabled: early return / cf.cond_br now works
     # "test_num_warps_pow2",  # Enabled: validation added to parse_options
-    # Early return → cf.cond_br (unstructured control flow not implemented)
-    "test_nested_if_else_return",
+    # Void early `return` mid-kernel lowers to top-level cf.cond_br
+    # (unstructured control flow). _lower_op_dispatch has no cf-dialect
+    # handler and the legacy parser drops the branch (and the atomic_add,
+    # and writes OOB) — verified silently-wrong. Now REFUSED with
+    # MetalNonRecoverableError (fail-loud) rather than emitting garbage.
+    "test_nested_if_else_return",  # legacy hallucinated an unrelated concat kernel
+    # FALSE PASS before the cf.cond_br refusal: its kernel has the same void
+    # early-return, so legacy emitted `Out = pid + 0` (dropping atomic_add +
+    # early-return, writing OOB). The test only asserts `out >= 0`, which
+    # `pid + 0` happens to satisfy — so the garbage went undetected. Now
+    # correctly refused; skipped here as a genuine feature gap (unstructured
+    # CF + multi-program atomic sync, cf. test_atomic_cas).
+    "test_constexpr_if_return",
     # Misc
     # "test_optimize_thread_locality",  # Enabled: (see above)
     # "test_unsigned_name_mangling",  # Testing: abs on uint32/int32
