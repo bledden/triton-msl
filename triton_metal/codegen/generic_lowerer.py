@@ -19,7 +19,9 @@ from typing import Any, Dict, List, Optional
 from triton_metal.codegen.mlir_walker import IRGraph, SSAValue, FuncArg, CalledFunc, _extract_shape
 from triton_metal.codegen.msl_emitter import KernelBuilder, _msl_compute_type, _sanitize_msl_name
 from triton_metal.codegen.msl_types import triton_type_to_msl
-from triton_metal.errors import MetalCodegenError, MetalNotImplementedError
+from triton_metal.errors import (
+    MetalCodegenError, MetalNotImplementedError, MetalNonRecoverableError,
+)
 
 
 # Free helpers extracted to keep this file navigable; see
@@ -3943,6 +3945,27 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self._find_op_type_str(src_id)
         )
         dst_shape = _extract_shape(ssa.type_str)
+
+        # Integrity guard (PR1): the generic transpose only implements the
+        # 2-D shared-memory exchange below. A rank>=3 transpose falls through
+        # to a passthrough that silently DROPS the permutation — correct only
+        # when the permute is the identity, wrong for any real reordering
+        # (test_trans_4d: identity perms pass, the rest return the input
+        # unpermuted). Templates that do handle high-rank transposes
+        # (_detect_transpose_via_reshape, _detect_permute_chained_reduce)
+        # return before the generic path, so they never reach here. When we
+        # can confirm a non-identity rank>=3 permute, refuse rather than emit
+        # wrong output. (If the order can't be parsed we keep the old
+        # passthrough — no regression, just no new guarantee.)
+        if len(src_shape) >= 3:
+            order = self._parse_trans_order(ssa, len(src_shape))
+            if order is not None and order != list(range(len(src_shape))):
+                raise MetalNonRecoverableError(
+                    f"rank-{len(src_shape)} tt.trans with a non-identity "
+                    f"permutation {order} is not supported by the generic "
+                    "lowerer (only 2-D transpose is). Refusing rather than "
+                    "dropping the permutation and returning wrong output "
+                    "(e.g. test_trans_4d).", op_name="tt.trans")
 
         if len(src_shape) < 2 or not self._is_2d:
             # 1D or unknown — passthrough
