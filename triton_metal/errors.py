@@ -81,6 +81,30 @@ class MetalNotImplementedError(MetalCodegenError):
         super().__init__(full_msg, op_name=op_name, ssa_id=ssa_id, type_str=type_str)
 
 
+class MetalNonRecoverableError(MetalCodegenError):
+    """The lowerer recognized a kernel it cannot lower CORRECTLY, and knows
+    the legacy fallback parser cannot either, so it refuses rather than emit
+    silently-wrong output.
+
+    Unlike ``MetalNotImplementedError`` (which signals "I can't, but a
+    fallback path might"), this is raised when falling back would only
+    substitute one wrong result for another — e.g. a pid-tiled matmul whose
+    full dimensions are baked in as ``tl.constexpr`` (no runtime M/N/K), so
+    no template can derive the true output strides. ``emit_msl`` re-raises
+    this instead of falling back, turning a silent-wrong into a clear error.
+    Integrity guarantee: the backend never returns numbers it can't vouch for.
+    """
+
+    def __init__(self, message, op_name=None, ssa_id=None, type_str=None):
+        full_msg = (
+            f"Refusing to emit silently-wrong output: {message}\n"
+            f"  This kernel pattern is not supported and cannot be safely "
+            f"approximated. File an issue at "
+            f"https://github.com/bledden/triton-metal/issues"
+        )
+        super().__init__(full_msg, op_name=op_name, ssa_id=ssa_id, type_str=type_str)
+
+
 class MetalLaunchError(RuntimeError):
     """Kernel dispatch failed at launch time.
 

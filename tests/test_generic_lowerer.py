@@ -91,6 +91,60 @@ def _validate_msl_compiles(msl_src: str):
 # ---------------------------------------------------------------------------
 
 @requires_triton
+def test_constexpr_dim_matmul_refuses_not_silently_wrong():
+    """Integrity (PR1): a pid-tiled matmul with constexpr-baked M/N must
+    RAISE (MetalNonRecoverableError), never emit silently-wrong output.
+
+    The matmul template needs runtime M/N to derive output strides; when
+    they're baked as constexpr it would guess _N=BLOCK_N and produce ~98%
+    wrong numbers. The guard refuses instead. This is the
+    test_dot_mulbroadcasted shape, lowered directly.
+    """
+    from triton.compiler import ASTSource
+    from triton.backends.compiler import GPUTarget
+    from triton._C.libtriton import ir
+    from triton_metal.backend.compiler import MetalBackend
+    from triton_metal.codegen.msl_emitter import emit_msl
+    from triton_metal.errors import MetalNonRecoverableError
+
+    @triton.jit
+    def kernel(Z, X, Y, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
+               BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+        pidn = tl.program_id(1)
+        pidm = tl.program_id(0)
+        offm = tl.arange(0, BM)[:, None]
+        offn = tl.arange(0, BN)[None, :]
+        offak = tl.arange(0, BK)[None, :]
+        offbk = tl.arange(0, BK)[:, None]
+        acc = tl.full((BM, BN), 0.0, tl.float32)
+        for ridx5 in range(0, K // BK):
+            x = tl.load(X + ((pidm * K * BM) + (offm * K) + (ridx5 * BK) + offak))
+            y = tl.load(Y + ((pidn * BN) + (offbk * N) + (ridx5 * N * BK) + offn))
+            x = tl.expand_dims(x, axis=2)
+            y = tl.expand_dims(y, axis=0)
+            t = tl.sum(x * y, axis=1)
+            acc = t + acc
+        tl.store(Z + ((pidm * BM * N) + (pidn * BN) + (offm * N) + offn), acc)
+
+    target = GPUTarget("metal", "apple-m4", 32)
+    backend = MetalBackend(target)
+    options = backend.parse_options({})
+    sig = {"Z": "*fp32", "X": "*fp32", "Y": "*fp32"}
+    ce = dict(M=256, N=192, K=160, BM=128, BN=32, BK=32)
+    src = ASTSource(fn=kernel, signature=sig, constexprs=ce)
+    ctx = ir.context()
+    ir.load_dialects(ctx)
+    mod = src.make_ir(target, options, backend.get_codegen_implementation(options),
+                      backend.get_module_map(), ctx)
+    meta = {}
+    mod = backend.make_ttir(mod, meta, options)
+    mod = backend.make_ttgir(mod, meta, options)
+
+    with pytest.raises(MetalNonRecoverableError, match="silently-wrong"):
+        emit_msl(mod, meta, options)
+
+
+@requires_triton
 @requires_metal
 @pytest.mark.parametrize("in_shape,perm,red_dims", [
     ((4, 32, 32, 4, 2), [2, 1, 0, 3, 4], [3, 1, 0]),

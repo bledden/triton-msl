@@ -291,6 +291,25 @@ class _TemplateMixin:
         has_N = "N" in scalar_arg_map
         has_K = "K" in scalar_arg_map
 
+        # Integrity guard (PR1): when M/N aren't runtime args the template
+        # guesses ``_M=BLOCK_M`` / ``_N=BLOCK_N`` — correct ONLY for a
+        # single output tile. If the kernel actually tiles the output across
+        # programs (uses program_id on that axis), the guess collapses the
+        # real stride to the block size and silently produces wrong output
+        # (test_dot_mulbroadcasted: grid 2x6 over 256x192, B read with
+        # stride 32 instead of 192 -> ~98% mismatch). The full dim is baked
+        # in as constexpr and isn't recoverable here, so refuse rather than
+        # emit wrong numbers: an UNSUPPORTED stub makes emit_msl fall back.
+        pid_axes = {s.attrs.get("axis", 0) for s in self.graph.ops
+                    if s.op == "tt.get_program_id"}
+        if (1 in pid_axes and not has_N) or (0 in pid_axes and not has_M):
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "K-loop matmul tiles the output across programs "
+                f"(program_id axes {sorted(pid_axes)}) but M/N are baked as "
+                "constexpr, not runtime args — the true output strides "
+                "can't be derived (e.g. test_dot_mulbroadcasted).")
+
         if has_M:
             lines.append(f"    uint _M = (uint)M;")
         else:
@@ -1926,6 +1945,25 @@ class _TemplateMixin:
     def _lower_dot_simple_template(self, tile_dims, ptr_args, dtype) -> str:
         """Fall back to optimized simdgroup matmul template for simple kernels."""
         from triton_metal.codegen.msl_emitter import make_matmul_kernel
+
+        # Integrity guard (PR1): make_matmul_kernel addresses the output and
+        # bounds its loops using runtime M/N/K scalar args (buffers 3-5). A
+        # kernel that bakes M/N/K as ``tl.constexpr`` supplies no such args,
+        # so the template's M/N/K are unbound -> garbage dims -> silently
+        # wrong output (this is exactly test_dot_mulbroadcasted: pid-tiled
+        # over a 256x192 output with BM/BN/BK=128/32/32 baked in, ~98%
+        # mismatch). Every matmul this template emits needs M/N/K, so any
+        # kernel that legitimately uses it provides them. When they're
+        # absent, refuse rather than emit wrong numbers: emit an UNSUPPORTED
+        # stub so emit_msl falls back to the legacy parser / errors clearly.
+        scalar_args = [a for a in self.graph.args if not a.is_ptr]
+        has_pid = any(s.op == "tt.get_program_id" for s in self.graph.ops)
+        if has_pid and len(scalar_args) < 3:
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "matmul template requires runtime M/N/K scalar args but the "
+                "kernel bakes its dims as constexpr; cannot derive the true "
+                "output strides (e.g. test_dot_mulbroadcasted).")
 
         block_m = tile_dims[0] if len(tile_dims) > 0 else 32
         block_n = block_m

@@ -464,6 +464,24 @@ class MSLCodeGen:
 # TTGIR integration (requires triton)
 # ---------------------------------------------------------------------------
 
+def _mept_path_log(tag, detail):
+    """Diagnostic: record which lowering path produced a kernel.
+
+    No-op unless ``TRITON_METAL_PATH_LOG`` names a file. Used by the
+    fallback-integrity audit to measure how load-bearing the (silent-
+    capable) legacy fallback is across the test suite.
+    """
+    import os
+    path = os.environ.get("TRITON_METAL_PATH_LOG")
+    if not path:
+        return
+    try:
+        with open(path, "a") as f:
+            f.write(f"{tag}\t{detail}\n")
+    except Exception:
+        pass
+
+
 def emit_msl(mod, metadata, options):
     """Convert a TritonGPU IR module to MSL source code.
 
@@ -480,6 +498,7 @@ def emit_msl(mod, metadata, options):
     Returns:
         MSL source code as a string.
     """
+    from triton_metal.errors import MetalNonRecoverableError
     # Primary path: new walker + generic lowerer
     try:
         from triton_metal.codegen.mlir_walker import walk_ttgir
@@ -501,9 +520,18 @@ def emit_msl(mod, metadata, options):
             # Flag whether the kernel uses multi-axis program_id (needs 2D/3D grid)
             used_axes = getattr(lowerer, '_used_pid_axes', {0})
             metadata["needs_2d_grid"] = max(used_axes) > 0 if used_axes else False
+            _mept_path_log("primary", metadata.get("name", "?"))
             return msl_src
 
         # Fall through to legacy parser if unsupported ops remain
+        _mept_path_log("fallback-unsupported", metadata.get("name", "?"))
+    except MetalNonRecoverableError:
+        # Deliberate refusal: the lowerer recognized a kernel it cannot lower
+        # correctly AND knows the legacy parser can't either. Re-raise instead
+        # of falling back — returning silently-wrong numbers is worse than a
+        # clear error. This is the integrity backstop (PR1).
+        _mept_path_log("refused-nonrecoverable", metadata.get("name", "?"))
+        raise
     except Exception as e:
         import warnings
         warnings.warn(
@@ -511,6 +539,7 @@ def emit_msl(mod, metadata, options):
             "Falling back to legacy text-based parser.",
             stacklevel=2,
         )
+        _mept_path_log("fallback-exception", str(e)[:80])
 
     # Legacy fallback: text-based parser + pattern matchers
     from triton_metal.codegen.ttgir_parser import parse_ttgir
