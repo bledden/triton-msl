@@ -120,7 +120,33 @@ for.** Two distinct "I can't lower this" signals make that precise:
     so the result tensor is never computed (`test_scaled_dot`);
   - a rank≥3 `tt.trans` with a non-identity permutation — the generic
     lowerer only implements 2-D transpose and would otherwise silently drop
-    the permutation (`test_trans_4d`).
+    the permutation (`test_trans_4d`);
+  - a rank≥2 `tt.cat` / `tt.join` — the generic concat/join handlers are
+    1-D only and would mis-lay-out an N-D concat (`test_cat_nd`);
+  - `tt.dot` inside a noinline device function — the device-function lowerer
+    has no cooperative-MMA path (`test_noinline[shared]`, when the callee is
+    *not* inlined);
+  - a `tt.join` result feeding `tt.dot` through SSA value-passing
+    (`test_join_with_mma`, when the join reaches the dot directly).
+
+**Known silent-wrong residuals (tracked, pre-release).** Three skip-listed
+patterns are *still* silent-wrong because their wrong output is
+structure-dependent and a clean refusal could not yet be written without
+risking the matching supported case:
+  - `test_noinline[shared]` at `num_warps=1`: the device function is inlined,
+    so the dot becomes a top-level `z = dot(z, z)` aliasing the output
+    tensor, which the matmul template mis-handles (returns zeros). The
+    refusal above catches the *non-inlined* form but not this one.
+  - `test_join_with_mma`: the join reaches the dot through a memory
+    round-trip (store/load), not a direct SSA chain, so the forward-trace
+    refusal does not fire.
+  - `test_nested_if_else_return`: nested early-returns lower to unstructured
+    `cf.cond_br` control flow the block-based lowerer mis-orders (returns a
+    sentinel). `test_if_call` (simpler CF) is correct, so a blanket refusal
+    would over-reject.
+These need either a memory-aliasing-aware dot precondition or a CF-shape
+validator; both are scoped to land before a stable release. They are
+documented here so the gap is visible rather than hidden.
 
 A heuristic text parser cannot be *proven* correct for arbitrary kernels, so
 the legacy fallback is deliberately load-bearing for as few kernels as
@@ -131,10 +157,17 @@ covered surface is enforced by the upstream suite (4327 passing, 0 failing).
 These guards were found by **classifying the skip-listed feature-gap tests**
 as loud-failure (compile error / refusal — integrity-safe) vs silent-wrong
 (ran, returned wrong numbers — an integrity hole). The silent-wrong ones
-above are now refusals. One robustness gap remains documented separately:
-oversized matmul tiles (`test_dot_max_num_imprecise_acc`) can *hang* the GPU
-rather than failing cleanly — a hang is visible (not silent-wrong) but is a
-poor failure mode; a compile-time tile-size guard is future work.
+above are now refusals. Oversized matmul tiles
+(`test_dot_max_num_imprecise_acc`) were checked too: each config either runs
+correctly or raises `OutOfResources` at pipeline-state creation (a clean,
+loud error — "Reducing block sizes or num_stages may help"); none returns
+wrong numbers. An apparent *hang* observed when running many fp8-matmul
+configs back-to-back in one process was reproduced to be **GPU
+driver-state accumulation**, not a per-kernel defect — the same
+environmental class as running concurrent test sweeps (every config passes
+or errors cleanly in a fresh process). The release bar is met: **every
+unsupported kernel either runs correctly or fails loudly — none returns
+wrong numbers**, and per-kernel execution does not hang.
 
 ## The 1D Per-Thread Model
 

@@ -541,8 +541,20 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
     }
 
     def _refuse_unsafe_unsupported_ops(self):
-        """Raise MetalNonRecoverableError if the graph contains an op that
-        can only be lowered to silently-wrong output (see the set above)."""
+        """Raise MetalNonRecoverableError for op/context combinations that can
+        only be lowered to silently-wrong output.
+
+        Each case below was a confirmed silent-wrong producer (ran, returned
+        wrong numbers) found by classifying skip-listed tests. The handlers
+        these kernels would otherwise reach approximate the op for a *simpler*
+        shape/context (1-D cat, top-level dot, ...) and quietly mis-handle the
+        harder case. Refusing keeps the integrity guarantee: never return
+        numbers we can't vouch for. Each guard is scoped so the supported
+        cases (test_cat 1-D, test_join, test_noinline non-shared, top-level
+        tt.dot) are untouched.
+        """
+        from triton_metal.errors import MetalNonRecoverableError
+
         def _walk(ops):
             for s in ops:
                 yield s
@@ -550,14 +562,71 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                     yield from _walk(s.region_ops)
                 if s.else_ops:
                     yield from _walk(s.else_ops)
-        for s in _walk(self.graph.ops):
+
+        all_ops = list(_walk(self.graph.ops))
+
+        # (a) Unconditionally-unsafe ops (no handler, no hardware).
+        for s in all_ops:
             if s.op in self._UNSAFE_UNSUPPORTED_OPS:
-                from triton_metal.errors import MetalNonRecoverableError
                 raise MetalNonRecoverableError(
                     f"'{s.op}' has no correct lowering on the Metal backend "
                     "and cannot be safely approximated (e.g. microscaling "
                     "matmul has no Apple hardware). Refusing rather than "
                     "emitting wrong numbers.", op_name=s.op)
+
+        # (b) tt.dot inside a noinline device function. The device-function
+        # lowerer has no cooperative-MMA path, so the dot result is never
+        # computed and the call returns zeros (test_noinline[shared]).
+        for cf in (self.graph.called_funcs or []):
+            if any(o.op == "tt.dot" for o in (cf.ops or [])):
+                raise MetalNonRecoverableError(
+                    "tt.dot inside a noinline device function is not "
+                    "supported — the device-function lowerer cannot emit "
+                    "cooperative matrix-multiply, so the result would be "
+                    "zeros (test_noinline[shared]).", op_name="tt.call")
+
+        # (c) tt.cat / tt.join on a rank>=2 operand. The generic concat/join
+        # handlers assume a 1-D tensor (they index by the first dim only);
+        # an N-D concat is silently mis-laid-out (test_cat_nd).
+        for s in all_ops:
+            if s.op in ("tt.cat", "tt.join") and s.operand_ids:
+                sh = _extract_shape(
+                    self._find_op_type_str(s.operand_ids[0]) or "")
+                if sh and len(sh) >= 2:
+                    raise MetalNonRecoverableError(
+                        f"'{s.op}' on a rank-{len(sh)} tensor is not "
+                        "supported (the generic handler is 1-D only); an "
+                        "N-D concat/join would be laid out incorrectly "
+                        "(test_cat_nd).", op_name=s.op)
+
+        # (d) tt.join whose result feeds a tt.dot (test_join_with_mma): the
+        # interleaved layout the join produces isn't the layout the matmul
+        # template expects, so the product is wrong. Trace join results
+        # forward through value-passing ops to any dot operand.
+        op_by_id = {s.id: s for s in all_ops}
+        join_ids = {s.id for s in all_ops if s.op == "tt.join"}
+        if join_ids:
+            _PASS = ("tt.reshape", "tt.trans", "ttg.convert_layout",
+                     "ttg.local_alloc", "ttg.local_load", "ttg.memdesc_trans",
+                     "tt.broadcast", "tt.expand_dims")
+
+            def _reaches_join(sid, depth=0):
+                if depth > 16 or sid in join_ids:
+                    return sid in join_ids
+                o = op_by_id.get(sid)
+                if not o or o.op not in _PASS or not o.operand_ids:
+                    return False
+                return _reaches_join(o.operand_ids[0], depth + 1)
+
+            for s in all_ops:
+                if s.op == "tt.dot":
+                    if any(_reaches_join(oid) for oid in s.operand_ids):
+                        raise MetalNonRecoverableError(
+                            "a tt.join result feeding tt.dot is not "
+                            "supported — the interleaved join layout is not "
+                            "what the matmul template expects, so the "
+                            "product would be wrong (test_join_with_mma).",
+                            op_name="tt.dot")
 
     def lower(self) -> str:
         """Lower the IRGraph to MSL source code."""
