@@ -111,15 +111,30 @@ for.** Two distinct "I can't lower this" signals make that precise:
   knows it can't lower it correctly, *and* knows the legacy parser can't
   either — so falling back would only swap one wrong answer for another."
   `emit_msl` **re-raises** this; it never reaches the user as silent output.
-  Example: a pid-tiled matmul whose dimensions are baked in as `tl.constexpr`
-  (no runtime M/N/K) — the template can't derive the true output strides, so
-  it refuses (`test_dot_mulbroadcasted`).
+  The known cases (each was a silent-wrong producer before the guard, found
+  by classifying skip-listed tests with a path-logging sweep):
+  - a pid-tiled matmul whose dims are baked in as `tl.constexpr` (no runtime
+    M/N/K) — the template guesses `_N = BLOCK_N` and mis-strides the output
+    (`test_dot_mulbroadcasted`, ~98% mismatch);
+  - `tt.dot_scaled` — microscaling matmul, no Apple hardware and no handler,
+    so the result tensor is never computed (`test_scaled_dot`);
+  - a rank≥3 `tt.trans` with a non-identity permutation — the generic
+    lowerer only implements 2-D transpose and would otherwise silently drop
+    the permutation (`test_trans_4d`).
 
 A heuristic text parser cannot be *proven* correct for arbitrary kernels, so
 the legacy fallback is deliberately load-bearing for as few kernels as
 possible (the long-term goal is to retire it once the primary path is
 complete, leaving a single auditable lowering path). Correctness for the
 covered surface is enforced by the upstream suite (4327 passing, 0 failing).
+
+These guards were found by **classifying the skip-listed feature-gap tests**
+as loud-failure (compile error / refusal — integrity-safe) vs silent-wrong
+(ran, returned wrong numbers — an integrity hole). The silent-wrong ones
+above are now refusals. One robustness gap remains documented separately:
+oversized matmul tiles (`test_dot_max_num_imprecise_acc`) can *hang* the GPU
+rather than failing cleanly — a hang is visible (not silent-wrong) but is a
+poor failure mode; a compile-time tile-size guard is future work.
 
 ## The 1D Per-Thread Model
 
