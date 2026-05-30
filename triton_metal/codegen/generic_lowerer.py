@@ -528,8 +528,46 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             return False
         return True
 
+    # Ops with no correct lowering AND no viable fallback: their presence
+    # means the kernel can only produce silently-wrong output, so the
+    # lowerer refuses instead. Keep this list tight — only ops that are
+    # both unsupported and *unsafe to approximate* belong here.
+    _UNSAFE_UNSUPPORTED_OPS = {
+        # Microscaling (mxfp) matmul — no Apple hardware, no handler; the
+        # output tensor is never computed. (test_scaled_dot)
+        "tt.dot_scaled",
+    }
+
+    def _refuse_unsafe_unsupported_ops(self):
+        """Raise MetalNonRecoverableError if the graph contains an op that
+        can only be lowered to silently-wrong output (see the set above)."""
+        def _walk(ops):
+            for s in ops:
+                yield s
+                if s.region_ops:
+                    yield from _walk(s.region_ops)
+                if s.else_ops:
+                    yield from _walk(s.else_ops)
+        for s in _walk(self.graph.ops):
+            if s.op in self._UNSAFE_UNSUPPORTED_OPS:
+                from triton_metal.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    f"'{s.op}' has no correct lowering on the Metal backend "
+                    "and cannot be safely approximated (e.g. microscaling "
+                    "matmul has no Apple hardware). Refusing rather than "
+                    "emitting wrong numbers.", op_name=s.op)
+
     def lower(self) -> str:
         """Lower the IRGraph to MSL source code."""
+        # Integrity prescan (PR1): some ops have no correct lowering on this
+        # backend AND the legacy fallback can't help — emitting anything for
+        # them yields silently-wrong output (a kernel that runs and returns
+        # wrong numbers). Refuse rather than approximate. ``tt.dot_scaled``
+        # is microscaling (mxfp) matmul: Apple GPUs have no microscaling
+        # units and our codegen has no handler, so the result tensor is
+        # never computed -> garbage (test_scaled_dot, ~all configs mismatch).
+        self._refuse_unsafe_unsupported_ops()
+
         # Check for simple dot (no stride args, no scf.for) — use inline
         # scalar matmul that loads from global into shared memory, then
         # does per-thread dot product.

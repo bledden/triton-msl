@@ -91,6 +91,47 @@ def _validate_msl_compiles(msl_src: str):
 # ---------------------------------------------------------------------------
 
 @requires_triton
+def test_dot_scaled_refuses_not_silently_wrong():
+    """Integrity (PR1): microscaling matmul (tt.dot_scaled) has no Apple
+    hardware and no handler, so the result tensor is never computed —
+    emitting anything yields silently-wrong output. The lowerer must RAISE
+    MetalNonRecoverableError instead (test_scaled_dot was ~all mismatch)."""
+    from triton.compiler import ASTSource
+    from triton.backends.compiler import GPUTarget
+    from triton._C.libtriton import ir
+    from triton_metal.backend.compiler import MetalBackend
+    from triton_metal.codegen.msl_emitter import emit_msl
+    from triton_metal.errors import MetalNonRecoverableError
+
+    @triton.jit
+    def k(a_base, b_base, out, BM: tl.constexpr, BN: tl.constexpr,
+          BK: tl.constexpr):
+        a_ptr = a_base + tl.arange(0, BM)[:, None] * BK + tl.arange(0, BK)[None, :]
+        b_ptr = b_base + tl.arange(0, BK)[:, None] * BN + tl.arange(0, BN)[None, :]
+        a = tl.load(a_ptr)
+        b = tl.load(b_ptr)
+        c = tl.dot_scaled(a, None, "e5m2", b, None, "e5m2")
+        out_ptr = out + tl.arange(0, BM)[:, None] * BN + tl.arange(0, BN)[None, :]
+        tl.store(out_ptr, c)
+
+    target = GPUTarget("metal", "apple-m4", 32)
+    backend = MetalBackend(target)
+    options = backend.parse_options({})
+    src = ASTSource(fn=k, signature={"a_base": "*fp8e5", "b_base": "*fp8e5",
+                                     "out": "*fp32"},
+                    constexprs=dict(BM=32, BN=32, BK=32))
+    ctx = ir.context()
+    ir.load_dialects(ctx)
+    mod = src.make_ir(target, options, backend.get_codegen_implementation(options),
+                      backend.get_module_map(), ctx)
+    meta = {}
+    mod = backend.make_ttir(mod, meta, options)
+    mod = backend.make_ttgir(mod, meta, options)
+    with pytest.raises(MetalNonRecoverableError):
+        emit_msl(mod, meta, options)
+
+
+@requires_triton
 def test_constexpr_dim_matmul_refuses_not_silently_wrong():
     """Integrity (PR1): a pid-tiled matmul with constexpr-baked M/N must
     RAISE (MetalNonRecoverableError), never emit silently-wrong output.
