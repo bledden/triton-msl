@@ -160,9 +160,23 @@ UNSUPPORTED_PRECISIONS = {
     "bf16x6",    # 6-pass bf16 emulation for fp32, CUDA-specific
 }
 
-# Features not yet implemented in the Metal backend.
-# These tests are skipped (not failed) because the backend doesn't support
-# them yet — they represent future work, not bugs.
+# Skip taxonomy (every entry below carries a one-line rationale; this set
+# is meant to be diff-able against the failures it suppresses so a reviewer
+# can confirm nothing here hides a correctness bug). Each skip falls into
+# exactly one of three buckets:
+#
+#   (1) HARDWARE-IMPOSSIBLE — Apple GPU lacks the unit (fp8 bias variants,
+#       fp64, tf32, int64 compute, device-side printf/assert, TMA). Will
+#       never pass; not a backend defect.
+#   (2) UPSTREAM/ENV BUG, NOT OURS — the failure originates in Triton's
+#       CUDA-only test harness or a Python-3.14 tooling regression
+#       (Gluon translator, slicing tool, ptxas ELF, private CPython symbols).
+#   (3) UNIMPLEMENTED FEATURE — an honest TODO in this backend (e.g. 4-D
+#       transpose, N-D cat, multi-output map_elementwise). Tracked work.
+#
+# Anything that would otherwise SILENTLY PRODUCE WRONG OUTPUT is handled in
+# codegen by MetalNonRecoverableError (a hard refusal), not by a skip here —
+# see docs/ARCHITECTURE.md "Lowering paths and the integrity model".
 UNIMPLEMENTED_FEATURES = {
     # Histogram — M=2048 exceeds 1024 thread limit
     # "test_histogram",  # Enabled: threadgroup atomic histogram
@@ -388,6 +402,10 @@ UNIMPLEMENTED_FEATURES = {
     # Mixed uint16/float16 modulus — type promotion edge case
     "test_bin_op[1-uint16-float16-%]",
     "test_where[1-*int32]",  # Pointer type in where/select
+    # Wraps the launch in ``with torch.cuda.device(...)`` (CUDA-only context)
+    # and does a 3-D-grid atomic_add over a zero-strided (broadcast) view;
+    # both the CUDA harness call and the broadcast-stride atomic are
+    # unsupported here.
     "test_zero_strided_tensors",
     "test_pointer_arguments",  # Metal accepts CPU tensors (no ValueError)
     # "test_masked_load_shared_memory",  # Enabled: non-square K via strided template

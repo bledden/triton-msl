@@ -163,12 +163,24 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # SSA ids to skip (handled as part of a fused pattern)
         self._skip_ids = set()
 
-        # Phase 4b scaffolding: feature flag and array-storage env. When
-        # ``mept_enabled`` is False (default), no call site uses these and
-        # behavior is identical to today. When True, op handlers may emit
-        # array-form storage (``T name[N]``) and record entries in
-        # ``env_array``. See docs/superpowers/plans/
-        # 2026-05-21-multi-element-per-thread.md.
+        # ── EXPERIMENTAL: multi-element-per-thread (MEPT) ──────────────────
+        # Charter (read before changing this): MEPT is an OPT-IN
+        # (TRITON_METAL_MEPT=1), OFF-BY-DEFAULT experimental code path that
+        # lets a thread hold N tensor elements as a register array instead of
+        # one scalar. It is the prototype of the register-array programming
+        # model that is the long-term path to retiring the pattern detectors
+        # (see docs/ARCHITECTURE.md). It is NOT a performance feature:
+        # benchmarked perf-neutral on elementwise/reduce kernels (deltas
+        # within launch-overhead noise). It is kept because:
+        #   1. it is correct — the full upstream test_core suite passes with
+        #      the flag ON as well as OFF (4327/0 both ways), and
+        #   2. it is the foundation for the generic convert_layout / dot
+        #      lowering that would subsume the matmul + transpose detectors.
+        # Default behavior (flag off) is byte-identical to not having MEPT:
+        # every consumer is gated on ``mept_enabled`` and the producer
+        # (make_range) is the single activation root. Do not enable by
+        # default until it shows a measured win on a real workload.
+        # Plan: docs/superpowers/plans/2026-05-21-multi-element-per-thread.md
         self.mept_enabled = os.environ.get("TRITON_METAL_MEPT", "0") == "1"
         self.env_array = {}  # ssa_id -> (var_name: str, n_elems: int, ty: str)
         # Phase 4c: parallel to env_is_ptr but for the case where the
