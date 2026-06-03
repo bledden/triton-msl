@@ -5,9 +5,25 @@ results on MPS device by routing through TritonScheduling -> triton-metal -> MSL
 """
 
 import os
+import sys
 import pytest
 import torch
 import torch.nn as nn
+
+# torch.compile / TorchDynamo rewrites CPython bytecode via interpreter-internal
+# frame-evaluation hooks, which are Python-version-specific. PyTorch's own
+# platform guard raises "torch.compile is not supported on Python 3.14+" until
+# it ships 3.14 Dynamo support. These tests therefore *cannot* run on 3.14 —
+# this is not a triton-metal bug or an API backfill, it's an upstream-PyTorch
+# capability gap. Gate them so they're honest skips, not red failures; the gate
+# auto-lifts when PyTorch adds 3.14 support. Run them on a Python <=3.13 lane
+# (see docs/superpowers/specs/2026-05-30-ws0-foundation-design.md, component C3).
+pytestmark = pytest.mark.skipif(
+    sys.version_info >= (3, 14),
+    reason="torch.compile is not supported on Python 3.14+ (PyTorch's own "
+    "platform guard; resolves when PyTorch ships 3.14 Dynamo support). "
+    "See REFERENCES.md [12].",
+)
 
 # Metal/PyObjC is not fork-safe; force single-thread compilation
 os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"

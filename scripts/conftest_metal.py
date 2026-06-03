@@ -177,6 +177,20 @@ UNSUPPORTED_PRECISIONS = {
 # Anything that would otherwise SILENTLY PRODUCE WRONG OUTPUT is handled in
 # codegen by MetalNonRecoverableError (a hard refusal), not by a skip here —
 # see docs/ARCHITECTURE.md "Lowering paths and the integrity model".
+#
+# Policy (WS0/C3 — docs/superpowers/specs/2026-05-30-ws0-foundation-design.md):
+#   • A passing test is NOT the same as a correct kernel. The forbidden
+#     failure mode is silent-wrong tolerated by a loose assertion — e.g.
+#     test_constexpr_if_return "passed" for months while the kernel emitted
+#     `Out = pid + 0` (dropped atomic_add + early return, wrote OOB) because
+#     it only asserts `out >= 0`. When such a case is found, the kernel
+#     becomes a codegen refusal (bucket via MetalNonRecoverableError) and the
+#     test joins this list with that rationale — it is never left "passing".
+#   • Never modify the upstream test body to make it pass. The policy is
+#     fix-the-feature → un-skip → verify. When an upstream test changes shape
+#     because Triton evolved, re-evaluate and document; don't edit the test.
+#   • This list SHRINKS over time. As the register-array spine (WS1) lands,
+#     bucket-(3) UNIMPLEMENTED entries are removed and verified, not retained.
 UNIMPLEMENTED_FEATURES = {
     # Histogram — M=2048 exceeds 1024 thread limit
     # "test_histogram",  # Enabled: threadgroup atomic histogram
