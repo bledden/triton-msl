@@ -128,6 +128,15 @@ for.** Two distinct "I can't lower this" signals make that precise:
   knows it can't lower it correctly, *and* knows the legacy parser can't
   either — so falling back would only swap one wrong answer for another."
   `emit_msl` **re-raises** this; it never reaches the user as silent output.
+
+  > **Single source of truth:** the refusal catalog lives in
+  > [`triton_metal/codegen/refusal_catalog.py`](../triton_metal/codegen/refusal_catalog.py).
+  > `GenericLowerer._refuse_unsafe_unsupported_ops` walks it (Python path), the
+  > C++ MLIR→LLVM path consumes the same catalog via
+  > `python -m triton_metal.codegen.refusal_catalog --json` (so the two paths
+  > cannot drift), and the list below is the curated form of
+  > `refusal_catalog.doc_markdown()`. Add a new refusal *there*, not here.
+
   The known cases (each was a silent-wrong producer before the guard, found
   by classifying skip-listed tests with a path-logging sweep):
   - a pid-tiled matmul whose dims are baked in as `tl.constexpr` (no runtime

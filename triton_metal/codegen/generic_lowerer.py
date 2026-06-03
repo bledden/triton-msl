@@ -530,30 +530,29 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             return False
         return True
 
-    # Ops with no correct lowering AND no viable fallback: their presence
-    # means the kernel can only produce silently-wrong output, so the
-    # lowerer refuses instead. Keep this list tight — only ops that are
-    # both unsupported and *unsafe to approximate* belong here.
-    _UNSAFE_UNSUPPORTED_OPS = {
-        # Microscaling (mxfp) matmul — no Apple hardware, no handler; the
-        # output tensor is never computed. (test_scaled_dot)
-        "tt.dot_scaled",
-    }
+    # Ops/contexts with no correct lowering AND no viable fallback: their
+    # presence means the kernel can only produce silently-wrong output, so the
+    # lowerer refuses instead. The catalog (the unsafe-op set and every case
+    # predicate) lives in ``triton_metal.codegen.refusal_catalog`` — the single
+    # source of truth shared with the C++ path and the generated docs. Keep it
+    # tight: only ops that are both unsupported and *unsafe to approximate*.
 
     def _refuse_unsafe_unsupported_ops(self):
         """Raise MetalNonRecoverableError for op/context combinations that can
         only be lowered to silently-wrong output.
 
-        Each case below was a confirmed silent-wrong producer (ran, returned
-        wrong numbers) found by classifying skip-listed tests. The handlers
-        these kernels would otherwise reach approximate the op for a *simpler*
-        shape/context (1-D cat, top-level dot, ...) and quietly mis-handle the
-        harder case. Refusing keeps the integrity guarantee: never return
-        numbers we can't vouch for. Each guard is scoped so the supported
-        cases (test_cat 1-D, test_join, test_noinline non-shared, top-level
-        tt.dot) are untouched.
+        The cases are defined once in
+        ``triton_metal.codegen.refusal_catalog`` (the single source of truth
+        shared with the C++ path and the generated docs); this method just
+        builds the :class:`RefusalContext` and walks the catalog. Each case
+        was a confirmed silent-wrong producer found by classifying skip-listed
+        tests; refusing keeps the integrity guarantee (never return numbers we
+        can't vouch for). Guards are scoped so the supported cases (test_cat
+        1-D, test_join, test_noinline non-shared, top-level tt.dot,
+        value-returning early returns) are untouched.
         """
         from triton_metal.errors import MetalNonRecoverableError
+        from triton_metal.codegen import refusal_catalog as _rc
 
         def _walk(ops):
             for s in ops:
@@ -563,96 +562,17 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 if s.else_ops:
                     yield from _walk(s.else_ops)
 
-        all_ops = list(_walk(self.graph.ops))
-
-        # (a) Unconditionally-unsafe ops (no handler, no hardware).
-        for s in all_ops:
-            if s.op in self._UNSAFE_UNSUPPORTED_OPS:
-                raise MetalNonRecoverableError(
-                    f"'{s.op}' has no correct lowering on the Metal backend "
-                    "and cannot be safely approximated (e.g. microscaling "
-                    "matmul has no Apple hardware). Refusing rather than "
-                    "emitting wrong numbers.", op_name=s.op)
-
-        # (b) tt.dot inside a noinline device function. The device-function
-        # lowerer has no cooperative-MMA path, so the dot result is never
-        # computed and the call returns zeros (test_noinline[shared]).
-        for cf in (self.graph.called_funcs or []):
-            if any(o.op == "tt.dot" for o in (cf.ops or [])):
-                raise MetalNonRecoverableError(
-                    "tt.dot inside a noinline device function is not "
-                    "supported — the device-function lowerer cannot emit "
-                    "cooperative matrix-multiply, so the result would be "
-                    "zeros (test_noinline[shared]).", op_name="tt.call")
-
-        # (c) tt.cat / tt.join on a rank>=2 operand. The generic concat/join
-        # handlers assume a 1-D tensor (they index by the first dim only);
-        # an N-D concat is silently mis-laid-out (test_cat_nd).
-        for s in all_ops:
-            if s.op in ("tt.cat", "tt.join") and s.operand_ids:
-                sh = _extract_shape(
-                    self._find_op_type_str(s.operand_ids[0]) or "")
-                if sh and len(sh) >= 2:
-                    raise MetalNonRecoverableError(
-                        f"'{s.op}' on a rank-{len(sh)} tensor is not "
-                        "supported (the generic handler is 1-D only); an "
-                        "N-D concat/join would be laid out incorrectly "
-                        "(test_cat_nd).", op_name=s.op)
-
-        # (d) tt.join whose result feeds a tt.dot (test_join_with_mma): the
-        # interleaved layout the join produces isn't the layout the matmul
-        # template expects, so the product is wrong. Trace join results
-        # forward through value-passing ops to any dot operand.
-        op_by_id = {s.id: s for s in all_ops}
-        join_ids = {s.id for s in all_ops if s.op == "tt.join"}
-        if join_ids:
-            _PASS = ("tt.reshape", "tt.trans", "ttg.convert_layout",
-                     "ttg.local_alloc", "ttg.local_load", "ttg.memdesc_trans",
-                     "tt.broadcast", "tt.expand_dims")
-
-            def _reaches_join(sid, depth=0):
-                if depth > 16 or sid in join_ids:
-                    return sid in join_ids
-                o = op_by_id.get(sid)
-                if not o or o.op not in _PASS or not o.operand_ids:
-                    return False
-                return _reaches_join(o.operand_ids[0], depth + 1)
-
-            for s in all_ops:
-                if s.op == "tt.dot":
-                    if any(_reaches_join(oid) for oid in s.operand_ids):
-                        raise MetalNonRecoverableError(
-                            "a tt.join result feeding tt.dot is not "
-                            "supported — the interleaved join layout is not "
-                            "what the matmul template expects, so the "
-                            "product would be wrong (test_join_with_mma).",
-                            op_name="tt.dot")
-
-        # (e) Unstructured kernel-level control flow (cf.cond_br / cf.br at the
-        # top level of the kernel body). These appear when a kernel takes a
-        # *void* early return mid-body (`return` with no value, e.g.
-        #     if cond: ... else: return
-        # ). Triton lowers that to the `cf` dialect rather than structured
-        # `scf.if`, and `_lower_op_dispatch` has no handler for `cf.cond_br` /
-        # `cf.br`, so the branch is silently dropped and the wrong value
-        # reaches the store (test_nested_if_else_return: returns -1 for 1).
-        #
-        # Scope: only TOP-LEVEL ops are inspected (``self.graph.ops``), not the
-        # recursive ``all_ops``. ``tt.map_elementwise`` bodies also use
-        # cf.cond_br, but those live in the op's ``region_ops`` and ARE handled
-        # (``_lower_map_elementwise_cond_br``), so they must not be refused.
-        # Function-level early returns that yield a value (test_if_call[jit_if])
-        # inline to structured scf.if and never produce top-level cf.* — they
-        # are untouched.
-        for s in self.graph.ops:
-            if s.op in ("cf.cond_br", "cf.br"):
-                raise MetalNonRecoverableError(
-                    "unstructured kernel-level control flow "
-                    f"('{s.op}', produced by a void early `return` mid-kernel) "
-                    "has no Metal lowering — the branch would be dropped and "
-                    "the wrong value stored (test_nested_if_else_return). "
-                    "Structured control flow (scf.if) and value-returning "
-                    "early returns are supported.", op_name=s.op)
+        ctx = _rc.RefusalContext(
+            all_ops=list(_walk(self.graph.ops)),
+            top_level_ops=self.graph.ops,
+            called_funcs=self.graph.called_funcs or [],
+            find_op_type_str=self._find_op_type_str,
+            extract_shape=_extract_shape,
+        )
+        violation = _rc.check_all(ctx)
+        if violation is not None:
+            raise MetalNonRecoverableError(
+                violation.message, op_name=violation.op_name)
 
     def lower(self) -> str:
         """Lower the IRGraph to MSL source code."""
