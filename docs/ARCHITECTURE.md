@@ -1,6 +1,18 @@
 # triton-metal Architecture
 
-Metal backend for OpenAI Triton. Compiles `@triton.jit` kernels to MSL (Metal Shading Language) and dispatches on Apple GPUs.
+Metal backend for OpenAI Triton [\[1\]](../REFERENCES.md). Compiles `@triton.jit`
+kernels to MSL [\[8\]](../REFERENCES.md) (Metal Shading Language) and
+dispatches on Apple GPUs.
+
+> **References for the work this backend builds on:**
+> see [`REFERENCES.md`](../REFERENCES.md) for citations of Triton [1],
+> FlashAttention [4,5], online softmax [6], MLX [7], MSL spec [8], the
+> Asahi / `applegpu` toolchain [10,11], PyTorch Inductor [12], and the
+> M4 Max hardware reference [13]. Inline `[N]` markers link back to
+> entries there.
+>
+> **Active roadmap:** see
+> [`docs/superpowers/specs/2026-05-30-triton-metal-roadmap.md`](superpowers/specs/2026-05-30-triton-metal-roadmap.md).
 
 ## Pipeline
 
@@ -65,7 +77,7 @@ and the generic op-by-op path is bypassed. The dispatch order is in
 |----------|---------|------------------------------|
 | `_detect_simple_dot` / `_detect_dot_epilogue` | `tt.dot` (incl. K-loop) | simdgroup 8×8 MMA needs 2D cooperative execution |
 | `_detect_matmul_softmax` | matmul → row-softmax fusion | M-strip staging to fit the 32 KB threadgroup cap |
-| `_detect_softmax` / `_detect_layer_norm` | row-wise norm | caches the row in TG memory; ~2× vs re-reading |
+| `_detect_softmax` / `_detect_layer_norm` | row-wise norm | caches the row in TG memory; ~2× vs re-reading; numerically stable via the online normalizer trick [\[6\]](../REFERENCES.md) |
 | `_detect_flip` | `tl.flip` (reshape+xor-reduce) | closed-form index flip |
 | `_detect_transpose_via_reshape` | reshape→permute→reshape | closed-form transpose lookup; the generic path routes this through a multi-element `convert_layout` the 1D model can't honor |
 | `_detect_row_wise_sort` | `tl.sort`/`tl.topk` per row | in-register bitonic sort when total > 1024 threads |
@@ -91,12 +103,17 @@ generic path provably matches them (tracked as "4g").
 `emit_msl` (in `msl_emitter.py`) chooses among three paths, in order:
 
 1. **Primary** — `GenericLowerer.lower()`: pattern templates (above) or the
-   generic op-by-op lowering. **99.96%** of kernels in the upstream
-   `test_core` suite (4713 / 4715) take this path.
+   generic op-by-op lowering. The vast majority of kernels (~99.95%; the
+   legacy fallback was last measured to be load-bearing for 2 kernels —
+   see `reports/upstream_test_core.txt` and the per-path log under
+   `TRITON_METAL_PATH_LOG=1`) take this path.
 2. **Legacy fallback** — a text-based TTGIR parser (`ttgir_parser.py`), used
    only when the primary path emits an `UNSUPPORTED` marker or raises a
-   recoverable error. Exercised by **2 / 4715** kernels in the suite, both
-   via an explicit marker (never a silent throw — `0` exceptions measured).
+   recoverable error. Exercised by 2 kernels in the suite (last
+   measurement), both via an explicit marker (never a silent throw — `0`
+   exceptions measured). This path is deliberately load-bearing for as few
+   kernels as possible; the long-term goal is to retire it once the primary
+   path is complete, leaving a single auditable lowering path.
 3. **Refusal** — `MetalNonRecoverableError`.
 
 **The integrity guarantee: the backend never returns numbers it can't vouch
@@ -268,23 +285,49 @@ Run `python benchmarks/bench_copy_overhead.py` for full numbers.
 
 ## Triton Upstream Test Results
 
-Against `triton/python/test/unit/language/test_core.py` (9,320 tests):
+Against `triton/python/test/unit/language/test_core.py`, aligned to Triton
+3.7.0 (9,342 cases as of 2026-05-30; size drifts as upstream evolves), run
+with `scripts/run_upstream_test.sh` which loads
+`-p conftest_metal` so the project's documented feature-gap skips apply:
 
 | Status | Count | % |
 |--------|-------|---|
-| Passed | 1,404 | 15.1% |
-| Failed | 7,625 | 81.8% |
-| Skipped | 291 | 3.1% |
+| Passed | 4,326 | 46.3% |
+| Failed | 0 | 0.0% |
+| Skipped | 5,016 | 53.7% |
 
-Top failure categories:
-- Numerical mismatch (780): kernel runs but produces wrong output — mostly scalar broadcast bugs
-- Type error (92): missing integer/float type handling
-- Runtime error (46): MSL runtime failures
-- No FP64 (4): Metal has no FP64 support
+- **Passed** = the backend compiled, dispatched, and the test assertion
+  held end-to-end. No silent-wrong tolerated by a loose assertion (the
+  `test_constexpr_if_return` class is now refused and counted as a skip
+  with that rationale — see the integrity-model section above).
+- **Failed = 0** is the release bar.
+- **Skipped** = documented feature gaps. Every entry in
+  `scripts/conftest_metal.py` carries a one-line rationale and falls into
+  one of three categories: *refused with a clear error* (e.g. `tt.dot_scaled`,
+  unstructured `cf.cond_br`, N-D `tt.cat`/`tt.join`), *compile-time error*,
+  or *hardware-impossible on Apple GPUs* (FP64, FP8 compute, microscaling).
 
-The passing tests are primarily integer division ops and type codegen. Most arithmetic ops fail because `test_bin_op` tests scalar broadcast (`x[:1].reshape(())`) which the 1D per-thread model doesn't handle correctly.
+Live measurements live under `reports/` (`upstream_test_core.txt`,
+`upstream_test_core.json`, plus the per-sweep JSON archives). Run
+`python scripts/run_upstream_tests.py` to reproduce.
 
-Run `python scripts/run_upstream_tests.py` to reproduce. Full reports in `reports/`.
+### Note on a previous snapshot
+
+An earlier version of this doc carried a static "1,404 passed / 7,625
+failed / 81.8% fail" Phase-3 (2026-04-01) snapshot. That snapshot is no
+longer current and was a *raw* measurement (without the project's skip
+harness) — i.e., every documented feature-gap kernel was counted as a
+failure rather than a skip. The CHANGELOG dated 2026-03-10 already
+recorded the same-era *under-harness* count as "4,279 / 9,334 passing
+(0 failures)"; the two numbers measured different things, and the
+table's framing didn't make that explicit. Both numbers have moved
+substantially with the integrity work since (see `CHANGELOG.md`
+"Unreleased"); the historical-snapshot framing has been retired in favor
+of the current under-harness measurement above. For a raw measurement
+of how the backend behaves without the skip harness, run the sweep
+without `-p conftest_metal` — the failures correspond to the same
+documented feature gaps the harness covers; most are integrity-safe loud
+refusals, none silently returns wrong numbers.
 
 ## Apple GPU Properties (M4 Max reference)
 
