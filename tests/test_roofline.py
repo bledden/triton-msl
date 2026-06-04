@@ -71,6 +71,20 @@ def test_overridable_roofs():
     assert r.compute_roof_is_estimate is False
 
 
+def test_exceeding_roof_is_flagged_suspect():
+    # Move 1 TB in 1 ms -> 1,000,000 GB/s, far above the 546 roof: impossible,
+    # must be flagged rather than reported as a real 1832x-of-roof result.
+    r = classify(bytes_moved=1_000_000_000_000, flops=0, seconds=1e-3)
+    assert r.suspect_measurement is True
+    assert "SUSPECT" in format_roofline("bogus", r)
+
+
+def test_normal_measurement_not_suspect():
+    r = classify(3 * 16 * 1024 * 1024 * 4, 16 * 1024 * 1024,
+                 seconds=0.0014, dtype="fp32")
+    assert r.suspect_measurement is False
+
+
 def test_format_roofline_is_readable():
     r = classify(3 * 16 * 1024 * 1024 * 4, 16 * 1024 * 1024,
                  seconds=0.0014, dtype="fp32")

@@ -70,6 +70,10 @@ class RooflineResult:
     bound: str                        # "memory" | "compute"
     limiting_pct: float               # fraction of the *limiting* roof reached
     compute_roof_is_estimate: bool
+    # True when achieved exceeds a roof (>~100%): physically impossible, so the
+    # byte/flop model is wrong OR the kernel does less work than modelled OR the
+    # timing is bogus. Such a row must NOT be read as a real result.
+    suspect_measurement: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -132,11 +136,16 @@ def classify(bytes_moved: int, flops: int, seconds: float, *,
         bound=bound,
         limiting_pct=limiting_pct,
         compute_roof_is_estimate=roofs.compute_roof_is_estimate(dtype),
+        suspect_measurement=(pct_bw > 1.02 or pct_compute > 1.02),
     )
 
 
 def format_roofline(name: str, r: RooflineResult) -> str:
     """One-line human summary."""
+    if r.suspect_measurement:
+        return (f"{name}: SUSPECT ({r.limiting_pct * 100:.0f}% of roof — "
+                "exceeds the roof, so the byte/flop model or the kernel's "
+                "actual work is wrong; do not trust this row)")
     roof_note = " (est.)" if r.compute_roof_is_estimate and r.bound == "compute" else ""
     return (
         f"{name}: {r.bound}-bound at {r.limiting_pct * 100:.1f}% of "
