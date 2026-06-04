@@ -1,10 +1,76 @@
 cmake_minimum_required(VERSION 3.20)
 
+# ---------------------------------------------------------------------------
+# Triton source/build path resolution.
+#
+# The C++ MLIR->LLVM path links Triton's dialect OBJECT files from a
+# FROM-SOURCE Triton build (a pip wheel lacks them — libtriton.so does not
+# export the TTG symbols on macOS). See the evaluation in
+# docs/superpowers/specs/2026-05-30-ws0-c4-cpp-build-evaluation.md.
+#
+# Resolution order (so this builds on any machine with such a build, not just
+# the original developer's): env var -> -D override -> sensible default/GLOB.
+# ---------------------------------------------------------------------------
+if(DEFINED ENV{TRITON_ROOT})
+  set(_triton_src_default "$ENV{TRITON_ROOT}")
+else()
+  set(_triton_src_default "$ENV{HOME}/Documents/triton")
+endif()
+set(TRITON_SRCPATH "${_triton_src_default}"
+    CACHE PATH "Path to Triton source tree (env: TRITON_ROOT)")
+
+if(DEFINED ENV{TRITON_BUILD})
+  set(_triton_build_default "$ENV{TRITON_BUILD}")
+else()
+  # Triton's build dir is cmake.<platform>-<arch>-cpython-<pyver>; the suffix
+  # varies by macOS/Python version, so GLOB it rather than hardcode a version.
+  file(GLOB _triton_build_candidates
+       "${TRITON_SRCPATH}/build/cmake.*-arm64-cpython-*")
+  if(_triton_build_candidates)
+    list(SORT _triton_build_candidates)
+    list(GET _triton_build_candidates -1 _triton_build_default)  # newest
+  else()
+    set(_triton_build_default "${TRITON_SRCPATH}/build/cmake-build-not-found")
+  endif()
+endif()
+set(TRITON_BUILDPATH "${_triton_build_default}"
+    CACHE PATH "Path to Triton build tree for headers+objects (env: TRITON_BUILD)")
+
+if(NOT EXISTS "${TRITON_BUILDPATH}")
+  message(FATAL_ERROR
+    "Triton build tree not found at '${TRITON_BUILDPATH}'.\n"
+    "The C++ MLIR->LLVM path requires a FROM-SOURCE Triton build (a pip wheel "
+    "lacks the dialect object files this extension links). The Python MSL "
+    "path has no such requirement.\n"
+    "Point the build at your Triton checkout via either:\n"
+    "  -DTRITON_SRCPATH=/path/to/triton  (or env TRITON_ROOT), and/or\n"
+    "  -DTRITON_BUILDPATH=/path/to/triton/build/cmake.*  (or env TRITON_BUILD)\n"
+    "See docs/superpowers/specs/2026-05-30-ws0-c4-cpp-build-evaluation.md.")
+endif()
+
+# Triton commit the dialect ABI linkage is aligned to. Bump as a tested step
+# (the linked .o files must come from a compatible build). Soft-checked below.
+set(TRITON_PINNED_COMMIT "4da2e268dcccf090370e7bb7b59940e7567bf0ce"
+    CACHE STRING "Triton commit the C++ dialect linkage is aligned to")
+find_program(_git_exe git)
+if(_git_exe AND EXISTS "${TRITON_SRCPATH}/.git")
+  execute_process(
+    COMMAND "${_git_exe}" -C "${TRITON_SRCPATH}" rev-parse HEAD
+    OUTPUT_VARIABLE _triton_head OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(_triton_head AND NOT _triton_head STREQUAL "${TRITON_PINNED_COMMIT}")
+    message(WARNING
+      "Triton source at '${TRITON_SRCPATH}' is on ${_triton_head}, but the "
+      "C++ linkage is pinned to ${TRITON_PINNED_COMMIT}. ABI drift may cause "
+      "link/load errors; align the checkout or bump TRITON_PINNED_COMMIT after "
+      "rebuilding Triton.")
+  endif()
+endif()
+
 # Match the macOS deployment target Triton uses for its build, so that
 # linking against pre-built triton .o files doesn't trigger version
 # mismatch warnings or load failures. Read it from triton's CMakeCache.
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-  set(_triton_cache "$ENV{HOME}/Documents/triton/build/cmake.macosx-15.0-arm64-cpython-3.14/CMakeCache.txt")
+  set(_triton_cache "${TRITON_BUILDPATH}/CMakeCache.txt")
   if(EXISTS "${_triton_cache}")
     file(STRINGS "${_triton_cache}" _osx_target_line
          REGEX "^CMAKE_OSX_DEPLOYMENT_TARGET:STRING=.+$")
@@ -25,16 +91,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
-# Paths — hardcoded defaults, overridable via -D at configure time
+# LLVM path. TRITON_SRCPATH / TRITON_BUILDPATH are resolved at the top of this
+# file (env-overridable + GLOB); only LLVM remains to set here.
 # ---------------------------------------------------------------------------
 # Use the version-agnostic symlink so this tracks the LLVM hash from
 # triton/cmake/llvm-hash.txt without needing edits on every bump.
 set(LLVM_SYSPATH "$ENV{HOME}/.triton/llvm/llvm-macos-arm64"
     CACHE PATH "Path to LLVM/MLIR install")
-set(TRITON_SRCPATH "$ENV{HOME}/Documents/triton"
-    CACHE PATH "Path to Triton source tree")
-set(TRITON_BUILDPATH "$ENV{HOME}/Documents/triton/build/cmake.macosx-15.0-arm64-cpython-3.14"
-    CACHE PATH "Path to Triton build tree (for generated headers)")
 
 # ---------------------------------------------------------------------------
 # Find LLVM & MLIR (for include paths and cmake modules only)
@@ -205,8 +268,25 @@ install(TARGETS triton_metal_backend LIBRARY DESTINATION lib)
 # All conversion source files are compiled directly into this module (no
 # intermediate library), avoiding the two-library symbol resolution problem.
 # ---------------------------------------------------------------------------
-find_package(pybind11 REQUIRED PATHS
+# Discover pybind11 via the active Python (robust across Python versions and
+# checkout layouts — e.g. git worktrees that don't carry a .venv). Honor a
+# -DPython_EXECUTABLE override (the build driver passes the venv python);
+# fall back to the in-tree .venv path if discovery fails.
+if(NOT DEFINED Python_EXECUTABLE)
+  find_package(Python COMPONENTS Interpreter QUIET)
+endif()
+set(_pybind11_hint
     "${CMAKE_CURRENT_SOURCE_DIR}/../../.venv/lib/python3.14/site-packages/pybind11/share/cmake/pybind11")
+if(Python_EXECUTABLE)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -m pybind11 --cmakedir
+    OUTPUT_VARIABLE _pybind11_cmakedir OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET RESULT_VARIABLE _pb_rc)
+  if(_pb_rc EQUAL 0 AND _pybind11_cmakedir)
+    set(_pybind11_hint "${_pybind11_cmakedir}")
+  endif()
+endif()
+find_package(pybind11 REQUIRED PATHS "${_pybind11_hint}")
 
 pybind11_add_module(_triton_metal_cpp NO_EXTRAS SHARED
     python_bindings.cpp
@@ -227,10 +307,24 @@ pybind11_add_module(_triton_metal_cpp NO_EXTRAS SHARED
 # the linker accepts undefined references that resolve via libtriton.so at
 # runtime. -bundle's stricter symbol resolution rejects them. Python loads
 # .so files via dlopen regardless of whether they're -bundle or -dynamiclib.
+# Derive the extension suffix from the building Python's ABI rather than
+# hardcoding a version (was ".cpython-314-darwin.so", which breaks on any
+# other Python). Falls back to the 3.14 tag if discovery fails.
+set(_ext_suffix ".cpython-314-darwin.so")
+if(Python_EXECUTABLE)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c
+            "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))"
+    OUTPUT_VARIABLE _py_ext_suffix OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET RESULT_VARIABLE _es_rc)
+  if(_es_rc EQUAL 0 AND _py_ext_suffix)
+    set(_ext_suffix "${_py_ext_suffix}")
+  endif()
+endif()
 set_target_properties(_triton_metal_cpp PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION OFF
     PREFIX ""
-    SUFFIX ".cpython-314-darwin.so"
+    SUFFIX "${_ext_suffix}"
 )
 
 # Include our headers for the conversion sources compiled into this module
