@@ -34,5 +34,7 @@ test_constexpr_ir.py
 
 # Raw test output (contains local paths)
 reports/upstream_test_core_raw.txt
+# Machine-specific HW-harness runs (regenerate with benchmarks/hw_harness.py)
+reports/hw_harness/
 .cache/
 .claude/

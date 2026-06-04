@@ -53,6 +53,30 @@ Documented; not a code fix.
   honest skips with `skipif(py>=3.14)`, will auto-lift when PyTorch ships
   3.14 Dynamo support.
 
+### Hardware profiling harness (WS0/C6)
+
+- Added `benchmarks/hw_harness.py` + `triton_metal/profiling/roofline.py` +
+  `triton_metal/profiling/disasm.py`: per-kernel GPU-timestamp timing →
+  roofline classification (% of the M4 Max 546 GB/s memory roof / estimated
+  compute roof, memory- vs compute-bound), pipeline-reflection occupancy,
+  best-effort native-AGX disassembly, and an MLX comparison ratio. Emits
+  per-kernel JSON + summary.md + baseline.json. This is the empirical
+  backbone for the WS1 perf work ("optimal bounds = saturate the limiting
+  counter"). First run surfaced a concrete target: reduce_sum at ~16% of the
+  bandwidth roof / 1.3x slower than MLX, vs vector_add (72% of roof, 0.89x
+  MLX) and silu (48%, 0.59x MLX).
+- Vendored `applegpu` (dougallj — REFERENCES.md [11]) under
+  `third_party/applegpu/` for native-AGX disassembly. Honest scope: live GPU
+  counters (ALU%/occupancy/registers) are NOT programmatically available on
+  Apple Silicon (the device vends only the `timestamp` counter set), and
+  applegpu is M1-era so M4/AGX2 disassembly is partial (the harness reports a
+  decode-coverage %). `docs/INSTRUMENTS.md` documents the Xcode-capture /
+  Instruments path for the counters the programmatic API can't provide. No
+  Swift counter-helper was built — it would hit the same Metal API wall.
+- Tests: `tests/test_roofline.py` (9), `tests/test_disasm.py` (6, incl.
+  fat-header parsing for the 0xCBFEBABE GPU-archive magic + graceful
+  degradation).
+
 ### Documentation & roadmap
 
 - Added `REFERENCES.md` and `CITING.md` (citations for Triton [1],

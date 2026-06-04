@@ -261,11 +261,36 @@ consistent from day one).
 
 ### C6. Hardware profiling + disassembly harness
 
+> **Implementation reality (2026-06-03), corrected from this spec after
+> probing the M4.** Two assumptions in the original C6 design did not survive
+> contact with Apple Silicon, and the honest scope is recorded here:
+> 1. **Live GPU counters are not programmatically available.** The M4's only
+>    counter set is `timestamp` (`MTLDevice.counterSets()` → `['timestamp']`);
+>    `StageUtilization`/`Statistic` constants exist but the device does not
+>    vend them. So ALU%/occupancy/register *live* counters cannot be sampled
+>    via `MTLCounterSampleBuffer` — by pyobjc **or** a Swift helper (it's a
+>    Metal public-API wall). The planned Swift-helper "Stage 3" was therefore
+>    **not built**; it was reconceived as `docs/INSTRUMENTS.md` documenting
+>    the Xcode-capture / Instruments path (the genuine home for those
+>    counters). What the harness measures instead: GPU-timestamp timing →
+>    roofline, plus reliable pipeline-reflection occupancy.
+> 2. **Native-AGX disassembly is best-effort.** A `.metallib` holds AIR, not
+>    native code; the native AGX is in the serialized `MTLBinaryArchive`
+>    (a `0xCBFEBABE` fat Mach-O with an `applegpu` slice). The vendored
+>    `applegpu` decoder is M1-era, so M4/AGX2 decode coverage is partial
+>    (~40% measured) and the harness reports the coverage % explicitly rather
+>    than pretending completeness.
+>
+> Net: the harness is real and runs (`reports/hw_harness/<date>/`), giving the
+> roofline %, bound, occupancy hint, MLX ratio, and best-effort disasm per
+> kernel — the empirical backbone for WS1. The two items above moved to
+> `INSTRUMENTS.md` / best-effort rather than being faked.
+
 **What it is.** A tool — `python benchmarks/hw_harness.py <kernel-suite>`
-— that runs a representative kernel suite, captures Metal GPU counters,
-disassembles the produced `metallib`, performs a roofline analysis, and
-emits a structured report. This is the empirical definition of "optimal
-bounds."
+— that runs a representative kernel suite, times each with GPU timestamps,
+performs a roofline analysis, reads pipeline-reflection occupancy, attempts
+best-effort native-AGX disassembly, compares against MLX, and emits a
+structured report. This is the empirical definition of "optimal bounds."
 
 **How to use it.** For each kernel in the suite, the harness produces:
 
