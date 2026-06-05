@@ -160,3 +160,30 @@ the harness shows C.2 is still sync/staging-limited. YAGNI otherwise.
 4. `test_core` dot tests stay 4326/0; integrity guards intact.
 5. Whether the C++ generic-MMA rebuild is still warranted is decided *after*,
    from the post-fix harness numbers.
+
+## C.1 result (2026-06-04) — lie fixed and genuine; perf is sync-bound (latent)
+
+The fp16 lie is fixed in the standalone template, proven genuine:
+- MSL contains `simdgroup_half8x8` input fragments, no `float(A[`/`float(B[`
+  upcast, half threadgroup staging, `simdgroup_float8x8` accumulator.
+- Numerically correct end-to-end: full 64×64×128 fp16 template vs numpy
+  (`test_genuine_fp16_full_template_is_numerically_correct`), plus the de-risk
+  K=8 and K=256 cases.
+- fp32 path unchanged; existing emitter matmul/simdgroup tests stay green.
+
+But the **numeric floor (fp16 ≥15% over fp32, ≥8.5 TFLOP/s) is NOT met** —
+harness after the fix:
+
+| matmul | TFLOP/s | vs MLX |
+|---|---|---|
+| 2048 fp32 | 6.59 | 1.69× |
+| 2048 fp16 | 6.73 | 1.83× |
+| 4096 fp16 | 6.88 | 2.13× |
+
+fp16 and fp32 are the same *absolute* throughput (~6.7 vs ~6.6). This is the
+honest, useful finding: **the kernel is sync/staging-bound (root cause #2),
+not MMA-bound**, so doubling MMA precision throughput does not move the
+needle — the MMA units idle on the barrier-every-8-K. The fp16 benefit is
+real but **latent**: it materializes only once C.2 (deeper K-tiling) makes the
+kernel MMA-bound. C.1 delivered correctness + honesty (no more lie); C.2
+delivers the speed, and is where fp16 should finally pull ahead of fp32.
