@@ -3599,23 +3599,27 @@ kernel void simdgroup_matmul(
     uint row_base = tile_row * 32u;
     uint col_base = tile_col * 32u + sgitg * 8u;
 
+    // GENUINE fp16: half INPUT fragments, float ACCUMULATOR (half x half ->
+    // float MMA, de-risked in tests/test_simdgroup_half_mma.py). Inputs are
+    // staged as half and fed to simdgroup_half8x8 fragments — no float upcast.
+    // fp16 here means INPUT precision; the accumulator and C output stay float.
     simdgroup_float8x8 acc0(0), acc1(0), acc2(0), acc3(0);
-    simdgroup_float8x8 a_frag, b_frag;
+    simdgroup_half8x8 a_frag, b_frag;
 
-    threadgroup float tg_A[32 * 8];
-    threadgroup float tg_B[8 * 32];
+    threadgroup half tg_A[32 * 8];
+    threadgroup half tg_B[8 * 32];
 
     for (uint k = 0u; k < K; k += 8u) {{
         for (uint i = tiitg; i < 256u; i += 128u) {{
             uint r = i / 8u, c = i % 8u;
             uint gr = row_base + r, gc = k + c;
-            tg_A[i] = (gr < M && gc < K) ? float(A[gr * K + gc]) : 0.0f;
+            tg_A[i] = (gr < M && gc < K) ? A[gr * K + gc] : half(0.0h);
         }}
         uint col_base_tg = tile_col * 32u;
         for (uint i = tiitg; i < 256u; i += 128u) {{
             uint r = i / 32u, c = i % 32u;
             uint gr = k + r, gc = col_base_tg + c;
-            tg_B[i] = (gr < K && gc < N) ? float(B[gr * N + gc]) : 0.0f;
+            tg_B[i] = (gr < K && gc < N) ? B[gr * N + gc] : half(0.0h);
         }}
 
         threadgroup_barrier(mem_flags::mem_threadgroup);

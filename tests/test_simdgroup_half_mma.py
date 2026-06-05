@@ -163,3 +163,41 @@ def test_half_mma_kloop_256_precision(tmp_path):
     ref = a.astype(np.float32) @ b.astype(np.float32)
     # fp16 inputs, float accumulation: expect close but not exact.
     np.testing.assert_allclose(got, ref, rtol=2e-2, atol=2e-2)
+
+
+def _uint(dev, v):
+    import struct
+    b = dev.newBufferWithLength_options_(4, _shared())
+    b.contents().as_buffer(4)[:] = struct.pack("I", v)
+    return b
+
+
+@requires_metal
+def test_genuine_fp16_full_template_is_numerically_correct(tmp_path):
+    """The REAL make_simdgroup_matmul_kernel(fp16) — full 32x32 tile + K-loop +
+    boundary — must compute a correct matmul, not just the de-risk's 8x8. This
+    is what proves the genuine-fp16 fix is correct end-to-end, not only that it
+    compiles."""
+    from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel
+    M = N = 64
+    K = 128
+    dev, pso = _compile(make_simdgroup_matmul_kernel(dtype="fp16"),
+                        "simdgroup_matmul", tmp_path)
+    rng = np.random.default_rng(1)
+    a = (rng.standard_normal((M, K)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((K, N)) * 0.1).astype(np.float16)
+    A, B = _hbuf(dev, a), _hbuf(dev, b)
+    C = _fout(dev, M * N)
+    Mb, Nb, Kb = _uint(dev, M), _uint(dev, N), _uint(dev, K)
+    n_groups = ((M + 31) // 32) * ((N + 31) // 32)
+    q = dev.newCommandQueue(); cmd = q.commandBuffer()
+    enc = cmd.computeCommandEncoder(); enc.setComputePipelineState_(pso)
+    for i, bf in enumerate([A, B, C, Mb, Nb, Kb]):
+        enc.setBuffer_offset_atIndex_(bf, 0, i)
+    enc.dispatchThreadgroups_threadsPerThreadgroup_(
+        Metal.MTLSizeMake(n_groups, 1, 1), Metal.MTLSizeMake(128, 1, 1))
+    enc.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
+    got = np.frombuffer(C.contents().as_buffer(M * N * 4),
+                        dtype=np.float32).reshape(M, N)
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    np.testing.assert_allclose(got, ref, rtol=2e-2, atol=2e-2)
