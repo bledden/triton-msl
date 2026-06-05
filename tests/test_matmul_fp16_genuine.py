@@ -8,7 +8,11 @@ measured fp16==fp32==7.00 TFLOP/s). These tests assert on the GENERATED MSL so
 """
 import re
 
-from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel
+# Import via the public surface (msl_emitter), NOT _msl_templates directly:
+# importing _msl_templates before msl_emitter triggers a pre-existing
+# circular/star-import fragility that breaks `make_matmul_kernel` (tracked
+# follow-up). msl_emitter re-exports make_simdgroup_matmul_kernel.
+from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
 
 def test_fp16_matmul_uses_half_input_fragments():

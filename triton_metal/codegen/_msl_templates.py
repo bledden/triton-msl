@@ -3593,58 +3593,54 @@ kernel void simdgroup_matmul(
     uint sgitg [[simdgroup_index_in_threadgroup]],
     uint tiitg [[thread_index_in_threadgroup]]
 ) {{
+    // GENUINE fp16 + deeper K-tiling (WS1 Phase C). Half INPUT fragments,
+    // float ACCUMULATOR (half x half -> float MMA, de-risked in
+    // tests/test_simdgroup_half_mma.py). A 32-DEEP K-tile is staged per
+    // barrier and the inner loop issues 16 MMAs (4 K-substeps x 4 row-blocks)
+    // vs 4 in the old 8-deep template — amortizing the barrier so the kernel
+    // is MMA-bound rather than sync-bound (the ~7 TFLOP/s plateau). fp16 =
+    // INPUT precision; accumulator and C output stay float.
     uint n_tile_cols = (N + 31u) / 32u;
-    uint tile_row = pid / n_tile_cols;
-    uint tile_col = pid % n_tile_cols;
-    uint row_base = tile_row * 32u;
-    uint col_base = tile_col * 32u + sgitg * 8u;
+    uint row_base = (pid / n_tile_cols) * 32u;
+    uint col_base_tg = (pid % n_tile_cols) * 32u;
 
-    // GENUINE fp16: half INPUT fragments, float ACCUMULATOR (half x half ->
-    // float MMA, de-risked in tests/test_simdgroup_half_mma.py). Inputs are
-    // staged as half and fed to simdgroup_half8x8 fragments — no float upcast.
-    // fp16 here means INPUT precision; the accumulator and C output stay float.
+    threadgroup half tg_A[32 * 32];   // [row(32) x k(32)]
+    threadgroup half tg_B[32 * 32];   // [k(32)   x col(32)]
     simdgroup_float8x8 acc0(0), acc1(0), acc2(0), acc3(0);
     simdgroup_half8x8 a_frag, b_frag;
 
-    threadgroup half tg_A[32 * 8];
-    threadgroup half tg_B[8 * 32];
-
-    for (uint k = 0u; k < K; k += 8u) {{
-        for (uint i = tiitg; i < 256u; i += 128u) {{
-            uint r = i / 8u, c = i % 8u;
+    for (uint k = 0u; k < K; k += 32u) {{
+        for (uint i = tiitg; i < 1024u; i += 128u) {{
+            uint r = i / 32u, c = i % 32u;
             uint gr = row_base + r, gc = k + c;
             tg_A[i] = (gr < M && gc < K) ? A[gr * K + gc] : half(0.0h);
         }}
-        uint col_base_tg = tile_col * 32u;
-        for (uint i = tiitg; i < 256u; i += 128u) {{
+        for (uint i = tiitg; i < 1024u; i += 128u) {{
             uint r = i / 32u, c = i % 32u;
             uint gr = k + r, gc = col_base_tg + c;
             tg_B[i] = (gr < K && gc < N) ? B[gr * N + gc] : half(0.0h);
         }}
-
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        simdgroup_load(b_frag, tg_B + sgitg * 8u, 32);
-
-        simdgroup_load(a_frag, tg_A, 8);
-        simdgroup_multiply_accumulate(acc0, a_frag, b_frag, acc0);
-
-        simdgroup_load(a_frag, tg_A + 64u, 8);
-        simdgroup_multiply_accumulate(acc1, a_frag, b_frag, acc1);
-
-        simdgroup_load(a_frag, tg_A + 128u, 8);
-        simdgroup_multiply_accumulate(acc2, a_frag, b_frag, acc2);
-
-        simdgroup_load(a_frag, tg_A + 192u, 8);
-        simdgroup_multiply_accumulate(acc3, a_frag, b_frag, acc3);
-
+        for (uint kk = 0u; kk < 32u; kk += 8u) {{
+            simdgroup_load(b_frag, tg_B + kk * 32u + sgitg * 8u, 32);
+            simdgroup_load(a_frag, tg_A + 0u * 8u * 32u + kk, 32);
+            simdgroup_multiply_accumulate(acc0, a_frag, b_frag, acc0);
+            simdgroup_load(a_frag, tg_A + 1u * 8u * 32u + kk, 32);
+            simdgroup_multiply_accumulate(acc1, a_frag, b_frag, acc1);
+            simdgroup_load(a_frag, tg_A + 2u * 8u * 32u + kk, 32);
+            simdgroup_multiply_accumulate(acc2, a_frag, b_frag, acc2);
+            simdgroup_load(a_frag, tg_A + 3u * 8u * 32u + kk, 32);
+            simdgroup_multiply_accumulate(acc3, a_frag, b_frag, acc3);
+        }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }}
 
-    simdgroup_store(acc0, C + (row_base) * N + col_base, N);
-    simdgroup_store(acc1, C + (row_base + 8u) * N + col_base, N);
-    simdgroup_store(acc2, C + (row_base + 16u) * N + col_base, N);
-    simdgroup_store(acc3, C + (row_base + 24u) * N + col_base, N);
+    uint col = col_base_tg + sgitg * 8u;
+    simdgroup_store(acc0, C + (row_base) * N + col, N);
+    simdgroup_store(acc1, C + (row_base + 8u) * N + col, N);
+    simdgroup_store(acc2, C + (row_base + 16u) * N + col, N);
+    simdgroup_store(acc3, C + (row_base + 24u) * N + col, N);
 }}
 """
 
