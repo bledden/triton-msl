@@ -187,3 +187,40 @@ needle — the MMA units idle on the barrier-every-8-K. The fp16 benefit is
 real but **latent**: it materializes only once C.2 (deeper K-tiling) makes the
 kernel MMA-bound. C.1 delivered correctness + honesty (no more lie); C.2
 delivers the speed, and is where fp16 should finally pull ahead of fp32.
+
+## C.2 result (2026-06-05) — MLX parity reached; C++ rebuild NOT needed
+
+Measure-and-keep sweep on the 2048^3 fp16 matmul (M4 Max), each variant
+validated vs numpy first:
+
+| approach | TFLOP/s | note |
+|---|---|---|
+| staged, k_depth=8 (genuine fp16) | ~6.7 | sync-bound (the C.1 plateau) |
+| staged, k_depth=32 | 7.73 | barrier amortized 4->16 MMAs; **committed** |
+| staged, 64x64 tile | 7.12 | REGRESS — occupancy (8 acc + smem) |
+| staged, double-buffered | 7.45 | REGRESS — occupancy (2x smem) |
+| **direct device load (no staging/barriers)** | 8.62 | removing the barrier beats amortizing it |
+| direct + 2-col register blocking | 10.34 | a-fragment reuse |
+| **direct + 4x4 register blocking (16 acc)** | **13.76** | **MLX parity (MLX ~12.9 @ 2048 fp16)** |
+| direct + 8x4 (32 acc) | 11.09 | too many registers -> occupancy drop |
+
+Findings:
+- The staged-template levers (bigger tiles, double-buffering) REGRESS on
+  occupancy. The win is the opposite: **drop threadgroup staging entirely**
+  (`simdgroup_load` directly from device A/B, relying on the GPU cache for
+  reuse) and **maximize fragment reuse via register blocking** (each simdgroup
+  computes a 32x32 output block = 16 accumulators; each a-/b-fragment feeds 4
+  MMAs).
+- The 4x4 register-blocked direct-load kernel hits **13.76 TFLOP/s = MLX
+  parity**, ~2x the original ~7 plateau.
+- **C++ decision (spec success criterion #5): the MSL path reaches MLX
+  parity, so the C++ generic-MMA rebuild is NOT warranted for matmul
+  performance.** The remaining work is productionization, not a rewrite.
+
+Productionization constraint (next task): the direct-load kernel requires
+tile alignment (M % (8*RR), N % (32*RC), K % 8) — `simdgroup_load` from device
+does not mask, so edge tiles read OOB. Shipping needs boundary handling (a
+masked-staging fallback for partial tiles, or refuse-when-unaligned + keep the
+boundary-safe staged template for those), and the same treatment applied to
+the inline JIT dot paths so real @triton.jit matmuls get it — gated on the
+full 4326/0 sweep. Deferred to a focused pass rather than rushed.
