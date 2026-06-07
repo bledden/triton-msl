@@ -49,7 +49,7 @@ from triton_metal.profiling import roofline, disasm
 from triton_metal.codegen.msl_emitter import (
     make_vector_add_kernel, make_silu_kernel, make_reduce_kernel,
     make_softmax_kernel, make_layer_norm_kernel, make_matmul_kernel,
-    make_simdgroup_matmul_kernel,
+    make_simdgroup_matmul_kernel, make_simdgroup_matmul_kernel_fast,
 )
 
 _SHARED = Metal.MTLResourceStorageModeShared
@@ -240,47 +240,47 @@ SUITE: List[KernelSpec] = [
             bytes=(M * K + K * N + M * N) * 4, flops=2 * M * N * K,
             mlx=_mlx_matmul(M, N, K, "fp32")))()),
     KernelSpec("matmul_512_fp32_simd",
-        lambda: make_simdgroup_matmul_kernel(),
+        lambda: make_simdgroup_matmul_kernel_fast(dtype="fp32"),
         lambda d: (lambda M=512, N=512, K=512: dict(
             buffers=[_fbuf(d, M * K, "small"), _fbuf(d, K * N, "small"),
                      _empty(d, M * N), _ubuf(d, M), _ubuf(d, N), _ubuf(d, K)],
-            n_groups=((M + 31) // 32) * ((N + 31) // 32), threads_per_tg=128,
+            n_groups=((M + 31) // 32) * ((N + 127) // 128), threads_per_tg=128,
             bytes=(M * K + K * N + M * N) * 4, flops=2 * M * N * K,
             mlx=_mlx_matmul(M, N, K, "fp32")))()),
     KernelSpec("matmul_1024_fp16_simd",
-        lambda: make_simdgroup_matmul_kernel(dtype="fp16"),
+        lambda: make_simdgroup_matmul_kernel_fast(dtype="fp16"),
         lambda d: (lambda M=1024, N=1024, K=1024: dict(
-            buffers=[_hbuf(d, M * K), _hbuf(d, K * N), _empty(d, M * N, 2),
+            buffers=[_hbuf(d, M * K), _hbuf(d, K * N), _empty(d, M * N, 4),
                      _ubuf(d, M), _ubuf(d, N), _ubuf(d, K)],
-            n_groups=((M + 31) // 32) * ((N + 31) // 32), threads_per_tg=128,
-            bytes=(M * K + K * N + M * N) * 2, flops=2 * M * N * K,
+            n_groups=((M + 31) // 32) * ((N + 127) // 128), threads_per_tg=128,
+            bytes=(M * K + K * N) * 2 + M * N * 4, flops=2 * M * N * K,
             mlx=_mlx_matmul(M, N, K, "fp16")))(), dtype="fp16"),
     # Large sizes: long enough to run ~ms, so timing is stable and the true
     # compute-bound regime (where MLX's tuned kernels show their edge) is
     # visible. These are the decisive matmul-gap measurements.
     KernelSpec("matmul_2048_fp32_simd",
-        lambda: make_simdgroup_matmul_kernel(),
+        lambda: make_simdgroup_matmul_kernel_fast(dtype="fp32"),
         lambda d: (lambda M=2048, N=2048, K=2048: dict(
             buffers=[_fbuf(d, M * K, "small"), _fbuf(d, K * N, "small"),
                      _empty(d, M * N), _ubuf(d, M), _ubuf(d, N), _ubuf(d, K)],
-            n_groups=((M + 31) // 32) * ((N + 31) // 32), threads_per_tg=128,
+            n_groups=((M + 31) // 32) * ((N + 127) // 128), threads_per_tg=128,
             bytes=(M * K + K * N + M * N) * 4, flops=2 * M * N * K,
             mlx=_mlx_matmul(M, N, K, "fp32")))()),
     KernelSpec("matmul_2048_fp16_simd",
-        lambda: make_simdgroup_matmul_kernel(dtype="fp16"),
+        lambda: make_simdgroup_matmul_kernel_fast(dtype="fp16"),
         lambda d: (lambda M=2048, N=2048, K=2048: dict(
-            buffers=[_hbuf(d, M * K), _hbuf(d, K * N), _empty(d, M * N, 2),
+            buffers=[_hbuf(d, M * K), _hbuf(d, K * N), _empty(d, M * N, 4),
                      _ubuf(d, M), _ubuf(d, N), _ubuf(d, K)],
-            n_groups=((M + 31) // 32) * ((N + 31) // 32), threads_per_tg=128,
-            bytes=(M * K + K * N + M * N) * 2, flops=2 * M * N * K,
+            n_groups=((M + 31) // 32) * ((N + 127) // 128), threads_per_tg=128,
+            bytes=(M * K + K * N) * 2 + M * N * 4, flops=2 * M * N * K,
             mlx=_mlx_matmul(M, N, K, "fp16")))(), dtype="fp16"),
     KernelSpec("matmul_4096_fp16_simd",
-        lambda: make_simdgroup_matmul_kernel(dtype="fp16"),
+        lambda: make_simdgroup_matmul_kernel_fast(dtype="fp16"),
         lambda d: (lambda M=4096, N=4096, K=4096: dict(
-            buffers=[_hbuf(d, M * K), _hbuf(d, K * N), _empty(d, M * N, 2),
+            buffers=[_hbuf(d, M * K), _hbuf(d, K * N), _empty(d, M * N, 4),
                      _ubuf(d, M), _ubuf(d, N), _ubuf(d, K)],
-            n_groups=((M + 31) // 32) * ((N + 31) // 32), threads_per_tg=128,
-            bytes=(M * K + K * N + M * N) * 2, flops=2 * M * N * K,
+            n_groups=((M + 31) // 32) * ((N + 127) // 128), threads_per_tg=128,
+            bytes=(M * K + K * N) * 2 + M * N * 4, flops=2 * M * N * K,
             mlx=_mlx_matmul(M, N, K, "fp16")))(), dtype="fp16"),
 ]
 

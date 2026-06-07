@@ -3543,6 +3543,87 @@ kernel void repeat_kv(
 """
 
 
+def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4):
+    """Fast matmul: direct-device simdgroup_load + register blocking (WS1 C.2).
+
+    Reaches MLX parity (~13.8 TFLOP/s fp16 @ 2048, vs ~7.7 for the staged
+    template) by (a) loading simdgroup fragments DIRECTLY from device A/B (no
+    threadgroup staging, no barriers — the GPU cache provides reuse) and
+    (b) register blocking: each simdgroup computes an (8*rr) x (8*rc) output
+    block (rr*rc accumulators), so each loaded a-/b-fragment feeds rc / rr MMAs.
+
+    Genuine fp16: half INPUT fragments (simdgroup_half8x8) with a float
+    ACCUMULATOR; fp16 = input precision, C output is float.
+
+    DISPATCH CONTRACT (the caller MUST honour this — different from the staged
+    template's grid):
+        threads/threadgroup = 128 (4 simdgroups)
+        n_groups            = ceil(M / (8*rr)) * ceil(N / (32*rc))
+
+    SIZE CONTRACT (required for correctness — direct simdgroup_load does not
+    mask, so the caller must guarantee or refuse otherwise):
+        M % (8*rr) == 0        (row tile; grid guarantees in-bounds rows)
+        N % 32 == 0            (col strips align to 32; partial column tiles
+                                beyond N are guarded off per-simdgroup, so any
+                                multiple of 32 — incl. non-multiples of 32*rc —
+                                is fine, but NOT arbitrary N)
+        K % 8 == 0             (the K loop reads 8-deep fragments)
+    With rr=rc=4: row tile 32, col tile 128, 16 accumulators/simdgroup.
+    """
+    if dtype in ("fp16", "f16"):
+        in_t, in_frag, pad = "half", "simdgroup_half8x8", "half(0.0h)"
+    elif dtype in ("fp32", "f32"):
+        in_t, in_frag, pad = "float", "simdgroup_float8x8", "0.0f"
+    else:
+        raise ValueError(f"fast matmul supports fp16/fp32, got {dtype}")
+
+    accs = "\n    ".join(
+        "simdgroup_float8x8 " + ", ".join(f"c{r}_{c}(0)" for c in range(rc))
+        + ";" for r in range(rr))
+    bdecl = ", ".join(f"b{c}" for c in range(rc))
+    loads_b = "\n        ".join(
+        f"simdgroup_load(b{c}, B + k * N + col0 + {c * 8}u, N);"
+        for c in range(rc))
+    inner = []
+    for r in range(rr):
+        inner.append(f"simdgroup_load(a_frag, A + (row_base + {r * 8}u) * K + k, K);")
+        for c in range(rc):
+            inner.append(
+                f"simdgroup_multiply_accumulate(c{r}_{c}, a_frag, b{c}, c{r}_{c});")
+    inner = "\n        ".join(inner)
+    stores = "\n    ".join(
+        f"simdgroup_store(c{r}_{c}, C + (row_base + {r * 8}u) * N + col0 + {c * 8}u, N);"
+        for r in range(rr) for c in range(rc))
+
+    return f"""#include <metal_stdlib>
+#include <metal_simdgroup_matrix>
+using namespace metal;
+
+kernel void simdgroup_matmul_fast(
+    device const {in_t}* A [[buffer(0)]],
+    device const {in_t}* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant uint& M [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    constant uint& K [[buffer(5)]],
+    uint pid [[threadgroup_position_in_grid]],
+    uint sgitg [[simdgroup_index_in_threadgroup]]
+) {{
+    uint ntc = (N + {32 * rc - 1}u) / {32 * rc}u;
+    uint row_base = (pid / ntc) * {8 * rr}u;
+    uint col0 = (pid % ntc) * {32 * rc}u + sgitg * {8 * rc}u;
+    if (col0 >= N) return;   // partial column tile: this simdgroup is OOB (uniform)
+    {accs}
+    {in_frag} a_frag, {bdecl};
+    for (uint k = 0u; k < K; k += 8u) {{
+        {loads_b}
+        {inner}
+    }}
+    {stores}
+}}
+"""
+
+
 def make_simdgroup_matmul_kernel(dtype="fp32"):
     """Generate a matmul kernel using Apple's simdgroup_matrix hardware.
 
