@@ -18,13 +18,14 @@ Each function is independent. Cross-template dependencies (when one
 template uses another) go through this same module.
 """
 
-from triton_metal.codegen.msl_emitter import (
-    KernelBuilder,
-    _msl_compute_type,
-    _msl_zero,
-    _sanitize_msl_name,
-)
 from triton_metal.codegen.msl_types import triton_type_to_msl
+# NOTE: KernelBuilder, _msl_compute_type, _msl_zero, _sanitize_msl_name are
+# imported from msl_emitter at the BOTTOM of this module, not here. msl_emitter
+# re-exports this module via `from _msl_templates import *`, so importing it at
+# the top creates a circular import: when _msl_templates is imported first, the
+# star-import runs while this module is only partially initialized and silently
+# drops make_matmul_kernel et al. Deferring our import to the end (after all
+# defs, none of which run at import time) lets both orders resolve. See #152.
 
 
 
@@ -4900,3 +4901,15 @@ kernel void compare_{op}_kernel(
     kb = KernelBuilder(f"compare_{op}_kernel", block_size=block_size)
     kb.set_prebuilt_msl(msl)
     return kb.build()
+
+
+# Deferred import (see the note near the top): placed AFTER all defs so the
+# circular re-export with msl_emitter resolves regardless of import order (#152).
+# These names are only referenced inside the functions above, never at module
+# load time, so binding them here (before any function is called) is sufficient.
+from triton_metal.codegen.msl_emitter import (  # noqa: E402
+    KernelBuilder,
+    _msl_compute_type,
+    _msl_zero,
+    _sanitize_msl_name,
+)

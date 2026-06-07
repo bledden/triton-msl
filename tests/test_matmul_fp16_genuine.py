@@ -99,3 +99,20 @@ def test_inline_jit_fp32_matmul_stays_float():
         pytest.skip("triton not importable")
     msl = _emit_jit_matmul_msl("*fp32")
     assert "simdgroup_half8x8" not in msl  # fp32 stays on the float path
+
+
+def test_import_order_msl_templates_first_reexports_matmul(tmp_path):
+    """#152: importing _msl_templates BEFORE msl_emitter must not break
+    msl_emitter's re-export of make_matmul_kernel (circular-import regression).
+    Run in a subprocess so the import order is actually fresh."""
+    import subprocess
+    import sys
+    code = (
+        "import triton_metal.codegen._msl_templates\n"
+        "import triton_metal.codegen.msl_emitter as e\n"
+        "assert hasattr(e, 'make_matmul_kernel'), 'make_matmul_kernel missing'\n"
+        "assert 'kernel' in e.make_matmul_kernel().lower()\n"
+        "print('OK')\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0 and "OK" in r.stdout, r.stderr
