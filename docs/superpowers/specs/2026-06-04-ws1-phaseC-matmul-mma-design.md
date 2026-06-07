@@ -288,3 +288,28 @@ shipped to the harness/standalone path; the inline path is now correct for all
 representable geometries and genuine-fp16, but does not yet use direct loads
 (it keeps the boundary-safe staged structure). Direct-load for inline remains
 #153.
+
+## C.2 inline-path: direct-load perf + full correctness (2026-06-07, cont.)
+
+Direct-load fast path added to `_lower_k_loop_dot_inline`: a FULL float-output
+tile with K%8==0 loads simdgroup fragments straight from device A/B (no staging,
+no barriers), like the standalone kernel. Real @triton.jit fp16 matmul (2048^3,
+wall-clock vs MLX 12.7): best config 4.70 -> 8.10 TFLOP/s (0.37x -> 0.64x MLX).
+Not full parity — the staged tg_A/tg_B are allocated even on the direct path,
+capping occupancy; closing that needs a two-kernel split (host picks direct vs
+staged by runtime alignment). That is the remaining #153 perf item.
+
+The excavation found FOUR reachable correctness bugs in this one path, all
+latent because the corpus used only aligned, BLOCK_N=32, fp32-output K-loop
+matmuls:
+  1. BLOCK_N>32 computed only 32 columns (6012445).
+  2. fp16-output raced on a shared tg_out slot (2cb58bd).
+  3. partial-N float store wrote unmasked -> overflow columns wrapped into the
+     next row's in-bounds data (fe8e5a6).
+  4. BLOCK_N<32 (e.g. 16) over-wrote a <32-wide tile; was a false-pass
+     (cf472f0).
+The path now: column-register-blocks any BLOCK_N%8 (idle simdgroups for small
+tiles, guarded only when not /4); direct-loads aligned float tiles; masked
+per-simdgroup store for partial/edge/half; refuses BLOCK_M/K%8, BLOCK_N%8, and
+>32KiB threadgroup configs. Genuine fp16 throughout. Each step gated on a
+FRESH-cache (~/.cache/triton_metal) full test_core sweep at 4326/0.
