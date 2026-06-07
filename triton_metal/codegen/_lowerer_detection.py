@@ -215,6 +215,46 @@ class _DetectionMixin:
         if not dot_ssa or len(dot_ssa.operand_ids) < 3:
             return None
 
+        # Detect a post-dot EPILOGUE on the dot result. _lower_simple_dot_inline
+        # emits a bare matmul + store; if the dot result feeds any value-changing
+        # op before the store (bias add, activation, scale, ...), that op was
+        # SILENTLY DROPPED -> the kernel returned A@B (confirmed: matmul*3+1 and
+        # matmul->relu both came back as bare A@B). The softmax epilogue is the
+        # one fused form we support, and `lower()` checks _detect_matmul_softmax
+        # BEFORE this, so any epilogue still present here is an UNSUPPORTED one;
+        # no path computes a matmul-sized dot + arbitrary epilogue correctly
+        # (the per-thread generic lowerer is wrong at 16/32/64). Refuse loudly
+        # rather than emit wrong numbers. Only layout changes / output dtype
+        # casts are value-preserving passthroughs.
+        _passthrough = {
+            "ttg.convert_layout", "tt.reshape", "tt.trans",
+            "arith.truncf", "arith.extf", "arith.bitcast",
+            "arith.sitofp", "arith.uitofp", "arith.fptosi", "arith.fptoui",
+            "tt.fp_to_fp",
+        }
+        _seen = set()
+        _frontier = [dot_ssa.id]
+        while _frontier:
+            _vid = _frontier.pop()
+            if _vid in _seen:
+                continue
+            _seen.add(_vid)
+            for _op in self.graph.ops:
+                if _vid not in (_op.operand_ids or []):
+                    continue
+                if _op.op == "tt.store":
+                    continue                      # terminal — fine
+                if _op.op in _passthrough:
+                    _frontier.append(_op.id)      # follow representation change
+                else:
+                    from triton_metal.errors import MetalNonRecoverableError
+                    raise MetalNonRecoverableError(
+                        f"matmul with a fused '{_op.op}' epilogue on the dot "
+                        "result is not supported (only softmax is fused). The "
+                        "simple-dot path would silently drop it. Split the "
+                        "epilogue into a separate kernel, or apply it after a "
+                        "K-loop matmul store.")
+
         # Verify the dot operands come from loads (not constants)
         # Trace: dot ← local_load ← local_alloc ← tt.load
         has_loads = False

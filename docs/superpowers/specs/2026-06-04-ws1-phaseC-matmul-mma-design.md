@@ -339,3 +339,27 @@ only the store" check.
 Genuine fp16 is now true on ALL FOUR matmul paths (standalone template, simple
 dot inline, K-loop inline, matmul→softmax). Five reachable silent-wrongs found
 and fixed across the inline matmul lowering this session.
+
+## C.2 sixth silent-wrong: simple_dot dropped ALL epilogues (2026-06-07, #157)
+
+The #154 softmax-routing fix exposed the general case: `_detect_simple_dot`
+matches any load->dot->store and emits a bare matmul, dropping ANY value-changing
+epilogue on the dot result — not just softmax. Confirmed: matmul*3+1 and
+matmul->relu both returned bare A@B. (matmul+softmax was the special case already
+routed to matmul_softmax.)
+
+No path computes a matmul-sized dot + arbitrary elementwise epilogue correctly:
+simple_dot drops it; the per-thread generic lowerer is wrong at 16/32/64 (a dot
+that large exceeds the cooperative cap — the original reason matmul_softmax was
+written). Fix: _detect_simple_dot now traces the dot result's consumers; only
+layout changes / output dtype casts are value-preserving passthroughs to the
+store, and any other consumer (arith/math/reduce/broadcast) raises
+MetalNonRecoverableError — a loud refusal instead of silent wrong numbers.
+matmul_softmax is checked first, so the supported fused-softmax form is
+unaffected. Users hit the refusal with a clear message (split the epilogue into
+a separate kernel). General fused epilogues remain a possible future feature,
+not an integrity gap.
+
+Six reachable silent-wrong/false-pass bugs found and fixed across the inline
+matmul lowering this session (BLOCK_N>32, fp16-output race, partial-N store
+wrap, BLOCK_N<32 false-pass, softmax-drop routing, epilogue-drop).

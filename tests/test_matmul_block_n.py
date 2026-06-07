@@ -161,3 +161,32 @@ def test_matmul_softmax_not_dropped(dt):
     np.testing.assert_allclose(got, ref, atol=2e-2, rtol=2e-2)
     # softmax rows sum to 1 (the dropped-softmax bug gave bare-matmul rows)
     np.testing.assert_allclose(got.sum(1), np.ones(M), atol=2e-2)
+
+
+if HAS:
+    @triton.jit
+    def _mm_scale(A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+        om = tl.arange(0, M)
+        on = tl.arange(0, N)
+        ok = tl.arange(0, K)
+        a = tl.load(A + om[:, None] * K + ok[None, :])
+        b = tl.load(B + ok[:, None] * N + on[None, :])
+        acc = tl.dot(a, b)
+        acc = acc * 3.0 + 1.0          # non-softmax elementwise epilogue
+        tl.store(C + om[:, None] * N + on[None, :], acc)
+
+
+@requires_metal
+def test_matmul_nonsoftmax_epilogue_refuses_not_dropped():
+    # A matmul + value-changing epilogue (scale/bias/activation) once routed to
+    # _detect_simple_dot, which emitted a BARE matmul and silently dropped the
+    # epilogue (returned A@B). No path computes a matmul-sized dot + arbitrary
+    # epilogue correctly, so it must REFUSE loudly, never silent-wrong.
+    from triton_metal.errors import MetalNonRecoverableError
+    a = (torch.randn(32, 32) * 0.3)
+    b = (torch.randn(32, 32) * 0.3)
+    c = torch.zeros(32, 32)
+    with pytest.raises((MetalNonRecoverableError, Exception)) as ei:
+        _mm_scale[(1,)](a, b, c, M=32, N=32, K=32)
+    # ensure it's the intended refusal, not an unrelated crash
+    assert "epilogue" in str(ei.value).lower() or "MetalNonRecoverable" in type(ei.value).__name__
