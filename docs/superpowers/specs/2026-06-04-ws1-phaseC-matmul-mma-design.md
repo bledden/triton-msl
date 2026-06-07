@@ -224,3 +224,29 @@ masked-staging fallback for partial tiles, or refuse-when-unaligned + keep the
 boundary-safe staged template for those), and the same treatment applied to
 the inline JIT dot paths so real @triton.jit matmuls get it — gated on the
 full 4326/0 sweep. Deferred to a focused pass rather than rushed.
+
+## C.2 productionized (2026-06-07) — MLX-parity matmul shipped (harness path)
+
+`make_simdgroup_matmul_kernel_fast` (direct-load + 4x4 register blocking)
+is in the harness, boundary-correct, MLX parity/better:
+
+| matmul | TFLOP/s | % of roof | vs MLX |
+|---|---|---|---|
+| 2048 fp16 | 13.75 | 48% | 0.90x (beats MLX) |
+| 4096 fp16 | 14.28 | 50% | 1.02x (parity) |
+| 2048 fp32 | 12.75 | **89%** | 0.90x (beats MLX) |
+
+- Dispatch contract: 128 threads, n_groups = ceil(M/(8*rr)) * ceil(N/(32*rc)).
+- Size contract: M%(8*rr)==0, N%32==0 (partial col tiles guarded per-simdgroup),
+  K%8==0. 18 correctness tests vs numpy across boundary cases (32x32 w/ 3
+  simdgroups guarded; N=96/160 %32-not-%128; rectangular; fp16+fp32).
+- Fixed a pre-existing harness bug (fp16 C is FLOAT output; specs under-allocated
+  it as half).
+
+Remaining (the inline JIT paths): real @triton.jit `tl.dot` matmuls use
+`_lower_simple_dot_inline`/`_lower_k_loop_dot_inline`, whose dispatch grid is
+tied to the Triton program model (not a free choice), plus transpose/batch
+support and the constexpr-dim refusal. Applying the fast kernel there needs a
+careful dispatch-grid mapping + the full 4326/0 sweep — a focused follow-on,
+not rushed at session end. The harness path proves the technique and locks in
+the perf; the inline integration ships it to user kernels.
