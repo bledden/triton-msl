@@ -370,11 +370,18 @@ class _TemplateMixin:
                 "rather than computing wrong columns.")
         col_tiles = BLOCK_N // 32           # 8-wide col blocks per simdgroup
         cols_per_sg = BLOCK_N // 4          # = col_tiles * 8
-        if output_msl_type != "float" and col_tiles > 1:
-            raise MetalNonRecoverableError(
-                "K-loop matmul with non-float output and BLOCK_N>32 is not yet "
-                "supported (the half-output store path is single-col-block "
-                "only). Refusing rather than emitting wrong numbers.")
+        # Non-float output converts via a full BLOCK_M x BLOCK_N float tile in
+        # threadgroup memory; refuse if that plus the A/B staging exceeds
+        # Metal's 32 KiB threadgroup limit (rather than emit a kernel that
+        # silently overflows).
+        if output_msl_type != "float":
+            tg_elt = 2 if tg_type == "half" else 4
+            tg_bytes = (tg_a_size + tg_b_size) * tg_elt + BLOCK_M * BLOCK_N * 4
+            if tg_bytes > 32 * 1024:
+                raise MetalNonRecoverableError(
+                    f"K-loop matmul with non-float output needs {tg_bytes} B of "
+                    "threadgroup memory (> 32 KiB) to stage the output tile; "
+                    "refusing.")
 
         # Accumulators: one simdgroup_float8x8 per (8-row tile, 8-col block).
         acc_names = [[f"acc_{r}_{c}" for c in range(col_tiles)]
@@ -429,15 +436,21 @@ class _TemplateMixin:
                 for c in range(col_tiles):
                     lines.append(f"    simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
         else:
-            # Half output — col_tiles == 1 here (BLOCK_N>32 half is refused
-            # above). Store through threadgroup memory and convert.
-            lines.append(f"    threadgroup float tg_out[{BLOCK_M} * 8];")
+            # Non-float output: stage the FULL BLOCK_M x BLOCK_N tile to
+            # threadgroup memory, each (row tile, col block) accumulator to its
+            # OWN slot (row t*8, col sgitg*cols_per_sg + c*8), then all 128
+            # threads convert + masked-store to C. The old code wrote every
+            # simdgroup's accumulator to the same tg_out offset (no sgitg term)
+            # — a race that silently corrupted fp16-output matmuls. Each
+            # simdgroup now owns a distinct column strip, so there's no overlap.
+            lines.append(f"    threadgroup float tg_out[{BLOCK_M} * {BLOCK_N}];")
             for t in range(n_row_tiles):
-                lines.append(f"    simdgroup_store({acc_names[t][0]}, tg_out + {t * 64}u, 8);")
+                for c in range(col_tiles):
+                    lines.append(f"    simdgroup_store({acc_names[t][c]}, tg_out + ({t * 8}u) * {BLOCK_N}u + sgitg * {cols_per_sg}u + {c * 8}u, {BLOCK_N});")
             lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-            lines.append(f"    for (uint i = tiitg; i < {BLOCK_M * 8}u; i += 128u) {{")
-            lines.append(f"        uint r = i / 8u, c = i % 8u;")
-            lines.append(f"        uint gr = row_base + r, gc = col_base + sgitg * 8u + c;")
+            lines.append(f"    for (uint i = tiitg; i < {BLOCK_M * BLOCK_N}u; i += 128u) {{")
+            lines.append(f"        uint r = i / {BLOCK_N}u, c = i % {BLOCK_N}u;")
+            lines.append(f"        uint gr = row_base + r, gc = col_base + c;")
             lines.append(f"        if (gr < _M && gc < _N) {{")
             lines.append(f"            {c_name}[gr * _N + gc] = {output_msl_type}(tg_out[i]);")
             lines.append(f"        }}")
