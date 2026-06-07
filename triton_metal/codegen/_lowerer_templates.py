@@ -356,10 +356,34 @@ class _TemplateMixin:
         lines.append(f"    threadgroup {tg_type} tg_B[{tg_b_size}];")
         lines.append(f"")
 
-        # Declare accumulators — one per 8-row tile
-        acc_names = [f"acc{i}" for i in range(n_row_tiles)]
-        lines.append(f"    {acc_frag} {', '.join(n + '(0)' for n in acc_names)};")
-        lines.append(f"    {in_frag} a_frag, b_frag;")
+        # Column register-blocking: each of the 4 simdgroups owns BLOCK_N/4
+        # output columns = col_tiles 8-wide blocks. The old code emitted only
+        # sgitg*8 = 32 columns regardless of BLOCK_N, silently dropping columns
+        # 32+ for BLOCK_N>32 (the *standard* matmul tiling, BLOCK_N=64/128) —
+        # a reachable silent-wrong. (WS1 integrity fix; also adds a-fragment
+        # reuse across col blocks, which helps throughput.)
+        from triton_metal.errors import MetalNonRecoverableError
+        if BLOCK_N % 32 != 0:
+            raise MetalNonRecoverableError(
+                f"K-loop matmul BLOCK_N={BLOCK_N} is not a multiple of 32; the "
+                "4-simdgroup column tiling can't cover it cleanly. Refusing "
+                "rather than computing wrong columns.")
+        col_tiles = BLOCK_N // 32           # 8-wide col blocks per simdgroup
+        cols_per_sg = BLOCK_N // 4          # = col_tiles * 8
+        if output_msl_type != "float" and col_tiles > 1:
+            raise MetalNonRecoverableError(
+                "K-loop matmul with non-float output and BLOCK_N>32 is not yet "
+                "supported (the half-output store path is single-col-block "
+                "only). Refusing rather than emitting wrong numbers.")
+
+        # Accumulators: one simdgroup_float8x8 per (8-row tile, 8-col block).
+        acc_names = [[f"acc_{r}_{c}" for c in range(col_tiles)]
+                     for r in range(n_row_tiles)]
+        all_accs = [acc_names[r][c] for r in range(n_row_tiles)
+                    for c in range(col_tiles)]
+        lines.append(f"    {acc_frag} {', '.join(n + '(0)' for n in all_accs)};")
+        b_names = [f"b_frag{c}" for c in range(col_tiles)]
+        lines.append(f"    {in_frag} a_frag, {', '.join(b_names)};")
         lines.append(f"")
 
         # K-loop: iterate over K in steps of BLOCK_K
@@ -387,27 +411,29 @@ class _TemplateMixin:
         # Inner MMA: iterate BLOCK_K in steps of 8
         lines.append(f"        // MMA across BLOCK_K in steps of 8")
         lines.append(f"        for (uint kk = 0u; kk < {BLOCK_K}u; kk += 8u) {{")
-        lines.append(f"            simdgroup_load(b_frag, tg_B + kk * {BLOCK_N}u + sgitg * 8u, {BLOCK_N});")
+        for c in range(col_tiles):
+            lines.append(f"            simdgroup_load(b_frag{c}, tg_B + kk * {BLOCK_N}u + sgitg * {cols_per_sg}u + {c * 8}u, {BLOCK_N});")
         for t in range(n_row_tiles):
             lines.append(f"            simdgroup_load(a_frag, tg_A + {t}u * 8u * {BLOCK_K}u + kk, {BLOCK_K});")
-            lines.append(f"            simdgroup_multiply_accumulate({acc_names[t]}, a_frag, b_frag, {acc_names[t]});")
+            for c in range(col_tiles):
+                lines.append(f"            simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
         lines.append(f"        }}")
         lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append(f"    }} // K-loop")
         lines.append(f"")
 
-        # Store results to global memory
+        # Store results to global memory — all (row tile, col block) pairs.
         lines.append(f"    // Store {BLOCK_M}x{BLOCK_N} result tile")
-        col_expr = "col_base + sgitg * 8u"
         if output_msl_type == "float":
             for t in range(n_row_tiles):
-                row_off = t * 8
-                lines.append(f"    simdgroup_store({acc_names[t]}, {c_name} + (row_base + {row_off}u) * _N + {col_expr}, _N);")
+                for c in range(col_tiles):
+                    lines.append(f"    simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
         else:
-            # For half output, store through threadgroup memory and convert
+            # Half output — col_tiles == 1 here (BLOCK_N>32 half is refused
+            # above). Store through threadgroup memory and convert.
             lines.append(f"    threadgroup float tg_out[{BLOCK_M} * 8];")
             for t in range(n_row_tiles):
-                lines.append(f"    simdgroup_store({acc_names[t]}, tg_out + {t * 64}u, 8);")
+                lines.append(f"    simdgroup_store({acc_names[t][0]}, tg_out + {t * 64}u, 8);")
             lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
             lines.append(f"    for (uint i = tiitg; i < {BLOCK_M * 8}u; i += 128u) {{")
             lines.append(f"        uint r = i / 8u, c = i % 8u;")
