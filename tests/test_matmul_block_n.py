@@ -73,6 +73,41 @@ if HAS:
         tl.store(C + om[:, None] * N + on[None, :], acc.to(tl.float16))
 
 
+if HAS:
+    @triton.jit
+    def _mm_masked(A, B, C, M, N, K, BM: tl.constexpr, BN: tl.constexpr,
+                   BK: tl.constexpr):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        om = pid_m * BM + tl.arange(0, BM)
+        on = pid_n * BN + tl.arange(0, BN)
+        ok = tl.arange(0, BK)
+        acc = tl.zeros((BM, BN), tl.float32)
+        for k in range(0, K, BK):
+            a = tl.load(A + om[:, None] * K + (k + ok)[None, :],
+                        mask=(om[:, None] < M) & ((k + ok)[None, :] < K), other=0.)
+            b = tl.load(B + (k + ok)[:, None] * N + on[None, :],
+                        mask=((k + ok)[:, None] < K) & (on[None, :] < N), other=0.)
+            acc += tl.dot(a, b)
+        tl.store(C + om[:, None] * N + on[None, :], acc,
+                 mask=(om[:, None] < M) & (on[None, :] < N))
+
+
+@requires_metal
+@pytest.mark.parametrize("M,N", [(48, 96), (40, 72), (33, 100)])
+def test_kloop_matmul_partial_tiles_correct(M, N):
+    # M/N NOT multiples of BLOCK -> partial edge tiles -> the staged masked
+    # store path. The old unmasked float store wrapped overflow columns into
+    # the next row's in-bounds data (maxdiff ~0.27) and wrote past the buffer.
+    K, BM, BN, BK = 64, 32, 64, 32
+    a = torch.randn(M, K, dtype=torch.float32) * 0.1
+    b = torch.randn(K, N, dtype=torch.float32) * 0.1
+    c = torch.zeros(M, N, dtype=torch.float32)
+    grid = ((M + BM - 1) // BM, (N + BN - 1) // BN)
+    _mm_masked[grid](a, b, c, M, N, K, BM=BM, BN=BN, BK=BK)
+    np.testing.assert_allclose(c.numpy(), (a @ b).numpy(), atol=1e-2, rtol=1e-2)
+
+
 @requires_metal
 @pytest.mark.parametrize("BN", [32, 64])
 def test_kloop_matmul_fp16_output_correct(BN):

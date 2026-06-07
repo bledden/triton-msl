@@ -383,18 +383,15 @@ class _TemplateMixin:
                 "rather than computing wrong columns.")
         col_tiles = BLOCK_N // 32           # 8-wide col blocks per simdgroup
         cols_per_sg = BLOCK_N // 4          # = col_tiles * 8
-        # Non-float output converts via a full BLOCK_M x BLOCK_N float tile in
-        # threadgroup memory; refuse if that plus the A/B staging exceeds
-        # Metal's 32 KiB threadgroup limit (rather than emit a kernel that
-        # silently overflows).
-        if output_msl_type != "float":
-            tg_elt = 2 if tg_type == "half" else 4
-            tg_bytes = (tg_a_size + tg_b_size) * tg_elt + BLOCK_M * BLOCK_N * 4
-            if tg_bytes > 32 * 1024:
-                raise MetalNonRecoverableError(
-                    f"K-loop matmul with non-float output needs {tg_bytes} B of "
-                    "threadgroup memory (> 32 KiB) to stage the output tile; "
-                    "refusing.")
+        # Threadgroup budget: the staged path needs tg_A + tg_B (plus a small
+        # 1 KiB store scratch). Refuse if it exceeds Metal's 32 KiB threadgroup
+        # limit rather than emit a kernel that silently overflows.
+        tg_elt = 2 if tg_type == "half" else 4
+        tg_bytes = (tg_a_size + tg_b_size) * tg_elt + 4 * 64 * 4
+        if tg_bytes > 32 * 1024:
+            raise MetalNonRecoverableError(
+                f"K-loop matmul needs {tg_bytes} B of threadgroup memory "
+                "(> 32 KiB limit) for the staged path; refusing.")
 
         # Accumulators: one simdgroup_float8x8 per (8-row tile, 8-col block).
         acc_names = [[f"acc_{r}_{c}" for c in range(col_tiles)]
@@ -406,6 +403,32 @@ class _TemplateMixin:
         lines.append(f"    {in_frag} a_frag, {', '.join(b_names)};")
         lines.append(f"")
 
+        # Fast path (WS1 C.2): a FULL float-output tile with K % 8 == 0 loads
+        # simdgroup fragments DIRECTLY from device A/B — no threadgroup staging,
+        # no barriers (the GPU cache supplies reuse). This is the lever that
+        # takes the standalone kernel to MLX parity; combined with the column
+        # register-blocking above it brings the same to real @triton.jit
+        # matmuls. Partial/edge tiles (and half output) fall through to the
+        # boundary-safe staged path below — direct simdgroup_load can't mask.
+        if output_msl_type == "float":
+            lines.append(f"    if (row_base + {BLOCK_M}u <= _M && col_base + {BLOCK_N}u <= _N && (_K % 8u) == 0u) {{")
+            lines.append(f"        for (uint k = 0u; k < _K; k += 8u) {{")
+            for c in range(col_tiles):
+                lines.append(f"            simdgroup_load(b_frag{c}, {b_name} + k * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+            for t in range(n_row_tiles):
+                lines.append(f"            simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * _K + k, _K);")
+                for c in range(col_tiles):
+                    lines.append(f"            simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
+            lines.append(f"        }}")
+            for t in range(n_row_tiles):
+                for c in range(col_tiles):
+                    lines.append(f"        simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+            lines.append(f"        return;")
+            lines.append(f"    }}")
+            lines.append(f"")
+
+        # Staged path: cooperative masked load through threadgroup memory —
+        # handles partial M/N/K tiles (and is the only path for half output).
         # K-loop: iterate over K in steps of BLOCK_K
         lines.append(f"    for (uint _k = 0u; _k < _K; _k += {BLOCK_K}u) {{")
         lines.append(f"")
@@ -442,32 +465,28 @@ class _TemplateMixin:
         lines.append(f"    }} // K-loop")
         lines.append(f"")
 
-        # Store results to global memory — all (row tile, col block) pairs.
-        lines.append(f"    // Store {BLOCK_M}x{BLOCK_N} result tile")
-        if output_msl_type == "float":
-            for t in range(n_row_tiles):
-                for c in range(col_tiles):
-                    lines.append(f"    simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
-        else:
-            # Non-float output: stage the FULL BLOCK_M x BLOCK_N tile to
-            # threadgroup memory, each (row tile, col block) accumulator to its
-            # OWN slot (row t*8, col sgitg*cols_per_sg + c*8), then all 128
-            # threads convert + masked-store to C. The old code wrote every
-            # simdgroup's accumulator to the same tg_out offset (no sgitg term)
-            # — a race that silently corrupted fp16-output matmuls. Each
-            # simdgroup now owns a distinct column strip, so there's no overlap.
-            lines.append(f"    threadgroup float tg_out[{BLOCK_M} * {BLOCK_N}];")
-            for t in range(n_row_tiles):
-                for c in range(col_tiles):
-                    lines.append(f"    simdgroup_store({acc_names[t][c]}, tg_out + ({t * 8}u) * {BLOCK_N}u + sgitg * {cols_per_sg}u + {c * 8}u, {BLOCK_N});")
-            lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-            lines.append(f"    for (uint i = tiitg; i < {BLOCK_M * BLOCK_N}u; i += 128u) {{")
-            lines.append(f"        uint r = i / {BLOCK_N}u, c = i % {BLOCK_N}u;")
-            lines.append(f"        uint gr = row_base + r, gc = col_base + c;")
-            lines.append(f"        if (gr < _M && gc < _N) {{")
-            lines.append(f"            {c_name}[gr * _N + gc] = {output_msl_type}(tg_out[i]);")
-            lines.append(f"        }}")
-            lines.append(f"    }}")
+        # Store the BLOCK_M x BLOCK_N tile, MASKED so partial M/N tiles don't
+        # over-write. simdgroup_store can't mask, so each simdgroup stages its
+        # 8x8 block to its OWN 64-float slot (no cross-simdgroup collision),
+        # then its 32 lanes write only the in-bounds elements. This fixes two
+        # silent-wrongs the old store had: the float path wrote a full unmasked
+        # 8x8 (for partial N the overflow columns wrapped into the next row's
+        # in-bounds data), and the half path raced on a shared slot. (Reached
+        # only by the staged path — partial/odd-K tiles, or non-float output;
+        # the direct fast path above stores full tiles unmasked.)
+        lines.append(f"    // Store {BLOCK_M}x{BLOCK_N} result tile (masked)")
+        lines.append(f"    threadgroup float tg_st[4u * 64u];")
+        lines.append(f"    uint laneid = tiitg % 32u;")
+        for t in range(n_row_tiles):
+            for c in range(col_tiles):
+                lines.append(f"    simdgroup_store({acc_names[t][c]}, tg_st + sgitg * 64u, 8);")
+                lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
+                lines.append(f"    for (uint i = laneid; i < 64u; i += 32u) {{")
+                lines.append(f"        uint gr = row_base + {t * 8}u + i / 8u;")
+                lines.append(f"        uint gc = col_base + sgitg * {cols_per_sg}u + {c * 8}u + i % 8u;")
+                lines.append(f"        if (gr < _M && gc < _N) {{ {c_name}[gr * _N + gc] = {output_msl_type}(tg_st[sgitg * 64u + i]); }}")
+                lines.append(f"    }}")
+                lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         lines.append(f"}}")
 
