@@ -47,9 +47,12 @@ def _matmul(M, N, K, BM, BN, BK):
 
 
 @requires_metal
-@pytest.mark.parametrize("BN", [32, 64, 128])
+@pytest.mark.parametrize("BN", [8, 16, 32, 64, 128])
 def test_kloop_matmul_all_columns_correct(BN):
-    # square-ish tiled matmul; the bug left cols >= 32 wrong for BN > 32.
+    # square-ish tiled matmul (BN must be a power of 2 for tl.arange). BN>32
+    # once dropped cols>=32; BN<32 (8/16) exercises the partially-idle-
+    # simdgroup column distribution (the old 4x8=32-col store over-wrote a
+    # <32-wide tile).
     M, K, BK = 64, 64, 32
     N = BN * 2  # two column tiles, so pid_n tiling is exercised too
     got, ref = _matmul(M, N, K, BM=32, BN=BN, BK=BK)

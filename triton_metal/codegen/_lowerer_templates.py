@@ -376,13 +376,23 @@ class _TemplateMixin:
             raise MetalNonRecoverableError(
                 f"K-loop matmul BLOCK_K={BLOCK_K} is not a multiple of 8; the "
                 "8-deep MMA step would drop the tail of K. Refusing.")
-        if BLOCK_N % 32 != 0:
+        if BLOCK_N % 8 != 0:
             raise MetalNonRecoverableError(
-                f"K-loop matmul BLOCK_N={BLOCK_N} is not a multiple of 32; the "
-                "4-simdgroup column tiling can't cover it cleanly. Refusing "
-                "rather than computing wrong columns.")
-        col_tiles = BLOCK_N // 32           # 8-wide col blocks per simdgroup
-        cols_per_sg = BLOCK_N // 4          # = col_tiles * 8
+                f"K-loop matmul BLOCK_N={BLOCK_N} is not a multiple of 8; "
+                "output columns tile in 8-wide simdgroup blocks. Refusing.")
+        # Distribute the BLOCK_N/8 8-wide column blocks across the 4 simdgroups
+        # (ceil). For BLOCK_N a multiple of 32 all four are fully used; for
+        # smaller / non-32-multiple BLOCK_N the extra simdgroups idle (guarded).
+        total_col_blocks = BLOCK_N // 8
+        col_tiles = (total_col_blocks + 3) // 4   # 8-wide col blocks per simdgroup
+        cols_per_sg = col_tiles * 8
+        col_needs_guard = (total_col_blocks % 4 != 0)
+
+        def _col_guard(c):
+            # Uniform-per-simdgroup predicate: is local block c a real column?
+            # None when every (sgitg, c) is in range (no runtime cost).
+            return (f"(sgitg * {col_tiles}u + {c}u) < {total_col_blocks}u"
+                    if col_needs_guard else None)
         # Threadgroup budget: the staged path needs tg_A + tg_B (plus a small
         # 1 KiB store scratch). Refuse if it exceeds Metal's 32 KiB threadgroup
         # limit rather than emit a kernel that silently overflows.
@@ -414,15 +424,21 @@ class _TemplateMixin:
             lines.append(f"    if (row_base + {BLOCK_M}u <= _M && col_base + {BLOCK_N}u <= _N && (_K % 8u) == 0u) {{")
             lines.append(f"        for (uint k = 0u; k < _K; k += 8u) {{")
             for c in range(col_tiles):
-                lines.append(f"            simdgroup_load(b_frag{c}, {b_name} + k * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+                g = _col_guard(c)
+                pfx = f"if ({g}) " if g else ""
+                lines.append(f"            {pfx}simdgroup_load(b_frag{c}, {b_name} + k * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
             for t in range(n_row_tiles):
                 lines.append(f"            simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * _K + k, _K);")
                 for c in range(col_tiles):
-                    lines.append(f"            simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
+                    g = _col_guard(c)
+                    pfx = f"if ({g}) " if g else ""
+                    lines.append(f"            {pfx}simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
             lines.append(f"        }}")
             for t in range(n_row_tiles):
                 for c in range(col_tiles):
-                    lines.append(f"        simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+                    g = _col_guard(c)
+                    pfx = f"if ({g}) " if g else ""
+                    lines.append(f"        {pfx}simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
             lines.append(f"        return;")
             lines.append(f"    }}")
             lines.append(f"")
@@ -455,11 +471,15 @@ class _TemplateMixin:
         lines.append(f"        // MMA across BLOCK_K in steps of 8")
         lines.append(f"        for (uint kk = 0u; kk < {BLOCK_K}u; kk += 8u) {{")
         for c in range(col_tiles):
-            lines.append(f"            simdgroup_load(b_frag{c}, tg_B + kk * {BLOCK_N}u + sgitg * {cols_per_sg}u + {c * 8}u, {BLOCK_N});")
+            g = _col_guard(c)
+            pfx = f"if ({g}) " if g else ""
+            lines.append(f"            {pfx}simdgroup_load(b_frag{c}, tg_B + kk * {BLOCK_N}u + sgitg * {cols_per_sg}u + {c * 8}u, {BLOCK_N});")
         for t in range(n_row_tiles):
             lines.append(f"            simdgroup_load(a_frag, tg_A + {t}u * 8u * {BLOCK_K}u + kk, {BLOCK_K});")
             for c in range(col_tiles):
-                lines.append(f"            simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
+                g = _col_guard(c)
+                pfx = f"if ({g}) " if g else ""
+                lines.append(f"            {pfx}simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
         lines.append(f"        }}")
         lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append(f"    }} // K-loop")
@@ -479,12 +499,18 @@ class _TemplateMixin:
         lines.append(f"    uint laneid = tiitg % 32u;")
         for t in range(n_row_tiles):
             for c in range(col_tiles):
-                lines.append(f"    simdgroup_store({acc_names[t][c]}, tg_st + sgitg * 64u, 8);")
+                g = _col_guard(c)
+                spfx = f"if ({g}) " if g else ""
+                cond = f"{g} && gr < _M && gc < _N" if g else "gr < _M && gc < _N"
+                # store + write are per-simdgroup guarded; the barriers are NOT
+                # (every thread must reach them, regardless of which columns its
+                # simdgroup owns).
+                lines.append(f"    {spfx}simdgroup_store({acc_names[t][c]}, tg_st + sgitg * 64u, 8);")
                 lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
                 lines.append(f"    for (uint i = laneid; i < 64u; i += 32u) {{")
                 lines.append(f"        uint gr = row_base + {t * 8}u + i / 8u;")
                 lines.append(f"        uint gc = col_base + sgitg * {cols_per_sg}u + {c * 8}u + i % 8u;")
-                lines.append(f"        if (gr < _M && gc < _N) {{ {c_name}[gr * _N + gc] = {output_msl_type}(tg_st[sgitg * 64u + i]); }}")
+                lines.append(f"        if ({cond}) {{ {c_name}[gr * _N + gc] = {output_msl_type}(tg_st[sgitg * 64u + i]); }}")
                 lines.append(f"    }}")
                 lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
