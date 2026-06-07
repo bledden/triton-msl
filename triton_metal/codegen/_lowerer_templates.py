@@ -76,10 +76,17 @@ class _TemplateMixin:
         c_elem = ptr_args[2].elem_type
         output_msl_type = triton_type_to_msl(c_elem)
 
-        # Threadgroup staging and accumulation always in float
-        tg_type = "float"
-        frag_type = "simdgroup_float8x8"
-        cast_load = "float"
+        # Genuine fp16 (WS1 Phase C): half INPUT fragments + float ACCUMULATOR;
+        # fp16 staged as half (no upcast) so the half MMA is actually used. bf16
+        # / other stay on the float path (exact). Accumulator always float.
+        acc_frag = "simdgroup_float8x8"
+        if input_msl_type == "half":
+            in_frag, tg_type, stage_cast, pad = (
+                "simdgroup_half8x8", "half", "", "half(0.0h)")
+        else:
+            in_frag, tg_type, stage_cast, pad = (
+                "simdgroup_float8x8", "float", "float", "0.0f")
+        frag_type = acc_frag
 
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
@@ -127,8 +134,8 @@ class _TemplateMixin:
         lines.append(f"        uint row_base = tile_row * 32u;")
         lines.append(f"        uint col_base = tile_col * 32u + sgitg * 8u;")
         lines.append(f"")
-        lines.append(f"        {frag_type} acc0(0), acc1(0), acc2(0), acc3(0);")
-        lines.append(f"        {frag_type} a_frag, b_frag;")
+        lines.append(f"        {acc_frag} acc0(0), acc1(0), acc2(0), acc3(0);")
+        lines.append(f"        {in_frag} a_frag, b_frag;")
         lines.append(f"")
         lines.append(f"        for (uint kk = 0u; kk < K; kk += 8u) {{")
 
@@ -139,7 +146,7 @@ class _TemplateMixin:
         lines.append(f"            for (uint i = tiitg; i < 256u; i += 128u) {{")
         lines.append(f"                uint r = i / 8u, c = i % 8u;")
         lines.append(f"                uint gr = row_base + r, gc = kk + c;")
-        lines.append(f"                tg_A[i] = (gr < M && gc < K) ? {cast_load}({a_name}[a_batch_off + {a_index}]) : 0.0f;")
+        lines.append(f"                tg_A[i] = (gr < M && gc < K) ? {stage_cast}({a_name}[a_batch_off + {a_index}]) : {pad};")
         lines.append(f"            }}")
 
         # Load B tile (8x32) cooperatively. ``trans_b`` analogue: original
@@ -149,7 +156,7 @@ class _TemplateMixin:
         lines.append(f"            for (uint i = tiitg; i < 256u; i += 128u) {{")
         lines.append(f"                uint r = i / 32u, c = i % 32u;")
         lines.append(f"                uint gr = kk + r, gc = col_base_tg + c;")
-        lines.append(f"                tg_B[i] = (gr < K && gc < N) ? {cast_load}({b_name}[b_batch_off + {b_index}]) : 0.0f;")
+        lines.append(f"                tg_B[i] = (gr < K && gc < N) ? {stage_cast}({b_name}[b_batch_off + {b_index}]) : {pad};")
         lines.append(f"            }}")
         lines.append(f"")
         lines.append(f"            threadgroup_barrier(mem_flags::mem_threadgroup);")
@@ -241,9 +248,20 @@ class _TemplateMixin:
         c_elem = ptr_args[2].elem_type
         output_msl_type = triton_type_to_msl(c_elem)
 
-        tg_type = "float"
-        frag_type = "simdgroup_float8x8"
-        cast_load = "float"
+        # Genuine fp16 (WS1 Phase C): half INPUT fragments + float ACCUMULATOR
+        # (half x half -> float MMA, de-risked in test_simdgroup_half_mma.py).
+        # fp16 inputs are staged as half and fed to simdgroup_half8x8 — no float
+        # upcast, so Apple's ~2x fp16 matrix throughput is actually used. bf16
+        # and other types stay on the float path (bf16->float is exact; there is
+        # no simdgroup_bfloat8x8 to use). The accumulator is always float.
+        acc_frag = "simdgroup_float8x8"
+        if input_msl_type == "half":
+            in_frag, tg_type, stage_cast, pad = (
+                "simdgroup_half8x8", "half", "", "half(0.0h)")
+        else:
+            in_frag, tg_type, stage_cast, pad = (
+                "simdgroup_float8x8", "float", "float", "0.0f")
+        frag_type = acc_frag  # accumulators
 
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
@@ -340,8 +358,8 @@ class _TemplateMixin:
 
         # Declare accumulators — one per 8-row tile
         acc_names = [f"acc{i}" for i in range(n_row_tiles)]
-        lines.append(f"    {frag_type} {', '.join(n + '(0)' for n in acc_names)};")
-        lines.append(f"    {frag_type} a_frag, b_frag;")
+        lines.append(f"    {acc_frag} {', '.join(n + '(0)' for n in acc_names)};")
+        lines.append(f"    {in_frag} a_frag, b_frag;")
         lines.append(f"")
 
         # K-loop: iterate over K in steps of BLOCK_K
@@ -353,7 +371,7 @@ class _TemplateMixin:
         lines.append(f"        for (uint i = tiitg; i < {tg_a_size}u; i += 128u) {{")
         lines.append(f"            uint r = i / {BLOCK_K}u, c = i % {BLOCK_K}u;")
         lines.append(f"            uint gr = row_base + r, gc = _k + c;")
-        lines.append(f"            tg_A[i] = (gr < _M && gc < _K) ? {cast_load}({a_name}[gr * _K + gc]) : 0.0f;")
+        lines.append(f"            tg_A[i] = (gr < _M && gc < _K) ? {stage_cast}({a_name}[gr * _K + gc]) : {pad};")
         lines.append(f"        }}")
 
         # Cooperative load B tile (BLOCK_K x BLOCK_N) from global memory
@@ -361,7 +379,7 @@ class _TemplateMixin:
         lines.append(f"        for (uint i = tiitg; i < {tg_b_size}u; i += 128u) {{")
         lines.append(f"            uint r = i / {BLOCK_N}u, c = i % {BLOCK_N}u;")
         lines.append(f"            uint gr = _k + r, gc = col_base + c;")
-        lines.append(f"            tg_B[i] = (gr < _K && gc < _N) ? {cast_load}({b_name}[gr * _N + gc]) : 0.0f;")
+        lines.append(f"            tg_B[i] = (gr < _K && gc < _N) ? {stage_cast}({b_name}[gr * _N + gc]) : {pad};")
         lines.append(f"        }}")
         lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append(f"")
