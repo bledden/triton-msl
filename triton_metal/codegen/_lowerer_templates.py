@@ -1091,6 +1091,17 @@ class _TemplateMixin:
 
         c_msl_type = triton_type_to_msl(c_elem)
 
+        # Genuine fp16 (WS1 Phase C): half INPUT fragments + float ACCUMULATOR
+        # (the matmul output tg_C stays float for the softmax epilogue). fp16 A/B
+        # are staged as half and fed to simdgroup_half8x8 — no float upcast — so
+        # the half MMA is actually used. bf16/other stay on the float path
+        # (bf16->float is exact; there is no simdgroup_bfloat8x8).
+        input_msl_type = triton_type_to_msl(a_elem)
+        if input_msl_type == "half":
+            in_frag, in_stage_t, in_cast = "simdgroup_half8x8", "half", ""
+        else:
+            in_frag, in_stage_t, in_cast = "simdgroup_float8x8", "float", "float"
+
         # Each SIMD group owns ``N / 4`` columns of the output, which must
         # split evenly into 8-wide simdgroup tiles.
         cols_per_sg = N // 4
@@ -1132,8 +1143,8 @@ class _TemplateMixin:
         lines.append("    uint lid [[thread_position_in_threadgroup]],")
         lines.append("    uint tid [[thread_position_in_grid]]")
         lines.append(") {")
-        lines.append(f"    threadgroup float tg_A[{m_block} * 8];")
-        lines.append(f"    threadgroup float tg_B[8 * {N}];")
+        lines.append(f"    threadgroup {in_stage_t} tg_A[{m_block} * 8];")
+        lines.append(f"    threadgroup {in_stage_t} tg_B[8 * {N}];")
         lines.append(f"    threadgroup float tg_C[{m_block} * {N}];")
         lines.append("")
 
@@ -1153,24 +1164,24 @@ class _TemplateMixin:
             f"            for (uint i = tiitg; i < {m_block * 8}u; i += 128u) {{")
         lines.append("                uint r = i / 8u, c = i % 8u;")
         a_load = _addr(a_ptr, "mstrip + r", "kk + c", a_row_s, a_col_s, K)
-        lines.append(f"                tg_A[i] = (float)({a_load});")
+        lines.append(f"                tg_A[i] = {in_cast}({a_load});")
         lines.append("            }")
         # Stage B[8, N] cooperatively.
         lines.append(
             f"            for (uint i = tiitg; i < {8 * N}u; i += 128u) {{")
         lines.append(f"                uint r = i / {N}u, c = i % {N}u;")
         b_load = _addr(b_ptr, "kk + r", "c", b_row_s, b_col_s, N)
-        lines.append(f"                tg_B[i] = (float)({b_load});")
+        lines.append(f"                tg_B[i] = {in_cast}({b_load});")
         lines.append("            }")
         lines.append("            threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append("")
         for ct in range(col_tiles_per_sg):
-            lines.append(f"            simdgroup_float8x8 b_{ct};")
+            lines.append(f"            {in_frag} b_{ct};")
             lines.append(
                 f"            simdgroup_load(b_{ct}, "
                 f"tg_B + sgitg * {cols_per_sg}u + {ct * 8}u, {N});")
         lines.append("")
-        lines.append("            simdgroup_float8x8 a_frag;")
+        lines.append(f"            {in_frag} a_frag;")
         for rt in range(row_tiles):
             lines.append(
                 f"            simdgroup_load(a_frag, tg_A + {rt * 8 * 8}u, 8);")

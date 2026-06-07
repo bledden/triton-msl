@@ -585,25 +585,27 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # never computed -> garbage (test_scaled_dot, ~all configs mismatch).
         self._refuse_unsafe_unsupported_ops()
 
-        # Check for simple dot (no stride args, no scf.for) — use inline
-        # scalar matmul that loads from global into shared memory, then
-        # does per-thread dot product.
-        simple_dot = self._detect_simple_dot()
-        if simple_dot:
-            return self._lower_simple_dot_inline(simple_dot)
-
-        # Check for the fused matmul + row-softmax pattern (test_dot with
-        # epilogue=softmax at sizes that exceed the per-thread scalar
-        # model — e.g. 64×64). Must run before ``_requires_matmul_template``
-        # would reject the kernel for having a tt.reduce, since that path
-        # falls back to the legacy text parser\'s bare matmul template,
-        # which silently drops the softmax.
+        # Check for the fused matmul + row-softmax pattern FIRST — before the
+        # simple/K-loop dot detectors. _detect_simple_dot matches any
+        # load→dot→store and emits a BARE matmul, silently dropping a softmax
+        # (or any) epilogue (a simple matmul→softmax kernel returned A@B with
+        # no softmax — row sums != 1). matmul_softmax only matches the full
+        # dot→max→sub→exp→sum→div pattern, so a pure matmul still falls through
+        # to simple_dot below. (Also must precede _requires_matmul_template,
+        # whose legacy fallback drops the softmax too.)
         matmul_softmax_info = self._detect_matmul_softmax()
         if matmul_softmax_info:
             msl = self._lower_matmul_softmax_template(matmul_softmax_info)
             if msl is not None:
                 self._prescan_stores()
                 return msl
+
+        # Check for simple dot (no stride args, no scf.for) — use inline
+        # scalar matmul that loads from global into shared memory, then
+        # does per-thread dot product.
+        simple_dot = self._detect_simple_dot()
+        if simple_dot:
+            return self._lower_simple_dot_inline(simple_dot)
 
         # Check for tt.dot — switch to prebuilt matmul template
         if self._requires_matmul_template():

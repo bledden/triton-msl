@@ -126,3 +126,38 @@ def test_kloop_matmul_fp16_output_correct(BN):
     _mm_f16out[grid](a, b, c, M, N, K, BM=32, BN=BN, BK=BK)
     np.testing.assert_allclose(c.numpy().astype(np.float32), (a @ b).numpy(),
                                atol=2e-2, rtol=2e-2)
+
+
+if HAS:
+    @triton.jit
+    def _mm_softmax(A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+        om = tl.arange(0, M)
+        on = tl.arange(0, N)
+        ok = tl.arange(0, K)
+        a = tl.load(A + om[:, None] * K + ok[None, :])
+        b = tl.load(B + ok[:, None] * N + on[None, :])
+        acc = tl.dot(a, b)
+        acc = acc - tl.max(acc, axis=1)[:, None]
+        e = tl.exp(acc)
+        out = e / tl.sum(e, axis=1)[:, None]
+        tl.store(C + om[:, None] * N + on[None, :], out)
+
+
+@requires_metal
+@pytest.mark.parametrize("dt", [torch.float32, torch.float16])
+def test_matmul_softmax_not_dropped(dt):
+    # A simple matmul->row-softmax kernel once routed to _detect_simple_dot,
+    # which emitted a BARE matmul and silently dropped the softmax (output ==
+    # A@B, row sums != 1). matmul_softmax is now checked first.
+    M = N = K = 32
+    a = (torch.randn(M, K) * 0.3).to(dt)
+    b = (torch.randn(K, N) * 0.3).to(dt)
+    c = torch.zeros(M, N, dtype=torch.float32)
+    _mm_softmax[(1,)](a, b, c, M=M, N=N, K=K)
+    mm = (a.float() @ b.float()).numpy()
+    ref = np.exp(mm - mm.max(1, keepdims=True))
+    ref = ref / ref.sum(1, keepdims=True)
+    got = c.numpy()
+    np.testing.assert_allclose(got, ref, atol=2e-2, rtol=2e-2)
+    # softmax rows sum to 1 (the dropped-softmax bug gave bare-matmul rows)
+    np.testing.assert_allclose(got.sum(1), np.ones(M), atol=2e-2)

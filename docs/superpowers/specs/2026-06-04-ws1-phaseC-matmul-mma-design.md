@@ -313,3 +313,29 @@ tiles, guarded only when not /4); direct-loads aligned float tiles; masked
 per-simdgroup store for partial/edge/half; refuses BLOCK_M/K%8, BLOCK_N%8, and
 >32KiB threadgroup configs. Genuine fp16 throughout. Each step gated on a
 FRESH-cache (~/.cache/triton_metal) full test_core sweep at 4326/0.
+
+## C.2 fourth path + a fifth silent-wrong (2026-06-07, #154)
+
+Genuine fp16 applied to `_lower_matmul_softmax_template` (the fused
+matmul→row-softmax path): half INPUT fragments + float accumulator; the matmul
+result tg_C stays float for the softmax epilogue. bf16/other stay on the float
+path.
+
+Trying to exercise it exposed a FIFTH reachable silent-wrong: a simple
+matmul→softmax kernel routed to `_detect_simple_dot` (checked first in
+`lower()`), which emits a BARE matmul and silently drops the softmax — output
+== A@B, row sums != 1 (confirmed: fp32 maxdiff vs softmax 2.05, matches A@B
+exactly). _detect_simple_dot matches any load→dot→store and ignores the
+epilogue. Fix: check `_detect_matmul_softmax` BEFORE `_detect_simple_dot` —
+matmul_softmax only matches the full dot→max→sub→exp→sum→div pattern, so pure
+matmuls still fall through to simple_dot. After the fix both fp32 and fp16
+matmul→softmax are exact (maxdiff 0.0000, row sums = 1), and the fp16 path is
+genuine (simdgroup_half8x8).
+
+Broader latent concern tracked (#157): _detect_simple_dot also drops NON-softmax
+epilogues (e.g. matmul+bias) the same way; needs a general "dot result must feed
+only the store" check.
+
+Genuine fp16 is now true on ALL FOUR matmul paths (standalone template, simple
+dot inline, K-loop inline, matmul→softmax). Five reachable silent-wrongs found
+and fixed across the inline matmul lowering this session.
