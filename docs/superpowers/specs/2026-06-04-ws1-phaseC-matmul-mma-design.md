@@ -250,3 +250,41 @@ support and the constexpr-dim refusal. Applying the fast kernel there needs a
 careful dispatch-grid mapping + the full 4326/0 sweep — a focused follow-on,
 not rushed at session end. The harness path proves the technique and locks in
 the perf; the inline integration ships it to user kernels.
+
+## C.2 inline-path integrity excavation (2026-06-07)
+
+Bringing the matmul work to real `@triton.jit` kernels (the inline dot paths)
+surfaced two REACHABLE silent-wrong bugs in `_lower_k_loop_dot_inline` (the
+pid-tiled large-matmul path) — both latent because the test corpus only used
+BLOCK_N=32, fp32-output K-loop matmuls:
+
+1. **BLOCK_N>32 → only 32 columns computed.** The kernel emitted output at
+   `col_base + sgitg*8` (4 simdgroups x 8 = 32 cols) regardless of BLOCK_N. Any
+   tiled matmul with BLOCK_N=64/128 (the *standard* Triton tiling) silently
+   dropped columns 32+. Confirmed: BLOCK_N=64 maxdiff 0.324 on cols 32-63.
+   Fixed with column register-blocking (each simdgroup owns BLOCK_N/4 cols;
+   a-fragment reused across col blocks). Commit 6012445.
+
+2. **fp16-output raced on shared `tg_out`.** The non-float-output convert path
+   stored every simdgroup's accumulator to the same `tg_out + t*64` slot (no
+   per-simdgroup column offset) → race → all columns corrupted (maxdiff 0.337
+   even at BLOCK_N=32). Fixed with full-tile staging (each accumulator to its
+   own slot). Commit 2cb58bd.
+
+Geometry that the 8x8-simdgroup tiling can't represent now REFUSES loudly
+(MetalNonRecoverableError) instead of computing wrong numbers: BLOCK_N%32!=0,
+BLOCK_M%8!=0, BLOCK_K%8!=0 (the last two are unreachable via normal kernels —
+tl.arange forces power-of-2 block dims — but guarded defensively), and
+non-float output whose full-tile staging would exceed the 32 KiB threadgroup
+limit.
+
+Method note: a stale `~/.cache/triton_metal` (keyed by AST, not codegen
+version) initially masked the fix during development — every codegen-change
+verification must clear it. Each fix was gated on a FRESH-cache full test_core
+sweep at 4326 passed / 0 failed.
+
+The MLX-parity direct-load + register-blocking config (13.76 TFLOP/s) is
+shipped to the harness/standalone path; the inline path is now correct for all
+representable geometries and genuine-fp16, but does not yet use direct loads
+(it keeps the boundary-safe staged structure). Direct-load for inline remains
+#153.

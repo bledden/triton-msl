@@ -363,6 +363,19 @@ class _TemplateMixin:
         # a reachable silent-wrong. (WS1 integrity fix; also adds a-fragment
         # reuse across col blocks, which helps throughput.)
         from triton_metal.errors import MetalNonRecoverableError
+        # The simdgroup tiling is 8x8: BLOCK_M must split into 8-row tiles and
+        # BLOCK_K into 8-deep MMA steps, else the row loop / inner K loop drop
+        # the tail and silently under-compute. (Unreachable via normal kernels —
+        # tl.arange forces power-of-2 block dims — but guarded defensively so a
+        # non-arange-constructed dot can never silently produce wrong numbers.)
+        if BLOCK_M % 8 != 0:
+            raise MetalNonRecoverableError(
+                f"K-loop matmul BLOCK_M={BLOCK_M} is not a multiple of 8; the "
+                "8-row simdgroup tiling would drop the tail rows. Refusing.")
+        if BLOCK_K % 8 != 0:
+            raise MetalNonRecoverableError(
+                f"K-loop matmul BLOCK_K={BLOCK_K} is not a multiple of 8; the "
+                "8-deep MMA step would drop the tail of K. Refusing.")
         if BLOCK_N % 32 != 0:
             raise MetalNonRecoverableError(
                 f"K-loop matmul BLOCK_N={BLOCK_N} is not a multiple of 32; the "
