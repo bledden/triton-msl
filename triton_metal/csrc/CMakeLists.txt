@@ -210,6 +210,31 @@ endforeach()
 list(LENGTH TRITON_SUPPORT_OBJS _ts_obj_count)
 message(STATUS "Using ${_ts_obj_count} Triton support objects")
 
+# Extra objects needed ONLY by the fully-static standalone target
+# (triton_metal_backend), which resolves every Triton symbol at link time
+# rather than via libtriton.so/dynamic_lookup like the plugin. These are the
+# transitive references the IR/GPU dialect objects pull in (e.g. TritonGPU
+# Ops.cpp -> hasCGABroadcast in TritonNvidiaGPU TMAUtilities). Curated as
+# specific .o files (not whole pass dirs) to keep the closure minimal. #144.
+# TritonInstrument IR dialect objects (bounded dialect definition) — pulled in
+# by Allocation.cpp's scratch sizing, which references its op TypeIDs.
+file(GLOB TRITON_INSTRUMENT_OBJS
+    "${TRITON_BUILDPATH}/lib/Dialect/TritonInstrument/IR/CMakeFiles/TritonInstrumentIR.dir/*.o")
+set(TRITON_BACKEND_CLOSURE_OBJS
+    "${TRITON_BUILDPATH}/lib/Dialect/TritonNvidiaGPU/Transforms/CMakeFiles/TritonNvidiaGPUTransforms.dir/TMAUtilities.cpp.o"
+    "${TRITON_BUILDPATH}/lib/Analysis/CMakeFiles/TritonAnalysis.dir/Allocation.cpp.o"
+    "${TRITON_BUILDPATH}/lib/Analysis/CMakeFiles/TritonAnalysis.dir/Alias.cpp.o"
+    "${TRITON_BUILDPATH}/lib/Analysis/CMakeFiles/TritonAnalysis.dir/BufferRegion.cpp.o"
+    "${TRITON_BUILDPATH}/lib/Dialect/TritonGPU/Transforms/CMakeFiles/TritonGPUTransforms.dir/DescriptorMemoryLayouts.cpp.o"
+    "${TRITON_BUILDPATH}/lib/Tools/CMakeFiles/TritonTools.dir/GenericSwizzling.cpp.o"
+    ${TRITON_INSTRUMENT_OBJS}
+)
+foreach(_obj ${TRITON_BACKEND_CLOSURE_OBJS})
+  if(NOT EXISTS "${_obj}")
+    message(FATAL_ERROR "Triton backend-closure object not found: ${_obj}")
+  endif()
+endforeach()
+
 # ---------------------------------------------------------------------------
 # libtriton.so path — Triton's shared library that contains all MLIR symbols.
 # By linking against this instead of standalone MLIR libraries, we avoid
@@ -232,6 +257,15 @@ add_subdirectory(lib/Conversion)
 add_library(triton_metal_backend SHARED
     $<TARGET_OBJECTS:TritonMetalToLLVM>
     ${TRITON_IR_OBJS}
+    # The conversion sources reference TritonGPU types (MemDescType::getShape /
+    # getElementType, its TypeIDResolver) and TritonNvidiaGPU/Support symbols.
+    # This standalone target links individual MLIR libs (no libtriton.so /
+    # dynamic_lookup), so unlike the plugin it must EMBED these dialect objects
+    # or they're undefined at link (#144). Matches triton_metal_plugin's set.
+    ${TRITON_GPU_OBJS}
+    ${TRITON_NVIDIA_GPU_OBJS}
+    ${TRITON_SUPPORT_OBJS}
+    ${TRITON_BACKEND_CLOSURE_OBJS}
     python_bindings_bridge.cpp
 )
 
@@ -253,6 +287,26 @@ target_link_libraries(triton_metal_backend
     MLIRTensorDialect
     LLVMSupport
     LLVMCore
+    # TMAUtilities.cpp (pulled in for hasCGABroadcast) references LLVM cloning
+    # utilities; this standalone target must link them explicitly (#144).
+    LLVMTransformUtils
+    # python_bindings_bridge.cpp's run-to-LLVM path parses MLIR text, runs
+    # SCF/CF->LLVM lowering, and translates to LLVM IR; the standalone target
+    # links those MLIR libraries explicitly (the plugin gets them at runtime
+    # from libtriton.so). #144.
+    MLIRParser
+    MLIRSCFToControlFlow
+    MLIRControlFlowToLLVM
+    MLIRBuiltinToLLVMIRTranslation
+    MLIRLLVMToLLVMIRTranslation
+    MLIRTargetLLVMIRExport
+    # The run-to-LLVM lowering pipeline also needs the per-dialect ->LLVM
+    # conversion pattern libraries. #144.
+    MLIRArithToLLVM
+    MLIRFuncToLLVM
+    MLIRMathToLLVM
+    MLIRIndexToLLVM
+    MLIRReconcileUnrealizedCasts
 )
 
 install(TARGETS triton_metal_backend LIBRARY DESTINATION lib)
@@ -285,6 +339,15 @@ if(Python_EXECUTABLE)
   if(_pb_rc EQUAL 0 AND _pybind11_cmakedir)
     set(_pybind11_hint "${_pybind11_cmakedir}")
   endif()
+endif()
+# pybind11 >= 2.12 / 3.x's pybind11_add_module calls python_add_library, which
+# only exists when FindPython's Development.Module component was loaded. Letting
+# pybind11 own the Python discovery (PYBIND11_FINDPYTHON) pulls in that
+# component; otherwise configure fails with `Unknown CMake command
+# "python_add_library"`. Default it ON so the build works without the caller
+# passing -DPYBIND11_FINDPYTHON=ON.
+if(NOT DEFINED PYBIND11_FINDPYTHON)
+  set(PYBIND11_FINDPYTHON ON)
 endif()
 find_package(pybind11 REQUIRED PATHS "${_pybind11_hint}")
 
