@@ -142,13 +142,23 @@ def _time_dispatch(bench, pipeline, buffers, n_groups, threads_per_tg,
     for _ in range(warmup):
         once()
     us = []
+    wall_us = []
     for _ in range(rep):
+        _s = time.perf_counter()
         cmd = once()
+        wall_us.append((time.perf_counter() - _s) * 1e6)
         us.append((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e6)
     us.sort()
+    wall_us.sort()
     nn = len(us)
     return {"median_us": us[nn // 2], "min_us": us[0], "max_us": us[-1],
-            "p10_us": us[int(0.1 * (nn - 1))], "p90_us": us[int(0.9 * (nn - 1))]}
+            "p10_us": us[int(0.1 * (nn - 1))], "p90_us": us[int(0.9 * (nn - 1))],
+            # Wall-clock per dispatch (commit -> waitUntilCompleted), measured the
+            # SAME way MLX is (_bench_mlx: perf_counter + synchronize). Use this —
+            # not the GPU-only median_us — for the MLX ratio, so both sides
+            # include host/submit/sync overhead. Comparing our GPU-only time to
+            # MLX wall-clock structurally flattered every ratio (audit #164).
+            "wall_median_us": wall_us[nn // 2]}
 
 
 # ── Kernel suite ────────────────────────────────────────────────────────────
@@ -348,9 +358,17 @@ def run_one(device, bench, spec: KernelSpec, *, do_disasm=True, do_mlx=True):
     if do_mlx and s.get("mlx") is not None:
         mlx_ms = _bench_mlx(s["mlx"])
         if mlx_ms is not None:
-            ours_ms = timing["median_us"] / 1e3
-            result["mlx"] = {"mlx_median_ms": mlx_ms, "ours_median_ms": ours_ms,
-                             "ratio_ours_over_mlx": (ours_ms / mlx_ms) if mlx_ms else None}
+            # Symmetric: both sides wall-clock (audit #164). Fall back to GPU-only
+            # only if wall wasn't recorded. Also report the GPU-only ratio so the
+            # gap between kernel time and dispatch overhead is visible, not hidden.
+            ours_ms = timing.get("wall_median_us", timing["median_us"]) / 1e3
+            ours_gpu_ms = timing["median_us"] / 1e3
+            result["mlx"] = {"mlx_median_ms": mlx_ms,
+                             "ours_median_ms": ours_ms,
+                             "ours_gpu_only_ms": ours_gpu_ms,
+                             "ratio_ours_over_mlx": (ours_ms / mlx_ms) if mlx_ms else None,
+                             "ratio_gpu_only_over_mlx": (ours_gpu_ms / mlx_ms) if mlx_ms else None,
+                             "basis": "wall-clock both sides"}
     return result
 
 
@@ -397,8 +415,15 @@ def _write_reports(results, out_dir):
               "- Native-AGX disassembly is best-effort (applegpu is M1-era; "
               "M4 is AGX2) — coverage % reflects this.",
               "- Compute roofs are estimates (Apple does not publish GPU "
-              "FLOPs); the 546 GB/s memory roof is Apple-published. The MLX "
-              "ratio is the more reliable compute-bound yardstick.",
+              "FLOPs); the 546 GB/s memory roof is Apple-published. Treat "
+              "'% of roof' as indicative, not precise.",
+              "- MLX ratio basis (audit #164): both sides are now timed by "
+              "WALL-CLOCK (perf_counter around commit->wait, matching MLX's "
+              "perf_counter+synchronize). Earlier ratios compared our GPU-only "
+              "time to MLX wall-clock, which flattered us by the host/submit "
+              "overhead MLX pays — those numbers were optimistic. "
+              "ratio_gpu_only_over_mlx is also recorded for reference but is "
+              "NOT an apples-to-apples comparison.",
               "- SMALL/FAST kernels (≲50 us: softmax, layernorm, 512 matmul) "
               "have large run-to-run timing variance — a single run can read "
               "above the roof (flagged ⚠ SUSPECT). For trustworthy "

@@ -29,8 +29,15 @@ class HardwareRoofs:
     # Apple-published.
     mem_bw_gbps: float = 546.0
     # ESTIMATES (Apple does not publish GPU FLOPs):
-    #   40 cores * 128 ALUs * 2 (FMA) * 1.4 GHz ~= 14.3 TFLOP/s FP32.
-    #   Apple GPUs run FP16 at ~2x FP32 throughput.
+    #   40 cores * 128 ALUs * 2 (FMA) * ~1.4 GHz ~= 14.3 TFLOP/s FP32.
+    #   The clock is a nominal guess (M4 Max boosts higher, ~1.5-1.6 GHz), so
+    #   the FP32 roof is soft to within ~10-15%; do NOT quote "% of roof" as a
+    #   precise figure (audit #164).
+    #   The FP16 roof assumes ~2x FP32, an ALU-FMA assumption that does NOT
+    #   reflect simdgroup-matrix (MMA) throughput — matmul fp16 runs close to
+    #   the fp32 rate on this path, not 2x. So fp16 "% of roof" via this roof is
+    #   especially soft and understates matmul efficiency; treat it as a loose
+    #   upper bound, not an achievable target for MMA kernels.
     fp32_tflops: float = 14.3
     fp16_tflops: float = 28.6
     fp32_is_estimate: bool = True

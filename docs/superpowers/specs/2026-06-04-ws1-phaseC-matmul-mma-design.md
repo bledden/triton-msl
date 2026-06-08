@@ -418,3 +418,38 @@ signal): 4096^3 reaches ~1.03x MLX (parity+), up from 0.87x. The dynamic-tg
 result PROVED only a separate no-tg kernel recovers the occupancy — confirmed.
 Correctness: aligned -> direct kernel, partial/odd-K/half -> staged kernel, both
 verified (test_matmul_block_n) + full test_core sweep.
+
+## Benchmark honesty correction (audit #164, 2026-06-08)
+
+An external (MLX-team-lens) audit found the perf claims rested on a flawed
+comparison. Corrected:
+
+1. ASYMMETRIC TIMER (the load-bearing flaw). The harness timed OURS by GPU-only
+   time (GPUEndTime-GPUStartTime) but MLX by wall-clock (perf_counter+
+   synchronize). Comparing our kernel-only time to MLX's full wall-clock made us
+   look faster than we are: e.g. matmul_2048_fp16 reported 0.90x ("beats MLX")
+   but is ~1.04x (≈4% SLOWER) when both are timed wall-clock. FIXED: _time_dispatch
+   now also records wall-clock and the MLX ratio is wall/wall; GPU-only TFLOP/s is
+   kept as the kernel-throughput / roofline metric, and a gpu_only ratio is
+   reported but labelled not-apples-to-apples.
+
+2. HONEST NUMBERS (symmetric wall-clock both sides, M4 Max; thermal-sensitive,
+   so a BAND not a point):
+   - Standalone fast kernel (make_simdgroup_matmul_kernel_fast): ≈ MLX parity,
+     0.95–1.05x wall-clock across 1024–4096 (fp16) and 1.00x at 2048 fp32.
+   - Inline @triton.jit two-kernel-split path: ~0.96x at 2048, ~0.82–0.87x at
+     4096 (ours 11.9–12.8 TFLOP/s vs MLX ~14.6) — competitive but below MLX on
+     large GEMM, not parity.
+   - The #159 "1.03x parity+" was a THROTTLED-run artifact (MLX read 12.47 that
+     run vs its real ~14.6); it does not hold on a thermally-stable machine.
+
+3. ROOFLINE. "% of roof" (esp. the fp16 89%/50% figures) is soft: the compute
+   roof uses a guessed ~1.4 GHz clock and a flat 2x-fp16 ALU assumption that does
+   NOT reflect simdgroup-matrix (MMA) throughput. Do not quote it as precise.
+
+4. WHAT STANDS: "genuine fp16" is verified — half inputs + fp32 accumulation,
+   matching MLX/MPS semantics to ~0 error (distinguishable from fp16-accumulate).
+   The two-kernel split is a correct, safe occupancy fix (falls back to staged on
+   any misalignment). The honest one-line claim: "competitive with MLX — standalone
+   GEMM ≈parity, inline @triton.jit ~0.85–0.96x — measured wall-clock both sides;
+   genuine fp16 (fp32-accumulate)."
