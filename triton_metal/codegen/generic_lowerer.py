@@ -1761,8 +1761,28 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self._lower_fp_to_fp(ssa)
         elif op == "tt.assert":
             pass  # Runtime bounds check — skip in MSL
+        elif op in ("tt.print", "tt.device_print"):
+            # Device-side print: Apple GPUs have no device printf channel. This
+            # is an output-NEUTRAL diagnostic side effect, so dropping it is
+            # correct (does not affect the kernel's result buffers) — unlike a
+            # store/atomic, which the no-result refusal below catches. Documented
+            # unsupported (test_print is skip-listed). (audit #165)
+            pass
         else:
-            # Unknown op — emit comment (don't raise: may be in dead code path)
+            # Unknown op. A NO-RESULT op (negative synthetic id, see mlir_walker
+            # SSAValue construction) is a side-effect / terminator the lowerer
+            # doesn't model — store/atomic/scatter/cf variants — and dropping it
+            # silently loses its effect (audit #165). Refuse loudly. A
+            # result-producing unknown op leaves its result undefined; any
+            # consumer reads UNKNOWN_<id> and fails loud at MSL compile (or it's
+            # dead -> harmless), so a comment is safe and tolerates dead-code ops.
+            if ssa.id is not None and ssa.id < 0:
+                from triton_metal.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    f"Refusing to emit silently-wrong output: unsupported "
+                    f"side-effecting op '{op}' (no result) has no Metal lowering "
+                    f"and would be silently dropped, losing its effect. Add a "
+                    f"handler or an explicit refusal for it.")
             self.kb.comment(f"UNSUPPORTED: {op}")
 
     # -- Program ID and indexing --
@@ -5052,10 +5072,14 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         b_shape = _extract_shape(b_type) if b_type else None
 
         if not a_shape or not b_shape or len(a_shape) < 2 or len(b_shape) < 2:
-            # Fall back to passthrough (accumulator)
-            self.env[ssa.id] = acc_var
-            self.kb.comment("UNSUPPORTED: tt.dot without 2D operand shapes -- passthrough")
-            return
+            # Returning the accumulator here drops A@B silently (audit #165 —
+            # same class as the #157 matmul-epilogue refusals). Refuse loudly.
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing to emit silently-wrong output: tt.dot operand shapes "
+                f"({a_shape} x {b_shape}) are not both 2-D; the generic dot path "
+                f"cannot lower this and would silently return the accumulator, "
+                f"dropping the matmul. File an issue or restructure the dot.")
 
         M, K = a_shape[0], a_shape[1]
         K2, N = b_shape[0], b_shape[1]
@@ -5077,10 +5101,15 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                     break
 
         if not a_shared or not b_shared:
-            # No shared memory — fall back to passthrough
-            self.env[ssa.id] = acc_var
-            self.kb.comment("UNSUPPORTED: tt.dot operands not in shared memory -- passthrough")
-            return
+            # No shared-memory operands -> the generic simdgroup dot path can't
+            # lower this. Returning the accumulator drops A@B silently; refuse
+            # loudly instead (audit #165).
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "Refusing to emit silently-wrong output: tt.dot operands are not "
+                "in threadgroup (shared) memory (no ttg.local_load source); the "
+                "generic dot path would silently return the accumulator, dropping "
+                "the matmul. File an issue.")
 
         a_smem, _, _ = a_shared
         b_smem, _, _ = b_shared
