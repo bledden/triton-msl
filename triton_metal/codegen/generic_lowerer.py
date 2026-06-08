@@ -3534,16 +3534,27 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         is_unsigned = pred_name in ("ult", "ule", "ugt", "uge") if pred_name else False
         is_signed = pred_name in ("slt", "sle", "sgt", "sge") if pred_name else False
 
+        # The normalizing cast must match the operand WIDTH, not assume 32 bits:
+        # i64 operands are declared ``long`` in MSL, so a hardcoded ``(int)``
+        # truncates them to 32 bits before the compare — a silent-wrong on any
+        # value outside int32 range (audit C1). Pick the 64-bit cast when either
+        # operand is 64-bit; ``eq``/``ne`` (no cast) were already width-safe.
+        def _is64(oid):
+            return self.env_types.get(oid) in ("i64", "u64", "ui64")
+        wide64 = _is64(ssa.operand_ids[0]) or _is64(ssa.operand_ids[1])
+        s_cast = "(long)" if wide64 else "(int)"
+        u_cast = "(ulong)" if wide64 else "(uint)"
+
         # Phase 4b/c: MEPT array path. Wraps the same cast convention
         # (uint / int / none) per array position. Result is bool[N];
         # downstream consumers (tt.load mask, tt.store mask, arith.andi
         # on i1) read it as an env_array.
         if is_unsigned:
             def _make_expr(av, bv, _op=op_str):
-                return f"(uint){av} {_op} (uint){bv}"
+                return f"{u_cast}{av} {_op} {u_cast}{bv}"
         elif is_signed:
             def _make_expr(av, bv, _op=op_str):
-                return f"(int){av} {_op} (int){bv}"
+                return f"{s_cast}{av} {_op} {s_cast}{bv}"
         else:
             def _make_expr(av, bv, _op=op_str):
                 return f"{av} {_op} {bv}"
@@ -3556,9 +3567,9 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         var_name = self._next_var("mask")
         if is_unsigned:
-            self.kb.raw_line(f"    bool {var_name} = (uint){a} {op_str} (uint){b};")
+            self.kb.raw_line(f"    bool {var_name} = {u_cast}{a} {op_str} {u_cast}{b};")
         elif is_signed:
-            self.kb.raw_line(f"    bool {var_name} = (int){a} {op_str} (int){b};")
+            self.kb.raw_line(f"    bool {var_name} = {s_cast}{a} {op_str} {s_cast}{b};")
         else:
             self.kb.raw_line(f"    bool {var_name} = {a} {op_str} {b};")
         self.env[ssa.id] = var_name
@@ -4484,7 +4495,17 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             else:
                 return None
             is_unsigned = pred_name in ("ult", "ule", "ugt", "uge") if pred_name else False
-            cast = "(uint)" if is_unsigned else "(int)"
+            # Width-correct cast (see _lower_cmpi, audit C1): a 64-bit bound
+            # (e.g. a large tensor dim compared against an index) must not be
+            # truncated to 32 bits. Falls back to 32-bit when the operand type
+            # is unknown (index-derived operands, always small).
+            def _is64m(oid):
+                return self.env_types.get(oid) in ("i64", "u64", "ui64")
+            wide64 = _is64m(op.operand_ids[0]) or _is64m(op.operand_ids[1])
+            if is_unsigned:
+                cast = "(ulong)" if wide64 else "(uint)"
+            else:
+                cast = "(long)" if wide64 else "(int)"
             return f"({cast}{a} {op_str} {cast}{b})"
 
         # arith.andi / arith.ori / arith.xori on i1 — logical combinators
