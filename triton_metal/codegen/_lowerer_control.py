@@ -468,6 +468,22 @@ class _ControlFlowMixin:
         # Use float detection: if either the value or the pointer is float
         is_float = is_float or is_float_ptr
 
+        # Refuse 16-bit float atomics (audit C2). The float-atomic path below
+        # reinterprets the slot as a 32-bit word (CAS loop on atomic_uint*,
+        # result_dtype hardcoded fp32). For an fp16/bf16 element that reads and
+        # writes 4 bytes over a 2-byte value — silently corrupting both it and
+        # its neighbor. Metal has no 16-bit device atomic, so there is no
+        # correct lowering: refuse loudly rather than emit wrong output.
+        if (val_dtype in ("fp16", "bf16", "f16")
+                or store_dtype in ("fp16", "bf16", "f16")):
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "Refusing to emit silently-wrong output: atomic_rmw on a 16-bit "
+                f"float ({val_dtype}/{store_dtype}) is not supported — Metal has "
+                "no 16-bit device atomic and the 32-bit CAS loop would corrupt "
+                "the 2-byte value. Accumulate in fp32 (atomic on an fp32 buffer) "
+                "and cast, or restructure to avoid the atomic.")
+
         # Check for mask
         mask_var = None
         if mask_id is not None:
