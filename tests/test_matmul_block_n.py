@@ -177,16 +177,15 @@ if HAS:
 
 
 @requires_metal
-def test_matmul_nonsoftmax_epilogue_refuses_not_dropped():
+def test_matmul_nonsoftmax_epilogue_computed_not_dropped():
     # A matmul + value-changing epilogue (scale/bias/activation) once routed to
     # _detect_simple_dot, which emitted a BARE matmul and silently dropped the
-    # epilogue (returned A@B). No path computes a matmul-sized dot + arbitrary
-    # epilogue correctly, so it must REFUSE loudly, never silent-wrong.
-    from triton_metal.errors import MetalNonRecoverableError
+    # epilogue (returned A@B). #157 made it refuse; #158 now COMPUTES it via the
+    # fused-epilogue template. Either way it is never silently dropped: verify
+    # the epilogue is actually applied (result != bare A@B, == A@B*3+1).
     a = (torch.randn(32, 32) * 0.3)
     b = (torch.randn(32, 32) * 0.3)
     c = torch.zeros(32, 32)
-    with pytest.raises((MetalNonRecoverableError, Exception)) as ei:
-        _mm_scale[(1,)](a, b, c, M=32, N=32, K=32)
-    # ensure it's the intended refusal, not an unrelated crash
-    assert "epilogue" in str(ei.value).lower() or "MetalNonRecoverable" in type(ei.value).__name__
+    _mm_scale[(1,)](a, b, c, M=32, N=32, K=32)
+    np.testing.assert_allclose(c.numpy(), (a @ b).numpy() * 3.0 + 1.0,
+                               atol=2e-2, rtol=2e-2)

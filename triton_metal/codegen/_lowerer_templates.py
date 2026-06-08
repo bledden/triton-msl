@@ -1211,6 +1211,18 @@ class _TemplateMixin:
         lines.append("        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append("")
 
+        # Fused pointwise/broadcast epilogue (#158): apply the lowered op chain
+        # per element on the staged tg_C, then write. Early-return leaves the
+        # softmax path below untouched.
+        if info.get("epilogue_ops"):
+            lines.extend(self._emit_matmul_epilogue_loop(
+                info, m_block, N, c_ptr, c_row_s, c_col_s, c_msl_type, _addr))
+            lines.append("        threadgroup_barrier(mem_flags::mem_threadgroup);")
+            lines.append("    }  // end M-strip loop")
+            lines.append("}")
+            lines.append("")
+            return "\n".join(lines)
+
         # Row softmax across the strip\'s M_BLOCK rows.
         lines.append(
             f"        for (uint row = tiitg; row < {m_block}u; row += 128u) {{")
@@ -1246,6 +1258,98 @@ class _TemplateMixin:
         lines.append("}")
         lines.append("")
         return "\n".join(lines)
+
+    # MSL for each fused-epilogue op given operand expressions. Reuses the same
+    # operators/functions the generic op dispatch maps to (#158).
+    _EPI_BIN = {"arith.addf": "+", "arith.subf": "-", "arith.mulf": "*",
+                "arith.divf": "/", "arith.addi": "+", "arith.subi": "-",
+                "arith.muli": "*"}
+    _EPI_FN2 = {"arith.maximumf": "fmax", "arith.minimumf": "fmin",
+                "arith.maxnumf": "fmax", "arith.minnumf": "fmin"}
+    _EPI_FN1 = {"math.exp": "exp", "math.exp2": "exp2", "math.log": "log",
+                "math.log2": "log2", "math.sqrt": "sqrt", "math.rsqrt": "rsqrt",
+                "math.sin": "precise::sin", "math.cos": "precise::cos",
+                "math.erf": "erf", "math.tanh": "precise::tanh",
+                "math.floor": "floor", "math.ceil": "ceil", "math.absf": "fabs"}
+
+    def _emit_matmul_epilogue_loop(self, info, m_block, N, c_ptr, c_row_s,
+                                   c_col_s, c_msl_type, _addr):
+        """Per-element fused-epilogue loop body (#158).
+
+        Lowers the topologically-ordered epilogue op chain to scalar MSL on the
+        staged matmul result tg_C[i], then writes. The dot result is seeded to
+        ``tg_C[i]``; constants reuse ``_lower_constant``; a bias load indexes by
+        ``col``; layout/cast ops pass through.
+        """
+        from triton_metal.codegen._lowerer_detection import _EPI_PASSTHROUGH
+        by_id = {ssa.id: ssa for ssa in self.graph.ops}
+        bias = info.get("bias_ptr")
+        # The matmul result staged in tg_C is a@b (accumulators init to 0). If a
+        # bias was fused into the dot's accumulator, add it back here.
+        acc_bias = info.get("acc_bias_ptr")
+        acc_idx = "row" if info.get("acc_bias_dim") == "row" else "col"
+        dot_expr = (f"(tg_C[i] + {acc_bias}[{acc_idx}])" if acc_bias else "tg_C[i]")
+        val = {info["dot_id"]: dot_expr}
+
+        def _const_expr(op):
+            try:
+                self._lower_constant(op)
+                return f"({self.env[op.id]})"
+            except Exception:
+                return "0.0f"
+
+        def expr(vid):
+            if vid in val:
+                return val[vid]
+            op = by_id.get(vid)
+            if op is None:
+                return "0.0f"
+            if op.op == "arith.constant":
+                return _const_expr(op)
+            if op.op == "tt.load":
+                return f"{bias}[col]" if bias else "0.0f"
+            if op.op in _EPI_PASSTHROUGH and op.operand_ids:
+                return expr(op.operand_ids[0])
+            return "0.0f"
+
+        body = []
+        n = 0
+        for op in info["epilogue_ops"]:
+            if op.op in _EPI_PASSTHROUGH:
+                val[op.id] = expr(op.operand_ids[0]) if op.operand_ids else "0.0f"
+                continue
+            if op.op == "arith.constant":
+                val[op.id] = _const_expr(op)
+                continue
+            if op.op == "tt.load":
+                val[op.id] = f"{bias}[col]" if bias else "0.0f"
+                continue
+            es = [expr(o) for o in (op.operand_ids or [])]
+            if op.op == "arith.negf" and es:
+                e = f"(-({es[0]}))"
+            elif op.op in self._EPI_BIN and len(es) >= 2:
+                e = f"(({es[0]}) {self._EPI_BIN[op.op]} ({es[1]}))"
+            elif op.op in self._EPI_FN2 and len(es) >= 2:
+                e = f"{self._EPI_FN2[op.op]}(({es[0]}), ({es[1]}))"
+            elif op.op in self._EPI_FN1 and es:
+                e = f"{self._EPI_FN1[op.op]}(({es[0]}))"
+            elif op.op == "tt.clampf" and len(es) >= 3:
+                e = f"clamp(({es[0]}), ({es[1]}), ({es[2]}))"
+            else:
+                e = f"({es[0]})" if es else "0.0f"
+            var = f"ep{n}"
+            n += 1
+            body.append(f"            float {var} = {e};")
+            val[op.id] = var
+
+        out = val.get(info["store_value_id"], "tg_C[i]")
+        lines = [f"        for (uint i = tiitg; i < {m_block * N}u; i += 128u) {{",
+                 f"            uint row = i / {N}u, col = i % {N}u;"]
+        lines.extend(body)
+        c_store_addr = _addr(c_ptr, "mstrip + row", "col", c_row_s, c_col_s, N)
+        lines.append(f"            {c_store_addr} = ({c_msl_type})({out});")
+        lines.append("        }")
+        return lines
 
     def _lower_row_wise_sort_template(self, info) -> str:
         """Emit a per-row bitonic sort / top-k kernel.

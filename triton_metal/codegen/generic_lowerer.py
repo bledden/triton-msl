@@ -600,6 +600,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 self._prescan_stores()
                 return msl
 
+        # Fused matmul + pointwise/broadcast epilogue (bias, activation, scale,
+        # chains). Same staged vehicle as softmax; the epilogue op chain is
+        # lowered per-element on the staged tg_C. Checked after softmax (which
+        # claims the reduce-bearing case) and before simple_dot (whose #157
+        # epilogue-refusal is the catch-all for anything not matched here). #158.
+        matmul_epilogue_info = self._detect_matmul_epilogue()
+        if matmul_epilogue_info:
+            msl = self._lower_matmul_softmax_template(matmul_epilogue_info)
+            if msl is not None:
+                self._prescan_stores()
+                return msl
+
         # Check for simple dot (no stride args, no scf.for) — use inline
         # scalar matmul that loads from global into shared memory, then
         # does per-thread dot product.

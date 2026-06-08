@@ -77,3 +77,25 @@ refused pointwise-epilogue case now matches the new detector.
   still REFUSES (no silent-wrong); oversized N refuses cleanly.
 - Regression: pure matmul still simple_dot; matmul→softmax still softmax.
 - Full `test_core` sweep 4326/0 (fresh `~/.cache/triton_metal`).
+
+## Implementation outcome (2026-06-07)
+
+Implemented as designed. Two notes vs the spec:
+
+1. The factored generic emitters (`_emit_binary` etc.) turned out to be
+   entangled with the lowerer's MEPT register-array / shared-memory / layout
+   machinery — driving them from a per-element loop was high-risk. So the
+   epilogue loop reuses the op->MSL DISPATCH MAPPING (same operators/functions
+   the generic dispatch maps each op to) applied per element, and reuses
+   `_lower_constant` for literals. Same general coverage, far lower risk.
+
+2. Triton FUSES a trailing `acc + bias` into the dot's accumulator operand
+   (`tt.dot %a, %b, %bias_broadcast`), so the bias is the dot's 3rd operand,
+   NOT a post-dot op. The detector now also inspects `dot.operand_ids[2]`: a
+   zero constant is the plain init (ignored); a broadcast-of-load is a bias
+   (col for (N,), row for (M,1)) added back in the epilogue seed
+   `tg_C[i] + bias[col]`; anything else refuses.
+
+Verified: tests/test_matmul_epilogue.py (scale, relu, bias+relu linear layer,
+chained scale->relu->clamp, and an unsupported reduce epilogue still refuses) —
+all pass; project suite 591/0; full test_core sweep pending.

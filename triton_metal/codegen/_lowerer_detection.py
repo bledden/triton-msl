@@ -17,6 +17,17 @@ from triton_metal.codegen.mlir_walker import SSAValue, _extract_shape
 from triton_metal.codegen._lowerer_helpers import _mlir_to_triton_dtype
 
 
+# Epilogue ops that don't compute a new value — they only reshape the layout or
+# round the representation. In the per-element fused-epilogue loop they resolve
+# to their operand's expression (no emitted statement). Output dtype casts are
+# absorbed by the final store's cast. #158.
+_EPI_PASSTHROUGH = frozenset({
+    "tt.splat", "tt.broadcast", "tt.expand_dims", "tt.reshape",
+    "ttg.convert_layout", "arith.truncf", "arith.extf",
+    "arith.sitofp", "arith.fptosi",
+})
+
+
 class _DetectionMixin:
     """Pattern-detection predicates for GenericLowerer.
 
@@ -549,6 +560,193 @@ class _DetectionMixin:
             "c_row_stride": c_row_s, "c_col_stride": c_col_s,
         }
 
+    # Ops a fused matmul epilogue may apply to the dot result. Pointwise /
+    # broadcast / cast / layout only — NO reduce/scan (softmax has its own
+    # path; anything else falls through to the #157 refusal). #158.
+    _EPILOGUE_ALLOWED = frozenset({
+        "arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf",
+        "arith.maximumf", "arith.minimumf", "arith.maxnumf", "arith.minnumf",
+        "math.exp", "math.exp2", "math.log", "math.log2", "math.sqrt",
+        "math.rsqrt", "math.sin", "math.cos", "math.erf", "math.tanh",
+        "math.floor", "math.ceil", "math.fma", "math.absf",
+        "arith.truncf", "arith.extf", "arith.sitofp", "arith.fptosi",
+        "tt.splat", "tt.broadcast", "tt.expand_dims", "tt.reshape",
+        "ttg.convert_layout", "arith.constant", "tt.load", "tt.clampf",
+    })
+
+    def _detect_matmul_epilogue(self):
+        """Detect matmul -> pointwise/broadcast epilogue -> store (#158).
+
+        Same staged vehicle as _detect_matmul_softmax, but the epilogue is a
+        GENERAL elementwise/broadcast op chain (scale, bias, activation, ...)
+        rather than the hardcoded softmax. Returns the softmax-style info dict
+        plus ``epilogue_ops`` (topologically ordered), ``bias_ptr`` (or None),
+        and ``store_value_id``; or None if not matched, or if any op on the
+        dot->store path is outside _EPILOGUE_ALLOWED (those keep falling
+        through to the #157 refusal — never silently dropped).
+
+        Checked AFTER _detect_matmul_softmax in lower(), so a reduce-bearing
+        softmax kernel is already claimed; what reaches here has no reduce.
+        """
+        dot_ssa = None
+        for ssa in self.graph.ops:
+            if ssa.op == "tt.dot":
+                if dot_ssa is not None:
+                    return None
+                dot_ssa = ssa
+        if dot_ssa is None or len(dot_ssa.operand_ids) < 2:
+            return None
+
+        a_type = self._find_op_type_str(dot_ssa.operand_ids[0])
+        b_type = self._find_op_type_str(dot_ssa.operand_ids[1])
+        a_shape = _extract_shape(a_type) if a_type else None
+        b_shape = _extract_shape(b_type) if b_type else None
+        if (not a_shape or not b_shape
+                or len(a_shape) != 2 or len(b_shape) != 2):
+            return None
+        M, K = a_shape
+        K2, N = b_shape
+        if K != K2:
+            return None
+
+        by_id0 = {ssa.id: ssa for ssa in self.graph.ops}
+
+        # tt.dot's 3rd operand is the accumulator INIT. Triton fuses a trailing
+        # `acc + bias` into it, so a non-zero init = a bias added to the matmul
+        # result BEFORE the epilogue. Recognise a broadcast-of-load (a (N,) col
+        # bias or (M,1) row bias); a zero constant is the plain init (ignore);
+        # anything else is an unsupported accumulator -> bail (#157 refuses).
+        acc_bias_ptr = None
+        acc_bias_dim = None
+        if len(dot_ssa.operand_ids) >= 3:
+            acc = by_id0.get(dot_ssa.operand_ids[2])
+
+            def _is_zero_const(op):
+                if op is None or op.op != "arith.constant":
+                    return False
+                v = op.attrs.get("value")
+                try:
+                    return float(str(v).strip()) == 0.0
+                except (TypeError, ValueError):
+                    return "0.0" in str(v) or str(v) in ("0", "false")
+
+            if acc is not None and not _is_zero_const(acc):
+                cur = acc
+                axis = None
+                for _ in range(6):
+                    if cur is None:
+                        break
+                    if cur.op in ("tt.broadcast", "ttg.convert_layout",
+                                  "tt.reshape"):
+                        cur = by_id0.get(cur.operand_ids[0]) if cur.operand_ids else None
+                        continue
+                    if cur.op == "tt.expand_dims":
+                        axis = cur.attrs.get("axis")
+                        cur = by_id0.get(cur.operand_ids[0]) if cur.operand_ids else None
+                        continue
+                    break
+                if cur is not None and cur.op == "tt.load" and cur.operand_ids:
+                    bptr = self._trace_ptr_source(cur.operand_ids[0], by_id0)
+                    if bptr is None:
+                        return None
+                    acc_bias_ptr = bptr.name
+                    acc_bias_dim = "col" if str(axis) in ("0",) else "row"
+                else:
+                    return None   # non-zero, non-bias accumulator: unsupported
+
+        # Walk BACKWARD from the single tt.store's value, collecting the
+        # epilogue input cone and stopping at the dot (the matmul result is the
+        # seed). Backward — not forward from the dot — because a bias enters via
+        # an independent tt.load that is NOT a consumer of the dot. Every op in
+        # the cone must be allow-listed (else bail -> #157 refuses loudly).
+        by_id = {ssa.id: ssa for ssa in self.graph.ops}
+        stores = [s for s in self.graph.ops if s.op == "tt.store"]
+        if len(stores) != 1 or len(stores[0].operand_ids or []) < 2:
+            return None
+        store = stores[0]
+        # tt.store operands are (ptr, value[, mask]) — the stored value is [1].
+        store_value_id = store.operand_ids[1]
+        epilogue_ids = set()
+        reached_dot = False
+        has_compute = False
+        seen = set()
+        frontier = [store_value_id]
+        while frontier:
+            vid = frontier.pop()
+            if vid in seen:
+                continue
+            seen.add(vid)
+            if vid == dot_ssa.id:
+                reached_dot = True
+                continue                 # leaf: the matmul result (seeded later)
+            op = by_id.get(vid)
+            if op is None:
+                continue                 # kernel / block arg leaf
+            if op.op == "tt.dot":
+                continue
+            if op.op not in self._EPILOGUE_ALLOWED:
+                return None              # unsupported epilogue op
+            epilogue_ids.add(op.id)
+            if op.op not in _EPI_PASSTHROUGH and op.op not in (
+                    "arith.constant", "tt.load"):
+                has_compute = True
+            frontier.extend(op.operand_ids or [])
+        if not reached_dot or not has_compute:
+            return None                  # store doesn't derive from dot, or
+                                         # pure matmul (no real epilogue)
+
+        # A bias / extra input enters via a tt.load inside the epilogue. Collect
+        # its pointer arg (we index it per element in the template).
+        bias_ptr = None
+        for eid in epilogue_ids:
+            if by_id[eid].op == "tt.load":
+                bptr = self._trace_ptr_source(
+                    by_id[eid].operand_ids[0], by_id) if by_id[eid].operand_ids else None
+                if bptr is not None:
+                    if bias_ptr is not None and bias_ptr.name != bptr.name:
+                        return None       # >1 extra input not supported yet
+                    bias_ptr = bptr
+
+        ptr_args = [a for a in self.graph.args if a.is_ptr]
+        scalar_args = [a for a in self.graph.args if not a.is_ptr]
+        if len(ptr_args) < 3:
+            return None
+        a_ptr = ptr_args[0]
+        b_ptr = ptr_args[1]
+        c_ptr = ptr_args[-1]
+
+        def _strides_after(ptr_arg):
+            row = col = None
+            for a in scalar_args:
+                if a.index == ptr_arg.index + 1:
+                    row = a.name
+                elif a.index == ptr_arg.index + 2:
+                    col = a.name
+            return row, col
+
+        a_row_s, a_col_s = _strides_after(a_ptr)
+        b_row_s, b_col_s = _strides_after(b_ptr)
+        c_row_s, c_col_s = _strides_after(c_ptr)
+
+        # Topologically-ordered epilogue ops (graph order is topo).
+        epilogue_ops = [ssa for ssa in self.graph.ops if ssa.id in epilogue_ids]
+
+        return {
+            "M": M, "N": N, "K": K,
+            "a_ptr": a_ptr.name, "b_ptr": b_ptr.name, "c_ptr": c_ptr.name,
+            "a_elem": a_ptr.elem_type, "b_elem": b_ptr.elem_type,
+            "c_elem": c_ptr.elem_type,
+            "a_row_stride": a_row_s, "a_col_stride": a_col_s,
+            "b_row_stride": b_row_s, "b_col_stride": b_col_s,
+            "c_row_stride": c_row_s, "c_col_stride": c_col_s,
+            # epilogue-specific:
+            "epilogue_ops": epilogue_ops,
+            "dot_id": dot_ssa.id,
+            "bias_ptr": bias_ptr.name if bias_ptr else None,
+            "acc_bias_ptr": acc_bias_ptr,      # bias fused into the dot's init
+            "acc_bias_dim": acc_bias_dim,      # "col" (N,) or "row" (M,1)
+            "store_value_id": store_value_id,
+        }
 
     def _detect_permute_chained_reduce(self):
         """Detect ``load(In) -> trans(perm) -> sum-reduce* -> store(Out)``.
