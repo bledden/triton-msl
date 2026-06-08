@@ -268,9 +268,20 @@ class _TemplateMixin:
         # Number of row tiles per MMA step (BLOCK_M / 8)
         n_row_tiles = BLOCK_M // 8
 
+        # The (edge-only) staged path stages just 8 deep per K step rather than
+        # BLOCK_K deep. The matmul is identical (it accumulates over the full K
+        # either way), but the threadgroup footprint drops from BLOCK_M*BLOCK_K
+        # + BLOCK_K*BLOCK_N to BLOCK_M*8 + 8*BLOCK_N — and since that static
+        # allocation also caps the FAST direct path's occupancy (Metal reserves
+        # threadgroup memory whether or not the direct branch touches it),
+        # shrinking it lifts aligned-matmul throughput ~13% (#156). The deep
+        # K-tiling that mattered for the old staging-bound kernel is irrelevant
+        # here: the fast path doesn't stage at all.
+        STAGE_DEPTH = 8
+
         # Threadgroup memory sizes
-        tg_a_size = BLOCK_M * BLOCK_K
-        tg_b_size = BLOCK_K * BLOCK_N
+        tg_a_size = BLOCK_M * STAGE_DEPTH
+        tg_b_size = STAGE_DEPTH * BLOCK_N
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -445,20 +456,18 @@ class _TemplateMixin:
 
         # Staged path: cooperative masked load through threadgroup memory —
         # handles partial M/N/K tiles (and is the only path for half output).
-        # K-loop: iterate over K in steps of BLOCK_K
-        lines.append(f"    for (uint _k = 0u; _k < _K; _k += {BLOCK_K}u) {{")
+        # Stages STAGE_DEPTH(8) deep per K step (small tg footprint, see above).
+        lines.append(f"    for (uint _k = 0u; _k < _K; _k += {STAGE_DEPTH}u) {{")
         lines.append(f"")
 
-        # Cooperative load A tile (BLOCK_M x BLOCK_K) from global memory
-        lines.append(f"        // Load A tile ({BLOCK_M}x{BLOCK_K})")
+        # Cooperative masked load A tile (BLOCK_M x STAGE_DEPTH).
         lines.append(f"        for (uint i = tiitg; i < {tg_a_size}u; i += 128u) {{")
-        lines.append(f"            uint r = i / {BLOCK_K}u, c = i % {BLOCK_K}u;")
+        lines.append(f"            uint r = i / {STAGE_DEPTH}u, c = i % {STAGE_DEPTH}u;")
         lines.append(f"            uint gr = row_base + r, gc = _k + c;")
         lines.append(f"            tg_A[i] = (gr < _M && gc < _K) ? {stage_cast}({a_name}[gr * _K + gc]) : {pad};")
         lines.append(f"        }}")
 
-        # Cooperative load B tile (BLOCK_K x BLOCK_N) from global memory
-        lines.append(f"        // Load B tile ({BLOCK_K}x{BLOCK_N})")
+        # Cooperative masked load B tile (STAGE_DEPTH x BLOCK_N).
         lines.append(f"        for (uint i = tiitg; i < {tg_b_size}u; i += 128u) {{")
         lines.append(f"            uint r = i / {BLOCK_N}u, c = i % {BLOCK_N}u;")
         lines.append(f"            uint gr = _k + r, gc = col_base + c;")
@@ -467,20 +476,17 @@ class _TemplateMixin:
         lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append(f"")
 
-        # Inner MMA: iterate BLOCK_K in steps of 8
-        lines.append(f"        // MMA across BLOCK_K in steps of 8")
-        lines.append(f"        for (uint kk = 0u; kk < {BLOCK_K}u; kk += 8u) {{")
+        # One STAGE_DEPTH(8)-deep MMA step over the staged tiles.
         for c in range(col_tiles):
             g = _col_guard(c)
             pfx = f"if ({g}) " if g else ""
-            lines.append(f"            {pfx}simdgroup_load(b_frag{c}, tg_B + kk * {BLOCK_N}u + sgitg * {cols_per_sg}u + {c * 8}u, {BLOCK_N});")
+            lines.append(f"        {pfx}simdgroup_load(b_frag{c}, tg_B + sgitg * {cols_per_sg}u + {c * 8}u, {BLOCK_N});")
         for t in range(n_row_tiles):
-            lines.append(f"            simdgroup_load(a_frag, tg_A + {t}u * 8u * {BLOCK_K}u + kk, {BLOCK_K});")
+            lines.append(f"        simdgroup_load(a_frag, tg_A + {t}u * 8u * {STAGE_DEPTH}u, {STAGE_DEPTH});")
             for c in range(col_tiles):
                 g = _col_guard(c)
                 pfx = f"if ({g}) " if g else ""
-                lines.append(f"            {pfx}simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
-        lines.append(f"        }}")
+                lines.append(f"        {pfx}simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
         lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append(f"    }} // K-loop")
         lines.append(f"")

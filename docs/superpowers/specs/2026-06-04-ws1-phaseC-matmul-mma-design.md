@@ -363,3 +363,29 @@ not an integrity gap.
 Six reachable silent-wrong/false-pass bugs found and fixed across the inline
 matmul lowering this session (BLOCK_N>32, fp16-output race, partial-N store
 wrap, BLOCK_N<32 false-pass, softmax-drop routing, epilogue-drop).
+
+## C.2 #156: inline matmul occupancy — low-risk 8-deep staging
+
+Profiling refined the inline-vs-MLX gap: at GPU-bound sizes the inline path was
+~0.84x MLX (not the wall-clock 0.64x). Root cause confirmed by the standalone
+comparison — the standalone fast kernel (SAME 16 accumulators / register
+pressure, but NO threadgroup memory) hits 14.28 TFLOP/s @ 4096 vs the inline
+path's 11-12; the differentiator is the static threadgroup allocation, which
+Metal reserves and which caps occupancy even on the FAST direct branch (the
+branch never touches tg, but the kernel still declares it).
+
+A shrink-tg experiment quantified it (4096^3): 11 KB tg -> 11.18 TFLOP/s;
+~0 tg -> 13.09; standalone 0 tg -> 14.28. So most of the gap is recoverable by
+shrinking the static footprint — no launch-path change.
+
+Fix (low risk): the edge-only staged path now stages STAGE_DEPTH=8 deep per K
+step instead of BLOCK_K deep. The matmul is identical (it accumulates over the
+full K either way); tg drops from BLOCK_M*BLOCK_K + BLOCK_K*BLOCK_N to
+BLOCK_M*8 + 8*BLOCK_N (~11 KB -> ~3.5 KB). Result: inline 4096^3 11.18 ->
+12.68 TFLOP/s (+13%, ~0.87x MLX), correctness preserved (partial tiles /
+fp16-output / small BLOCK_N all green), test_core 4326/0.
+
+Residual to full parity (~0.87x -> ~0.98x) is the remaining 3.5 KB tg, only
+fully removable by zero-tg-for-aligned (dynamic threadgroup length or a
+two-kernel split selected in the driver by runtime alignment) — a high-risk
+launch-path change for ~13% more. Deferred unless that last bit is needed.
