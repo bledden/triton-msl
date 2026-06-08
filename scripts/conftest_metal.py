@@ -9,6 +9,8 @@ Also patches:
 - check_type_supported → skip CUDA capability checks
 """
 
+import os
+
 import pytest
 import torch
 
@@ -166,7 +168,7 @@ UNSUPPORTED_PRECISIONS = {
 # exactly one of three buckets:
 #
 #   (1) HARDWARE-IMPOSSIBLE — Apple GPU lacks the unit (fp8 bias variants,
-#       fp64, tf32, int64 compute, device-side printf/assert, TMA). Will
+#       fp64, tf32, 64-bit atomics, device-side printf/assert, TMA). Will
 #       never pass; not a backend defect.
 #   (2) UPSTREAM/ENV BUG, NOT OURS — the failure originates in Triton's
 #       CUDA-only test harness or a Python-3.14 tooling regression
@@ -404,7 +406,10 @@ UNIMPLEMENTED_FEATURES = {
     "test_tl_range_fuse",
     "test_tl_range_fuse_dependent",
     "test_tl_range_num_stages",
-    # i64 compute — Metal GPU pipeline compiler doesn't support int64
+    # int64 loop induction variable: HANGS (re-verified, audit #163) — the i64
+    # loop bound/step lowering does not terminate, wedging the run. Genuine gap
+    # (not "no int64 support" — scalar int64 compute works); keep skipped until
+    # the i64 loop-var lowering is fixed.
     "test_for_iv",
     # "test_if_call[jit_if]",  # Enabled: early return / cf.cond_br now works
     # "test_num_warps_pow2",  # Enabled: validation added to parse_options
@@ -464,8 +469,19 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_unsupported)
             continue
 
-        # Skip 64-bit integer tests (Metal GPU doesn't support int64 compute)
-        if "int64" in test_id or "uint64" in test_id:
+        # int64/uint64 compute IS supported (elementwise, comparison — width-
+        # correct since the arith.cmpi fix — cast, load/store, indexing: ~1047
+        # upstream test_core cases pass). What remains unimplemented is i64 SIMD
+        # reduction (no metal simd_sum/simd_max/simd_min overload for `long`)
+        # and where/transpose on i64; those raise a loud Metal COMPILE error
+        # (not silent-wrong), so skip just those op-families honestly rather
+        # than blanket-claiming "no int64 support". Override with METAL_TEST_INT64=1
+        # to exercise them. Audit #163.
+        _I64_UNIMPLEMENTED = ("test_reduce1d", "test_reduce2d",
+                              "test_where", "test_transpose")
+        if (("int64" in test_id or "uint64" in test_id)
+                and func_name in _I64_UNIMPLEMENTED
+                and not os.environ.get("METAL_TEST_INT64")):
             item.add_marker(skip_unsupported)
             continue
 
