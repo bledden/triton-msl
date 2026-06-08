@@ -681,7 +681,13 @@ class _DetectionMixin:
                 continue                 # leaf: the matmul result (seeded later)
             op = by_id.get(vid)
             if op is None:
-                continue                 # kernel / block arg leaf
+                # A non-dot leaf in the VALUE cone is a kernel/block arg the
+                # per-element emitter can't lower (e.g. a runtime scalar scale
+                # entering via tt.splat). Resolving it to 0.0f would be silently
+                # wrong, so refuse -> the #157 catch-all rejects loudly. (Bias
+                # POINTERS never reach here: their address goes through tt.addptr,
+                # which isn't allow-listed and bails above.)
+                return None
             if op.op == "tt.dot":
                 continue
             if op.op not in self._EPILOGUE_ALLOWED:

@@ -123,3 +123,25 @@ def test_matmul_unsupported_epilogue_still_refuses():
         _mm_rowreduce[(1,)](a, b, c, M=M, N=N, K=K)
     assert ("epilogue" in str(ei.value).lower()
             or "MetalNonRecoverable" in type(ei.value).__name__)
+
+
+if HAS:
+    @triton.jit
+    def _mm_scale_runtime_arg(A, B, C, alpha, M: tl.constexpr, N: tl.constexpr,
+                              K: tl.constexpr):
+        om = tl.arange(0, M); on = tl.arange(0, N); ok = tl.arange(0, K)
+        a = tl.load(A + om[:, None] * K + ok[None, :])
+        b = tl.load(B + ok[:, None] * N + on[None, :])
+        tl.store(C + om[:, None] * N + on[None, :], tl.dot(a, b) * alpha)
+
+
+@requires_metal
+def test_matmul_runtime_scalar_epilogue_refuses_not_silentwrong():
+    # An epilogue that scales by a RUNTIME scalar arg (not a constant) cannot be
+    # lowered by the per-element emitter (the scalar is a kernel-arg leaf). It
+    # must REFUSE LOUDLY (MetalNonRecoverableError), never silently resolve the
+    # scalar to 0 (-> wrong output) nor crash the MSL compiler. #158 integrity.
+    from triton_metal.errors import MetalNonRecoverableError
+    a, b = _ab(); c = torch.zeros(M, N)
+    with pytest.raises(MetalNonRecoverableError):
+        _mm_scale_runtime_arg[(1,)](a, b, c, 2.5, M=M, N=N, K=K)
