@@ -31,6 +31,14 @@ def ty_to_cpp(ty):
     }[ty]
 
 
+# Two-kernel-split matmul (#159): when a metallib carries both a staged matmul
+# kernel and its pure-direct (no-threadgroup) variant, load_binary resolves both
+# and records the direct pipeline here, keyed by id() of the primary (staged)
+# pipeline. The launcher looks it up to dispatch the direct kernel for
+# fully-aligned matmuls (max occupancy / MLX parity).
+_MM_DIRECT_PIPELINES = {}
+
+
 class MetalUtils:
     """Manages Metal device, command queue, and kernel dispatch.
 
@@ -190,6 +198,22 @@ class MetalUtils:
         # ``NUM_REGS // (n_regs * ...)`` to estimate occupancy.
         n_regs = 32
         n_spills = 0
+
+        # Two-kernel split (#159): if the metallib also defines a pure-direct
+        # matmul variant, resolve its pipeline and stash it so the launcher can
+        # dispatch it for fully-aligned matmuls. Cheap no-op for other kernels
+        # (newFunctionWithName_ returns None when absent).
+        try:
+            direct_fn = library.newFunctionWithName_(name + "__mmdirect")
+            if direct_fn is not None:
+                direct_ps, derr = (
+                    self.device.newComputePipelineStateWithFunction_error_(
+                        direct_fn, None))
+                if derr is None and direct_ps is not None:
+                    _MM_DIRECT_PIPELINES[id(pipeline_state)] = direct_ps
+        except Exception:
+            pass
+
         return library, pipeline_state, n_regs, n_spills, n_max_threads
 
     def launch(
@@ -698,14 +722,35 @@ class MetalLauncher:
             grid = (gridX * gridY * gridZ, 1, 1)
         threadgroup_size = (threads_per_tg, 1, 1)
 
+        # Two-kernel split (#159): for a fully-aligned float matmul, dispatch the
+        # pure-direct (no-threadgroup) kernel instead of the staged one — same
+        # grid, max occupancy. Falls back to the staged kernel on any
+        # uncertainty (different size, non-aligned, read error). Other kernels
+        # have no descriptor and are unaffected.
+        dispatch_fn = function
+        mm_two = kernel_metadata[6] if (
+            kernel_metadata and len(kernel_metadata) > 6) else None
+        if mm_two is not None:
+            direct_ps = _MM_DIRECT_PIPELINES.get(id(function))
+            if direct_ps is not None:
+                try:
+                    _M = int(flat_args[mm_two["m_idx"]])
+                    _N = int(flat_args[mm_two["n_idx"]])
+                    _K = int(flat_args[mm_two["k_idx"]])
+                    if (_M % mm_two["block_m"] == 0 and _N % mm_two["block_n"] == 0
+                            and _K % 8 == 0):
+                        dispatch_fn = direct_ps
+                except Exception:
+                    dispatch_fn = function
+
         if utils.batch_active:
             # Batched mode: encode dispatch, defer copy-back until flush()
-            utils.launch(function, grid, threadgroup_size, buffers)
+            utils.launch(dispatch_fn, grid, threadgroup_size, buffers)
             if tensor_copies or pool_releases:
                 utils.defer_copy_back(tensor_copies, pool_releases)
         else:
             # Immediate mode: dispatch, wait, copy-back
-            utils.launch(function, grid, threadgroup_size, buffers)
+            utils.launch(dispatch_fn, grid, threadgroup_size, buffers)
 
             # Copy results back from Metal buffers to tensor memory.
             for entry in tensor_copies:

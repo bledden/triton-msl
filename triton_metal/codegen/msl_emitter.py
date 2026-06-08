@@ -520,6 +520,8 @@ def emit_msl(mod, metadata, options):
             # Flag whether the kernel uses multi-axis program_id (needs 2D/3D grid)
             used_axes = getattr(lowerer, '_used_pid_axes', {0})
             metadata["needs_2d_grid"] = max(used_axes) > 0 if used_axes else False
+            # Two-kernel-split matmul descriptor (#159); None for other kernels.
+            metadata["mm_two_kernel"] = getattr(lowerer, "_mm_two_kernel", None)
             _mept_path_log("primary", metadata.get("name", "?"))
             return msl_src
 

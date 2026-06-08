@@ -389,3 +389,32 @@ Residual to full parity (~0.87x -> ~0.98x) is the remaining 3.5 KB tg, only
 fully removable by zero-tg-for-aligned (dynamic threadgroup length or a
 two-kernel split selected in the driver by runtime alignment) — a high-risk
 launch-path change for ~13% more. Deferred unless that last bit is needed.
+
+## C.2 #159: inline matmul to MLX parity — two-kernel split (after dynamic-tg dead end)
+
+The residual to parity (0.87x -> ~1.0x) is the ~3.5KB static tg capping the
+direct path's occupancy. Two attempts:
+
+1. DYNAMIC THREADGROUP MEMORY (reverted). Bind the staging as one host-sized
+   [[threadgroup(0)]] buffer; launcher sets length 0 for fully-aligned float
+   dispatches (which take the direct path and never touch tg). Correct, but NO
+   perf gain (12.70 vs 12.68): Metal/AGX caps occupancy by a kernel's
+   compile-time tg usage (the staged path's accesses), not the per-dispatch
+   host length. Setting length 0 doesn't free occupancy when the kernel CODE
+   still contains the staged path. Reverted (no benefit, launcher risk).
+
+2. TWO-KERNEL SPLIT (kept). Emit a SEPARATE pure-direct kernel `<name>__mmdirect`
+   whose CODE has zero threadgroup memory (no staged path, no full-tile guard —
+   the launcher only dispatches it when aligned). Plumbing: lowerer emits both +
+   a dispatch descriptor (block_m/n, M/N/K arg indices); compiler threads it as
+   kernel_metadata[6]; load_binary resolves the direct pipeline and stashes it
+   keyed by id(primary); the launcher reads M/N/K from flat_args, and for a
+   fully-aligned float matmul dispatches the direct kernel (same grid), else the
+   staged kernel. Safety: any uncertainty (size mismatch, non-aligned, read
+   error) falls back to the staged kernel — never wrong.
+
+Result (fp16, thermally-throttled bench so absolute TFLOP/s low; RATIO is the
+signal): 4096^3 reaches ~1.03x MLX (parity+), up from 0.87x. The dynamic-tg
+result PROVED only a separate no-tg kernel recovers the occupancy — confirmed.
+Correctness: aligned -> direct kernel, partial/odd-K/half -> staged kernel, both
+verified (test_matmul_block_n) + full test_core sweep.

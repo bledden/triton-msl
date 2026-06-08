@@ -522,6 +522,57 @@ class _TemplateMixin:
 
         lines.append(f"}}")
 
+        # Two-kernel split (#159): when M/N/K are runtime args and the output is
+        # float, ALSO emit a standalone pure-direct kernel whose CODE contains no
+        # threadgroup memory at all -> max occupancy -> MLX parity. The launcher
+        # dispatches it for fully-aligned dispatches (every tile takes the direct
+        # path); the staged kernel above handles partial/odd-K/half. (The
+        # dynamic-threadgroup approach failed: Metal/AGX caps occupancy by a
+        # kernel's compile-time tg usage, not the per-dispatch host length, so
+        # only a SEPARATE no-tg kernel recovers the residual occupancy.)
+        _argnames = [a.name for a in self.graph.args]
+        if (output_msl_type == "float" and has_M and has_N and has_K
+                and "M" in _argnames and "N" in _argnames and "K" in _argnames):
+            dn = f"{safe_name}__mmdirect"
+            lines.append("")
+            lines.append(f"kernel void {dn}(")
+            lines.append(",\n".join(arg_decls) + ",")
+            lines.append(f"    uint3 pid3 [[threadgroup_position_in_grid]],")
+            lines.append(f"    uint sgitg [[simdgroup_index_in_threadgroup]],")
+            lines.append(f"    uint tiitg [[thread_index_in_threadgroup]]")
+            lines.append(f") {{")
+            for arg in all_scalar_args:
+                lines.append(f"    int {arg.name} = {arg.name}_buf[0];")
+            lines.append(f"    uint pid_m = pid3.x, pid_n = pid3.y;")
+            lines.append(f"    uint _M = (uint)M, _N = (uint)N, _K = (uint)K;")
+            lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
+            lines.append(f"    uint col_base = pid_n * {BLOCK_N}u;")
+            lines.append(f"    {acc_frag} {', '.join(n + '(0)' for n in all_accs)};")
+            lines.append(f"    {in_frag} a_frag, {', '.join(b_names)};")
+            lines.append(f"    for (uint k = 0u; k < _K; k += 8u) {{")
+            for c in range(col_tiles):
+                g = _col_guard(c)
+                pfx = f"if ({g}) " if g else ""
+                lines.append(f"        {pfx}simdgroup_load(b_frag{c}, {b_name} + k * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+            for t in range(n_row_tiles):
+                lines.append(f"        simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * _K + k, _K);")
+                for c in range(col_tiles):
+                    g = _col_guard(c)
+                    pfx = f"if ({g}) " if g else ""
+                    lines.append(f"        {pfx}simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});")
+            lines.append(f"    }}")
+            for t in range(n_row_tiles):
+                for c in range(col_tiles):
+                    g = _col_guard(c)
+                    pfx = f"if ({g}) " if g else ""
+                    lines.append(f"    {pfx}simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+            lines.append(f"}}")
+            self._mm_two_kernel = {
+                "direct_name": dn, "block_m": BLOCK_M, "block_n": BLOCK_N,
+                "m_idx": _argnames.index("M"), "n_idx": _argnames.index("N"),
+                "k_idx": _argnames.index("K"),
+            }
+
         return "\n".join(lines)
 
 
