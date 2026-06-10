@@ -1,4 +1,7 @@
 """Tests for the data-driven C++ family allowlist (Phase 1, T1)."""
+import json
+import os
+
 import triton  # noqa: F401
 
 
@@ -22,6 +25,15 @@ def test_dot_not_default_on(monkeypatch):
     monkeypatch.delenv("TRITON_METAL_USE_CPP", raising=False)
     assert MetalBackend._has_complex_ops("  %0 = tt.dot %a, %b") is True
     assert MetalBackend._has_complex_ops("  %0 = tt.reduce %a") is True
+
+
+def test_coverage_report_matches_enabled():
+    """reports/cpp_coverage.json must mirror the in-code ENABLED set."""
+    from triton_metal.backend.cpp_families import ENABLED
+    report = os.path.join(os.path.dirname(__file__), os.pardir,
+                          "reports", "cpp_coverage.json")
+    with open(report) as f:
+        assert sorted(json.load(f)["enabled"]) == sorted(ENABLED)
 
 
 def test_use_cpp_optin_keeps_legacy_surface(monkeypatch):

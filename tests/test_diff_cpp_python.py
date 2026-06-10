@@ -4,7 +4,11 @@ Each path runs in its own subprocess (fresh cache dir, fresh process state)
 and saves the kernel output buffer; the parent byte-compares the two .npy
 files. Skips entirely when the C++ pass library isn't built.
 """
-import os, subprocess, sys, tempfile
+import os
+import subprocess
+import sys
+import tempfile
+
 import numpy as np
 import pytest
 import triton  # noqa: F401  (backend discovery before triton_metal imports)
@@ -34,6 +38,8 @@ def _run(out, force_python):
     subprocess.run([sys.executable, "-c", KERNEL, out], check=True, env=env, timeout=180)
 
 def test_elementwise_matches():
-    a, b = tempfile.mktemp(".npy"), tempfile.mktemp(".npy")
-    _run(a, True); _run(b, False)
-    np.testing.assert_array_equal(np.load(a), np.load(b))
+    with tempfile.TemporaryDirectory() as d:
+        a, b = os.path.join(d, "a.npy"), os.path.join(d, "b.npy")
+        _run(a, True)
+        _run(b, False)
+        np.testing.assert_array_equal(np.load(a), np.load(b))
