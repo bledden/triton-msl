@@ -543,13 +543,27 @@ def emit_msl(mod, metadata, options):
         )
         _mept_path_log("fallback-exception", str(e)[:80])
 
-    # Legacy fallback: text-based parser + pattern matchers
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    return _legacy_fallback(str(mod), metadata, options,
+                            "generic lowerer could not lower this kernel")
 
-    ir_text = str(mod)
+
+def _legacy_fallback(ir_text, metadata, options, reason):
+    """Legacy text-based parser — OPT-IN only (Phase 0 T4).
+
+    The heuristic parser can emit plausible-but-wrong kernels (it has produced
+    verified silent-wrongs). By default an unlowerable kernel REFUSES; set
+    TRITON_METAL_LEGACY=1 to accept the risk for debugging.
+    """
+    import os
+    if os.environ.get("TRITON_METAL_LEGACY") != "1":
+        from triton_metal.errors import MetalNonRecoverableError
+        raise MetalNonRecoverableError(
+            f"Refusing to emit possibly-wrong output: {reason}, and the legacy "
+            "text parser is heuristic (has produced silent-wrongs). Set "
+            "TRITON_METAL_LEGACY=1 to opt in for debugging.")
+    from triton_metal.codegen.ttgir_parser import parse_ttgir
     kernel_name = _extract_kernel_name(ir_text)
     metadata["name"] = _sanitize_msl_name(kernel_name)
-
     kb = parse_ttgir(ir_text, options)
     metadata["block_size"] = kb.block_size
     return kb.build()

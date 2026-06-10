@@ -57,3 +57,31 @@ def test_i64_compare_above_bit32():
     _i64_lt_unsigned[(1,)](x, o, N=8)
     ref = (x.numpy() < 4_000_000_000).astype(np.int32)
     np.testing.assert_array_equal(o.numpy(), ref)
+
+
+@requires_metal
+def test_i64_loop_bounds_refuse_not_hang():
+    # i64 scf.for induction lowering does not terminate (test_for_iv hang).
+    # Until implemented it must refuse loudly, not hang. Run in a subprocess
+    # with a hard timeout so a regression cannot wedge the suite/GPU.
+    import subprocess, sys, os
+    code = (
+        "import os; os.environ.setdefault('TRITON_DEFAULT_BACKEND','metal')\n"
+        "import torch, triton, triton.language as tl\n"
+        "@triton.jit\n"
+        "def k(O, lo, hi, N: tl.constexpr):\n"
+        "    s = tl.zeros((N,), tl.int64)\n"
+        "    for i in range(lo, hi):\n"
+        "        s += i\n"
+        "    tl.store(O + tl.arange(0, N), s)\n"
+        "o = torch.zeros(8, dtype=torch.int64)\n"
+        "try:\n"
+        "    k[(1,)](o, 2**33, 2**33 + 4, N=8)\n"
+        "    print('RAN')\n"
+        "except Exception as e:\n"
+        "    print('REFUSED' if 'NonRecoverable' in type(e).__name__ else 'OTHER:' + type(e).__name__)\n"
+    )
+    env = dict(os.environ, PYTHONPATH=os.getcwd())
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, timeout=60, env=env)
+    assert "REFUSED" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr[-400:]!r}"

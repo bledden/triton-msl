@@ -38,3 +38,5 @@ reports/upstream_test_core_raw.txt
 reports/hw_harness/
 .cache/
 .claude/
+compile_commands.json
+triton_metal/csrc/.cache/

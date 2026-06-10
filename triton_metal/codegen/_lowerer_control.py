@@ -45,6 +45,16 @@ class _ControlFlowMixin:
         if len(ssa.operand_ids) < 3:
             return
 
+        # i64 loop bounds: the induction lowering assumes 32-bit and does not
+        # terminate for 64-bit ranges (the test_for_iv hang). No correct
+        # lowering exists yet — refuse loudly rather than hang (Phase 0 T3).
+        for bid in ssa.operand_ids[:3]:
+            if self.env_types.get(bid) in ("i64", "u64", "ui64"):
+                from triton_metal.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "Refusing scf.for with 64-bit loop bounds: the induction "
+                    "lowering would not terminate (hang). Use 32-bit bounds.")
+
         start_var = self._lookup(ssa.operand_ids[0])
         end_var = self._lookup(ssa.operand_ids[1])
         step_var = self._lookup(ssa.operand_ids[2])

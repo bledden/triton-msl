@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 triton = [
-    "triton>=3.6.0",
+    "triton==3.7.0",
     "torch>=2.1.0",
 ]
 dev = [
