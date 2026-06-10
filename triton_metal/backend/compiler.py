@@ -37,6 +37,20 @@ def _get_cache_dir():
     return cache_dir
 
 
+def _msl_cache_key(mod_text, options_hash):
+    """Persistent-cache key for emitted MSL.
+
+    Includes CODEGEN_VERSION and the MEPT flag alongside TTGIR text + options:
+    without them, emitter/lowerer changes (or toggling TRITON_METAL_MEPT)
+    silently replay stale compiled kernels (Phase 0, audit debt #1/#2).
+    """
+    from triton_metal import CODEGEN_VERSION
+    mept = os.environ.get("TRITON_METAL_MEPT", "")
+    return hashlib.sha256(
+        (mod_text + options_hash + CODEGEN_VERSION + mept).encode("utf-8")
+    ).hexdigest()[:16]
+
+
 @dataclass(frozen=True)
 class MetalOptions:
     num_warps: int = 4
@@ -1596,7 +1610,7 @@ class MetalBackend(BaseBackend):
 
         try:
             cache_dir = _get_cache_dir()
-            src_hash = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+            src_hash = _msl_cache_key(src, "")  # versioned (Phase 0)
             base = f"{kernel_name}_{src_hash}"
 
             ll_path = os.path.join(cache_dir, f"{base}.ll")
@@ -1801,11 +1815,10 @@ class MetalBackend(BaseBackend):
             with open(ttgir_path, "w") as f:
                 f.write(str(mod))
 
-        # Check persistent MSL cache (TTGIR text + options → MSL string).
+        # Check persistent MSL cache (TTGIR text + options + codegen version
+        # + MEPT flag → MSL string).
         mod_text = str(mod)
-        cache_key = hashlib.sha256(
-            (mod_text + options.hash()).encode("utf-8")
-        ).hexdigest()[:16]
+        cache_key = _msl_cache_key(mod_text, options.hash())
         cache_dir = _get_cache_dir()
         msl_cache_path = os.path.join(cache_dir, f"{kernel_name}_{cache_key}.msl")
 
@@ -1924,7 +1937,7 @@ class MetalBackend(BaseBackend):
             cache_dir = _get_cache_dir()
 
             # Use content hash for deterministic naming.
-            src_hash = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+            src_hash = _msl_cache_key(src, "")  # versioned (Phase 0)
             base = f"{kernel_name}_{src_hash}"
 
             metal_path = os.path.join(cache_dir, f"{base}.metal")
