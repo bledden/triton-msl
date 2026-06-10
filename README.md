@@ -10,14 +10,14 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
 
 **Alpha** — actively developed, not yet production-ready.
 
-- **0 failures** across the upstream Triton `test_core.py` suite — 4,326 kernels
-  attempted and correct, ~5,016 documented feature-gap skips (each is either a
+- **0 failures** across the upstream Triton `test_core.py` suite — 5,335 kernels
+  attempted and correct, ~4,007 documented feature-gap skips (each is either a
   *refused* kernel — fails loudly, never silent-wrong — or a hardware-impossible
   case like FP64). Aligned with Triton [\[2\]](REFERENCES.md) release `3.7.0`.
-- **507 / 507** project tests (codegen, GPU correctness, integration,
+- **603 / 603** project tests (codegen, GPU correctness, integration,
   FlashAttention, MLX backend). FlashAttention path: **11 / 11** at
   HEAD_DIM=32 (see [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX
-  backend tests; project test-suite size grew from 434 to 507 since
+  backend tests; project test-suite size grew from 434 to 603 since
   `0.1.0-alpha`.
 - **32 / 32** `torch.compile` model tests pass on Python ≤ 3.13 (PyTorch
   Inductor [\[12\]](REFERENCES.md)). On Python 3.14 the suite is honestly
@@ -129,7 +129,7 @@ results = triton_call(add_kernel, x, y, out, n, grid=(4,), BLOCK=256)
 | **Elementwise** | add, sub, mul, div, exp, log, sqrt, abs, neg, SiLU, GELU, sigmoid, tanh, ReLU, leaky ReLU, clamp, FMA |
 | **Reductions** | sum, max, min, argmax, argmin, xor_sum |
 | **Dot product** | `tl.dot` with strided matmul template, all epilogues (add, softmax, chain-dot, transpose) |
-| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at HEAD_DIM=32 via the C++ MLIR→LLVM path; dedicated `qk = q @ trans(k)` lowering in `DotOpToLLVM.cpp`. HEAD_DIM=64 is part of the WS1 register-array spine. |
+| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at HEAD_DIM=32 via the default Python MSL path (C++ plugin is experimental); dedicated `qk = q @ trans(k)` lowering in `DotOpToLLVM.cpp`. HEAD_DIM=64 is part of the WS1 register-array spine. |
 | **Normalization** | Layer norm, RMS norm, batch norm |
 | **Type casts** | FP32, FP16, BF16, INT8, INT16, INT32, bool |
 | **Control flow** | `scf.for`, `scf.if`, while loops |
