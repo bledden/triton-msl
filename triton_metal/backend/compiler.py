@@ -200,7 +200,10 @@ class MetalBackend(BaseBackend):
         # Optional C++ LLVM IR lowering: when enabled, the metallib stage
         # uses LLVM IR → xcrun metal instead of MSL → xcrun metal.
         # MSL is STILL generated above for MLX compatibility.
-        use_cpp = os.environ.get("TRITON_METAL_USE_CPP", "") == "1"
+        # Phase 1: C++ default-on for allowlisted families. Python escape hatch.
+        use_cpp = (os.environ.get("TRITON_METAL_FORCE_PYTHON") != "1"
+                   and (os.environ.get("TRITON_METAL_USE_CPP", "") == "1"
+                        or self._has_cpp_passes()))
         if use_cpp and self._has_cpp_passes():
             def _metallib_via_cpp(src, metadata):
                 """Compile metallib from C++ LLVM IR when possible, MSL otherwise.
