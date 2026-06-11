@@ -514,6 +514,24 @@ def emit_msl(mod, metadata, options):
         # Use lowerer's effective block_size (may differ from graph for matmul templates)
         metadata["block_size"] = lowerer.effective_block_size
 
+        # Integrity backstop: an UNKNOWN_<id> in the emitted source is an
+        # UNRESOLVED SSA reference (e.g. _lookup of a value not in env). It is
+        # never valid MSL — it would fail xcrun with a cryptic compile error.
+        # Refuse loudly with an actionable message instead. The common cause is
+        # a value defined OUTSIDE a runtime-bound loop referenced INSIDE it in
+        # the multi-element-per-thread regime (BLOCK > threadgroup size, e.g.
+        # the tl.arange / other= constant in a tl.sum-in-loop at BLOCK>=256) —
+        # the register-array spine (roadmap Phase 2). (downstream tridec bug 2)
+        if "UNKNOWN_" in msl_src and "UNSUPPORTED" not in msl_src:
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"codegen left an unresolved value (UNKNOWN_<id>) in kernel "
+                f"'{metadata.get('name', '?')}'. This usually means a value defined "
+                f"outside a runtime-bound loop is used inside it when BLOCK "
+                f"exceeds the threadgroup size (multi-element-per-thread). "
+                f"Use BLOCK <= 128, or restructure the loop, until the "
+                f"register-array spine lands.")
+
         # Verify no UNSUPPORTED markers in output
         if "UNSUPPORTED" not in msl_src:
             metadata["output_arg_indices"] = lowerer.get_output_arg_indices()
