@@ -5356,7 +5356,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             # Triton's renamed cross-threadgroup barrier (was tt.debug_barrier).
             # Without this it fell to the passthrough below and was SILENTLY
             # dropped -> racy multi-SIMD-group kernels (downstream tridec bug 1).
-            self.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+            self.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);")
         elif ssa.id is not None and ssa.id < 0:
             # Unknown NO-RESULT ttg op = a dropped side effect / synchronization
             # (async copy, barrier variant) the passthrough would lose silently.

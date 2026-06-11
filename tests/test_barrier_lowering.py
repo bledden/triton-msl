@@ -47,3 +47,33 @@ def test_debug_barrier_emits_threadgroup_barrier(emit):
 
     msl = emit(kbar, {"X": "*fp32", "O": "*fp32"}, dict(N=128))
     assert "threadgroup_barrier" in msl
+
+
+import torch  # noqa: E402
+
+
+@pytest.mark.skipif(
+    not __import__("Metal").MTLCreateSystemDefaultDevice(),
+    reason="Metal device needed")
+def test_barrier_orders_cross_lane_gather_deterministic():
+    """The barrier must make a write->gather across SIMD groups (BLOCK=128 =
+    4 groups) correct and deterministic; without it the kernel is racy."""
+    import numpy as np
+    import triton, triton.language as tl
+
+    @triton.jit
+    def race(S, O, N: tl.constexpr):
+        i = tl.arange(0, N)
+        tl.store(S + i, i.to(tl.float32))
+        tl.debug_barrier()
+        tl.store(O + i, tl.load(S + ((i + 1) % N)))
+
+    N = 128
+    ref = ((np.arange(N) + 1) % N).astype(np.float32)
+    outs = []
+    for _ in range(5):
+        s = torch.zeros(N); o = torch.zeros(N)
+        race[(1,)](s, o, N=N)
+        outs.append(o.numpy().copy())
+    assert all(np.array_equal(o, ref) for o in outs)
+    assert all(np.array_equal(o, outs[0]) for o in outs)
