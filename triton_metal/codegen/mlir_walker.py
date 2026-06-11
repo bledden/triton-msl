@@ -536,6 +536,7 @@ class MLIRWalker:
 
         # Predicate matching: same approach
         self._predicate_names_in_order = self._get_predicate_ssa_names_in_order()
+        self._predicates_in_order = self._get_predicates_in_order()
         self._predicate_walk_index = 0
 
         # Atomic op matching: same approach
@@ -569,6 +570,18 @@ class MLIRWalker:
         """Get arith.cmp* SSA names in text order."""
         return [m.group(1) for m in re.finditer(
             r"%(\w+(?::\d+)?)\s*=\s*arith\.cmp[if]",
+            self._mod_text
+        )]
+
+    def _get_predicates_in_order(self) -> List[str]:
+        """Get arith.cmp* PREDICATES in text order, parallel to the SSA-name
+        list above. Used positionally (by walk order) instead of keying by SSA
+        name: scf.while/scf.if regions reuse local SSA names (%0 in both before
+        and after), so a name->predicate dict collides and the later region
+        overwrites the earlier one — corrupting the loop condition. Same anchored
+        regex as the name list so the two stay index-aligned."""
+        return [m.group(2) for m in re.finditer(
+            r"%(\w+(?::\d+)?)\s*=\s*arith\.cmp[if]\s+(\w+)",
             self._mod_text
         )]
 
@@ -1223,12 +1236,12 @@ class MLIRWalker:
             pred = op.get_int_attr("predicate")
             if pred is not None:
                 attrs["predicate"] = pred
-            # Look up predicate name from pre-parsed text by walk order
+            # Look up predicate name POSITIONALLY by walk order (not by SSA
+            # name — region-local names collide across scf.while/scf.if regions
+            # and a name-keyed lookup returns the wrong region's predicate).
             idx = self._predicate_walk_index
-            if idx < len(self._predicate_names_in_order):
-                ssa_name = self._predicate_names_in_order[idx]
-                if ssa_name in self._text_index.predicates:
-                    attrs["predicate_name"] = self._text_index.predicates[ssa_name]
+            if idx < len(self._predicates_in_order):
+                attrs["predicate_name"] = self._predicates_in_order[idx]
             self._predicate_walk_index += 1
 
         elif name == "cf.cond_br":
