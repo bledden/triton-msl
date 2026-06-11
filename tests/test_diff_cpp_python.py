@@ -34,7 +34,14 @@ def _run(out, force_python):
     env = dict(os.environ, PYTHONPATH=os.getcwd(),
                TRITON_METAL_CACHE_DIR=tempfile.mkdtemp(),
                TRITON_CACHE_DIR=tempfile.mkdtemp())
-    env["TRITON_METAL_FORCE_PYTHON"] = "1" if force_python else "0"
+    # C++ is opt-in (default-on flip reverted): the C++ side must request it
+    # explicitly, else both sides route Python and the differential is vacuous.
+    if force_python:
+        env["TRITON_METAL_FORCE_PYTHON"] = "1"
+        env.pop("TRITON_METAL_USE_CPP", None)
+    else:
+        env.pop("TRITON_METAL_FORCE_PYTHON", None)
+        env["TRITON_METAL_USE_CPP"] = "1"
     subprocess.run([sys.executable, "-c", KERNEL, out], check=True, env=env, timeout=180)
 
 def test_elementwise_matches():

@@ -1,1 +1,6 @@
-{"enabled": ["elementwise"]}
+{
+  "enabled": [
+    "elementwise"
+  ],
+  "routing": "opt-in only (TRITON_METAL_USE_CPP=1); default-on flip reverted pending full-corpus differential (the C++ elementwise path fails fp32/i32 bin_ops + compiles slowly)"
+}
