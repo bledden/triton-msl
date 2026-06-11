@@ -109,7 +109,7 @@ def enabled_ops():
 # int8+float16 mixes crash AGXMetalG16X with "internal error" at pipeline
 # creation, repeated crashes wedge the corpus run). Kernels whose TTGIR mentions
 # any of these dtypes route to Python until the C++ lowering is fixed per dtype.
-UNSAFE_DTYPE_PAT = ("xi8", "xf16", "xbf16", "xi16", "xi1,", "xi1>")
+UNSAFE_DTYPE_PAT = ("f16", "i8", "i16", "i1,", "i1>")  # coarse: over-routing safe
 
 
 def cpp_safe_text(ttgir_text):
