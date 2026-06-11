@@ -274,6 +274,9 @@ class MetalBackend(BaseBackend):
         import re
         from triton_metal.backend.cpp_families import enabled_ops
         allowed_ops = enabled_ops()
+        from triton_metal.backend.cpp_families import cpp_safe_text
+        if not cpp_safe_text(ttgir_text):
+            return True  # unsafe dtype for C++ AIR path -> Python route
         # Extract actual MLIR operations from the TTGIR text.
         # Operations appear as either:
         #   %result = tt.load %ptr   (result-producing op)

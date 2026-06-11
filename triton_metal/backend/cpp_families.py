@@ -103,3 +103,14 @@ def enabled_ops():
     for fam in families:
         out |= FAMILIES[fam]
     return out
+
+
+# Dtypes the C++ AIR pipeline miscompiles or AGX rejects today (Phase 1 burn-in:
+# int8+float16 mixes crash AGXMetalG16X with "internal error" at pipeline
+# creation, repeated crashes wedge the corpus run). Kernels whose TTGIR mentions
+# any of these dtypes route to Python until the C++ lowering is fixed per dtype.
+UNSAFE_DTYPE_PAT = ("xi8", "xf16", "xbf16", "xi16", "xi1,", "xi1>")
+
+
+def cpp_safe_text(ttgir_text):
+    return not any(p in ttgir_text for p in UNSAFE_DTYPE_PAT)
