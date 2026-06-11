@@ -771,8 +771,8 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             ssa.op == "tt.reduce" for ssa in all_ops_iter
         )
         has_barrier_ops = any(
-            ssa.op in ("tt.reduce", "tt.scan", "tt.debug_barrier", "tt.trans",
-                       "tt.dot", "ttg.local_alloc")
+            ssa.op in ("tt.reduce", "tt.scan", "tt.debug_barrier", "ttg.barrier",
+                       "tt.trans", "tt.dot", "ttg.local_alloc")
             for ssa in all_ops_iter
         )
         # Multi-value reduces (argmin/argmax) need per-element indices which
@@ -5352,8 +5352,23 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self._emit_passthrough(ssa)
         elif op == "ttg.memdesc_trans":
             self._lower_memdesc_trans(ssa)
+        elif op == "ttg.barrier":
+            # Triton's renamed cross-threadgroup barrier (was tt.debug_barrier).
+            # Without this it fell to the passthrough below and was SILENTLY
+            # dropped -> racy multi-SIMD-group kernels (downstream tridec bug 1).
+            self.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        elif ssa.id is not None and ssa.id < 0:
+            # Unknown NO-RESULT ttg op = a dropped side effect / synchronization
+            # (async copy, barrier variant) the passthrough would lose silently.
+            # Refuse loudly, consistent with the #165 generic default-deny.
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing to emit silently-wrong output: unsupported "
+                f"side-effecting op '{op}' (no result) would be dropped, losing "
+                f"its effect. Add a handler or explicit refusal.")
         else:
-            # Other ttg ops: passthrough
+            # Other (value-producing) ttg ops: passthrough. An undefined result
+            # surfaces as UNKNOWN_<id> -> loud MSL compile error if consumed.
             self._emit_passthrough(ssa)
 
     def _lower_convert_layout_mept_shuffle(self, ssa, src_type, dest_type,
