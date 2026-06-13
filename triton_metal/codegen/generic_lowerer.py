@@ -224,6 +224,25 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self.kb.raw_line(f"    {name}[{i}] = {expr};")
         return name
 
+    def _materialize(self, regval, body, base="t"):
+        """Emit the cheapest correct form for a value and return its RegVal.
+
+        ``body(e)`` -> MSL expression string for element index e. MEPT spine
+        (milestone 1). scalar (n_elems==1): ``ty name = body(0);`` (identical
+        to a plain _var) -- the scalar-collapse that keeps the common path
+        byte-identical to today. array: ``ty name[n]; name[e] = body(e);`` via
+        _var_array. wraploop: a single expression emitted inside the caller's
+        _loop_e loop (scalar-shaped, indexed by _loop_e in body(0))."""
+        from triton_metal.codegen.regval import RegVal
+        if regval.form == "array" and regval.n_elems > 1:
+            arr = self._var_array(
+                base, [body(e) for e in range(regval.n_elems)], regval.ty)
+            return RegVal(name=arr, n_elems=regval.n_elems, ty=regval.ty,
+                          form="array")
+        name = self._next_var(base)
+        self.kb.raw_line(f"    {regval.ty} {name} = {body(0)};")
+        return RegVal(name=name, n_elems=1, ty=regval.ty, form=regval.form)
+
     # -- Shape tracking helpers --------------------------------------------------
 
     def _get_shape(self, ssa_id: int) -> tuple:

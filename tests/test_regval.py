@@ -44,3 +44,37 @@ def test_lookup_regval_scalar_and_array():
     assert s.name == "v5" and s.n_elems == 1 and s.is_scalar
     a = lo._lookup_regval(6)
     assert a.name == "a6" and a.n_elems == 4 and a.form == "array"
+
+
+def test_materialize_scalar_collapses_to_plain_var():
+    import triton  # noqa: F401
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.regval import RegVal
+
+    class _KB:
+        def __init__(self): self.lines = []
+        def raw_line(self, s): self.lines.append(s)
+
+    lo = GenericLowerer.__new__(GenericLowerer)
+    lo.kb = _KB(); lo._var_counter = 0
+    rv = lo._materialize(RegVal(name="", n_elems=1, ty="float", form="scalar"),
+                         lambda e: "a + b", base="m")
+    assert rv.n_elems == 1 and rv.is_scalar
+    joined = "\n".join(lo.kb.lines)
+    assert "float m_0 = a + b;" in joined and "for (" not in joined
+
+
+def test_materialize_array_emits_indexed_loop():
+    import triton  # noqa: F401
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.regval import RegVal
+
+    class _KB:
+        def __init__(self): self.lines = []
+        def raw_line(self, s): self.lines.append(s)
+
+    lo = GenericLowerer.__new__(GenericLowerer)
+    lo.kb = _KB(); lo._var_counter = 0
+    rv = lo._materialize(RegVal(name="", n_elems=2, ty="float", form="array"),
+                         lambda e: "x[%d]" % e, base="m")
+    assert rv.form == "array" and rv.n_elems == 2
