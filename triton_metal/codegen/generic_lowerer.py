@@ -1647,6 +1647,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             return self.env_array[ssa_id]
         return (self._lookup(ssa_id), 1, "")
 
+    def _lookup_regval(self, ssa_id):
+        """Unified RegVal view over env / env_array. Does not change emission;
+        callers migrate to this incrementally (MEPT spine, milestone 1)."""
+        from triton_metal.codegen.regval import RegVal
+        if ssa_id in getattr(self, "env_array", {}):
+            name, n, ty = self.env_array[ssa_id]
+            return RegVal(name=name, n_elems=n, ty=ty, form="array")
+        name = self.env.get(ssa_id, "UNKNOWN_%s" % ssa_id)
+        n = self.env_n_elems.get(ssa_id, 1)
+        ty = self.env_types.get(ssa_id, "")
+        return RegVal(name=name, n_elems=n, ty=ty, form="scalar")
+
     def _lower_op(self, ssa: SSAValue):
         """Lower a single SSA operation to MSL."""
         # Skip ops that were handled as part of a fused pattern

@@ -32,3 +32,15 @@ def test_region_needs_arrays_for_without_multielem_false():
     body = [FakeOp("arith.addi")]
     ops = [FakeOp("scf.for", region_ops=body)]
     assert region_needs_arrays(ops, multi_elem_ids=set()) is False
+
+
+def test_lookup_regval_scalar_and_array():
+    import triton  # noqa: F401
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    lo = GenericLowerer.__new__(GenericLowerer)
+    lo.env = {5: "v5"}; lo.env_array = {6: ("a6", 4, "float")}
+    lo.env_n_elems = {5: 1, 6: 4}; lo.env_types = {5: "i32", 6: "f32"}
+    s = lo._lookup_regval(5)
+    assert s.name == "v5" and s.n_elems == 1 and s.is_scalar
+    a = lo._lookup_regval(6)
+    assert a.name == "a6" and a.n_elems == 4 and a.form == "array"
