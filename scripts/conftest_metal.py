@@ -510,13 +510,30 @@ def pytest_collection_modifyitems(config, items):
                     continue
 
         # Skip atomic tests with types Metal atomics don't support:
-        # - int64/uint64: Metal has no 64-bit atomics
-        # - bfloat16/float16: Triton's half-precision atomic codegen
-        #   produces FP16 intermediate values that our CAS loop can't handle
+        # - int64/uint64: Metal has no 64-bit device atomic (hardware-impossible;
+        #   stays skipped permanently).
+        # - bfloat16/float16: NOW SUPPORTED via 32-bit word-CAS emulation —
+        #   see docs/superpowers/specs/2026-06-13-fp16-bf16-atomics-design.md.
+        #
+        # Enabled (2026-06-13): fp16/bf16 ``test_atomic_rmw`` 'add' variants.
+        #   Triton's frontend restricts 16-bit-float atomics to 'add' ONLY, so
+        #   the test_atomic_rmw corpus has only ('add', float16)/('add', bfloat16)
+        #   16-bit-float variants (max/min/etc. never reach the backend — the
+        #   frontend refuses them). These 40 variants (20 fp16 + 20 bf16) now
+        #   pass via word-CAS, so they fall through to run. The fp16/bf16 skip
+        #   is RETAINED for every OTHER atomic test (tensor_atomic_rmw/cas/
+        #   use_result/add_access_patterns/add_non_exclusive_offset), whose
+        #   2D-broadcast shapes are a separate, still-open scope.
         if "atomic" in func_name:
-            if any(t in test_id for t in ("int64", "uint64", "bfloat16", "float16")):
+            if any(t in test_id for t in ("int64", "uint64")):
                 item.add_marker(skip_unsupported)
                 continue
+            if any(t in test_id for t in ("bfloat16", "float16")):
+                if func_name == "test_atomic_rmw":
+                    pass  # fp16/bf16 atomic_rmw add: enabled via word-CAS
+                else:
+                    item.add_marker(skip_unsupported)
+                    continue
 
         # test_tensor_atomic_use_result with size > 1 requires 2D broadcast
         # (NxN store via Nx1 broadcast to NxN). Metal 1D per-thread model
