@@ -57,7 +57,7 @@ from triton_metal.codegen._lowerer_control import _ControlFlowMixin
 # (still correct); a too-wide set would risk an op consuming a register
 # array it can't handle (wrong results). Err narrow.
 #
-# Deliberately EXCLUDED (not array-wired): arith.cmpf, arith.select,
+# Deliberately EXCLUDED (not array-wired): arith.cmpf,
 # arith.bitcast, math.erf/log1p/expm1, every shape op (tt.trans/join/cat/
 # split/gather/broadcast/expand_dims/reshape), atomics, reduce/scan/
 # histogram, tt.dot, control flow (scf.*), ttg.*. FP8 kernels are excluded
@@ -80,6 +80,8 @@ _MEPT_SAFE_OPS = frozenset({
     "arith.shli", "arith.shrsi", "arith.shrui",
     # comparison (only cmpi is array-wired; cmpf is NOT)
     "arith.cmpi",
+    # ternary select (tl.where) -> _lower_select / _mept_select_dispatch
+    "arith.select",
     # unary
     "arith.negf",
     # casts (passthrough or _emit_cast / _emit_int_cast / _emit_uitofp)
@@ -3866,6 +3868,14 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         else:
             ty = "int"
             dtype = "i32"
+
+        # MEPT array path: if any operand is a register array, emit a
+        # per-element select and return. Scalar/flag-off select falls through
+        # to the byte-identical scalar emission below.
+        if self._mept_select_dispatch(
+                ssa, ssa.operand_ids[0], ssa.operand_ids[1],
+                ssa.operand_ids[2], cond, true_val, false_val, ty, dtype):
+            return
 
         self.kb.raw_line(f"    {ty} {var_name} = {cond} ? {true_val} : {false_val};")
         self.env[ssa.id] = var_name

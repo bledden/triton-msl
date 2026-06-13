@@ -92,6 +92,37 @@ class _EmissionMixin:
         self._emit_binary_mept(ssa, n, read_a, read_b, make_expr, ty, dtype)
         return True
 
+    def _mept_select_dispatch(self, ssa, cond_id, t_id, f_id,
+                              cond, t, f, ty, dtype) -> bool:
+        """MEPT array dispatch for arith.select (ternary). If any operand is a
+        register array, emit a per-element select and return True; else False
+        (caller does the scalar path). Mirrors _mept_binary_dispatch."""
+        if not self.mept_enabled:
+            return False
+        c_arr = self.env_array.get(cond_id)
+        t_arr = self.env_array.get(t_id)
+        f_arr = self.env_array.get(f_id)
+        arrs = [a for a in (c_arr, t_arr, f_arr) if a is not None]
+        if not arrs:
+            return False
+        ns = {a[1] for a in arrs}
+        if len(ns) != 1:
+            return False  # mismatched array lengths -> scalar fallback
+        n = ns.pop()
+        read_c = ((lambda i, an=c_arr[0]: f"{an}[{i}]") if c_arr
+                  else (lambda i, cv=cond: cv))
+        read_t = ((lambda i, an=t_arr[0]: f"{an}[{i}]") if t_arr
+                  else (lambda i, tv=t: tv))
+        read_f = ((lambda i, an=f_arr[0]: f"{an}[{i}]") if f_arr
+                  else (lambda i, fv=f: fv))
+        exprs = [f"({read_c(i)} ? {read_t(i)} : {read_f(i)})" for i in range(n)]
+        var_name = self._var_array("r", exprs, ty)
+        self.env[ssa.id] = var_name
+        self.env_array[ssa.id] = (var_name, n, ty)
+        self.env_types[ssa.id] = dtype
+        self._propagate_shape_elementwise(ssa)
+        return True
+
 
     def _emit_binary(self, ssa: SSAValue, op_str: str, force_unsigned=False):
         """Emit a binary operation: result = a op b.
