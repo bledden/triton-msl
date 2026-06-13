@@ -15,8 +15,13 @@ def test_msl_cache_key_includes_codegen_version():
 
 
 def test_msl_cache_key_changes_with_mept(monkeypatch):
+    # Since M5 the default is ON, so no-env and "1" share a key; the escape
+    # hatch "0" must produce a DISTINCT key (else a scalar-path metallib could
+    # be served to a default/array-path compile, or vice versa).
     from triton_metal.backend.compiler import _msl_cache_key
-    monkeypatch.delenv("TRITON_METAL_MEPT", raising=False)
-    off = _msl_cache_key("m", "o")
-    monkeypatch.setenv("TRITON_METAL_MEPT", "1")
-    assert _msl_cache_key("m", "o") != off
+    monkeypatch.delenv("TRITON_METAL_MEPT", raising=False)  # default ON
+    default_on = _msl_cache_key("m", "o")
+    monkeypatch.setenv("TRITON_METAL_MEPT", "0")            # escape hatch
+    assert _msl_cache_key("m", "o") != default_on
+    monkeypatch.setenv("TRITON_METAL_MEPT", "1")            # explicit ON == default
+    assert _msl_cache_key("m", "o") == default_on

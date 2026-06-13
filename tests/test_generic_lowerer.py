@@ -1254,8 +1254,8 @@ def test_track_n_elems_unresolved_alias_falls_back():
 # ---------------------------------------------------------------------------
 
 
-def test_mept_flag_defaults_off():
-    """Without TRITON_METAL_MEPT in env, the feature flag is off."""
+def test_mept_flag_defaults_on():
+    """Without TRITON_METAL_MEPT in env, the feature flag is ON (default since M5)."""
     import os
     from triton_metal.codegen.generic_lowerer import GenericLowerer
     from triton_metal.codegen.mlir_walker import IRGraph
@@ -1267,10 +1267,32 @@ def test_mept_flag_defaults_off():
     saved = os.environ.pop("TRITON_METAL_MEPT", None)
     try:
         lowerer = GenericLowerer(graph, _Options())
-        assert lowerer.mept_enabled is False
+        assert lowerer.mept_enabled is True
         assert lowerer.env_array == {}
     finally:
         if saved is not None:
+            os.environ["TRITON_METAL_MEPT"] = saved
+
+
+def test_mept_flag_off_when_env_zero():
+    """TRITON_METAL_MEPT=0 is the escape hatch to the scalar path (default since M5)."""
+    import os
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_metal.codegen.mlir_walker import IRGraph
+
+    class _Options:
+        num_warps = 4
+
+    graph = IRGraph(func_name="t", args=[], ops=[])
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "0"
+    try:
+        lowerer = GenericLowerer(graph, _Options())
+        assert lowerer.mept_enabled is False
+    finally:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
