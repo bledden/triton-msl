@@ -1,4 +1,4 @@
-from triton_metal.codegen.regval import RegVal, region_needs_arrays
+from triton_metal.codegen.regval import RegVal, region_needs_arrays, tensor_value_ids
 
 
 class FakeOp:
@@ -78,3 +78,44 @@ def test_materialize_array_emits_indexed_loop():
     rv = lo._materialize(RegVal(name="", n_elems=2, ty="float", form="array"),
                          lambda e: "x[%d]" % e, base="m")
     assert rv.form == "array" and rv.n_elems == 2
+
+
+# ---------------------------------------------------------------------------
+# tensor_value_ids tests
+# Use distinct names (_TVOp / _tv_is_multi) to avoid shadowing FakeOp above.
+# ---------------------------------------------------------------------------
+
+class _TVOp:
+    def __init__(self, op, id=None, operand_ids=None, result_ids=None,
+                 region_ops=None, multi=False):
+        self.op = op
+        self.id = id
+        self.operand_ids = operand_ids or []
+        self.result_ids = result_ids or []
+        self.region_ops = region_ops or []
+        self._multi = multi
+
+
+def _tv_is_multi(op):
+    return getattr(op, "_multi", False)
+
+
+def test_tensor_value_ids_collects_multi_top_level():
+    rng = _TVOp("tt.make_range", id="offs", result_ids=["offs"], multi=True)
+    pid = _TVOp("tt.get_program_id", id="pid", result_ids=["pid"], multi=False)
+    ids = tensor_value_ids([rng, pid], _tv_is_multi)
+    assert ids == {"offs"}
+
+
+def test_tensor_value_ids_recurses_into_control_flow():
+    body_load = _TVOp("tt.load", id="v", result_ids=["v"], multi=True)
+    loop = _TVOp("scf.for", id="loop", result_ids=["loop"],
+                 region_ops=[body_load], multi=False)
+    ids = tensor_value_ids([loop], _tv_is_multi)
+    assert ids == {"v"}
+
+
+def test_tensor_value_ids_empty_when_no_multi():
+    pid = _TVOp("tt.get_program_id", id="pid", result_ids=["pid"], multi=False)
+    ids = tensor_value_ids([pid], _tv_is_multi)
+    assert ids == set()

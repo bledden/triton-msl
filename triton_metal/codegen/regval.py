@@ -23,6 +23,34 @@ class RegVal:
         return self.n_elems == 1 and self.form == "scalar"
 
 
+def tensor_value_ids(ops, is_multi_fn) -> set:
+    """Collect SSA ids of values that are multi-element-per-thread.
+
+    ``is_multi_fn(op)`` returns True if ``op``'s result holds >1 element per
+    thread (the caller decides, using the kernel's thread count + the value's
+    tensor shape). Recurses into control-flow regions so a multi-element value
+    produced inside a loop body is captured too. Pairs with
+    ``region_needs_arrays`` to decide whether a region needs the array form.
+    """
+    ids = set()
+
+    def _walk(op_list):
+        for op in op_list:
+            if is_multi_fn(op):
+                rids = getattr(op, "result_ids", None)
+                if not rids:
+                    oid = getattr(op, "id", None)
+                    rids = [oid] if oid is not None else []
+                for rid in rids:
+                    ids.add(rid)
+            body = getattr(op, "region_ops", None)
+            if body:
+                _walk(body)
+
+    _walk(ops)
+    return ids
+
+
 def region_needs_arrays(ops, multi_elem_ids) -> bool:
     """True if ``ops`` contains a data-dependent control-flow op (scf.for/
     while/if) whose body references or carries a multi-element value.
