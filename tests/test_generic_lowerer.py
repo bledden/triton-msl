@@ -3279,3 +3279,26 @@ def test_track_n_elems_against_real_kernel_layouts():
         assert n is not None and n >= 1, (
             f"_track_n_elems failed for ssa id={op.id} "
             f"type={op.type_str!r} (got {n!r})")
+
+
+def test_find_op_type_str_recurses_nested_regions():
+    from types import SimpleNamespace
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+
+    def _op(id, type_str="", region_ops=None, else_ops=None):
+        return SimpleNamespace(id=id, type_str=type_str,
+                               region_ops=region_ops or [],
+                               else_ops=else_ops or [])
+
+    gl = GenericLowerer.__new__(GenericLowerer)
+    inner = _op(99, "tensor<256xf32>")          # depth-2: inside a nested loop
+    mid = _op(50, "", region_ops=[inner])        # depth-1: nested scf.for body
+    outer = _op(10, "", region_ops=[mid])        # top-level scf.for
+    gl.graph = SimpleNamespace(ops=[outer], args=[])
+
+    assert gl._find_op_type_str(99) == "tensor<256xf32>"
+    einner = _op(77, "tensor<128xi32>")
+    eouter = _op(20, "", else_ops=[_op(60, "", region_ops=[einner])])
+    gl.graph = SimpleNamespace(ops=[eouter], args=[])
+    assert gl._find_op_type_str(77) == "tensor<128xi32>"
+    assert gl._find_op_type_str(404) == ""

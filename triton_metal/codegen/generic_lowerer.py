@@ -4221,18 +4221,22 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self.env_shapes[ssa.id] = dst_shape
 
     def _find_op_type_str(self, ssa_id: int) -> str:
-        """Find the type_str for an SSA value by searching ops."""
-        for ssa in self.graph.ops:
-            if ssa.id == ssa_id:
-                return ssa.type_str
-            if ssa.region_ops:
-                for inner in ssa.region_ops:
-                    if inner.id == ssa_id:
-                        return inner.type_str
-            if ssa.else_ops:
-                for inner in ssa.else_ops:
-                    if inner.id == ssa_id:
-                        return inner.type_str
+        """Find the type_str for an SSA value by searching ops, recursing
+        into nested scf regions (region_ops = body/then, else_ops = while
+        body/else) at any depth. Returns "" if not found."""
+        def _search(ops):
+            for ssa in ops:
+                if ssa.id == ssa_id:
+                    return ssa.type_str or ""
+                body = list(ssa.region_ops or []) + list(ssa.else_ops or [])
+                if body:
+                    r = _search(body)
+                    if r is not None:
+                        return r
+            return None
+        r = _search(self.graph.ops)
+        if r is not None:
+            return r
         # Check args
         for arg in self.graph.args:
             if arg.id == ssa_id:
