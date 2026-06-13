@@ -87,12 +87,13 @@ def test_materialize_array_emits_indexed_loop():
 
 class _TVOp:
     def __init__(self, op, id=None, operand_ids=None, result_ids=None,
-                 region_ops=None, multi=False):
+                 region_ops=None, else_ops=None, multi=False):
         self.op = op
         self.id = id
         self.operand_ids = operand_ids or []
         self.result_ids = result_ids or []
         self.region_ops = region_ops or []
+        self.else_ops = else_ops or []
         self._multi = multi
 
 
@@ -119,3 +120,21 @@ def test_tensor_value_ids_empty_when_no_multi():
     pid = _TVOp("tt.get_program_id", id="pid", result_ids=["pid"], multi=False)
     ids = tensor_value_ids([pid], _tv_is_multi)
     assert ids == set()
+
+
+def test_tensor_value_ids_recurses_into_else_ops():
+    # scf.while: loop body lives in else_ops, not region_ops
+    body_load = _TVOp("tt.load", id="v", result_ids=["v"], multi=True)
+    wh = _TVOp("scf.while", id="wh", result_ids=["wh"],
+               region_ops=[], else_ops=[body_load], multi=False)
+    ids = tensor_value_ids([wh], _tv_is_multi)
+    assert ids == {"v"}
+
+
+def test_region_needs_arrays_detects_multi_in_else_ops():
+    from triton_metal.codegen.regval import region_needs_arrays
+    # a multi value referenced by an op in the scf.while body (else_ops)
+    use = _TVOp("tt.addptr", id="idx", operand_ids=["offs"], result_ids=["idx"])
+    wh = _TVOp("scf.while", id="wh", operand_ids=[],
+               region_ops=[], else_ops=[use])
+    assert region_needs_arrays([wh], {"offs"}) is True

@@ -6,7 +6,6 @@ correctness lives in tests/test_mept_m2_bug2_gpu.py.
 import importlib
 import os
 
-import pytest
 import triton
 import triton.language as tl
 from triton.compiler import ASTSource

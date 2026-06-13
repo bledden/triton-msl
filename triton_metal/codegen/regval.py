@@ -46,6 +46,9 @@ def tensor_value_ids(ops, is_multi_fn) -> set:
             body = getattr(op, "region_ops", None)
             if body:
                 _walk(body)
+            ebody = getattr(op, "else_ops", None)
+            if ebody:
+                _walk(ebody)
 
     _walk(ops)
     return ids
@@ -62,7 +65,7 @@ def region_needs_arrays(ops, multi_elem_ids) -> bool:
     multi = set(multi_elem_ids)
     for op in ops:
         if op.op in _CONTROL_OPS:
-            body = op.region_ops or []
+            body = list(op.region_ops or []) + list(getattr(op, "else_ops", None) or [])
             if any(oid in multi for oid in (op.operand_ids or [])):
                 return True
             for b in body:

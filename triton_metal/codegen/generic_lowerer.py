@@ -899,7 +899,8 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         def _arrayform_op_ok(s):
             if s.op in _CF_OPS:
-                return all(_arrayform_op_ok(b) for b in (s.region_ops or []))
+                body = list(s.region_ops or []) + list(getattr(s, "else_ops", None) or [])
+                return all(_arrayform_op_ok(b) for b in body)
             if s.op in ("scf.yield", "scf.condition", "tt.reduce"):
                 return True
             return _op_mept_ok(s)
@@ -910,6 +911,8 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                     yield s
                 if s.region_ops:
                     yield from _all_reduces(s.region_ops)
+                if getattr(s, "else_ops", None):
+                    yield from _all_reduces(s.else_ops)
 
         def _value_is_multi(s):
             shp = _extract_shape(getattr(s, "type_str", "") or "")
@@ -920,11 +923,11 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 tot *= d
             return tot > num_threads
 
-        _multi_ids = _tensor_value_ids(_top_ops, _value_is_multi)
         mept_arrayform_eligible = (
             self.mept_enabled
             and any(s.op in _CF_OPS for s in _top_ops)
-            and _region_needs_arrays(_top_ops, _multi_ids)
+            and _region_needs_arrays(
+                _top_ops, _tensor_value_ids(_top_ops, _value_is_multi))
             and all(_arrayform_op_ok(s) for s in _top_ops)
             and all(_reduce_is_1d_full(r) for r in _all_reduces(_top_ops))
             and not any(_op_is_fp8(s) for s in all_ops_iter)
