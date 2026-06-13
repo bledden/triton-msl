@@ -134,6 +134,14 @@ class _ControlFlowMixin:
                     msl_type = "int"
                 if init_id in self.env_array:
                     src_arr, _src_n, _src_ty = self.env_array[init_id]
+                    # Both widths derive from total_elements/num_threads, so they
+                    # must agree; refuse loudly if a future producer diverges
+                    # rather than emit out-of-bounds src_arr[e] (silent UB).
+                    if _src_n != n:
+                        from triton_metal.errors import MetalNonRecoverableError
+                        raise MetalNonRecoverableError(
+                            f"MEPT iter-arg array width mismatch: env_array has "
+                            f"{_src_n}, init_total//bs gives {n} (init_id={init_id})")
                     exprs = [f"{src_arr}[{e}]" for e in range(n)]
                 else:
                     exprs = [init_val for _ in range(n)]
