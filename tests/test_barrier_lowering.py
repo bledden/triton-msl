@@ -12,8 +12,12 @@ import triton  # noqa: F401
 
 
 @pytest.fixture
-def emit():
-    os.environ["TRITON_METAL_FORCE_PYTHON"] = "1"
+def emit(monkeypatch):
+    # monkeypatch.setenv auto-restores at teardown — a bare os.environ[...]=...
+    # here leaked FORCE_PYTHON=1 into later test files (e.g. test_cpp_backend),
+    # which routes their C++ kernels to Python; harmless flag-off but turns into
+    # a MEPT-array refusal under TRITON_METAL_MEPT=1.
+    monkeypatch.setenv("TRITON_METAL_FORCE_PYTHON", "1")
     import triton, triton.language as tl
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
