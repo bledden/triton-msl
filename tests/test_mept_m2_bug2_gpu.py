@@ -2,6 +2,8 @@
 correctly at BLOCK>=256 under flag-ON (previously refused with
 MetalNonRecoverableError). Run with TRITON_METAL_MEPT=1. Serial only.
 """
+import os
+
 import pytest
 
 try:
@@ -14,6 +16,9 @@ except Exception:
     HAS = False
 
 requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
+requires_mept = pytest.mark.skipif(
+    os.environ.get("TRITON_METAL_MEPT") != "1",
+    reason="requires TRITON_METAL_MEPT=1 (M2 register-array form)")
 
 if HAS:
     @triton.jit
@@ -28,6 +33,7 @@ if HAS:
 
 
 @requires_metal
+@requires_mept
 @pytest.mark.parametrize("BLOCK", [256, 512, 1024])
 def test_sum_in_loop_computes_flag_on(BLOCK):
     N = 4096

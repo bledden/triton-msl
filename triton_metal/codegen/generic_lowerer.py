@@ -898,13 +898,17 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         )
 
         def _reshape_preserves_elems(s):
-            # A tt.reshape that keeps the same total element count is a
-            # layout-only change (e.g. the sizePerThread=[2]→[1] reshape
-            # Triton inserts before a tt.reduce of a tl.sum). It lowers via
-            # _emit_passthrough, which propagates env_array unchanged, so the
-            # per-thread register array survives into the reduce. A reshape
-            # that changes the element count would be a real reinterpretation
-            # and is rejected (returns False → kernel stays on the safe path).
+            # A rank- and element-count-preserving tt.reshape is a layout-only
+            # change (e.g. the sizePerThread=[2]→[1] reshape Triton inserts
+            # before a tt.reduce of a tl.sum, which is rank-1→rank-1). It lowers
+            # via _emit_passthrough, which propagates env_array unchanged, so the
+            # per-thread register array survives into the reduce. We require both
+            # the same total element count AND the same number of dimensions:
+            # a (N,)→(a,b) reshape keeps the element count but changes the
+            # rank/layout, which is a real reinterpretation, so it is rejected.
+            # This keeps the helper self-contained — it does not lean on a
+            # downstream gate (_reduce_is_1d_full) to reject rank-changing
+            # reshapes. Stays conservative-False on any unresolvable shape.
             if not s.operand_ids:
                 return False
             src_t = self._find_op_type_str(s.operand_ids[0])
@@ -918,7 +922,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             tout = 1
             for d in out_sh:
                 tout *= d
-            return tin == tout
+            return tin == tout and len(in_sh) == len(out_sh)
 
         def _arrayform_op_ok(s):
             if s.op in _CF_OPS:
