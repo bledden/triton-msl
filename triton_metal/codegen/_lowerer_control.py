@@ -70,6 +70,11 @@ class _ControlFlowMixin:
         iter_dtypes = []
         # Track which iter_args are oversized and need shared memory
         smem_iter_indices = set()  # indices into iter_vars that are smem-backed
+        # MEPT (M3a): indices of iter_args carried as per-thread register
+        # arrays ``T v[n]`` (a 1-D multi-element value updated across the
+        # loop). Maps index -> (n_elems, msl_type).
+        mept_array_iter_indices = set()
+        mept_array_iter_n = {}
         # The scf.for result type tells us the true type of iter_args
         result_elem = ssa.elem_type or "f32"  # First result's type
         for i, init_id in enumerate(init_ids):
@@ -107,6 +112,36 @@ class _ControlFlowMixin:
                 if not hasattr(self, '_shared_mem_descs'):
                     self._shared_mem_descs = {}
                 # We will register the block_arg_id below after mapping
+                continue
+
+            # MEPT register-array iter-arg: a 1-D multi-element value carried
+            # across the loop. Each thread owns ``n`` contiguous elements as a
+            # mutable register array. Init may be a broadcast scalar (tl.zeros)
+            # or already an env_array; declare T v[n] and seed every element.
+            # Gated on the single-pass array regime so flag-off / scalar
+            # kernels are unaffected.
+            if (getattr(self, "_mept_single_pass", False)
+                    and len(init_shape) == 1
+                    and init_total > bs and init_total % bs == 0):
+                n = init_total // bs
+                if init_type.startswith("f") or init_type.startswith("bf"):
+                    msl_type = "float"
+                elif init_type in ("i64",):
+                    msl_type = "long"
+                elif init_type.startswith("u"):
+                    msl_type = "uint"
+                else:
+                    msl_type = "int"
+                if init_id in self.env_array:
+                    src_arr, _src_n, _src_ty = self.env_array[init_id]
+                    exprs = [f"{src_arr}[{e}]" for e in range(n)]
+                else:
+                    exprs = [init_val for _ in range(n)]
+                var_name = self._var_array("iter", exprs, msl_type)
+                iter_vars.append(var_name)
+                iter_dtypes.append(init_type)
+                mept_array_iter_indices.add(i)
+                mept_array_iter_n[i] = (n, msl_type)
                 continue
 
             var_name = self._next_var("iter")
@@ -158,6 +193,12 @@ class _ControlFlowMixin:
                     # preserves that layout.
                     if init_id is not None and init_id in self._is_splat:
                         self._is_splat.add(ba_id)
+                    # MEPT register-array iter-arg: expose as an env_array so
+                    # the body resolves the block arg with per-element ``v[e]``.
+                    if i in mept_array_iter_indices:
+                        n_arr, mt = mept_array_iter_n[i]
+                        self.env_array[ba_id] = (var, n_arr, mt)
+                        self.env_n_elems[ba_id] = n_arr
                     # Register shared-memory-backed iter_args
                     if i in smem_iter_indices:
                         init_shape = self.env_shapes.get(
@@ -207,6 +248,26 @@ class _ControlFlowMixin:
                                     self.kb.raw_line(
                                         f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
                                 continue
+                            # MEPT register-array iter-arg: update v[e] per
+                            # element. The yielded value is itself an env_array
+                            # (the elementwise chain); copy element-wise. If it
+                            # collapsed to a scalar, splat it into every slot.
+                            if i in mept_array_iter_indices:
+                                n_arr, _mt = mept_array_iter_n[i]
+                                ydesc = self.env_array.get(yield_id)
+                                if ydesc is not None:
+                                    ysrc, _yn, _yt = ydesc
+                                    for e in range(n_arr):
+                                        self.kb.raw_line(
+                                            f"        {iter_vars[i]}[{e}] = "
+                                            f"{ysrc}[{e}];")
+                                else:
+                                    yval = self._lookup(yield_id)
+                                    for e in range(n_arr):
+                                        self.kb.raw_line(
+                                            f"        {iter_vars[i]}[{e}] = "
+                                            f"{yval};")
+                                continue
                             yield_val = self._lookup(yield_id)
                             self.kb.raw_line(
                                 f"        {iter_vars[i]} = {yield_val};"
@@ -226,6 +287,12 @@ class _ControlFlowMixin:
                     # Propagate shape from init value to result
                     if i < len(init_ids) and init_ids[i] in self.env_shapes:
                         self.env_shapes[rid] = self.env_shapes[init_ids[i]]
+                    # MEPT register-array iter-arg: expose the result as an
+                    # env_array so the post-loop store reads ``v[e]``.
+                    if i in mept_array_iter_indices:
+                        n_arr, mt = mept_array_iter_n[i]
+                        self.env_array[rid] = (var, n_arr, mt)
+                        self.env_n_elems[rid] = n_arr
                     # Propagate shared_mem_desc for oversized iter_args
                     if i in smem_iter_indices:
                         init_shape = self.env_shapes.get(
@@ -247,6 +314,15 @@ class _ControlFlowMixin:
             self.env_types[ssa.id] = iter_dtypes[0] if iter_dtypes else "fp32"
             if init_ids and init_ids[0] in self.env_shapes:
                 self.env_shapes[ssa.id] = self.env_shapes[init_ids[0]]
+            # MEPT register-array iter-arg: a single-result scf.for reports
+            # ``result_ids`` as None (mlir_walker collapses len==1), so the
+            # result maps to ``ssa.id`` here, not the multi-result loop above.
+            # Register the env_array on ssa.id so the post-loop store reads the
+            # array rather than treating it as a scalar.
+            if 0 in mept_array_iter_indices:
+                n_arr, mt = mept_array_iter_n[0]
+                self.env_array[ssa.id] = (iter_vars[0], n_arr, mt)
+                self.env_n_elems[ssa.id] = n_arr
             if yielded_ids and yielded_ids[0] is not None:
                 lay = self._bcast_layout.get(yielded_ids[0])
                 if lay is not None:
@@ -257,6 +333,10 @@ class _ControlFlowMixin:
             self.env_types[ssa.id] = iter_dtypes[0] if iter_dtypes else "fp32"
             if init_ids and init_ids[0] in self.env_shapes:
                 self.env_shapes[ssa.id] = self.env_shapes[init_ids[0]]
+            if 0 in mept_array_iter_indices:
+                n_arr, mt = mept_array_iter_n[0]
+                self.env_array[ssa.id] = (iter_vars[0], n_arr, mt)
+                self.env_n_elems[ssa.id] = n_arr
             if yielded_ids and yielded_ids[0] is not None:
                 lay = self._bcast_layout.get(yielded_ids[0])
                 if lay is not None:
