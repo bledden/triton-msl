@@ -98,7 +98,16 @@ mismatch, no `UNKNOWN_`.
    (per-element state yielded across iterations) deferred to M3, where chained
    reductions require it — Bug 2's dataflow carries only a scalar partial.**
 3. Cooperative ops (reduce/dot/convert_layout) on the array form -> >1024 ceiling
-   + chained reductions.
+   + chained reductions. **M3a DONE (commits 41e5b39->a11520d): scf.for carries
+   per-thread register-array iter-args (the deferred M2 work) — a per-element
+   accumulator across a loop computes (`_vec_accumulate` column-sum at BLOCK
+   256/512/1024, flag-on); plus the two M2-review predicate fixes
+   (`_find_op_type_str` recurses nested scf regions; `region_needs_arrays`
+   matches all `result_ids`). Flag-off upstream test_core 5,335/0 held.
+   Remaining: M3b (`tt.dot` on the array form — dot is not yet in
+   `_MEPT_SAFE_OPS`), M3c (>1024 1D-ceiling audit — likely a dispatch-gate change
+   at `generic_lowerer.py` `elif size_per_thread > 1`; + convert_layout shuffle
+   GPU hardening, now unblocked by the `_find_op_type_str` fix).**
 4. FlashAttention HEAD_DIM=64 on the spine.
 5. Flip default; then (separate) retire MEPT-gap detectors.
 
