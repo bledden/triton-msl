@@ -3845,12 +3845,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             # Narrow float (fp16/bf16) also computes in float.
             ty = "float"
             dtype = "fp32" if ir_dtype == "fp64" else ir_dtype
+        elif ir_dtype in ("i64", "u64", "ui64"):
+            ty = "ulong" if ir_dtype != "i64" else "long"
+            dtype = "u64" if ir_dtype != "i64" else "i64"
         elif ir_dtype and ir_dtype.startswith("i"):
             ty = "int"
             dtype = ir_dtype
         elif ir_dtype and ir_dtype.startswith("u"):
             ty = "uint"
             dtype = ir_dtype
+        elif true_dtype in ("i64", "u64", "ui64"):
+            ty = "ulong" if true_dtype != "i64" else "long"
+            dtype = "u64" if true_dtype != "i64" else "i64"
         elif true_dtype.startswith("fp") or true_dtype.startswith("bf"):
             ty = "float"
             dtype = true_dtype if true_dtype in ("fp16", "bf16", "fp32", "fp64") else "fp32"
@@ -4201,8 +4207,13 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # Determine types
         input_dtype = self.env_types.get(src_id, "fp32")
         is_float = input_dtype.startswith("fp") or input_dtype.startswith("bf")
-        msl_type = "float" if is_float else "int"
-        shared_dtype = "fp32" if is_float else "i32"
+        if input_dtype in ("i64", "u64", "ui64"):
+            msl_type = "ulong" if input_dtype != "i64" else "long"
+            shared_dtype = "u64" if input_dtype != "i64" else "i64"
+        elif is_float:
+            msl_type, shared_dtype = "float", "fp32"
+        else:
+            msl_type, shared_dtype = "int", "i32"
 
         # Allocate shared memory for transpose
         shared_name = f"trans_shared_{self._shared_counter}"

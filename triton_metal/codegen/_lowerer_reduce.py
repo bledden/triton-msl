@@ -181,17 +181,37 @@ class _ReduceScanMixin:
             if next_reduce:
                 combine_op, identity = self._get_reduce_combine_info(next_reduce)
                 acc_var = f"_local_acc_{self._shared_counter}"
-                # Determine accumulator type from the reduce input
+                # Determine accumulator type from the reduce input. The operand
+                # may not be in env_types after multipass replay/reordering (a
+                # reshape between load and reduce can drop the type), so fall
+                # back to the reduce op's own element type (reliable from IR).
                 reduce_input_dtype = self.env_types.get(
-                    next_reduce.operand_ids[0], "fp32") if next_reduce.operand_ids else "fp32"
+                    next_reduce.operand_ids[0]) if next_reduce.operand_ids else None
+                if reduce_input_dtype is None:
+                    _et = getattr(next_reduce, "elem_type", None)
+                    reduce_input_dtype = (
+                        _mlir_to_triton_dtype(_et) if _et else "fp32")
                 is_int_reduce = not (
                     reduce_input_dtype.startswith("fp") or reduce_input_dtype.startswith("bf")
                 )
-                acc_msl_type = "int" if is_int_reduce else "float"
-                # Use type-appropriate identity values
-                if is_int_reduce:
+                is_i64_reduce = reduce_input_dtype in ("i64", "u64", "ui64")
+                is_u64_reduce = reduce_input_dtype in ("u64", "ui64")
+                if is_i64_reduce:
+                    acc_msl_type = "ulong" if is_u64_reduce else "long"
+                    # 64-bit identities (LONG_MIN/MAX); ulong min identity is 0.
+                    if is_u64_reduce:
+                        i64_identities = {"sum": "0", "max": "0",
+                                          "min": "ULONG_MAX"}
+                    else:
+                        i64_identities = {"sum": "0", "max": "LONG_MIN",
+                                          "min": "LONG_MAX"}
+                    identity = i64_identities.get(combine_op, "0")
+                elif is_int_reduce:
+                    acc_msl_type = "int"
                     int_identities = {"sum": "0", "max": "INT_MIN", "min": "INT_MAX"}
                     identity = int_identities.get(combine_op, "0")
+                else:
+                    acc_msl_type = "float"
                 self.kb.raw_line(f"    {acc_msl_type} {acc_var} = {identity};")
 
             # Open the per-element loop
@@ -226,10 +246,17 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"    }}")
             self._needs_wrapping = False
 
-            # Override the reduce's input to point to the accumulator
+            # Override the reduce's input to point to the accumulator, and
+            # record the accumulator's dtype so the downstream reduce dispatch
+            # picks the matching (e.g. 64-bit) path even when the original
+            # operand's type was dropped by a preceding reshape.
             if next_reduce and acc_var:
                 reduce_input_id = next_reduce.operand_ids[0]
                 self.env[reduce_input_id] = acc_var
+                _acc_dtype = {"long": "i64", "ulong": "u64",
+                              "int": "i32", "float": "fp32"}.get(acc_msl_type)
+                if _acc_dtype is not None:
+                    self.env_types[reduce_input_id] = _acc_dtype
 
             # Add this phase's ops to the preceding ops for future phases
             all_preceding_ops.extend(phase_ops)
@@ -283,13 +310,29 @@ class _ReduceScanMixin:
             elif combine_op == "sum" and has_cmpf_lt:
                 combine_op = "min"
 
-        # Determine type from input operand
-        input_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
+        # Determine type from input operand. After a multipass wrap-loop the
+        # operand is rebound to a freshly-typed accumulator whose env_type is
+        # set; but if the operand is missing from env_types (e.g. a reshape
+        # between load and reduce dropped it), fall back to the reduce op's own
+        # element type so 64-bit reduces still route to the i64 tree.
+        input_dtype = self.env_types.get(ssa.operand_ids[0])
+        if input_dtype is None:
+            _et = getattr(ssa, "elem_type", None)
+            input_dtype = _mlir_to_triton_dtype(_et) if _et else "fp32"
         is_int_reduce = not (
             input_dtype.startswith("fp") or input_dtype.startswith("bf")
         )
-        shared_dtype = "i32" if is_int_reduce else "fp32"
-        msl_type = "int" if is_int_reduce else "float"
+        is_i64 = input_dtype in ("i64", "u64", "ui64")
+        is_u64 = input_dtype in ("u64", "ui64")
+        if is_i64:
+            shared_dtype = "u64" if is_u64 else "i64"
+            msl_type = "ulong" if is_u64 else "long"
+        elif is_int_reduce:
+            shared_dtype = "i32"
+            msl_type = "int"
+        else:
+            shared_dtype = "fp32"
+            msl_type = "float"
 
         # Check if this is a 2D axis-specific reduction
         input_shape = self.env_shapes.get(ssa.operand_ids[0])
@@ -342,6 +385,11 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"    int {cast_var} = (int){input_var};")
             input_var = cast_var
 
+        if is_i64:
+            self._lower_reduce_1d_i64(ssa, input_var, combine_op,
+                                      msl_type, shared_dtype)
+            return
+
         # 1D full reduction (original behavior)
         shared_name = f"shared_{self._shared_counter}"
         self._shared_counter += 1
@@ -367,6 +415,41 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"    float {masked_var} = (float)((int){result_var} & 0xFFFF);")
             result_var = masked_var
 
+        self.env[ssa.id] = result_var
+        self.env_types[ssa.id] = shared_dtype
+
+
+    def _lower_reduce_1d_i64(self, ssa, input_var, combine_op,
+                             msl_type, shared_dtype):
+        """1-D full reduce for 64-bit ints via a shared-memory tree (Metal has
+        no simd_sum/max/min overload for long/ulong). Each thread writes its
+        value to a threadgroup array; a stride-doubling tree (non-power-of-2
+        safe via the `lid+s<bs` guard) reduces into slot 0; all threads read it.
+        """
+        bs = self.kb.block_size
+        n = self._shared_counter
+        self._shared_counter += 1
+        sh = f"red64_{n}"
+        self.kb.declare_threadgroup_array(sh, dtype=shared_dtype, size=bs)
+        combine = {
+            "sum": lambda a, b: f"({a} + {b})",
+            "max": lambda a, b: f"max({a}, {b})",
+            "min": lambda a, b: f"min({a}, {b})",
+            "umax": lambda a, b: f"max({a}, {b})",
+            "umin": lambda a, b: f"min({a}, {b})",
+            "xor": lambda a, b: f"({a} ^ {b})",
+        }[combine_op]
+        kb = self.kb
+        kb.raw_line(f"    {sh}[lid] = {input_var};")
+        kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        kb.raw_line(f"    for (uint _s = 1u; _s < {bs}u; _s <<= 1u) {{")
+        kb.raw_line(f"        if ((lid % (2u*_s)) == 0u && (lid + _s) < {bs}u) {{")
+        kb.raw_line(f"            {sh}[lid] = {combine(f'{sh}[lid]', f'{sh}[lid + _s]')};")
+        kb.raw_line("        }")
+        kb.raw_line("        threadgroup_barrier(mem_flags::mem_threadgroup);")
+        kb.raw_line("    }")
+        result_var = self._next_var("reduced64")
+        kb.raw_line(f"    {msl_type} {result_var} = {sh}[0];")
         self.env[ssa.id] = result_var
         self.env_types[ssa.id] = shared_dtype
 
