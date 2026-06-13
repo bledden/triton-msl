@@ -27,6 +27,11 @@ if HAS:
         tl.store(OUT, tl.max(x))
 
     @triton.jit
+    def _min_i64(X, OUT, BLOCK: tl.constexpr):
+        x = tl.load(X + tl.arange(0, BLOCK))
+        tl.store(OUT, tl.min(x))
+
+    @triton.jit
     def _where_i64(C, A, B, OUT, BLOCK: tl.constexpr):
         i = tl.arange(0, BLOCK)
         c = tl.load(C + i) != 0
@@ -49,6 +54,27 @@ def test_i64_max():
     OUT = torch.zeros(1, dtype=torch.int64)
     _max_i64[(1,)](X, OUT, BLOCK=BLOCK)
     assert int(OUT[0]) == int(X.max()), f"got {int(OUT[0])} want {int(X.max())}"
+
+
+@requires_metal
+def test_i64_min():
+    BLOCK = 256
+    # Span both signs above 2^40 to prove the LONG_MAX identity / signed
+    # min(long) overload (not INT_MAX / fmin) is used.
+    X = torch.randint(-(2**41), 2**41, (BLOCK,), dtype=torch.int64)
+    OUT = torch.zeros(1, dtype=torch.int64)
+    _min_i64[(1,)](X, OUT, BLOCK=BLOCK)
+    assert int(OUT[0]) == int(X.min()), f"got {int(OUT[0])} want {int(X.min())}"
+
+
+@requires_metal
+def test_u64_sum():
+    BLOCK = 256
+    # Values well above 2^40 in unsigned space; exact integer equality.
+    X = torch.randint(2**40, 2**41, (BLOCK,), dtype=torch.uint64)
+    OUT = torch.zeros(1, dtype=torch.uint64)
+    _sum_i64[(1,)](X, OUT, BLOCK=BLOCK)
+    assert int(OUT[0]) == int(X.sum()), f"got {int(OUT[0])} want {int(X.sum())}"
 
 
 @requires_metal

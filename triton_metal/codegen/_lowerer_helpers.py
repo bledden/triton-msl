@@ -69,6 +69,9 @@ def _mlir_to_triton_dtype(mlir_type: str) -> str:
     _map = {
         "f32": "fp32", "f16": "fp16", "bf16": "bf16", "f64": "fp64",
         "i1": "i1", "i8": "i8", "i16": "i16", "i32": "i32", "i64": "i64",
+        # ui64 → u64 so the reshape-drops-type fallback (which can surface a
+        # bare "ui64" base type) doesn't misclassify uint64 as fp32.
+        "ui64": "u64",
     }
     result = _map.get(mlir_type)
     if result:

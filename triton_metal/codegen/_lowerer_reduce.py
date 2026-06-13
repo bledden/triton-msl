@@ -93,6 +93,49 @@ class _ReduceScanMixin:
         identities = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY"}
         return combine_op, identities.get(combine_op, "0.0f")
 
+    def _reduce_identity_combine(self, combine_op, msl_type):
+        """Return (identity, combine_expr) for an `acc`/`val` sequential reduce.
+
+        Branches on the actual MSL accumulator type — float, long (i64),
+        ulong (u64), or int (any narrower signed/unsigned int reduced in
+        i32). The 64-bit paths must NOT use the 32-bit INT_MIN/INT_MAX
+        identities or the float fmax/fmin combine: those would silently
+        truncate to 32 bits / pick a float overload on a long argument.
+
+        max identities: float→(-INFINITY); long→LONG_MIN; ulong→0; int→INT_MIN
+        min identities: float→INFINITY; long→LONG_MAX; ulong→ULONG_MAX;
+                        int→INT_MAX
+        sum identity is 0 (0.0f for float). LONG_MIN/LONG_MAX/ULONG_MAX are
+        provided by metal_stdlib (same as the multipass-accumulator path).
+        """
+        is_float = msl_type == "float"
+        if combine_op == "sum":
+            identity = "0.0f" if is_float else "0"
+            combine_expr = "acc + val"
+        elif combine_op == "max":
+            identity = {
+                "float": "(-INFINITY)",
+                "long": "LONG_MIN",
+                "ulong": "0",
+                "int": "INT_MIN",
+            }.get(msl_type, "INT_MIN")
+            combine_expr = "fmax(acc, val)" if is_float else "max(acc, val)"
+        elif combine_op == "min":
+            identity = {
+                "float": "INFINITY",
+                "long": "LONG_MAX",
+                "ulong": "ULONG_MAX",
+                "int": "INT_MAX",
+            }.get(msl_type, "INT_MAX")
+            combine_expr = "fmin(acc, val)" if is_float else "min(acc, val)"
+        elif combine_op == "xor":
+            identity = "0"
+            combine_expr = "acc ^ val"
+        else:
+            identity = "0.0f" if is_float else "0"
+            combine_expr = "acc + val"
+        return identity, combine_expr
+
 
     def _lower_multipass_reduction(self, block_size):
         """Emit multi-pass reduction: per-element loops separated by reductions.
@@ -438,7 +481,11 @@ class _ReduceScanMixin:
             "umax": lambda a, b: f"max({a}, {b})",
             "umin": lambda a, b: f"min({a}, {b})",
             "xor": lambda a, b: f"({a} ^ {b})",
-        }[combine_op]
+        }.get(combine_op)
+        if combine is None:
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"i64 reduce: unsupported combine op {combine_op}")
         kb = self.kb
         kb.raw_line(f"    {sh}[lid] = {input_var};")
         kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
@@ -796,29 +843,11 @@ class _ReduceScanMixin:
             self._shared_counter += 1
             self.kb.declare_threadgroup_array(shared_name, dtype=shared_dtype, size=total)
 
-        # Identity value for the combine op
-        if combine_op == "sum":
-            identity = "0.0f" if msl_type == "float" else "0"
-        elif combine_op == "max":
-            identity = "(-INFINITY)" if msl_type == "float" else "INT_MIN"
-        elif combine_op == "min":
-            identity = "INFINITY" if msl_type == "float" else "INT_MAX"
-        elif combine_op == "xor":
-            identity = "0"
-        else:
-            identity = "0.0f" if msl_type == "float" else "0"
-
-        # Combine expression
-        if combine_op == "sum":
-            combine_expr = "acc + val"
-        elif combine_op == "max":
-            combine_expr = "max(acc, val)" if msl_type == "int" else "fmax(acc, val)"
-        elif combine_op == "min":
-            combine_expr = "min(acc, val)" if msl_type == "int" else "fmin(acc, val)"
-        elif combine_op == "xor":
-            combine_expr = "acc ^ val"
-        else:
-            combine_expr = "acc + val"
+        # Identity + combine expression. Must branch on the actual MSL type:
+        # long/ulong need 64-bit identities and the integer max/min overload,
+        # not the 32-bit INT_MIN/INT_MAX or the float fmax/fmin.
+        identity, combine_expr = self._reduce_identity_combine(
+            combine_op, msl_type)
 
         result_var = self._next_var("reduced")
 
@@ -926,22 +955,9 @@ class _ReduceScanMixin:
         if ssa.operand_ids:
             input_bcast_idx = self._bcast_layout.get(ssa.operand_ids[0])
 
-        # Identity and combine expression
-        if combine_op == "sum":
-            identity = "0.0f" if msl_type == "float" else "0"
-            combine_expr = "acc + val"
-        elif combine_op == "max":
-            identity = "(-INFINITY)" if msl_type == "float" else "INT_MIN"
-            combine_expr = "fmax(acc, val)" if msl_type == "float" else "max(acc, val)"
-        elif combine_op == "min":
-            identity = "INFINITY" if msl_type == "float" else "INT_MAX"
-            combine_expr = "fmin(acc, val)" if msl_type == "float" else "min(acc, val)"
-        elif combine_op == "xor":
-            identity = "0"
-            combine_expr = "acc ^ val"
-        else:
-            identity = "0.0f" if msl_type == "float" else "0"
-            combine_expr = "acc + val"
+        # Identity and combine expression (4-way: float/long/ulong/int).
+        identity, combine_expr = self._reduce_identity_combine(
+            combine_op, msl_type)
 
         # Allocate shared memory for the full 3D tensor
         shared_name = f"shared_{self._shared_counter}"
@@ -1094,24 +1110,9 @@ class _ReduceScanMixin:
                 x_ptr_name = arg.name
                 break
 
-        # Identity and combine expression
-        if combine_op == "sum":
-            identity = "0.0f" if msl_type == "float" else "0"
-            combine_expr = "acc + val"
-        elif combine_op == "max":
-            identity = "(-INFINITY)" if msl_type == "float" else "INT_MIN"
-            combine_expr = ("fmax(acc, val)" if msl_type == "float"
-                            else "max(acc, val)")
-        elif combine_op == "min":
-            identity = "INFINITY" if msl_type == "float" else "INT_MAX"
-            combine_expr = ("fmin(acc, val)" if msl_type == "float"
-                            else "min(acc, val)")
-        elif combine_op == "xor":
-            identity = "0"
-            combine_expr = "acc ^ val"
-        else:
-            identity = "0.0f" if msl_type == "float" else "0"
-            combine_expr = "acc + val"
+        # Identity and combine expression (4-way: float/long/ulong/int).
+        identity, combine_expr = self._reduce_identity_combine(
+            combine_op, msl_type)
 
         # Check if input has a tracked broadcast layout. If so, thread `lid`
         # does not hold the value at flat position `lid` — it holds the value
