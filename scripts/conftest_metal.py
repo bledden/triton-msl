@@ -470,15 +470,19 @@ def pytest_collection_modifyitems(config, items):
             continue
 
         # int64/uint64 compute IS supported (elementwise, comparison — width-
-        # correct since the arith.cmpi fix — cast, load/store, indexing: ~1047
-        # upstream test_core cases pass). What remains unimplemented is i64 SIMD
-        # reduction (no metal simd_sum/simd_max/simd_min overload for `long`)
-        # and where/transpose on i64; those raise a loud Metal COMPILE error
-        # (not silent-wrong), so skip just those op-families honestly rather
-        # than blanket-claiming "no int64 support". Override with METAL_TEST_INT64=1
-        # to exercise them. Audit #163.
-        _I64_UNIMPLEMENTED = ("test_reduce1d", "test_reduce2d",
-                              "test_where", "test_transpose")
+        # correct since the arith.cmpi fix — cast, load/store, indexing).
+        # As of 2026-06-13 the i64/u64 reduce (1-D + multi-dim, incl.
+        # argmin/argmax/min/max/sum), where, and transpose families ALSO pass
+        # by default: 64-bit reductions use a shared-memory tree (Metal has no
+        # simd_sum/max/min long overload) with correct LONG_MIN/LONG_MAX/
+        # ULONG_MAX identities, and where/transpose plumb the 64-bit type
+        # through. Verified: test_reduce1d 56, test_reduce (2-D) 10, test_where
+        # 2, test_transpose 2 i64/u64 variants all green. So _I64_UNIMPLEMENTED
+        # is now empty — nothing in these families is skipped.
+        # See docs/superpowers/specs/2026-06-13-i64-reduce-where-transpose-design.md.
+        # (test_for_iv i64-loop hang and i64 atomics — no 64-bit device atomic
+        # on Metal hardware — are handled by separate, still-active skips.)
+        _I64_UNIMPLEMENTED = ()
         if (("int64" in test_id or "uint64" in test_id)
                 and func_name in _I64_UNIMPLEMENTED
                 and not os.environ.get("METAL_TEST_INT64")):
