@@ -694,6 +694,21 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self._prescan_stores()
             return msl
 
+        # Check for the generic N-D transpose pattern: load(rank>=3)->trans->
+        # [reshape]->store with no reduce/control-flow (test_trans_4d). After
+        # the more-specific detector above (which returns None here), emit a
+        # closed-form direct-copy kernel (out[k] = in[src_flat(k)]) in a
+        # strided loop that handles the >1024-element shapes the shared-memory
+        # _lower_tt_trans path can't. The generic _lower_tt_trans rank>=3
+        # refusal stays as the backstop for un-matched cases.
+        nd_trans_info = self._detect_nd_trans()
+        if nd_trans_info:
+            msl = self._lower_nd_trans_template(nd_trans_info)
+            self.effective_block_size = (
+                (self.options.num_warps if self.options else 4) * 32)
+            self._prescan_stores()
+            return msl
+
         # Check for tl.sort / tl.topk applied to each row of a 2D tensor.
         # When total > 1024 threads are needed, the generic reduce path can't
         # run (threadgroup cap), but each row can be sorted independently in

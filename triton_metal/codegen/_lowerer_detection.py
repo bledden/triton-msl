@@ -1474,6 +1474,59 @@ class _DetectionMixin:
         }
 
 
+    def _detect_nd_trans(self):
+        """Detect a generic N-D transpose: one tt.load of a rank>=3 tensor, one
+        tt.trans (any permutation), optional tt.reshape(s), one tt.store to a
+        flat pointer, with NO reduce/scan/dot/control-flow. Emits a closed-form
+        direct copy (out[k] = in[src_flat(k)]). Returns dict or None.
+
+        More specific transpose templates (_detect_transpose_via_reshape,
+        _detect_permute_chained_reduce) run first and return None for anything
+        they don't own, so this is the general fallback for test_trans_4d."""
+        load_ssa = store_ssa = trans_ssa = None
+        for ssa in self.graph.ops:
+            if ssa.op == "tt.load":
+                if load_ssa is not None:
+                    return None
+                load_ssa = ssa
+            elif ssa.op == "tt.store":
+                if store_ssa is not None:
+                    return None
+                store_ssa = ssa
+            elif ssa.op == "tt.trans":
+                if trans_ssa is not None:
+                    return None
+                trans_ssa = ssa
+            elif ssa.op == "tt.reshape":
+                pass  # allowed (descriptor lowering inserts these)
+            elif ssa.op in ("scf.for", "scf.while", "scf.if",
+                            "tt.reduce", "tt.scan", "tt.dot"):
+                return None
+        if load_ssa is None or store_ssa is None or trans_ssa is None:
+            return None
+        # The transpose operates on its INPUT's shape (the N-D tensor).
+        src_shape = _extract_shape(self._find_op_type_str(trans_ssa.operand_ids[0]))
+        if not src_shape or len(src_shape) < 3:
+            return None
+        order = self._parse_trans_order(trans_ssa, len(src_shape))
+        if order is None or sorted(order) != list(range(len(src_shape))):
+            return None
+        ptr_args = [a for a in self.graph.args if a.is_ptr]
+        if len(ptr_args) < 2:
+            return None
+        total = 1
+        for s in src_shape:
+            total *= s
+        return {
+            "input_arg": ptr_args[0].name,
+            "output_arg": ptr_args[1].name,
+            "elem_type": ptr_args[0].elem_type,
+            "src_shape": list(src_shape),
+            "order": list(order),
+            "total": total,
+        }
+
+
     def _detect_row_wise_sort(self):
         """Detect tl.sort / tl.topk applied to each row of a 2D tensor.
 

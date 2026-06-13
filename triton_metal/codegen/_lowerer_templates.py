@@ -1020,6 +1020,70 @@ class _TemplateMixin:
         lines.append("")
         return "\n".join(lines)
 
+    def _lower_nd_trans_template(self, info) -> str:
+        """Closed-form N-D transpose: out[k] = in[src_flat(k)] in a strided
+        loop. src_flat(k) = sum_d ((k / dst_stride[d]) % dst_shape[d]) *
+        src_stride[order[d]], with row-major strides computed here."""
+        src_shape = info["src_shape"]
+        order = info["order"]
+        total = info["total"]
+        rank = len(src_shape)
+        dst_shape = [src_shape[order[d]] for d in range(rank)]
+
+        def _row_major_strides(shape):
+            st = [1] * len(shape)
+            for i in range(len(shape) - 2, -1, -1):
+                st[i] = st[i + 1] * shape[i + 1]
+            return st
+
+        dst_stride = _row_major_strides(dst_shape)
+        src_stride = _row_major_strides(src_shape)
+        # in_flat = sum_d O[d] * src_stride[order[d]];  O[d]=(k/dst_stride[d])%dst_shape[d]
+        terms = []
+        for d in range(rank):
+            o_d = (f"(k % {dst_shape[d]}u)" if dst_stride[d] == 1
+                   else f"((k / {dst_stride[d]}u) % {dst_shape[d]}u)")
+            terms.append(f"{o_d} * {src_stride[order[d]]}u")
+        in_flat = " + ".join(terms)
+
+        elem_type = info["elem_type"]
+        input_arg = info["input_arg"]
+        output_arg = info["output_arg"]
+        msl_type = triton_type_to_msl(elem_type)  # noqa: F841 (typed via args)
+        safe_name = _sanitize_msl_name(self.graph.func_name)
+        num_warps = self.options.num_warps if self.options else 4
+        threads = num_warps * 32
+
+        arg_decls = []
+        for i, arg in enumerate(self.graph.args):
+            if arg.is_ptr:
+                arg_msl_type = triton_type_to_msl(arg.elem_type)
+                arg_decls.append(
+                    f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+            else:
+                arg_msl_type = (triton_type_to_msl(arg.elem_type)
+                                if arg.elem_type else "int")
+                arg_decls.append(
+                    f"    constant {arg_msl_type}& {arg.name} [[buffer({i})]]")
+
+        lines = [
+            "#include <metal_stdlib>",
+            "using namespace metal;",
+            "",
+            f"kernel void {safe_name}(",
+            ",\n".join(arg_decls) + ",",
+            "    uint pid [[threadgroup_position_in_grid]],",
+            "    uint lid [[thread_position_in_threadgroup]],",
+            "    uint tid [[thread_position_in_grid]]",
+            ") {",
+            f"    for (uint k = lid; k < {total}u; k += {threads}u) {{",
+            f"        {output_arg}[k] = {input_arg}[{in_flat}];",
+            "    }",
+            "}",
+            "",
+        ]
+        return "\n".join(lines)
+
     def _lower_permute_chained_reduce_template(self, info) -> str:
         """Emit a fused permute+chained-sum-reduce cooperative kernel.
 
