@@ -119,8 +119,25 @@ mismatch, no `UNKNOWN_`.
    cooperative-op >1024 case (FlashAttention `_flash_too_large`) remains M4.
    M3c convert_layout shuffle GPU hardening still pending (needs a kernel that
    triggers an array-form ttg.convert_layout — more involved). M3b (dot) next.**
-4. FlashAttention HEAD_DIM=64 on the spine.
-5. Flip default; then (separate) retire MEPT-gap detectors.
+4. FlashAttention HEAD_DIM=64 on the spine. **MOOT (M3b exploration): FA
+   HEAD_DIM=64 already works via the generic lowerer's shared-memory accumulator
+   path (acc=[32,64]=2048 in threadgroup memory; 11/11 FA tests pass). It never
+   needed the register-array form — that would only be a perf change. The 2D
+   cooperative >1024 case (`_flash_too_large`, BLOCK_M*BLOCK_N>1024) is the only
+   remaining FA-class gap, separate from this spine.**
+5. Flip default; then (separate) retire MEPT-gap detectors. **M5 DONE (flip,
+   commits 49fa3a6->f6121ec): MEPT is the DEFAULT codegen path;
+   `TRITON_METAL_MEPT=0` is the escape hatch to the legacy scalar/wrap-loop path.
+   Lowerer default + cache-key default + CODEGEN_VERSION (2026.06.13) flipped
+   together (verified-equivalent predicates). Verified BOTH directions — no-env
+   default AND MEPT=0: upstream test_core 5335/0, project suite 622/0 (default)
+   / 620/0 (MEPT=0); explicit MEPT=1 newly-unlocked GPU tests 10/10. Flip-exposed
+   flag-OFF-asserting unit tests were pinned to explicit MEPT=0. Detector
+   retirement remains a separate follow-up. Noted follow-up: the flag-default
+   predicate is duplicated in generic_lowerer.py + compiler.py (verified-
+   equivalent, "must match" comments) — a shared helper would de-risk a future
+   re-flip but was deferred (folding it across the lowerer<->compiler boundary
+   risks a circular import).**
 
 ## Risks
 - Common-path bloat if scalar-collapse regresses -> the differential gate catches
