@@ -45,7 +45,9 @@ def _msl_cache_key(mod_text, options_hash):
     silently replay stale compiled kernels (Phase 0, audit debt #1/#2).
     """
     from triton_metal import CODEGEN_VERSION
-    mept = os.environ.get("TRITON_METAL_MEPT", "")
+    # Effective MEPT flag (default ON as of M5): no-env and "1" share a key;
+    # "0" (escape hatch) is distinct. Must match generic_lowerer's default.
+    mept = "0" if os.environ.get("TRITON_METAL_MEPT") == "0" else "1"
     return hashlib.sha256(
         (mod_text + options_hash + CODEGEN_VERSION + mept).encode("utf-8")
     ).hexdigest()[:16]
