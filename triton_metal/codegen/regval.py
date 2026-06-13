@@ -73,6 +73,9 @@ def region_needs_arrays(ops, multi_elem_ids) -> bool:
                     return True
                 if getattr(b, "id", None) in multi:
                     return True
+                for rid in (getattr(b, "result_ids", None) or []):
+                    if rid in multi:
+                        return True
             if region_needs_arrays(body, multi):
                 return True
     return False

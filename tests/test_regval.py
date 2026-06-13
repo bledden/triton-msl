@@ -138,3 +138,14 @@ def test_region_needs_arrays_detects_multi_in_else_ops():
     wh = _TVOp("scf.while", id="wh", operand_ids=[],
                region_ops=[], else_ops=[use])
     assert region_needs_arrays([wh], {"offs"}) is True
+
+
+def test_region_needs_arrays_matches_result_ids_not_just_id():
+    from triton_metal.codegen.regval import region_needs_arrays
+    # A body op whose multi-element value is its result_ids[0]=200, while its
+    # .id is a different number (300). tensor_value_ids would add 200 to the
+    # multi set; region_needs_arrays must detect that 200 is produced here.
+    producer = _TVOp("tt.load", id=300, operand_ids=[], result_ids=[200])
+    loop = _TVOp("scf.for", id=1, operand_ids=[], result_ids=[],
+                 region_ops=[producer])
+    assert region_needs_arrays([loop], {200}) is True
