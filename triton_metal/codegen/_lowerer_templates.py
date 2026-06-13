@@ -1046,10 +1046,10 @@ class _TemplateMixin:
             terms.append(f"{o_d} * {src_stride[order[d]]}u")
         in_flat = " + ".join(terms)
 
-        elem_type = info["elem_type"]
         input_arg = info["input_arg"]
         output_arg = info["output_arg"]
-        msl_type = triton_type_to_msl(elem_type)  # noqa: F841 (typed via args)
+        # Pointer element types come from each arg's own elem_type in the
+        # arg-decl loop below; no kernel-wide msl_type needed here.
         safe_name = _sanitize_msl_name(self.graph.func_name)
         num_warps = self.options.num_warps if self.options else 4
         threads = num_warps * 32

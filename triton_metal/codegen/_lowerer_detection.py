@@ -1504,6 +1504,44 @@ class _DetectionMixin:
                 return None
         if load_ssa is None or store_ssa is None or trans_ssa is None:
             return None
+        # Data-flow validation (CRITICAL): the template reads straight from the
+        # input pointer and writes the permuted index, so it is correct ONLY if
+        # the value path is purely load -> [reshape]* -> trans -> [reshape]* ->
+        # store. Any intervening compute op (e.g. load -> arith.mulf -> trans)
+        # is NOT a tt.reshape, so the chain breaks and we bail — otherwise that
+        # op would be silently dropped -> wrong output. (The descriptor lowering
+        # inserts layout-only reshapes between load/trans and trans/store, which
+        # are fine.) Refuse (return None -> generic path + rank>=3 backstop)
+        # unless the clean chain is proven.
+        # Value-preserving layout-only ops that may appear in the chain (the
+        # descriptor lowering inserts these). NOT arith/math/etc — those change
+        # the values and must break the chain (-> bail -> backstop).
+        _VALUE_PRESERVING = ("tt.reshape", "ttg.convert_layout")
+
+        def _traces_to(ssa_id, target_id):
+            """True if ssa_id is target_id or a value-preserving (reshape/
+            convert_layout) chain back to it."""
+            cur = ssa_id
+            seen = set()
+            for _ in range(8):
+                if cur == target_id:
+                    return True
+                if cur in seen:
+                    break
+                seen.add(cur)
+                op = next((s for s in self.graph.ops if s.id == cur), None)
+                if (op is None or op.op not in _VALUE_PRESERVING
+                        or not op.operand_ids):
+                    break
+                cur = op.operand_ids[0]
+            return False
+
+        if (not trans_ssa.operand_ids
+                or not _traces_to(trans_ssa.operand_ids[0], load_ssa.id)):
+            return None
+        if (len(store_ssa.operand_ids) < 2
+                or not _traces_to(store_ssa.operand_ids[1], trans_ssa.id)):
+            return None
         # The transpose operates on its INPUT's shape (the N-D tensor).
         src_shape = _extract_shape(self._find_op_type_str(trans_ssa.operand_ids[0]))
         if not src_shape or len(src_shape) < 3:
