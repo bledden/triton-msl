@@ -176,9 +176,9 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         #     the scalar path compute correctly here: reduction-in-loop at
         #     BLOCK>=256 (tridec Bug 2), loop-carried register arrays, and the
         #     >1024 threadgroup ceiling for 1-D kernels.
-        #   - Zero regression: the full upstream test_core suite is 5335/0 AND
-        #     the project suite 619/0 with MEPT on (default) as well as off
-        #     (MEPT=0), verified 2026-06-13.
+        #   - Zero regression: the full upstream test_core suite is 5335/0 with
+        #     MEPT on (default) as well as off (MEPT=0); the project suite is
+        #     622/0 (default) / 620/0 (MEPT=0). Verified 2026-06-13.
         # Every consumer is gated on ``mept_enabled``; the producer (make_range)
         # is the single activation root. ``TRITON_METAL_MEPT=0`` restores the
         # exact pre-flip scalar route (the parity gate proves byte-equivalence

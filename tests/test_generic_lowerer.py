@@ -1978,8 +1978,11 @@ def test_lower_make_range_emits_array_when_mept_and_n_elems():
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
-def test_lower_make_range_scalar_when_mept_off():
-    """`_lower_make_range` keeps existing scalar form when MEPT off."""
+def test_lower_make_range_scalar_when_single_pass_inactive():
+    """`_lower_make_range` keeps the scalar form when the single-pass array
+    regime is inactive — make_range emits an array only when
+    ``_mept_single_pass`` was set by the eligibility prescan, which never runs
+    in this direct unit test. (MEPT=0 also keeps it off end to end.)"""
     import os
     from triton_metal.codegen.generic_lowerer import GenericLowerer
     from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
@@ -1990,7 +1993,8 @@ def test_lower_make_range_scalar_when_mept_off():
 
     graph = IRGraph(func_name="t", args=[], ops=[],
                     block_size=512, num_warps=4)
-    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=512)
@@ -2003,7 +2007,8 @@ def test_lower_make_range_scalar_when_mept_off():
                              attrs={"start": 0, "end": 512},
                              type_str="tensor<512xi32>", elem_type="i32",
                              is_tensor=True)
-        # Even with n_elems hint, flag-off ignores it.
+        # Even with an n_elems hint, make_range stays scalar unless
+        # _mept_single_pass was set by the eligibility prescan.
         lowerer.env_n_elems[42] = 4
 
         lowerer._lower_make_range(range_ssa)
@@ -2012,7 +2017,9 @@ def test_lower_make_range_scalar_when_mept_off():
         # env[42] should be the scalar lid (start=0 fast path).
         assert lowerer.env[42] == "lid"
     finally:
-        if saved is not None:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
             os.environ["TRITON_METAL_MEPT"] = saved
 
 

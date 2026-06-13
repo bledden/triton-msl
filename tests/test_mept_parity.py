@@ -57,9 +57,9 @@ def test_mept_flag_parity_scalar_corpus(fn, sig, cst):
 
 
 def teardown_module(module):
-    # _emit mutates these process-global env vars; the lowerer reads
-    # TRITON_METAL_MEPT per-compile, so a leaked "1" would silently flip later
-    # test files into the MEPT path (e.g. test_unknown_value_backstop's flag-off
-    # refusal assertion). Restore the default-off state when this module ends.
+    # _emit mutates these process-global env vars; the lowerer reads them
+    # per-compile, so leaving a stale value would flip later test files onto
+    # the wrong path. Remove both so the process returns to its true defaults
+    # (MEPT is default-ON since M5; popping it restores that default).
     os.environ.pop("TRITON_METAL_MEPT", None)
     os.environ.pop("TRITON_METAL_FORCE_PYTHON", None)
