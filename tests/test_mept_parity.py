@@ -54,3 +54,12 @@ def test_mept_flag_parity_scalar_corpus(fn, sig, cst):
     on = _emit(fn, sig, cst, mept=True)
     assert on == off, (
         "MEPT flag changed scalar MSL:\n--- OFF ---\n%s\n--- ON ---\n%s" % (off, on))
+
+
+def teardown_module(module):
+    # _emit mutates these process-global env vars; the lowerer reads
+    # TRITON_METAL_MEPT per-compile, so a leaked "1" would silently flip later
+    # test files into the MEPT path (e.g. test_unknown_value_backstop's flag-off
+    # refusal assertion). Restore the default-off state when this module ends.
+    os.environ.pop("TRITON_METAL_MEPT", None)
+    os.environ.pop("TRITON_METAL_FORCE_PYTHON", None)

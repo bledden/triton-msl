@@ -19,6 +19,17 @@ except Exception:
 
 requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
 
+
+@pytest.fixture(autouse=True)
+def _force_mept_off(monkeypatch):
+    # These tests assert the DEFAULT (MEPT-off) behavior. The lowerer reads
+    # TRITON_METAL_MEPT per-compile, so pin it off here — otherwise a leaked
+    # "1" from an earlier test file turns the BLOCK=256 refusal into a (valid)
+    # M2 computation and this test fails on ordering. monkeypatch restores the
+    # prior value on teardown, so this fixture doesn't itself pollute.
+    monkeypatch.delenv("TRITON_METAL_MEPT", raising=False)
+
+
 if HAS:
     @triton.jit
     def _sum_in_loop(X, OUT, N, n_tiles, BLOCK: tl.constexpr):
