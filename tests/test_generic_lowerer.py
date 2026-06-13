@@ -1535,7 +1535,8 @@ def test_emit_binary_emits_scalar_when_mept_off():
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1556,7 +1557,9 @@ def test_emit_binary_emits_scalar_when_mept_off():
         body = "\n".join(lowerer.kb._body_lines)
         assert "= a + b;" in body
     finally:
-        if saved is not None:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
@@ -1691,7 +1694,8 @@ def test_emit_builtin_binary_scalar_path_unchanged():
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1711,7 +1715,9 @@ def test_emit_builtin_binary_scalar_path_unchanged():
         body = "\n".join(lowerer.kb._body_lines)
         assert "pow(a, b)" in body
     finally:
-        if saved is not None:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
@@ -2791,7 +2797,8 @@ def test_emit_unary_emits_scalar_when_mept_off():
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2810,7 +2817,9 @@ def test_emit_unary_emits_scalar_when_mept_off():
         assert "-v_src;" in body
         assert "v_src[0]" not in body
     finally:
-        if saved is not None:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
@@ -2825,7 +2834,8 @@ def test_emit_cast_emits_scalar_when_mept_off():
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    saved = os.environ.get("TRITON_METAL_MEPT")
+    os.environ["TRITON_METAL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2845,7 +2855,9 @@ def test_emit_cast_emits_scalar_when_mept_off():
         assert "static_cast<float>(v_src)" in body
         assert "v_src[0]" not in body
     finally:
-        if saved is not None:
+        if saved is None:
+            os.environ.pop("TRITON_METAL_MEPT", None)
+        else:
             os.environ["TRITON_METAL_MEPT"] = saved
 
 
@@ -2924,7 +2936,7 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
         if flag_on:
             os.environ["TRITON_METAL_MEPT"] = "1"
         else:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ["TRITON_METAL_MEPT"] = "0"
         try:
             target = GPUTarget("metal", "apple-m4", 32)
             backend = MetalBackend(target)
