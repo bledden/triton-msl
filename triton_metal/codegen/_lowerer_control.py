@@ -41,6 +41,13 @@ class _ControlFlowMixin:
         shared-memory array instead of a per-thread scalar.  Operations on
         those values (arith.mulf, tt.dot, tt.store) use cooperative strided
         loops.  The mapping is tracked in ``_smem_iter_args``.
+
+        For 1-D iter_args carrying more than one element per thread (single-pass
+        MEPT, flag-ON only), the value is kept as a per-thread register array
+        ``T v[n]`` declared once, seeded from the init value, and updated
+        per-element at each yield.  Tracked in ``mept_array_iter_indices`` /
+        ``mept_array_iter_n``; the block-arg and result are registered in
+        ``env_array`` so the body and the post-loop store read ``v[e]`` (M3a).
         """
         if len(ssa.operand_ids) < 3:
             return
@@ -265,6 +272,16 @@ class _ControlFlowMixin:
                                 ydesc = self.env_array.get(yield_id)
                                 if ydesc is not None:
                                     ysrc, _yn, _yt = ydesc
+                                    # Symmetric with the seed-side guard: the
+                                    # yielded array must match the iter-arg
+                                    # width, else iter_N[e]=ysrc[e] reads OOB.
+                                    if _yn != n_arr:
+                                        from triton_metal.errors import (
+                                            MetalNonRecoverableError)
+                                        raise MetalNonRecoverableError(
+                                            f"MEPT iter-arg yield width mismatch: "
+                                            f"yielded {_yn}, iter-arg {n_arr} "
+                                            f"(yield_id={yield_id})")
                                     for e in range(n_arr):
                                         self.kb.raw_line(
                                             f"        {iter_vars[i]}[{e}] = "
