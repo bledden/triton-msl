@@ -1,10 +1,12 @@
 """emit_msl refuses on unresolved UNKNOWN_<id> instead of emitting invalid MSL.
 
-A value defined outside a runtime-bound loop and used inside it, when BLOCK
-exceeds the threadgroup size (multi-element-per-thread regime), can't be
-resolved yet (register-array spine = roadmap Phase 2). It previously emitted
-UNKNOWN_<addr> -> cryptic xcrun compile error. Now it refuses loudly with an
-actionable message. BLOCK <= 128 still runs correctly. (downstream tridec bug 2)
+This pins the TRITON_METAL_MEPT=0 ESCAPE-HATCH behavior. As of M5 the
+register-array model is default-ON and computes this kernel at BLOCK>=256 (see
+tests/test_mept_m5_default_gpu.py). With the escape hatch (MEPT=0, pinned by the
+autouse fixture below), a value defined outside a runtime-bound loop and used
+inside it at BLOCK>threadgroup-size can't be resolved on the scalar path -> it
+refuses loudly (the UNKNOWN_ backstop) rather than emitting invalid MSL.
+BLOCK<=128 still runs on the scalar path. (downstream tridec bug 2)
 """
 import pytest
 
@@ -22,12 +24,11 @@ requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
 
 @pytest.fixture(autouse=True)
 def _force_mept_off(monkeypatch):
-    # These tests assert the DEFAULT (MEPT-off) behavior. The lowerer reads
-    # TRITON_METAL_MEPT per-compile, so pin it off here — otherwise a leaked
-    # "1" from an earlier test file turns the BLOCK=256 refusal into a (valid)
-    # M2 computation and this test fails on ordering. monkeypatch restores the
-    # prior value on teardown, so this fixture doesn't itself pollute.
-    monkeypatch.delenv("TRITON_METAL_MEPT", raising=False)
+    # These tests assert the TRITON_METAL_MEPT=0 ESCAPE-HATCH behavior (the
+    # legacy scalar/wrap-loop path). Pin the flag to "0" explicitly — NOT
+    # delenv: as of M5 the default is ON, so removing the var would let the
+    # kernel compute and break the refusal assertion. setenv auto-restores.
+    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
 
 
 if HAS:
@@ -50,8 +51,8 @@ def test_sum_in_loop_block128_runs():
     assert abs(float(OUT[0]) - X.sum().item()) < 1e-2
 
 
-# NOTE: refuses only with MEPT OFF (default). Under TRITON_METAL_MEPT=1 this
-# kernel computes correctly — see tests/test_mept_m2_bug2_gpu.py (M2).
+# Escape-hatch behavior: with MEPT=0 (pinned by _force_mept_off) this kernel
+# refuses at BLOCK=256. Default-ON it computes — see test_mept_m5_default_gpu.py.
 @requires_metal
 def test_sum_in_loop_block256_refuses_not_compile_error():
     from triton_metal.errors import MetalNonRecoverableError
