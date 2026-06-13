@@ -87,7 +87,16 @@ mismatch, no `UNKNOWN_`.
 ## Milestones (each its own plan)
 1. `RegVal` unification + form classifier + scalar-collapse parity (flag-ON ==
    flag-OFF on the scalar corpus; no new passes yet).
-2. `scf.for`/`while` array-carry -> Bug-2 BLOCK>=256 correct.
+2. `scf.for`/`while` array-carry -> Bug-2 BLOCK>=256 correct. **DONE (M2,
+   commits 41e5b39->e7f554e): eligibility extended so control-flow kernels
+   enter the single-pass register-array form (`mept_arrayform_eligible`);
+   hoisted values persist into the loop body via `env_array`. tridec Bug 2
+   computes at BLOCK 256/512/1024 (flag-on); flag-off upstream test_core
+   5,335/0 unchanged. GPU validation surfaced + fixed two array-path gaps
+   (shape-preserving reshape-before-reduce in the eligibility set; replicated-
+   layout exact-cover via `block_size // num_threads`). Array iter-arg carry
+   (per-element state yielded across iterations) deferred to M3, where chained
+   reductions require it — Bug 2's dataflow carries only a scalar partial.**
 3. Cooperative ops (reduce/dot/convert_layout) on the array form -> >1024 ceiling
    + chained reductions.
 4. FlashAttention HEAD_DIM=64 on the spine.
