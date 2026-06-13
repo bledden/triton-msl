@@ -39,6 +39,8 @@ def test_sum_in_loop_block128_runs():
     assert abs(float(OUT[0]) - X.sum().item()) < 1e-2
 
 
+# NOTE: refuses only with MEPT OFF (default). Under TRITON_METAL_MEPT=1 this
+# kernel computes correctly — see tests/test_mept_m2_bug2_gpu.py (M2).
 @requires_metal
 def test_sum_in_loop_block256_refuses_not_compile_error():
     from triton_metal.errors import MetalNonRecoverableError

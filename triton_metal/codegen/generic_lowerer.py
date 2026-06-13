@@ -897,12 +897,37 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             _CONTROL_OPS as _CF_OPS,
         )
 
+        def _reshape_preserves_elems(s):
+            # A tt.reshape that keeps the same total element count is a
+            # layout-only change (e.g. the sizePerThread=[2]→[1] reshape
+            # Triton inserts before a tt.reduce of a tl.sum). It lowers via
+            # _emit_passthrough, which propagates env_array unchanged, so the
+            # per-thread register array survives into the reduce. A reshape
+            # that changes the element count would be a real reinterpretation
+            # and is rejected (returns False → kernel stays on the safe path).
+            if not s.operand_ids:
+                return False
+            src_t = self._find_op_type_str(s.operand_ids[0])
+            in_sh = _extract_shape(src_t) if src_t else None
+            out_sh = _extract_shape(s.type_str or "")
+            if not in_sh or not out_sh:
+                return False
+            tin = 1
+            for d in in_sh:
+                tin *= d
+            tout = 1
+            for d in out_sh:
+                tout *= d
+            return tin == tout
+
         def _arrayform_op_ok(s):
             if s.op in _CF_OPS:
                 body = list(s.region_ops or []) + list(getattr(s, "else_ops", None) or [])
                 return all(_arrayform_op_ok(b) for b in body)
             if s.op in ("scf.yield", "scf.condition", "tt.reduce"):
                 return True
+            if s.op == "tt.reshape":
+                return _reshape_preserves_elems(s)
             return _op_mept_ok(s)
 
         def _all_reduces(op_list):
@@ -970,6 +995,21 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # so each thread handles exactly one element and _lower_reduce_2d
         # can correctly collect all values in shared memory.
         use_multipass = False
+        # MEPT arrayform exact-cover count. The raw ``size_per_thread`` is the
+        # product of the layout's first-level sizePerThread tile, which
+        # UNDERCOUNTS when the blocked tile is smaller than the tensor and the
+        # layout replicates (e.g. BLOCK=1024 has sizePerThread=[4],
+        # threadsPerWarp=[32], warpsPerCTA=[4] → a 512-wide tile covering a
+        # 1024 tensor, so each thread really holds 8 registers, not 4). The
+        # MEPT array producer (_track_n_elems / num_registers_per_thread) uses
+        # the true per-thread count, which for a contiguous 1-D cover equals
+        # ``block_size // num_threads``. The arrayform exact-cover gate must use
+        # the SAME count or it disagrees with the codegen (BLOCK=1024 was
+        # rejected with size_per_thread=4 even though the array path emits 8).
+        mept_elems_per_thread = (
+            block_size // num_threads
+            if num_threads and block_size % num_threads == 0 else 0
+        )
         if has_2d_axis_reduce and block_size <= 1024:
             # Skip multipass; use full block_size with one element per thread.
             # _lower_reduce_2d handles the sequential reduction internally.
@@ -1006,14 +1046,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             pass
         elif size_per_thread > 1 and block_size > num_threads:
             if (mept_arrayform_eligible
-                    and num_threads * size_per_thread == block_size):
+                    and mept_elems_per_thread > 1
+                    and num_threads * mept_elems_per_thread == block_size):
                 # MEPT M2 single-pass register-array form for control-flow
-                # kernels. Each thread owns size_per_thread contiguous
+                # kernels. Each thread owns mept_elems_per_thread contiguous
                 # elements as a register array (idx[i] = lid*N + i). The array
                 # IS the per-thread multiplicity, so there is NO wrap-loop
                 # (_needs_wrapping stays False). Arrays declared before a
                 # data-dependent scf.for persist into its body, so hoisted
                 # values (arange, masked-load `other`) resolve inside the loop.
+                # Uses mept_elems_per_thread (= block_size // num_threads), the
+                # replication-aware count that matches the array producer; the
+                # raw size_per_thread undercounts on replicated layouts.
                 self._total_elements = block_size
                 block_size = num_threads
                 self._mept_single_pass = True
