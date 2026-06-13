@@ -108,6 +108,17 @@ mismatch, no `UNKNOWN_`.
    `_MEPT_SAFE_OPS`), M3c (>1024 1D-ceiling audit — likely a dispatch-gate change
    at `generic_lowerer.py` `elif size_per_thread > 1`; + convert_layout shuffle
    GPU hardening, now unblocked by the `_find_op_type_str` fix).**
+
+   **M3c >1024 part DONE (commit 5f2e3d7): the >1024 ceiling is ALREADY lifted
+   for 1-D MEPT kernels — no dispatch change was needed. The array form keeps
+   num_threads<=128 and gives each thread block_size/num_threads elements, so a
+   loop-carried array iter-arg (column-sum) AND a reduction-in-loop (Bug-2
+   shape) both compute at BLOCK 2048/4096 (flag-on); locked by
+   tests/test_mept_m3c_gt1024_gpu.py. (The exploration's "blocked at BLOCK=2048"
+   was an import-path artifact — main-repo ASTSource, not worktree JIT.) The 2D
+   cooperative-op >1024 case (FlashAttention `_flash_too_large`) remains M4.
+   M3c convert_layout shuffle GPU hardening still pending (needs a kernel that
+   triggers an array-form ttg.convert_layout — more involved). M3b (dot) next.**
 4. FlashAttention HEAD_DIM=64 on the spine.
 5. Flip default; then (separate) retire MEPT-gap detectors.
 
