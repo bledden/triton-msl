@@ -1,10 +1,16 @@
-"""Atomic RMW integrity (audit C2).
+"""Atomic RMW integrity (audit C2 → Phase 3 feature 1).
 
-Metal has no 16-bit device atomic. The float-atomic CAS loop operates on 32-bit
-words, so an fp16/bf16 atomic_add silently corrupted the 2-byte slot (reproduced:
-scatter-add of eight 1.0s into two bins gave [0.0, 2.5] instead of [4, 4]). These
-tests pin that such atomics now REFUSE loudly instead of returning wrong output,
-and that the supported fp32 atomic still works.
+Metal has no 16-bit device atomic. A naive float-atomic CAS loop operates on
+32-bit words, so an fp16/bf16 atomic_add would corrupt the 2-byte slot AND its
+neighbor (reproduced: scatter-add of eight 1.0s into two bins gave [0.0, 2.5]
+instead of [4, 4]). The backend originally REFUSED such atomics loudly.
+
+As of 2026-06-13 the refusal is replaced by a neighbor-preserving 32-bit
+word-CAS (_emit_atomic_rmw_16bit in _lowerer_control.py; see
+docs/superpowers/specs/2026-06-13-fp16-bf16-atomics-design.md). These tests now
+pin that fp16/bf16 atomic_add produces the CORRECT result (no corruption), and
+that the supported fp32 atomic still works. Detailed correctness coverage
+(accumulation, neighbor preservation, bf16) lives in tests/test_fp16_atomics.py.
 """
 import os
 import subprocess
@@ -37,13 +43,15 @@ if HAS:
 
 
 @requires_metal
-def test_fp16_atomic_add_refuses_not_silentwrong():
-    from triton_metal.errors import MetalNonRecoverableError
+def test_fp16_atomic_add_correct_not_silentwrong():
+    # The exact reproduction that previously gave [0.0, 2.5] (corruption) and
+    # then loudly refused. The word-CAS now makes it correct: eight 1.0s
+    # scatter-added into two bins => [4, 4]. No neighbor corruption.
     idx = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32)
     val = torch.ones(8, dtype=torch.float16)
     out = torch.zeros(2, dtype=torch.float16)
-    with pytest.raises(MetalNonRecoverableError):
-        _scatter_add[(1,)](idx, val, out, N=8)
+    _scatter_add[(1,)](idx, val, out, N=8)
+    np.testing.assert_allclose(out.float().numpy(), [4.0, 4.0], atol=1e-3)
 
 
 _FP16_ATOMIC_SCRIPT = '''import os
@@ -57,18 +65,21 @@ idx = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32)
 val = torch.ones(8, dtype=torch.float16)
 out = torch.zeros(2, dtype=torch.float16)
 k[(1,)](idx, val, out, N=8)
+got = out.float().tolist()
+assert abs(got[0] - 4.0) < 1e-3 and abs(got[1] - 4.0) < 1e-3, got
+print("OK", got)
 '''
 
 
 @requires_metal
 @pytest.mark.skipif(not HAS_CPP, reason="cpp not built")
-def test_fp16_atomic_refusal_under_default_route():
-    """Refusal parity on the DEFAULT route (Phase 1, T4).
+def test_fp16_atomic_correct_under_default_route():
+    """Correctness parity on the DEFAULT route (Phase 3 feature 1).
 
     The in-process test above may inherit TRITON_METAL_FORCE_PYTHON from the
-    surrounding session. This pins the refusal in a fresh subprocess with the
-    C++ passes built and no FORCE_PYTHON: default routing must still raise
-    MetalNonRecoverableError, never produce silently-corrupt output.
+    surrounding session. This pins the word-CAS correctness in a fresh
+    subprocess with the C++ passes built and no FORCE_PYTHON: default routing
+    must produce the right result ([4, 4]), never silently-corrupt output.
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env = dict(os.environ,
@@ -78,11 +89,12 @@ def test_fp16_atomic_refusal_under_default_route():
     env.pop("TRITON_METAL_FORCE_PYTHON", None)
     r = subprocess.run([sys.executable, "-c", _FP16_ATOMIC_SCRIPT],
                        env=env, capture_output=True, text=True, timeout=180)
-    assert r.returncode != 0, (
-        f"fp16 atomic_add must refuse under the default route; "
-        f"exited 0\nstdout: {r.stdout}\nstderr: {r.stderr}")
-    assert "MetalNonRecoverableError" in r.stderr, (
-        f"expected MetalNonRecoverableError in stderr, got:\n{r.stderr}")
+    assert r.returncode == 0, (
+        f"fp16 atomic_add must succeed on the default route; "
+        f"exited {r.returncode}\nstdout: {r.stdout}\nstderr: {r.stderr}")
+    assert "OK" in r.stdout, (
+        f"expected correct [4, 4] result on default route, got:\n"
+        f"stdout: {r.stdout}\nstderr: {r.stderr}")
 
 
 @requires_metal

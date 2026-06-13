@@ -539,6 +539,45 @@ class _ControlFlowMixin:
             self.env[ssa.id] = iter_vars[0]
             self.env_types[ssa.id] = iter_dtypes[0] if iter_dtypes else "i32"
 
+    def _emit_atomic_rmw_16bit(self, base_ptr, offsets, val_var, rmw_op,
+                               half_type, result_var, indent, n):
+        """Neighbor-preserving 16-bit float atomic RMW via a 32-bit word CAS.
+
+        ``half_type`` is "half" (fp16) or "bfloat" (bf16). The element lives in
+        one half of an aligned 4-byte word; we CAS the word and preserve the
+        other half. The op runs in float domain (always supported) then casts
+        back. Returns the OLD value (Triton atomic_rmw semantics)."""
+        op_expr = {
+            "add":  f"({half_type})((float)old_{n} + (float){val_var})",
+            "fadd": f"({half_type})((float)old_{n} + (float){val_var})",
+            "max":  f"({half_type})max((float)old_{n}, (float){val_var})",
+            "min":  f"({half_type})min((float)old_{n}, (float){val_var})",
+            "exch": f"({half_type})((float){val_var})",
+        }[rmw_op]
+        kb = self.kb
+        kb.raw_line(f"{indent}uint _eidx_{n} = (uint)({offsets});")
+        kb.raw_line(f"{indent}device atomic_uint* wptr_{n} = "
+                    f"(device atomic_uint*)({base_ptr}) + (_eidx_{n} >> 1);")
+        kb.raw_line(f"{indent}uint _sh_{n} = 16u * (_eidx_{n} & 1u);")
+        kb.raw_line(f"{indent}uint _w_{n} = "
+                    f"atomic_load_explicit(wptr_{n}, memory_order_relaxed);")
+        kb.raw_line(f"{indent}ushort cur_bits_{n};")
+        kb.raw_line(f"{indent}while (true) {{")
+        kb.raw_line(f"{indent}    cur_bits_{n} = "
+                    f"(ushort)((_w_{n} >> _sh_{n}) & 0xFFFFu);")
+        kb.raw_line(f"{indent}    {half_type} old_{n} = "
+                    f"as_type<{half_type}>(cur_bits_{n});")
+        kb.raw_line(f"{indent}    {half_type} new_{n} = {op_expr};")
+        kb.raw_line(f"{indent}    ushort nb_{n} = as_type<ushort>(new_{n});")
+        kb.raw_line(f"{indent}    uint wn_{n} = (_w_{n} & ~(0xFFFFu << _sh_{n})) | "
+                    f"((uint)nb_{n} << _sh_{n});")
+        kb.raw_line(f"{indent}    if (atomic_compare_exchange_weak_explicit("
+                    f"wptr_{n}, &_w_{n}, wn_{n},")
+        kb.raw_line(f"{indent}            memory_order_relaxed, "
+                    f"memory_order_relaxed)) break;")
+        kb.raw_line(f"{indent}}}")
+        kb.raw_line(f"{indent}{result_var} = as_type<{half_type}>(cur_bits_{n});")
+
     def _lower_atomic_rmw(self, ssa: SSAValue):
         """tt.atomic_rmw → MSL atomic read-modify-write.
 
@@ -583,21 +622,19 @@ class _ControlFlowMixin:
         # Use float detection: if either the value or the pointer is float
         is_float = is_float or is_float_ptr
 
-        # Refuse 16-bit float atomics (audit C2). The float-atomic path below
-        # reinterprets the slot as a 32-bit word (CAS loop on atomic_uint*,
-        # result_dtype hardcoded fp32). For an fp16/bf16 element that reads and
-        # writes 4 bytes over a 2-byte value — silently corrupting both it and
-        # its neighbor. Metal has no 16-bit device atomic, so there is no
-        # correct lowering: refuse loudly rather than emit wrong output.
-        if (val_dtype in ("fp16", "bf16", "f16")
-                or store_dtype in ("fp16", "bf16", "f16")):
-            from triton_metal.errors import MetalNonRecoverableError
-            raise MetalNonRecoverableError(
-                "Refusing to emit silently-wrong output: atomic_rmw on a 16-bit "
-                f"float ({val_dtype}/{store_dtype}) is not supported — Metal has "
-                "no 16-bit device atomic and the 32-bit CAS loop would corrupt "
-                "the 2-byte value. Accumulate in fp32 (atomic on an fp32 buffer) "
-                "and cast, or restructure to avoid the atomic.")
+        # 16-bit float atomics: no native Metal 16-bit atomic, but a
+        # neighbor-preserving 32-bit word-CAS is correct (Phase 3 feature 1).
+        is_16bit_float = (val_dtype in ("fp16", "bf16", "f16")
+                          or store_dtype in ("fp16", "bf16", "f16"))
+        half_type = None
+        if is_16bit_float:
+            _bf = (val_dtype == "bf16" or store_dtype == "bf16")
+            half_type = "bfloat" if _bf else "half"
+            if rmw_op not in ("add", "fadd", "max", "min", "exch"):
+                from triton_metal.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    f"atomic_rmw '{rmw_op}' on 16-bit float not supported "
+                    "(only add/max/min/exch via word-CAS).")
 
         # Check for mask
         mask_var = None
@@ -633,7 +670,11 @@ class _ControlFlowMixin:
 
         # Determine result type
         result_var = f"old_{n}"
-        if is_float and rmw_op in ("fadd", "add", "exch"):
+        if is_16bit_float:
+            result_dtype = "bf16" if half_type == "bfloat" else "fp16"
+            result_msl_type = half_type
+            result_zero = f"({half_type})0"
+        elif is_float and rmw_op in ("fadd", "add", "exch"):
             result_dtype = "fp32"
             result_msl_type = "float"
             result_zero = "0.0f"
@@ -680,7 +721,10 @@ class _ControlFlowMixin:
             guard_cond = " && ".join(guard_parts)
             self.kb.raw_line(f"    if ({guard_cond}) {{")
 
-        if is_float and rmw_op in ("fadd", "add"):
+        if is_16bit_float:
+            self._emit_atomic_rmw_16bit(base_ptr, offsets, val_var, rmw_op,
+                                        half_type, result_var, indent, n)
+        elif is_float and rmw_op in ("fadd", "add"):
             # Float atomic add via CAS loop
             self.kb.raw_line(f"{indent}device atomic_uint* aptr_{n} = (device atomic_uint*)({base_ptr} + {offsets});")
             self.kb.raw_line(f"{indent}uint old_bits_{n} = atomic_load_explicit(aptr_{n}, memory_order_relaxed);")
