@@ -121,6 +121,18 @@ class _EmissionMixin:
         self.env_array[ssa.id] = (var_name, n, ty)
         self.env_types[ssa.id] = dtype
         self._propagate_shape_elementwise(ssa)
+        # An i1-typed select result is a mask (e.g. cond ? m1 : m2) — match the
+        # scalar path / _lower_cmpi so downstream loads/stores see it as one.
+        if dtype == "i1":
+            self.env_is_mask[ssa.id] = True
+        # Carry the broadcast layout from any operand (mirrors the scalar select
+        # path + _propagate_bcast_layout_binary) so a downstream re-stage indexes
+        # correctly; absent this, a 2D-reduce-then-select kernel would silently
+        # drop the bcast layout (not caught by the UNKNOWN_ backstop).
+        for oid in ssa.operand_ids:
+            if oid in self._bcast_layout:
+                self._bcast_layout[ssa.id] = self._bcast_layout[oid]
+                break
         return True
 
 

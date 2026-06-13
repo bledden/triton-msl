@@ -48,6 +48,18 @@ def test_sum_where_in_loop(BLOCK):
 
 
 @requires_metal
+@pytest.mark.parametrize("BLOCK,N", [(256, 3000), (512, 4100)])
+def test_sum_where_partial_mask(BLOCK, N):
+    # N not a multiple of BLOCK -> the last tile has m=False elements, so the
+    # select's FALSE branch (the 0.0) is actually exercised (a branch-swap bug
+    # would otherwise pass test_sum_where_in_loop, whose mask is all-True).
+    X = torch.randn(N); OUT = torch.zeros(1)
+    _sum_where_in_loop[(1,)](X, OUT, N, (N + BLOCK - 1) // BLOCK, BLOCK=BLOCK)
+    assert abs(float(OUT[0]) - X[:N].sum().item()) < 1e-1, (
+        f"BLOCK={BLOCK} N={N}: got {float(OUT[0])} want {X[:N].sum().item()}")
+
+
+@requires_metal
 def test_sum_where_nested():
     # nested loops (tridec relay shape): total = n_legs * sum(X)
     N, BLOCK, n_legs = 2048, 256, 3
