@@ -546,18 +546,33 @@ class _ControlFlowMixin:
         ``half_type`` is "half" (fp16) or "bfloat" (bf16). The element lives in
         one half of an aligned 4-byte word; we CAS the word and preserve the
         other half. The op runs in float domain (always supported) then casts
-        back. Returns the OLD value (Triton atomic_rmw semantics)."""
+        back. Returns the OLD value (Triton atomic_rmw semantics).
+
+        Note: ``exch`` still uses the CAS loop (not a bare atomic_exchange) so
+        the neighbor half is preserved; it may retry if the neighbor is written
+        concurrently — the returned old value is the half immediately before the
+        winning CAS. max/min/exch are forward-compatible: Triton's frontend
+        currently restricts 16-bit-float atomics to ``add`` only."""
         op_expr = {
-            "add":  f"({half_type})((float)old_{n} + (float){val_var})",
-            "fadd": f"({half_type})((float)old_{n} + (float){val_var})",
-            "max":  f"({half_type})max((float)old_{n}, (float){val_var})",
-            "min":  f"({half_type})min((float)old_{n}, (float){val_var})",
+            "add":  f"({half_type})((float)oldh_{n} + (float){val_var})",
+            "fadd": f"({half_type})((float)oldh_{n} + (float){val_var})",
+            # fmax/fmin (not max/min): IEEE maxNum/minNum NaN semantics.
+            "max":  f"({half_type})fmax((float)oldh_{n}, (float){val_var})",
+            "min":  f"({half_type})fmin((float)oldh_{n}, (float){val_var})",
             "exch": f"({half_type})((float){val_var})",
-        }[rmw_op]
+        }.get(rmw_op)
+        if op_expr is None:
+            raise ValueError(
+                f"_emit_atomic_rmw_16bit: unsupported op '{rmw_op}'")
         kb = self.kb
         kb.raw_line(f"{indent}uint _eidx_{n} = (uint)({offsets});")
+        # base_ptr is typed `device half*`/`device bfloat*` in the emitted MSL,
+        # so casting to atomic_uint* and adding (_eidx>>1) yields the 4-byte word
+        # containing element _eidx (always 4-byte aligned: buffer bindings are
+        # >=16-byte aligned).
         kb.raw_line(f"{indent}device atomic_uint* wptr_{n} = "
                     f"(device atomic_uint*)({base_ptr}) + (_eidx_{n} >> 1);")
+        # little-endian: even idx -> low half (shift 0), odd idx -> high half (16).
         kb.raw_line(f"{indent}uint _sh_{n} = 16u * (_eidx_{n} & 1u);")
         kb.raw_line(f"{indent}uint _w_{n} = "
                     f"atomic_load_explicit(wptr_{n}, memory_order_relaxed);")
@@ -565,7 +580,7 @@ class _ControlFlowMixin:
         kb.raw_line(f"{indent}while (true) {{")
         kb.raw_line(f"{indent}    cur_bits_{n} = "
                     f"(ushort)((_w_{n} >> _sh_{n}) & 0xFFFFu);")
-        kb.raw_line(f"{indent}    {half_type} old_{n} = "
+        kb.raw_line(f"{indent}    {half_type} oldh_{n} = "
                     f"as_type<{half_type}>(cur_bits_{n});")
         kb.raw_line(f"{indent}    {half_type} new_{n} = {op_expr};")
         kb.raw_line(f"{indent}    ushort nb_{n} = as_type<ushort>(new_{n});")
