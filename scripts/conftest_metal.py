@@ -201,7 +201,7 @@ UNIMPLEMENTED_FEATURES = {
     # 2D scan — now implemented via shared memory prefix scan
     # "test_scan2d",  # Enabled: tt.scan → shared memory sequential prefix scan
     # Multi-dimensional operations — not supported in 1D-per-thread model
-    "test_trans_4d",
+    # "test_trans_4d",  # Enabled (2026-06-13): generic N-D transpose via closed-form copy template — see docs/superpowers/specs/2026-06-13-nd-transpose-design.md
     # "test_trans_2d",  # Enabled: 2D expand_dims + shared memory transpose
     # "test_optimize_thread_locality",  # Enabled: BLOCK_N=32 configs pass (per-config skip for BLOCK_N>32)
     # "test_dot_multidim",  # Enabled 2026-05-13: batched simdgroup dot template
