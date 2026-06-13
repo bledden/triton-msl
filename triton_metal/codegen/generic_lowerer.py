@@ -877,6 +877,59 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             and not any(_op_is_fp8(s) for s in all_ops_iter)
         )
 
+        # Phase 4f (MEPT M2): control-flow kernels that carry a multi-element
+        # value across a data-dependent scf.for/while/if. The re-execution
+        # wrap-loop cannot carry per-element state across the control-flow
+        # boundary, so values hoisted before the loop (a tl.arange register
+        # array, a masked-load `other=` constant) fall back to UNKNOWN_ inside
+        # it and the integrity backstop refuses (tridec Bug 2, BLOCK>=256).
+        # Register arrays declared once before the loop persist into the body
+        # naturally (env_array is instance state), so the existing array-wired
+        # body handlers resolve them. Eligible iff: MEPT on; a control-flow op
+        # is present; the region references/carries a multi-element value;
+        # every op is array-wired (or control-flow / reduce / yield /
+        # condition); every reduce is a 1-D full reduce; the tile cover is
+        # exact; no fp8. See
+        # docs/superpowers/specs/2026-06-11-mept-register-array-spine-design.md
+        from triton_metal.codegen.regval import (
+            region_needs_arrays as _region_needs_arrays,
+            tensor_value_ids as _tensor_value_ids,
+            _CONTROL_OPS as _CF_OPS,
+        )
+
+        def _arrayform_op_ok(s):
+            if s.op in _CF_OPS:
+                return all(_arrayform_op_ok(b) for b in (s.region_ops or []))
+            if s.op in ("scf.yield", "scf.condition", "tt.reduce"):
+                return True
+            return _op_mept_ok(s)
+
+        def _all_reduces(op_list):
+            for s in op_list:
+                if s.op == "tt.reduce":
+                    yield s
+                if s.region_ops:
+                    yield from _all_reduces(s.region_ops)
+
+        def _value_is_multi(s):
+            shp = _extract_shape(getattr(s, "type_str", "") or "")
+            if not shp:
+                return False
+            tot = 1
+            for d in shp:
+                tot *= d
+            return tot > num_threads
+
+        _multi_ids = _tensor_value_ids(_top_ops, _value_is_multi)
+        mept_arrayform_eligible = (
+            self.mept_enabled
+            and any(s.op in _CF_OPS for s in _top_ops)
+            and _region_needs_arrays(_top_ops, _multi_ids)
+            and all(_arrayform_op_ok(s) for s in _top_ops)
+            and all(_reduce_is_1d_full(r) for r in _all_reduces(_top_ops))
+            and not any(_op_is_fp8(s) for s in all_ops_iter)
+        )
+
         # Detect if this 2D kernel has axis-specific reductions that produce
         # per-row/per-column results (not full-array reductions).
         # Multipass is incompatible with these because the per-thread
@@ -949,7 +1002,19 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             # block_size with one element per thread.
             pass
         elif size_per_thread > 1 and block_size > num_threads:
-            if (mept_reduce_eligible
+            if (mept_arrayform_eligible
+                    and num_threads * size_per_thread == block_size):
+                # MEPT M2 single-pass register-array form for control-flow
+                # kernels. Each thread owns size_per_thread contiguous
+                # elements as a register array (idx[i] = lid*N + i). The array
+                # IS the per-thread multiplicity, so there is NO wrap-loop
+                # (_needs_wrapping stays False). Arrays declared before a
+                # data-dependent scf.for persist into its body, so hoisted
+                # values (arange, masked-load `other`) resolve inside the loop.
+                self._total_elements = block_size
+                block_size = num_threads
+                self._mept_single_pass = True
+            elif (mept_reduce_eligible
                     and num_threads * size_per_thread == block_size):
                 # Phase 4e MEPT-reduce single-pass: each thread loads its
                 # ``size_per_thread`` elements as a register array, folds
