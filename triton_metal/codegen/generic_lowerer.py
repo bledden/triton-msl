@@ -57,7 +57,7 @@ from triton_metal.codegen._lowerer_control import _ControlFlowMixin
 # (still correct); a too-wide set would risk an op consuming a register
 # array it can't handle (wrong results). Err narrow.
 #
-# Deliberately EXCLUDED (not array-wired): arith.cmpf,
+# Deliberately EXCLUDED (not array-wired):
 # arith.bitcast, math.erf/log1p/expm1, every shape op (tt.trans/join/cat/
 # split/gather/broadcast/expand_dims/reshape), atomics, reduce/scan/
 # histogram, tt.dot, control flow (scf.*), ttg.*. FP8 kernels are excluded
@@ -78,8 +78,9 @@ _MEPT_SAFE_OPS = frozenset({
     "arith.maxnumf", "arith.minnumf", "arith.maximumf", "arith.minimumf",
     "arith.andi", "arith.ori", "arith.xori",
     "arith.shli", "arith.shrsi", "arith.shrui",
-    # comparison (only cmpi is array-wired; cmpf is NOT)
+    # comparison (cmpi and cmpf are array-wired)
     "arith.cmpi",
+    "arith.cmpf",
     # ternary select (tl.where) -> _lower_select / _mept_select_dispatch
     "arith.select",
     # unary
@@ -3787,8 +3788,10 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         """arith.cmpf → float comparison with NaN-aware unordered predicates.
 
         pred_name (from MLIR text parsing) is the primary predicate source.
-        pred_int is used as fallback only — its enum values can differ between
-        MLIR/Triton versions, so we don't hardcode a mapping.
+        pred_int is used as fallback only. Array path (MEPT) mirrors
+        _lower_cmpi: a register-array operand yields a bool[N] per-position
+        mask. The scalar fallback emits exactly the original text so MEPT=0
+        codegen is byte-identical.
         """
         if len(ssa.operand_ids) < 2:
             return
@@ -3798,42 +3801,43 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         pred_name = ssa.attrs.get("predicate_name")
         pred_int = ssa.attrs.get("predicate")
 
+        # Per-element boolean expression for operands (av, bv). Returns the
+        # SAME unparenthesised text the scalar path historically emitted, so
+        # `bool m = {_expr(a, b)};` is byte-identical to the old code.
+        def _expr(av, bv):
+            if pred_name == "false":
+                return "false"
+            if pred_name == "true":
+                return "true"
+            if pred_name == "uno":
+                return f"isnan({av}) || isnan({bv})"
+            if pred_name == "ord":
+                return f"!isnan({av}) && !isnan({bv})"
+            if pred_name == "une":
+                return f"{av} != {bv}"
+            if pred_name and pred_name in CMPF_NAMED:
+                op_str = CMPF_NAMED[pred_name]
+                if pred_name.startswith("u"):
+                    return f"isnan({av}) || isnan({bv}) || ({av} {op_str} {bv})"
+                return f"{av} {op_str} {bv}"
+            if pred_int is not None and pred_int in CMPF_PREDICATES:
+                return f"{av} {CMPF_PREDICATES[pred_int]} {bv}"
+            return f"{av} < {bv}"
+
+        # MEPT array path: if either operand is a register array, emit bool[N].
+        if self._mept_binary_dispatch(
+                ssa, ssa.operand_ids[0], ssa.operand_ids[1], a, b,
+                _expr, "bool", "i1"):
+            self.env_is_mask[ssa.id] = True
+            return
+
+        # Scalar fallback (byte-identical to the original emission).
         var_name = self._next_var("mask")
-
-        # Use pred_name as primary source. Fall back to pred_int for op_str only.
-        if pred_name == "false":
-            self.kb.raw_line(f"    bool {var_name} = false;")
-        elif pred_name == "true":
-            self.kb.raw_line(f"    bool {var_name} = true;")
-        elif pred_name == "uno":
-            self.kb.raw_line(f"    bool {var_name} = isnan({a}) || isnan({b});")
-        elif pred_name == "ord":
-            self.kb.raw_line(f"    bool {var_name} = !isnan({a}) && !isnan({b});")
-        elif pred_name == "une":
-            # MSL != matches IEEE 754 une semantics (NaN != x is true)
-            self.kb.raw_line(f"    bool {var_name} = {a} != {b};")
-        elif pred_name and pred_name in CMPF_NAMED:
-            op_str = CMPF_NAMED[pred_name]
-            if pred_name.startswith("u"):
-                self.kb.raw_line(
-                    f"    bool {var_name} = isnan({a}) || isnan({b}) || ({a} {op_str} {b});"
-                )
-            else:
-                self.kb.raw_line(f"    bool {var_name} = {a} {op_str} {b};")
-        elif pred_int is not None and pred_int in CMPF_PREDICATES:
-            # Fallback to pred_int when pred_name unavailable
-            op_str = CMPF_PREDICATES[pred_int]
-            self.kb.raw_line(f"    bool {var_name} = {a} {op_str} {b};")
-        else:
-            self.kb.raw_line(f"    bool {var_name} = {a} < {b};")
-
+        self.kb.raw_line(f"    bool {var_name} = {_expr(a, b)};")
         self.env[ssa.id] = var_name
         self.env_is_mask[ssa.id] = True
         self.env_types[ssa.id] = "i1"
-        # Shape: comparison inherits shape from operands
         self._propagate_shape_elementwise(ssa)
-        # Propagate bcast layout across the comparison — the result has the
-        # same (lid → flat-index) mapping as its operands.
         self._propagate_bcast_layout_binary(ssa)
 
     def _lower_select(self, ssa: SSAValue):

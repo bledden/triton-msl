@@ -28,10 +28,19 @@ if HAS:
             acc = acc + tl.sum(v)
         tl.store(OUT + tl.arange(0, 1), acc)
 
+    @triton.jit
+    def _min_blocksum_in_loop(X, OUT, C: tl.constexpr, BLOCK: tl.constexpr):
+        best = tl.zeros((), dtype=tl.float32) + 1e30
+        for i in range(0, C):
+            v = tl.load(X + i * BLOCK + tl.arange(0, BLOCK))
+            s = tl.sum(v)                       # in-loop reduce -> scalar
+            best = tl.where(s < best, s, best)  # cmpf + select on reduce result
+        tl.store(OUT + tl.arange(0, 1), best)
+
 # All @triton.jit kernels defined in this file.  The autouse fixture below
 # clears their in-process JIT caches before each test.  Extend this tuple
 # when Stage C adds more kernels.
-_MODULE_KERNELS = (_sum_carry_in_loop,) if HAS else ()
+_MODULE_KERNELS = (_sum_carry_in_loop, _min_blocksum_in_loop) if HAS else ()
 
 
 @pytest.fixture(autouse=True)
@@ -76,3 +85,17 @@ def test_inloop_reduce_small_block_ok(monkeypatch):
     OUT = torch.zeros(1, device="mps", dtype=torch.float32)
     _sum_carry_in_loop[(1,)](X, OUT, C=C, BLOCK=BLOCK)
     torch.testing.assert_close(OUT[0], X.sum(), rtol=1e-3, atol=1e-3)
+
+
+@requires_metal
+@pytest.mark.parametrize("BLOCK", [128, 256, 512, 1024])
+def test_inloop_where_on_reduce_default_correct(BLOCK):
+    """Default flag: a where (cmpf+select) consuming an in-loop reduce result
+    is register-array-eligible (Stage C) → correct at full SIMD width."""
+    C = 4
+    torch.manual_seed(0)
+    X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
+    OUT = torch.zeros(1, device="mps", dtype=torch.float32)
+    _min_blocksum_in_loop[(1,)](X, OUT, C=C, BLOCK=BLOCK)
+    ref = X.view(C, BLOCK).sum(dim=1).min()
+    torch.testing.assert_close(OUT[0], ref, rtol=1e-4, atol=1e-4)
