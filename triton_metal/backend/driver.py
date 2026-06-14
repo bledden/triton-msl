@@ -467,6 +467,14 @@ class MetalLauncher:
             if sig == "constexpr" and name in self.arg_names:
                 self.constexpr_indices.add(self.arg_names.index(name))
 
+        # Kernel name for the compile_shader fast-path MSL lookup (Phase 4).
+        self.kernel_name = getattr(metadata, "name", None)
+        try:
+            from triton_metal.backend.compiler import _MSL_BY_NAME
+            self._msl = _MSL_BY_NAME.get(self.kernel_name) if self.kernel_name else None
+        except Exception:
+            self._msl = None
+
     def __call__(
         self,
         gridX,

@@ -20,6 +20,27 @@ from types import ModuleType
 from triton.backends.compiler import BaseBackend, GPUTarget
 
 
+# Kernel-name -> MSL source, populated when MSL is emitted so the driver's
+# launcher can retrieve the source for the torch.mps.compile_shader fast-path
+# (the launcher only receives the compiled metallib + name, not the source).
+_MSL_BY_NAME: dict = {}
+
+
+def _stash_msl(msl_src):
+    """Register ``msl_src`` keyed on its ``kernel void <name>(`` entry point.
+
+    The launcher only receives the compiled metallib + the kernel name (the
+    same name ``emit_msl`` writes into ``metadata["name"]`` and into the MSL
+    entry point), so keying on the name parsed from the MSL guarantees the two
+    agree on both the cache-hit and freshly-emitted paths.
+    """
+    import re as _re
+
+    m = _re.search(r"kernel\s+void\s+(\w+)\s*\(", msl_src)
+    if m:
+        _MSL_BY_NAME[m.group(1)] = msl_src
+
+
 def _get_cache_dir():
     """Return the persistent cache directory for compiled kernels.
 
@@ -1905,6 +1926,10 @@ class MetalBackend(BaseBackend):
                     file=sys.stderr,
                 )
 
+            # Stash MSL keyed on the entry-point name (parsed from the MSL so
+            # it matches the kernel actually launched) for the launcher's
+            # compile_shader fast-path (Phase 4).
+            _stash_msl(msl_src)
             return msl_src
 
         # Level 2: time the MSL emission
@@ -1970,6 +1995,10 @@ class MetalBackend(BaseBackend):
             with open(msl_path, "w") as f:
                 f.write(msl_src)
 
+        # Stash MSL keyed on the entry-point name (parsed from the MSL so it
+        # matches the kernel actually launched) for the launcher's
+        # compile_shader fast-path (Phase 4).
+        _stash_msl(msl_src)
         return msl_src
 
     @staticmethod
