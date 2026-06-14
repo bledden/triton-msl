@@ -448,6 +448,17 @@ def _get_utils():
     return _metal_utils
 
 
+_COMPILE_SHADER_RUNTIME = None
+
+
+def _get_compile_shader_runtime():
+    global _COMPILE_SHADER_RUNTIME
+    if _COMPILE_SHADER_RUNTIME is None:
+        from triton_metal.backend.compile_shader_runtime import CompileShaderRuntime
+        _COMPILE_SHADER_RUNTIME = CompileShaderRuntime()
+    return _COMPILE_SHADER_RUNTIME
+
+
 class MetalLauncher:
     """Triton kernel launcher for Metal backend.
 
@@ -504,6 +515,43 @@ class MetalLauncher:
         num_warps = kernel_metadata[0] if kernel_metadata else 4
         block_size = kernel_metadata[3] if kernel_metadata and len(kernel_metadata) > 3 else num_warps * 32
         needs_2d_grid = kernel_metadata[5] if kernel_metadata and len(kernel_metadata) > 5 else False
+
+        # compile_shader zero-copy fast-path (Phase 4). Purely additive: any
+        # failure or ineligibility falls through to the existing (correct)
+        # host-round-trip driver path below. A wrong result here is the one
+        # unacceptable outcome, so eligibility is conservative and every error
+        # marks the MSL unsupported + falls back.
+        import os as _os
+        if (self._msl is not None
+                and _os.environ.get("TRITON_METAL_COMPILE_SHADER", "1") != "0"):
+            _rt = _get_compile_shader_runtime()
+            if _rt.available() and not _rt.is_unsupported(self._msl):
+                try:
+                    # Ordered non-constexpr args (match [[buffer(i)]] order).
+                    kargs = [a for i, a in enumerate(args) if i not in self.constexpr_indices]
+                    tensors = [a for a in kargs if hasattr(a, "data_ptr")]
+                    # Eligible only if there is >=1 tensor and EVERY tensor arg is MPS.
+                    all_mps = bool(tensors) and all(
+                        getattr(a, "device", None) is not None
+                        and str(a.device).startswith("mps") for a in tensors)
+                    if all_mps:
+                        tg = num_warps * 32
+                        # grid (gridX/Y/Z) = threadgroup counts; total threads = grid*tg per dim.
+                        if gridY == 1 and gridZ == 1:
+                            threads, group_size = gridX * tg, tg
+                        else:
+                            threads = (gridX * tg, gridY, gridZ)
+                            group_size = (tg, 1, 1)
+                        lib = _rt.get_library(self._msl)
+                        _rt.dispatch(lib, self.kernel_name, kargs,
+                                     threads=threads, group_size=group_size)
+                        if launch_exit_hook:
+                            launch_exit_hook(launch_metadata)
+                        return
+                except Exception:
+                    # Any failure -> mark unsupported + fall through to the
+                    # existing driver path (correct, just slower). NEVER wrong.
+                    _rt.mark_unsupported(self._msl)
 
         # Pack arguments into Metal buffers.
         # Strategy:
