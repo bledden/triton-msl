@@ -1576,8 +1576,6 @@ class MetalBackend(BaseBackend):
             src_hash = _msl_cache_key(src, "")  # versioned (Phase 0)
             base = f"{kernel_name}_{src_hash}"
 
-            ll_path = os.path.join(cache_dir, f"{base}.ll")
-            air_path = os.path.join(cache_dir, f"{base}.air")
             metallib_path = os.path.join(cache_dir, f"{base}.metallib")
 
             # Skip compilation if cached metallib exists.
@@ -1590,56 +1588,69 @@ class MetalBackend(BaseBackend):
                 with open(metallib_path, "rb") as f:
                     return f.read()
 
-            with open(ll_path, "w") as f:
-                f.write(src)
-
-            # Compile LLVM IR → AIR using Metal's compiler
-            # Our IR uses typed pointers (Metal's GPU JIT requires them).
+            # Per-call private work directory: each concurrent invocation of the
+            # same kernel gets its own unique dir, so intermediates never collide.
+            # All paths are on the same filesystem as metallib_path, so the final
+            # os.replace() stays atomic.  The work dir is removed in finally even
+            # if compilation fails.
+            work = tempfile.mkdtemp(dir=cache_dir)
             try:
-                subprocess.run(
-                    [
-                        "xcrun", "-sdk", "macosx", "metal",
-                        "-c", "-x", "ir",
-                        ll_path,
-                        "-o", air_path,
-                    ],
-                    capture_output=True,
-                    check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                from triton_metal.errors import MetalCompilationError
-                stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                raise MetalCompilationError(
-                    f"Metal IR compilation failed (exit {e.returncode})",
-                    msl_source=ll_path,
-                    stderr=stderr,
-                ) from None
+                ll_path = os.path.join(work, f"{base}.ll")
+                air_path = os.path.join(work, f"{base}.air")
+                tmp_metallib_path = os.path.join(work, "out.metallib")
 
-            # Link AIR → metallib
-            tmp_metallib_path = metallib_path + ".tmp"
-            try:
-                subprocess.run(
-                    [
-                        "xcrun", "-sdk", "macosx", "metallib",
-                        air_path,
-                        "-o", tmp_metallib_path,
-                    ],
-                    capture_output=True,
-                    check=True,
-                )
-                os.replace(tmp_metallib_path, metallib_path)
-            except subprocess.CalledProcessError as e:
+                with open(ll_path, "w") as f:
+                    f.write(src)
+
+                # Compile LLVM IR → AIR using Metal's compiler
+                # Our IR uses typed pointers (Metal's GPU JIT requires them).
                 try:
-                    os.unlink(tmp_metallib_path)
-                except OSError:
-                    pass
-                from triton_metal.errors import MetalCompilationError
-                stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                raise MetalCompilationError(
-                    f"Metal library linking failed (exit {e.returncode})",
-                    msl_source=air_path,
-                    stderr=stderr,
-                ) from None
+                    subprocess.run(
+                        [
+                            "xcrun", "-sdk", "macosx", "metal",
+                            "-c", "-x", "ir",
+                            ll_path,
+                            "-o", air_path,
+                        ],
+                        capture_output=True,
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    from triton_metal.errors import MetalCompilationError
+                    stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                    raise MetalCompilationError(
+                        f"Metal IR compilation failed (exit {e.returncode})",
+                        msl_source=ll_path,
+                        stderr=stderr,
+                    ) from None
+
+                # Link AIR → metallib (atomic rename onto content-addressed final path).
+                # Concurrent callers each rename their OWN unique tmp onto the same
+                # final path — last-writer-wins with identical content; all safe.
+                try:
+                    subprocess.run(
+                        [
+                            "xcrun", "-sdk", "macosx", "metallib",
+                            air_path,
+                            "-o", tmp_metallib_path,
+                        ],
+                        capture_output=True,
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    from triton_metal.errors import MetalCompilationError
+                    stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                    raise MetalCompilationError(
+                        f"Metal library linking failed (exit {e.returncode})",
+                        msl_source=air_path,
+                        stderr=stderr,
+                    ) from None
+
+                os.replace(tmp_metallib_path, metallib_path)
+
+            finally:
+                import shutil
+                shutil.rmtree(work, ignore_errors=True)
 
             with open(metallib_path, "rb") as f:
                 data = f.read()
@@ -1903,8 +1914,6 @@ class MetalBackend(BaseBackend):
             src_hash = _msl_cache_key(src, "")  # versioned (Phase 0)
             base = f"{kernel_name}_{src_hash}"
 
-            metal_path = os.path.join(cache_dir, f"{base}.metal")
-            air_path = os.path.join(cache_dir, f"{base}.air")
             metallib_path = os.path.join(cache_dir, f"{base}.metallib")
 
             # Skip compilation if cached metallib exists.
@@ -1917,71 +1926,83 @@ class MetalBackend(BaseBackend):
                 with open(metallib_path, "rb") as f:
                     return f.read()
 
-            with open(metal_path, "w") as f:
-                f.write(src)
-
-            # Resolve Metal standard version for compilation.
-            if options.target_metal_version == "auto":
-                from triton_metal.backend.device_detect import get_device_info
-                metal_std_flag = get_device_info().metal_std_flag
-            else:
-                metal_std_flag = f"-std=metal{options.target_metal_version}"
-
-            # Compile MSL -> AIR
-            # -fno-fast-math: disable algebraic re-association so IEEE-754
-            # rounding tricks like (x + 2^23) - 2^23 are preserved verbatim.
-            # The Triton test suite (test_conversions.py) relies on this
-            # idiom for round-to-nearest-even emulation; with fast-math the
-            # add/sub gets folded away, breaking rounding correctness.
+            # Per-call private work directory: each concurrent invocation of the
+            # same kernel gets its own unique dir, so intermediates never collide.
+            # All paths are on the same filesystem as metallib_path, so the final
+            # os.replace() stays atomic.  The work dir is removed in finally even
+            # if compilation fails.
+            import shutil
+            work = tempfile.mkdtemp(dir=cache_dir)
             try:
-                subprocess.run(
-                    [
-                        "xcrun", "-sdk", "macosx", "metal",
-                        "-c", metal_path,
-                        "-o", air_path,
-                        metal_std_flag,
-                        "-mmacosx-version-min=15.0",
-                        "-O2",
-                        "-fno-fast-math",
-                    ],
-                    capture_output=True,
-                    check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                from triton_metal.errors import MetalCompilationError
-                stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                raise MetalCompilationError(
-                    f"Metal shader compilation failed (exit {e.returncode})",
-                    msl_source=metal_path,
-                    stderr=stderr,
-                ) from None
+                metal_path = os.path.join(work, f"{base}.metal")
+                air_path = os.path.join(work, f"{base}.air")
+                tmp_metallib_path = os.path.join(work, "out.metallib")
 
-            # Link AIR -> metallib (atomic write via rename).
-            tmp_metallib_path = metallib_path + ".tmp"
-            try:
-                subprocess.run(
-                    [
-                        "xcrun", "-sdk", "macosx", "metallib",
-                        air_path,
-                        "-o", tmp_metallib_path,
-                    ],
-                    capture_output=True,
-                    check=True,
-                )
-                os.replace(tmp_metallib_path, metallib_path)
-            except subprocess.CalledProcessError as e:
-                # Clean up partial temp file on failure.
+                with open(metal_path, "w") as f:
+                    f.write(src)
+
+                # Resolve Metal standard version for compilation.
+                if options.target_metal_version == "auto":
+                    from triton_metal.backend.device_detect import get_device_info
+                    metal_std_flag = get_device_info().metal_std_flag
+                else:
+                    metal_std_flag = f"-std=metal{options.target_metal_version}"
+
+                # Compile MSL -> AIR
+                # -fno-fast-math: disable algebraic re-association so IEEE-754
+                # rounding tricks like (x + 2^23) - 2^23 are preserved verbatim.
+                # The Triton test suite (test_conversions.py) relies on this
+                # idiom for round-to-nearest-even emulation; with fast-math the
+                # add/sub gets folded away, breaking rounding correctness.
                 try:
-                    os.unlink(tmp_metallib_path)
-                except OSError:
-                    pass
-                from triton_metal.errors import MetalCompilationError
-                stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                raise MetalCompilationError(
-                    f"Metal library linking failed (exit {e.returncode})",
-                    msl_source=air_path,
-                    stderr=stderr,
-                ) from None
+                    subprocess.run(
+                        [
+                            "xcrun", "-sdk", "macosx", "metal",
+                            "-c", metal_path,
+                            "-o", air_path,
+                            metal_std_flag,
+                            "-mmacosx-version-min=15.0",
+                            "-O2",
+                            "-fno-fast-math",
+                        ],
+                        capture_output=True,
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    from triton_metal.errors import MetalCompilationError
+                    stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                    raise MetalCompilationError(
+                        f"Metal shader compilation failed (exit {e.returncode})",
+                        msl_source=metal_path,
+                        stderr=stderr,
+                    ) from None
+
+                # Link AIR -> metallib (atomic rename onto content-addressed final path).
+                # Concurrent callers each rename their OWN unique tmp onto the same
+                # final path — last-writer-wins with identical content; all safe.
+                try:
+                    subprocess.run(
+                        [
+                            "xcrun", "-sdk", "macosx", "metallib",
+                            air_path,
+                            "-o", tmp_metallib_path,
+                        ],
+                        capture_output=True,
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    from triton_metal.errors import MetalCompilationError
+                    stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                    raise MetalCompilationError(
+                        f"Metal library linking failed (exit {e.returncode})",
+                        msl_source=air_path,
+                        stderr=stderr,
+                    ) from None
+
+                os.replace(tmp_metallib_path, metallib_path)
+
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
 
             with open(metallib_path, "rb") as f:
                 data = f.read()
