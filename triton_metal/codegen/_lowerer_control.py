@@ -782,6 +782,26 @@ class _ControlFlowMixin:
             if len(atom_shape) == 1 and atom_shape[0] < self.effective_block_size:
                 atomic_1d_guard = atom_shape[0]
 
+        # n>1 under-cover guard (mirrors _lower_store): a BLOCK-wide atomic the
+        # base path emits as one element per thread (PTR[k+lid]) would silently
+        # drop the rest of each tile-stride when block_size > num_threads.
+        # Refuse loudly — the only correct n>1 paths are the register-array
+        # regime and _loop_e-wrapped emission.
+        _val_shape = self.env_shapes.get(val_id)
+        _num_threads = self.kb.block_size
+        if (not self._mept_single_pass
+                and not self._needs_wrapping
+                and _val_shape is not None
+                and len(_val_shape) >= 1
+                and _val_shape[0] > _num_threads):
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing a {_val_shape[0]}-element atomic with only "
+                f"{_num_threads} threads: the base path scatters one element "
+                f"per thread, so a tile wider than the threadgroup would "
+                f"silently drop the rest. Launch with num_warps = BLOCK/32 "
+                f"(so num_threads == BLOCK), or reduce BLOCK.")
+
         # Always declare result variable first (needed for mask or not)
         self.kb.raw_line(f"    {result_msl_type} {result_var} = {result_zero};")
 
@@ -894,6 +914,29 @@ class _ControlFlowMixin:
             result_dtype = "i32"
 
         result_var = f"old_{n}"
+
+        # n>1 under-cover guard (mirrors _lower_store): a BLOCK-wide atomic the
+        # base path emits as one element per thread (PTR[k+lid]) would silently
+        # drop the rest of each tile-stride when block_size > num_threads.
+        # Refuse loudly — the only correct n>1 paths are the register-array
+        # regime and _loop_e-wrapped emission. For CAS the value-tensor whose
+        # shape is the tile width is the `val` operand (operand_ids[2]); `cmp`
+        # shares that shape, so either resolves the same refusal.
+        _val_shape = self.env_shapes.get(val_id)
+        _num_threads = self.kb.block_size
+        if (not self._mept_single_pass
+                and not self._needs_wrapping
+                and _val_shape is not None
+                and len(_val_shape) >= 1
+                and _val_shape[0] > _num_threads):
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing a {_val_shape[0]}-element atomic with only "
+                f"{_num_threads} threads: the base path scatters one element "
+                f"per thread, so a tile wider than the threadgroup would "
+                f"silently drop the rest. Launch with num_warps = BLOCK/32 "
+                f"(so num_threads == BLOCK), or reduce BLOCK.")
+
         self.kb.raw_line(f"    {result_msl_type} {result_var} = {result_zero};")
 
         # Scalar guard
