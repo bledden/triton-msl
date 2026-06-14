@@ -2937,6 +2937,30 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 f"    if ({idx} < {guard_size}u) {base_ptr}[{offsets}] = {cast_val};")
             return
 
+        # Refuse a BLOCK-wide tensor store the base path can only emit as one
+        # element per thread (PTR[k + lid] = val). When the tile exceeds the
+        # threadgroup (block_size > num_threads, i.e. n>1 elements per thread),
+        # that silently covers only `lid` of each tile-stride and DROPS the
+        # rest — a silent-wrong. The correct n>1 store paths are the MEPT
+        # register-array scatter (_mept_single_pass), the smem-backed path
+        # above, and _loop_e-wrapped stores (_needs_wrapping); none apply here.
+        # Refuse loudly: the user must launch with num_warps = BLOCK/32 so
+        # num_threads == BLOCK (n=1), or reduce BLOCK.
+        _val_shape = self.env_shapes.get(val_id)
+        _num_threads = self.kb.block_size
+        if (not self._mept_single_pass
+                and not self._needs_wrapping
+                and _val_shape is not None
+                and len(_val_shape) >= 1
+                and _val_shape[0] > _num_threads):
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing a {_val_shape[0]}-element tensor store with only "
+                f"{_num_threads} threads: the base path stores one element per "
+                f"thread, so a tile wider than the threadgroup would silently "
+                f"drop the rest. Launch with num_warps = BLOCK/32 (so "
+                f"num_threads == BLOCK), or reduce BLOCK.")
+
         ptr_info = self.env_is_ptr.get(ptr_id)
         if ptr_info:
             base_ptr, offsets = ptr_info
