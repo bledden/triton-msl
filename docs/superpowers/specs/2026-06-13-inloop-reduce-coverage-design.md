@@ -39,6 +39,21 @@ they are safe-but-blocked. But the **class** — any ineligible kernel with an
 in-loop reduce and `block_size > num_threads` — is a silent landmine the minimal
 repro lands on directly.
 
+**Scope under `MEPT=0` (verified):** the register-array path is fully disabled,
+so under `MEPT=0` **every** in-loop reduce with `block_size > num_threads` is
+silent-wrong — even a plain `acc += tl.sum(v)` with no `cmpf` (confirmed: 256/512
+wrong, 128 correct). So the true condition is "in-loop reduce, block > threads,
+**not array-covered**" (`mept_arr is None`), which the B detection already
+captures. Consequences: (1) C (array-wiring) only helps the **default** flag —
+under `MEPT=0` C is inert, so B/A carry the `MEPT=0` correctness. (2) **A is the
+only path to correctness under `MEPT=0`** (B alone refuses every such kernel
+there). (3) B's full-corpus verification run **is** A's residual measurement —
+one pass, both flag directions, listing every kernel B refuses. Because the
+`MEPT=0` ratchet currently passes, no currently-passing test_core kernel can be
+an uncovered in-loop-reduce-over-threads case (an exact test would already fail),
+so B is expected not to regress the ratchet; the verification run confirms this
+empirically and is mandatory before B is declared done.
+
 ## Constraints
 
 - **Loud-refusal contract:** no reachable path may be silently wrong. After this
