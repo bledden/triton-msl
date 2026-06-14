@@ -53,6 +53,14 @@ def _msl_cache_key(mod_text, options_hash):
     ).hexdigest()[:16]
 
 
+# Number of attempts for the metal→air→metallib pipeline.
+# Transient toolchain flakes (e.g. xcrun metal -c exits 0 but the .air
+# is not yet durable) are retried up to this many times.  Genuine MSL/IR
+# compile errors (CalledProcessError from the metal -c step) are raised
+# immediately on the first attempt without retrying.
+_METALLIB_COMPILE_ATTEMPTS = 3
+
+
 @dataclass(frozen=True)
 class MetalOptions:
     num_warps: int = 4
@@ -1589,68 +1597,116 @@ class MetalBackend(BaseBackend):
                 with open(metallib_path, "rb") as f:
                     return f.read()
 
-            # Per-call private work directory: each concurrent invocation of the
-            # same kernel gets its own unique dir, so intermediates never collide.
-            # All paths are on the same filesystem as metallib_path, so the final
-            # os.replace() stays atomic.  The work dir is removed in finally even
-            # if compilation fails.
-            work = tempfile.mkdtemp(dir=cache_dir)
-            try:
-                ll_path = os.path.join(work, f"{base}.ll")
-                air_path = os.path.join(work, f"{base}.air")
-                tmp_metallib_path = os.path.join(work, "out.metallib")
-
-                with open(ll_path, "w") as f:
-                    f.write(src)
-
-                # Compile LLVM IR → AIR using Metal's compiler
-                # Our IR uses typed pointers (Metal's GPU JIT requires them).
+            # Bounded retry loop: each attempt gets a fresh private work dir so
+            # intermediates from failed attempts never interfere with the next.
+            # A CalledProcessError from the IR→AIR step is a REAL deterministic
+            # compile error → raised immediately (no retry).  All other failures
+            # (missing .air after exit-0, metallib link error, os.replace
+            # FileNotFoundError) are treated as transient toolchain flakes and
+            # retried; the last attempt re-raises as MetalCompilationError.
+            _last_transient_exc: Exception | None = None
+            for _attempt in range(_METALLIB_COMPILE_ATTEMPTS):
+                # Per-call private work directory: each concurrent invocation of the
+                # same kernel gets its own unique dir, so intermediates never collide.
+                # All paths are on the same filesystem as metallib_path, so the final
+                # os.replace() stays atomic.  The work dir is removed in finally even
+                # if compilation fails.
+                work = tempfile.mkdtemp(dir=cache_dir)
                 try:
-                    subprocess.run(
-                        [
-                            "xcrun", "-sdk", "macosx", "metal",
-                            "-c", "-x", "ir",
-                            ll_path,
-                            "-o", air_path,
-                        ],
-                        capture_output=True,
-                        check=True,
-                    )
-                except subprocess.CalledProcessError as e:
-                    from triton_metal.errors import MetalCompilationError
-                    stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                    raise MetalCompilationError(
-                        f"Metal IR compilation failed (exit {e.returncode})",
-                        msl_source=ll_path,
-                        stderr=stderr,
-                    ) from None
+                    ll_path = os.path.join(work, f"{base}.ll")
+                    air_path = os.path.join(work, f"{base}.air")
+                    tmp_metallib_path = os.path.join(work, "out.metallib")
 
-                # Link AIR → metallib (atomic rename onto content-addressed final path).
-                # Concurrent callers each rename their OWN unique tmp onto the same
-                # final path — last-writer-wins with identical content; all safe.
-                try:
-                    subprocess.run(
-                        [
-                            "xcrun", "-sdk", "macosx", "metallib",
-                            air_path,
-                            "-o", tmp_metallib_path,
-                        ],
-                        capture_output=True,
-                        check=True,
-                    )
-                except subprocess.CalledProcessError as e:
-                    from triton_metal.errors import MetalCompilationError
-                    stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                    raise MetalCompilationError(
-                        f"Metal library linking failed (exit {e.returncode})",
-                        msl_source=air_path,
-                        stderr=stderr,
-                    ) from None
+                    with open(ll_path, "w") as f:
+                        f.write(src)
 
-                os.replace(tmp_metallib_path, metallib_path)
+                    # Compile LLVM IR → AIR using Metal's compiler
+                    # Our IR uses typed pointers (Metal's GPU JIT requires them).
+                    # CalledProcessError here = real deterministic IR error → raise
+                    # immediately, no retry (retrying a syntax error wastes time).
+                    try:
+                        subprocess.run(
+                            [
+                                "xcrun", "-sdk", "macosx", "metal",
+                                "-c", "-x", "ir",
+                                ll_path,
+                                "-o", air_path,
+                            ],
+                            capture_output=True,
+                            check=True,
+                        )
+                    except subprocess.CalledProcessError as e:
+                        from triton_metal.errors import MetalCompilationError
+                        stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                        raise MetalCompilationError(
+                            f"Metal IR compilation failed (exit {e.returncode})",
+                            msl_source=ll_path,
+                            stderr=stderr,
+                        ) from None
 
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
+                    # Explicit transient guard: metal -c returned exit 0 but the
+                    # .air was not durably written.  Treat as transient (retry).
+                    if not os.path.exists(air_path):
+                        _last_transient_exc = FileNotFoundError(
+                            f"metal -c exited 0 but {air_path!r} is missing (attempt {_attempt + 1})"
+                        )
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
+                        from triton_metal.errors import MetalCompilationError
+                        raise MetalCompilationError(
+                            f"Metal IR compilation produced no .air (transient; all {_METALLIB_COMPILE_ATTEMPTS} attempts failed)",
+                            msl_source=ll_path,
+                            stderr=str(_last_transient_exc),
+                        ) from _last_transient_exc
+
+                    # Link AIR → metallib (atomic rename onto content-addressed final path).
+                    # Concurrent callers each rename their OWN unique tmp onto the same
+                    # final path — last-writer-wins with identical content; all safe.
+                    try:
+                        subprocess.run(
+                            [
+                                "xcrun", "-sdk", "macosx", "metallib",
+                                air_path,
+                                "-o", tmp_metallib_path,
+                            ],
+                            capture_output=True,
+                            check=True,
+                        )
+                    except subprocess.CalledProcessError as e:
+                        stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                        _last_transient_exc = subprocess.CalledProcessError(
+                            e.returncode, e.cmd, e.output, e.stderr
+                        )
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
+                        from triton_metal.errors import MetalCompilationError
+                        raise MetalCompilationError(
+                            f"Metal library linking failed (exit {e.returncode})",
+                            msl_source=air_path,
+                            stderr=stderr,
+                        ) from None
+
+                    try:
+                        os.replace(tmp_metallib_path, metallib_path)
+                    except (FileNotFoundError, OSError) as e:
+                        _last_transient_exc = e
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
+                        from triton_metal.errors import MetalCompilationError
+                        raise MetalCompilationError(
+                            f"Metal library linking failed (os.replace error: {e})",
+                            msl_source=air_path,
+                            stderr=str(e),
+                        ) from e
+
+                    # Success — break out of the retry loop.
+                    break
+
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
 
             with open(metallib_path, "rb") as f:
                 data = f.read()
@@ -1927,82 +1983,131 @@ class MetalBackend(BaseBackend):
                 with open(metallib_path, "rb") as f:
                     return f.read()
 
-            # Per-call private work directory: each concurrent invocation of the
-            # same kernel gets its own unique dir, so intermediates never collide.
-            # All paths are on the same filesystem as metallib_path, so the final
-            # os.replace() stays atomic.  The work dir is removed in finally even
-            # if compilation fails.
-            work = tempfile.mkdtemp(dir=cache_dir)
-            try:
-                metal_path = os.path.join(work, f"{base}.metal")
-                air_path = os.path.join(work, f"{base}.air")
-                tmp_metallib_path = os.path.join(work, "out.metallib")
+            # Resolve Metal standard version for compilation (done once, outside
+            # the retry loop — it's deterministic and has no side-effects).
+            if options.target_metal_version == "auto":
+                from triton_metal.backend.device_detect import get_device_info
+                metal_std_flag = get_device_info().metal_std_flag
+            else:
+                metal_std_flag = f"-std=metal{options.target_metal_version}"
 
-                with open(metal_path, "w") as f:
-                    f.write(src)
-
-                # Resolve Metal standard version for compilation.
-                if options.target_metal_version == "auto":
-                    from triton_metal.backend.device_detect import get_device_info
-                    metal_std_flag = get_device_info().metal_std_flag
-                else:
-                    metal_std_flag = f"-std=metal{options.target_metal_version}"
-
-                # Compile MSL -> AIR
-                # -fno-fast-math: disable algebraic re-association so IEEE-754
-                # rounding tricks like (x + 2^23) - 2^23 are preserved verbatim.
-                # The Triton test suite (test_conversions.py) relies on this
-                # idiom for round-to-nearest-even emulation; with fast-math the
-                # add/sub gets folded away, breaking rounding correctness.
+            # Bounded retry loop: each attempt gets a fresh private work dir so
+            # intermediates from failed attempts never interfere with the next.
+            # A CalledProcessError from the MSL→AIR step is a REAL deterministic
+            # compile error → raised immediately (no retry).  All other failures
+            # (missing .air after exit-0, metallib link error, os.replace
+            # FileNotFoundError) are treated as transient toolchain flakes and
+            # retried; the last attempt re-raises as MetalCompilationError.
+            _last_transient_exc: Exception | None = None
+            for _attempt in range(_METALLIB_COMPILE_ATTEMPTS):
+                # Per-call private work directory: each concurrent invocation of the
+                # same kernel gets its own unique dir, so intermediates never collide.
+                # All paths are on the same filesystem as metallib_path, so the final
+                # os.replace() stays atomic.  The work dir is removed in finally even
+                # if compilation fails.
+                work = tempfile.mkdtemp(dir=cache_dir)
                 try:
-                    subprocess.run(
-                        [
-                            "xcrun", "-sdk", "macosx", "metal",
-                            "-c", metal_path,
-                            "-o", air_path,
-                            metal_std_flag,
-                            "-mmacosx-version-min=15.0",
-                            "-O2",
-                            "-fno-fast-math",
-                        ],
-                        capture_output=True,
-                        check=True,
-                    )
-                except subprocess.CalledProcessError as e:
-                    from triton_metal.errors import MetalCompilationError
-                    stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                    raise MetalCompilationError(
-                        f"Metal shader compilation failed (exit {e.returncode})",
-                        msl_source=metal_path,
-                        stderr=stderr,
-                    ) from None
+                    metal_path = os.path.join(work, f"{base}.metal")
+                    air_path = os.path.join(work, f"{base}.air")
+                    tmp_metallib_path = os.path.join(work, "out.metallib")
 
-                # Link AIR -> metallib (atomic rename onto content-addressed final path).
-                # Concurrent callers each rename their OWN unique tmp onto the same
-                # final path — last-writer-wins with identical content; all safe.
-                try:
-                    subprocess.run(
-                        [
-                            "xcrun", "-sdk", "macosx", "metallib",
-                            air_path,
-                            "-o", tmp_metallib_path,
-                        ],
-                        capture_output=True,
-                        check=True,
-                    )
-                except subprocess.CalledProcessError as e:
-                    from triton_metal.errors import MetalCompilationError
-                    stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                    raise MetalCompilationError(
-                        f"Metal library linking failed (exit {e.returncode})",
-                        msl_source=air_path,
-                        stderr=stderr,
-                    ) from None
+                    with open(metal_path, "w") as f:
+                        f.write(src)
 
-                os.replace(tmp_metallib_path, metallib_path)
+                    # Compile MSL -> AIR
+                    # -fno-fast-math: disable algebraic re-association so IEEE-754
+                    # rounding tricks like (x + 2^23) - 2^23 are preserved verbatim.
+                    # The Triton test suite (test_conversions.py) relies on this
+                    # idiom for round-to-nearest-even emulation; with fast-math the
+                    # add/sub gets folded away, breaking rounding correctness.
+                    # CalledProcessError here = real deterministic MSL error → raise
+                    # immediately, no retry (retrying a syntax error wastes time).
+                    try:
+                        subprocess.run(
+                            [
+                                "xcrun", "-sdk", "macosx", "metal",
+                                "-c", metal_path,
+                                "-o", air_path,
+                                metal_std_flag,
+                                "-mmacosx-version-min=15.0",
+                                "-O2",
+                                "-fno-fast-math",
+                            ],
+                            capture_output=True,
+                            check=True,
+                        )
+                    except subprocess.CalledProcessError as e:
+                        from triton_metal.errors import MetalCompilationError
+                        stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                        raise MetalCompilationError(
+                            f"Metal shader compilation failed (exit {e.returncode})",
+                            msl_source=metal_path,
+                            stderr=stderr,
+                        ) from None
 
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
+                    # Explicit transient guard: metal -c returned exit 0 but the
+                    # .air was not durably written.  Treat as transient (retry).
+                    if not os.path.exists(air_path):
+                        _last_transient_exc = FileNotFoundError(
+                            f"metal -c exited 0 but {air_path!r} is missing (attempt {_attempt + 1})"
+                        )
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
+                        from triton_metal.errors import MetalCompilationError
+                        raise MetalCompilationError(
+                            f"Metal shader compilation produced no .air (transient; all {_METALLIB_COMPILE_ATTEMPTS} attempts failed)",
+                            msl_source=metal_path,
+                            stderr=str(_last_transient_exc),
+                        ) from _last_transient_exc
+
+                    # Link AIR -> metallib (atomic rename onto content-addressed final path).
+                    # Concurrent callers each rename their OWN unique tmp onto the same
+                    # final path — last-writer-wins with identical content; all safe.
+                    try:
+                        subprocess.run(
+                            [
+                                "xcrun", "-sdk", "macosx", "metallib",
+                                air_path,
+                                "-o", tmp_metallib_path,
+                            ],
+                            capture_output=True,
+                            check=True,
+                        )
+                    except subprocess.CalledProcessError as e:
+                        stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                        _last_transient_exc = subprocess.CalledProcessError(
+                            e.returncode, e.cmd, e.output, e.stderr
+                        )
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
+                        from triton_metal.errors import MetalCompilationError
+                        raise MetalCompilationError(
+                            f"Metal library linking failed (exit {e.returncode})",
+                            msl_source=air_path,
+                            stderr=stderr,
+                        ) from None
+
+                    try:
+                        os.replace(tmp_metallib_path, metallib_path)
+                    except (FileNotFoundError, OSError) as e:
+                        _last_transient_exc = e
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
+                        from triton_metal.errors import MetalCompilationError
+                        raise MetalCompilationError(
+                            f"Metal library linking failed (os.replace error: {e})",
+                            msl_source=air_path,
+                            stderr=str(e),
+                        ) from e
+
+                    # Success — break out of the retry loop.
+                    break
+
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
 
             with open(metallib_path, "rb") as f:
                 data = f.read()
