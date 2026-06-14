@@ -1,0 +1,57 @@
+"""Zero-copy MPS execution via torch.mps.compile_shader.
+
+PyTorch (newer versions) can compile a Metal compute library from MSL source
+and dispatch its kernels against MPS tensors zero-copy (PyTorch owns the
+buffers + the MPS stream). This runtime wraps that: compile (cached on the MSL
+string) + dispatch. It has NO triton-metal driver knowledge — the driver
+selects when to use it.
+"""
+from __future__ import annotations
+
+
+class CompileShaderRuntime:
+    """Compile + cache + dispatch MSL via torch.mps.compile_shader."""
+
+    def __init__(self):
+        self._lib_cache = {}          # msl_source -> compiled library
+        self._unsupported = set()     # msl_source hashes that failed; skip fast-path
+
+    def available(self) -> bool:
+        try:
+            import torch
+            return (hasattr(torch, "mps")
+                    and torch.backends.mps.is_available()
+                    and hasattr(torch.mps, "compile_shader"))
+        except Exception:
+            return False
+
+    def is_unsupported(self, msl: str) -> bool:
+        return hash(msl) in self._unsupported
+
+    def mark_unsupported(self, msl: str) -> None:
+        self._unsupported.add(hash(msl))
+
+    def get_library(self, msl: str):
+        """Compile MSL (cached on the source string). Raises on compile error."""
+        lib = self._lib_cache.get(msl)
+        if lib is None:
+            import torch
+            lib = torch.mps.compile_shader(msl)
+            self._lib_cache[msl] = lib
+        return lib
+
+    def dispatch(self, lib, kernel_name: str, tensor_and_scalar_args, scalar_args=None,
+                 *, threads, group_size) -> None:
+        """Dispatch lib.<kernel_name>(*args, threads=..., group_size=...).
+
+        ``tensor_and_scalar_args`` is the ordered argument list (MPS tensors +
+        Python scalars) matching the kernel's [[buffer(i)]] order. ``threads``
+        and ``group_size`` are ints (1-D) or tuples (2-D/3-D). PyTorch binds the
+        MPS tensors zero-copy and enqueues on the MPS stream.
+        """
+        if scalar_args is not None:
+            args = list(tensor_and_scalar_args) + list(scalar_args)
+        else:
+            args = list(tensor_and_scalar_args)
+        fn = getattr(lib, kernel_name)
+        fn(*args, threads=threads, group_size=group_size)
