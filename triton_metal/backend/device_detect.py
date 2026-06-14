@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -234,6 +235,13 @@ def _chip_generation(family: str) -> int:
 # ---------------------------------------------------------------------------
 
 _cached_info: Optional[DeviceInfo] = None
+# Serializes first-time detection. Beyond preventing redundant detection, the
+# lock is required for correctness under concurrent first use: _detect_device_info
+# does `import Metal; Metal.MTLCreateSystemDefaultDevice()`, and PyObjC populates
+# that symbol lazily on first attribute access. Two threads accessing it at once
+# can race the lazy loader and raise KeyError('MTLCreateSystemDefaultDevice').
+# Serializing detection keeps that import+access single-threaded.
+_cache_lock = threading.Lock()
 
 
 def get_device_info() -> DeviceInfo:
@@ -241,8 +249,11 @@ def get_device_info() -> DeviceInfo:
     global _cached_info
     if _cached_info is not None:
         return _cached_info
-    _cached_info = _detect_device_info()
-    return _cached_info
+    with _cache_lock:
+        # Double-checked: another thread may have detected while we waited.
+        if _cached_info is None:
+            _cached_info = _detect_device_info()
+        return _cached_info
 
 
 def _detect_device_info() -> DeviceInfo:
