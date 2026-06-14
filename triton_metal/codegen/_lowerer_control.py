@@ -231,74 +231,130 @@ class _ControlFlowMixin:
         # propagate metadata (e.g., _bcast_layout) from the yielded value to
         # the scf.for result variable below.
         yielded_ids: list = [None] * n_iter_args
+        # Expose the body's region_ops so an in-loop reduce (_cover_inloop_reduce)
+        # can collect its input dependency chain for body-local multipass
+        # coverage. Save/restore for nested loops.
+        _prev_body_ops = getattr(self, "_current_loop_body_ops", None)
+        self._current_loop_body_ops = list(ssa.region_ops or [])
+
+        # Stage A pre-emission: if any external tensor index ops (make_range,
+        # splat, broadcast, etc.) referenced by body ops are NOT yet in env,
+        # emit them now (at the outer body scope, _needs_wrapping unchanged)
+        # so body ops can reference them without producing UNKNOWN_<id>. This
+        # handles the multipass-ordering case where the outer _loop_e loop
+        # hasn't yet emitted these ops when the scf.for (scalar) is hoisted
+        # before it. We only emit ops that are NOT derived from tt.load (safe
+        # to emit at any index — their value is index-only, not data-bearing).
         if ssa.region_ops:
-            for body_op in ssa.region_ops:
-                if body_op.op == "scf.yield":
-                    # Update iter_arg variables from yield operands
-                    for i, yield_id in enumerate(body_op.operand_ids):
-                        if i < len(iter_vars):
-                            yielded_ids[i] = yield_id
-                            # Skip scalar assignment for smem-backed iter_args;
-                            # the shared memory was already updated in-place by
-                            # the dot or strided binary op.
-                            if i in smem_iter_indices:
-                                # Check if the yield value has a shared_mem_desc
-                                # pointing to a DIFFERENT array (e.g. the dot
-                                # wrote to smem_dot_X).  If so, copy it over.
-                                yield_smem = getattr(self, '_shared_mem_descs', {}).get(yield_id)
-                                if yield_smem and yield_smem[0] != iter_vars[i]:
-                                    src_smem = yield_smem[0]
-                                    dst_smem = iter_vars[i]
-                                    init_shape = self.env_shapes.get(
-                                        init_ids[i], ()) if i < len(init_ids) else ()
-                                    sz = 1
-                                    for d in init_shape:
-                                        sz *= d
-                                    self.kb.raw_line(
-                                        f"    for (uint _cp = lid; _cp < {sz}u; "
-                                        f"_cp += {bs}u) {{")
-                                    self.kb.raw_line(
-                                        f"        {dst_smem}[_cp] = {src_smem}[_cp];")
-                                    self.kb.raw_line(f"    }}")
-                                    self.kb.raw_line(
-                                        f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-                                continue
-                            # MEPT register-array iter-arg: update v[e] per
-                            # element. The yielded value is itself an env_array
-                            # (the elementwise chain); copy element-wise. If it
-                            # collapsed to a scalar, splat it into every slot.
-                            if i in mept_array_iter_indices:
-                                n_arr, _mt = mept_array_iter_n[i]
-                                ydesc = self.env_array.get(yield_id)
-                                if ydesc is not None:
-                                    ysrc, _yn, _yt = ydesc
-                                    # Symmetric with the seed-side guard: the
-                                    # yielded array must match the iter-arg
-                                    # width, else iter_N[e]=ysrc[e] reads OOB.
-                                    if _yn != n_arr:
-                                        from triton_metal.errors import (
-                                            MetalNonRecoverableError)
-                                        raise MetalNonRecoverableError(
-                                            f"MEPT iter-arg yield width mismatch: "
-                                            f"yielded {_yn}, iter-arg {n_arr} "
-                                            f"(yield_id={yield_id})")
-                                    for e in range(n_arr):
+            _body_ids = {o.id for o in ssa.region_ops}
+            _SAFE_PREEMIT_OPS = frozenset({
+                "tt.make_range", "tt.splat", "tt.broadcast", "tt.expand_dims",
+                "arith.constant",
+            })
+            # Collect referenced external safe ops (BFS over body op inputs)
+            _ext_needed = []
+            _ext_seen = set()
+            for _bop in ssa.region_ops:
+                for _oid in (_bop.operand_ids or []):
+                    if _oid in _body_ids or _oid in _ext_seen:
+                        continue
+                    if self.env.get(_oid) is not None:
+                        continue  # already in env
+                    _ext_seen.add(_oid)
+                    # Find the producing op
+                    _prod = None
+                    def _find_op(ops, target):
+                        for _o in ops:
+                            if _o.id == target:
+                                return _o
+                            if _o.region_ops:
+                                r = _find_op(_o.region_ops, target)
+                                if r: return r
+                            if _o.else_ops:
+                                r = _find_op(_o.else_ops, target)
+                                if r: return r
+                        return None
+                    _prod = _find_op(self.graph.ops, _oid)
+                    if (_prod is not None
+                            and _prod.op in _SAFE_PREEMIT_OPS
+                            and _prod.is_tensor):
+                        _ext_needed.append(_prod)
+            # Emit missing safe external ops before the body starts
+            for _ext_op in _ext_needed:
+                if self.env.get(_ext_op.id) is None:
+                    self._lower_op(_ext_op)
+
+        try:
+            if ssa.region_ops:
+                for body_op in ssa.region_ops:
+                    if body_op.op == "scf.yield":
+                        # Update iter_arg variables from yield operands
+                        for i, yield_id in enumerate(body_op.operand_ids):
+                            if i < len(iter_vars):
+                                yielded_ids[i] = yield_id
+                                # Skip scalar assignment for smem-backed iter_args;
+                                # the shared memory was already updated in-place by
+                                # the dot or strided binary op.
+                                if i in smem_iter_indices:
+                                    # Check if the yield value has a shared_mem_desc
+                                    # pointing to a DIFFERENT array (e.g. the dot
+                                    # wrote to smem_dot_X).  If so, copy it over.
+                                    yield_smem = getattr(self, '_shared_mem_descs', {}).get(yield_id)
+                                    if yield_smem and yield_smem[0] != iter_vars[i]:
+                                        src_smem = yield_smem[0]
+                                        dst_smem = iter_vars[i]
+                                        init_shape = self.env_shapes.get(
+                                            init_ids[i], ()) if i < len(init_ids) else ()
+                                        sz = 1
+                                        for d in init_shape:
+                                            sz *= d
                                         self.kb.raw_line(
-                                            f"        {iter_vars[i]}[{e}] = "
-                                            f"{ysrc}[{e}];")
-                                else:
-                                    yval = self._lookup(yield_id)
-                                    for e in range(n_arr):
+                                            f"    for (uint _cp = lid; _cp < {sz}u; "
+                                            f"_cp += {bs}u) {{")
                                         self.kb.raw_line(
-                                            f"        {iter_vars[i]}[{e}] = "
-                                            f"{yval};")
-                                continue
-                            yield_val = self._lookup(yield_id)
-                            self.kb.raw_line(
-                                f"        {iter_vars[i]} = {yield_val};"
-                            )
-                else:
-                    self._lower_op(body_op)
+                                            f"        {dst_smem}[_cp] = {src_smem}[_cp];")
+                                        self.kb.raw_line(f"    }}")
+                                        self.kb.raw_line(
+                                            f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
+                                    continue
+                                # MEPT register-array iter-arg: update v[e] per
+                                # element. The yielded value is itself an env_array
+                                # (the elementwise chain); copy element-wise. If it
+                                # collapsed to a scalar, splat it into every slot.
+                                if i in mept_array_iter_indices:
+                                    n_arr, _mt = mept_array_iter_n[i]
+                                    ydesc = self.env_array.get(yield_id)
+                                    if ydesc is not None:
+                                        ysrc, _yn, _yt = ydesc
+                                        # Symmetric with the seed-side guard: the
+                                        # yielded array must match the iter-arg
+                                        # width, else iter_N[e]=ysrc[e] reads OOB.
+                                        if _yn != n_arr:
+                                            from triton_metal.errors import (
+                                                MetalNonRecoverableError)
+                                            raise MetalNonRecoverableError(
+                                                f"MEPT iter-arg yield width mismatch: "
+                                                f"yielded {_yn}, iter-arg {n_arr} "
+                                                f"(yield_id={yield_id})")
+                                        for e in range(n_arr):
+                                            self.kb.raw_line(
+                                                f"        {iter_vars[i]}[{e}] = "
+                                                f"{ysrc}[{e}];")
+                                    else:
+                                        yval = self._lookup(yield_id)
+                                        for e in range(n_arr):
+                                            self.kb.raw_line(
+                                                f"        {iter_vars[i]}[{e}] = "
+                                                f"{yval};")
+                                    continue
+                                yield_val = self._lookup(yield_id)
+                                self.kb.raw_line(
+                                    f"        {iter_vars[i]} = {yield_val};"
+                                )
+                    else:
+                        self._lower_op(body_op)
+        finally:
+            self._current_loop_body_ops = _prev_body_ops
 
         self.kb.raw_line("    }")
 

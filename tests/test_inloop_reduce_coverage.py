@@ -37,10 +37,20 @@ if HAS:
             best = tl.where(s < best, s, best)  # cmpf + select on reduce result
         tl.store(OUT + tl.arange(0, 1), best)
 
+    @triton.jit
+    def _hoisted_reduce_in_loop(X, OUT, C: tl.constexpr, BLOCK: tl.constexpr):
+        v = tl.load(X + tl.arange(0, BLOCK))   # hoisted OUTSIDE the loop
+        acc = tl.zeros((), dtype=tl.float32)
+        for i in range(0, C):
+            acc = acc + tl.sum(v)
+        tl.store(OUT + tl.arange(0, 1), acc)
+
 # All @triton.jit kernels defined in this file.  The autouse fixture below
 # clears their in-process JIT caches before each test.  Add any new kernel
 # defined in this file to this tuple so the cache flush covers it.
-_MODULE_KERNELS = (_sum_carry_in_loop, _min_blocksum_in_loop) if HAS else ()
+_MODULE_KERNELS = (
+    _sum_carry_in_loop, _min_blocksum_in_loop, _hoisted_reduce_in_loop
+) if HAS else ()
 
 
 @pytest.fixture(autouse=True)
@@ -58,16 +68,17 @@ def _clear_jit_cache():
 
 
 @requires_metal
-@pytest.mark.parametrize("BLOCK", [256, 512])
-def test_inloop_reduce_mept0_refuses(BLOCK, monkeypatch):
-    """MEPT=0: an in-loop reduce with block>num_threads is uncovered → refuse
-    loudly (was silent-wrong before Stage B)."""
+@pytest.mark.parametrize("BLOCK", [256, 512, 1024])
+def test_inloop_reduce_mept0_correct(BLOCK, monkeypatch):
+    """Stage A: under MEPT=0 an in-loop reduce with block>num_threads computes
+    correctly via body-local multipass coverage (no longer refuses)."""
     monkeypatch.setenv("TRITON_METAL_MEPT", "0")
     C = 4
+    torch.manual_seed(0)
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
     OUT = torch.zeros(1, device="mps", dtype=torch.float32)
-    with pytest.raises(MetalNonRecoverableError):
-        _sum_carry_in_loop[(1,)](X, OUT, C=C, BLOCK=BLOCK)
+    _sum_carry_in_loop[(1,)](X, OUT, C=C, BLOCK=BLOCK)
+    torch.testing.assert_close(OUT[0], X.sum(), rtol=1e-3, atol=1e-3)
 
 
 @requires_metal
@@ -100,3 +111,21 @@ def test_inloop_where_on_reduce_default_correct(BLOCK, monkeypatch):
     _min_blocksum_in_loop[(1,)](X, OUT, C=C, BLOCK=BLOCK)
     ref = X.view(C, BLOCK).sum(dim=1).min()
     torch.testing.assert_close(OUT[0], ref, rtol=1e-4, atol=1e-4)
+
+
+@requires_metal
+def test_inloop_reduce_uncoverable_refuses(monkeypatch):
+    """Stage A backstop: a reduce whose per-element source is hoisted outside
+    the loop is not body-local-coverable → loud refusal, never silent-wrong.
+
+    _hoisted_reduce_in_loop loads v = tl.load(...) OUTSIDE the scf.for body,
+    so its SSA id is not in body_ids → _cover_inloop_reduce returns None →
+    Stage B refusal fires. This ensures silent-wrong is impossible even for
+    kernels that Stage A cannot safely cover.
+    """
+    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    BLOCK, C = 256, 4
+    X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
+    OUT = torch.zeros(1, device="mps", dtype=torch.float32)
+    with pytest.raises(MetalNonRecoverableError):
+        _hoisted_reduce_in_loop[(1,)](X, OUT, C=C, BLOCK=BLOCK)

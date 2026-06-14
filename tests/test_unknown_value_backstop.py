@@ -51,11 +51,17 @@ def test_sum_in_loop_block128_runs():
     assert abs(float(OUT[0]) - X.sum().item()) < 1e-2
 
 
-# Escape-hatch behavior: with MEPT=0 (pinned by _force_mept_off) this kernel
-# refuses at BLOCK=256. Default-ON it computes — see test_mept_m5_default_gpu.py.
+# Stage A (body-local multipass coverage): with MEPT=0 this kernel is now
+# COVERED rather than refused. The load and all its deps (idx, mask, offs) are
+# either inside the loop body or safe-external index ops (tt.make_range →
+# _loop_e), so _cover_inloop_reduce can replay them inside a _loop_e wrap.
+# See test_inloop_reduce_coverage.py for the dedicated Stage A tests.
 @requires_metal
-def test_sum_in_loop_block256_refuses_not_compile_error():
-    from triton_metal.errors import MetalNonRecoverableError
+def test_sum_in_loop_block256_correct_not_refused():
+    import torch
+    torch.manual_seed(0)
     N = 1024; X = torch.randn(N); OUT = torch.zeros(1)
-    with pytest.raises(MetalNonRecoverableError):
-        _sum_in_loop[(1,)](X, OUT, N, (N + 255) // 256, BLOCK=256)
+    _sum_in_loop[(1,)](X, OUT, N, (N + 255) // 256, BLOCK=256)
+    assert abs(float(OUT[0]) - X.sum().item()) < 1e-2, (
+        f"Stage A correctness check: got {float(OUT[0])} expected {X.sum().item()}"
+    )

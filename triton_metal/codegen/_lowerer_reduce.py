@@ -61,6 +61,177 @@ class _ReduceScanMixin:
                 f"    {fold_var} = {combine(fold_var, _read(i))};")
         return fold_var
 
+    def _cover_inloop_reduce(self, ssa, combine_op, msl_type, total):
+        """Stage A: make an in-loop 1-D reduce cover its whole tile.
+
+        Inside an scf.for body where block_size (num_threads) < tile size, a raw
+        cross-lane reduce sums only the first num_threads elements. This folds
+        each thread's strided share into a scalar accumulator BEFORE the cross-
+        thread reduce — the non-register-array analogue of _mept_reduce_fold and
+        the in-loop analogue of the top-level _lower_multipass_reduction wrap.
+
+        Re-emits the reduce input's per-element dependency chain inside a
+        ``for (_loop_e = lid; _loop_e < total; _loop_e += block_size)`` loop with
+        ``_needs_wrapping`` set (so make_range's lid term becomes _loop_e while
+        the loop-dependent base, e.g. r = k*BLOCK, is preserved), accumulating
+        with the reduce's combine op.
+
+        Returns the accumulator var name, or None if the chain is not safely
+        replayable (caller must then keep the loud Stage B refusal).
+        """
+        iid = ssa.operand_ids[0]
+        body_ops = getattr(self, "_current_loop_body_ops", None) or []
+        if not body_ops:
+            return None
+
+        body_ids = {o.id for o in body_ops}
+        by_id = {o.id: o for o in body_ops}
+
+        # The reduce input itself must be produced inside this body.
+        if iid not in body_ids:
+            return None
+
+        # Dependency closure of the reduce input within the body.
+        deps = self._collect_tensor_deps([ssa], body_ops, set())
+        dep_ids = {o.id for o in deps}
+
+        # SAFETY GATE (never silent-wrong): every TENSOR-shaped operand reachable
+        # from the reduce input that comes from OUTSIDE the body must be safely
+        # replayable. Index/shape ops (make_range, splat, broadcast, expand_dims,
+        # addptr, pure arithmetic) are safe because they are re-emitted with
+        # _needs_wrapping and produce the same index values. Data-bearing ops
+        # (tt.load and any value derived from one) are NOT safe because their
+        # content is fixed at the point of the original load and cannot be
+        # re-strided differently.
+        #
+        # Build the set of all IDs that derive from a tt.load in the full
+        # graph (and a lookup for safe external ops that need to be replayed).
+        _load_derived = set()
+        _DATA_OPS = frozenset({"tt.load", "tt.atomic_rmw", "tt.atomic_cas"})
+        _all_by_id = {}
+        def _scan_all(ops):
+            for op in ops:
+                _all_by_id[op.id] = op
+                if op.region_ops:
+                    _scan_all(op.region_ops)
+                if op.else_ops:
+                    _scan_all(op.else_ops)
+        _scan_all(getattr(self, "graph", None) and self.graph.ops or [])
+        # BFS: seed with load ops, propagate to their consumers.
+        _worklist = [o for o in _all_by_id.values() if o.op in _DATA_OPS]
+        for _o in _worklist:
+            _load_derived.add(_o.id)
+        # Also propagate: any op whose operand is load-derived is also
+        # load-derived (conservative but correct; pure index consumers of loads
+        # are unusual so over-refusal here is acceptable).
+        _changed = True
+        while _changed:
+            _changed = False
+            for _o in _all_by_id.values():
+                if _o.id in _load_derived:
+                    continue
+                if any(op_id in _load_derived for op_id in (_o.operand_ids or [])):
+                    _load_derived.add(_o.id)
+                    _changed = True
+
+        # Collect external safe deps: ops referenced by body deps that are
+        # NOT in the body, NOT load-derived (safe to replay), and ARE tensor-
+        # producing. These are index/shape ops (e.g. tt.make_range) that may
+        # not yet be in env (e.g. when running inside a multipass outer loop).
+        # We include them in the replay so the inner loop can re-emit them
+        # with _needs_wrapping=True (giving _loop_e instead of lid).
+        _SAFE_REPLAY_OPS = frozenset({
+            "tt.make_range", "tt.splat", "tt.broadcast", "tt.expand_dims",
+            "tt.addptr", "arith.constant", "arith.extf", "arith.truncf",
+            "arith.sitofp", "arith.fptosi",
+        })
+        external_safe_deps = []
+        external_safe_dep_ids = set()
+        # BFS over external references from body deps
+        _ext_worklist = []
+        for d in deps:
+            for oid in d.operand_ids:
+                if oid not in dep_ids and oid not in body_ids:
+                    _ext_worklist.append(oid)
+        _visited_ext = set()
+        while _ext_worklist:
+            oid = _ext_worklist.pop()
+            if oid in _visited_ext:
+                continue
+            _visited_ext.add(oid)
+            if oid in _load_derived:
+                return None
+            # Check if this is a body dep that's already covered
+            if oid in dep_ids:
+                continue
+            ext_op = _all_by_id.get(oid)
+            if ext_op is None:
+                # Not found in graph — must be a scalar (arg, constant, iter var)
+                # that stays in scope. Safe to skip.
+                continue
+            if ext_op.is_tensor:
+                if oid in _load_derived:
+                    return None
+                # Add to safe external deps if it's a replay-safe op
+                if ext_op.op in _SAFE_REPLAY_OPS:
+                    external_safe_dep_ids.add(oid)
+                    # Walk its operands too
+                    for sub_oid in (ext_op.operand_ids or []):
+                        if sub_oid not in _visited_ext:
+                            _ext_worklist.append(sub_oid)
+                else:
+                    # Tensor external dep that's not a safe replay op → refuse
+                    return None
+            # Non-tensor external ops (scalars) stay in scope — no action needed
+
+        # Build the ordered list of external safe deps in graph order
+        _all_id_order = {oid: idx for idx, oid in enumerate(_all_by_id.keys())}
+        external_safe_deps = [
+            _all_by_id[oid]
+            for oid in sorted(external_safe_dep_ids,
+                              key=lambda i: _all_id_order.get(i, 0))
+        ]
+
+        identity, combine_expr = self._reduce_identity_combine(combine_op, msl_type)
+        acc = self._next_var("inloop_acc")
+        self.kb.raw_line(f"        {msl_type} {acc} = {identity};")
+        self.kb.raw_line(
+            f"        for (uint _loop_e = lid; _loop_e < {total}u; "
+            f"_loop_e += {self.kb.block_size}u) {{")
+
+        # Save env bindings the replay will overwrite, so later body ops keep
+        # their original in-scope vars (a 2nd reduce's shared elementwise would
+        # otherwise reference an out-of-scope name → Metal compile error).
+        all_replay_ids = list(dep_ids) + list(external_safe_dep_ids)
+        saved_env = {rid: self.env.get(rid) for rid in all_replay_ids}
+        saved_ty = {rid: self.env_types.get(rid) for rid in all_replay_ids}
+
+        self._needs_wrapping = True
+        # Re-emit external safe index ops first (e.g. make_range → _loop_e)
+        for d in external_safe_deps:
+            self._lower_op(d)
+        # Then re-emit the body dependency chain
+        for d in deps:
+            self._lower_op(d)
+        val = self._lookup(iid)
+        self.kb.raw_line(
+            f"            {{ {msl_type} acc = {acc}; "
+            f"{msl_type} val = ({msl_type}){val}; {acc} = {combine_expr}; }}")
+        self._needs_wrapping = False
+        self.kb.raw_line(f"        }}")
+
+        for rid in all_replay_ids:
+            if saved_env[rid] is not None:
+                self.env[rid] = saved_env[rid]
+            elif rid in self.env:
+                del self.env[rid]
+            if saved_ty[rid] is not None:
+                self.env_types[rid] = saved_ty[rid]
+            elif rid in self.env_types:
+                del self.env_types[rid]
+
+        return acc
+
     def _get_reduce_combine_info(self, ssa):
         """Extract combine op and identity from a tt.reduce's body region.
 
@@ -440,14 +611,22 @@ class _ReduceScanMixin:
                 and input_shape is not None
                 and len(input_shape) == 1
                 and input_shape[0] > self.kb.block_size):
-            from triton_metal.errors import MetalNonRecoverableError
-            raise MetalNonRecoverableError(
-                f"Refusing in-loop reduction: a tile of {input_shape[0]} "
-                f"elements exceeds the {self.kb.block_size}-thread threadgroup "
-                f"and is not register-array-covered, so a cross-lane reduce "
-                f"here would sum only the first {self.kb.block_size} elements "
-                f"(silent-wrong). Use the default register-array path "
-                f"(TRITON_METAL_MEPT unset) or BLOCK <= num_threads.")
+            # Stage A: try to cover the whole tile by folding each thread's
+            # strided share before the cross-thread reduce.
+            _acc = self._cover_inloop_reduce(
+                ssa, combine_op, msl_type, input_shape[0])
+            if _acc is not None:
+                input_var = _acc
+                input_shape = None   # folded to one scalar per thread
+            else:
+                from triton_metal.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    f"Refusing in-loop reduction: a tile of {input_shape[0]} "
+                    f"elements exceeds the {self.kb.block_size}-thread threadgroup "
+                    f"and is not register-array-covered, so a cross-lane reduce "
+                    f"here would sum only the first {self.kb.block_size} elements "
+                    f"(silent-wrong). Use the default register-array path "
+                    f"(TRITON_METAL_MEPT unset) or BLOCK <= num_threads.")
 
         # Cast bool (i1) to int before reduction — MSL SIMD intrinsics reject bool
         if input_dtype == "i1" or (isinstance(input_var, str) and input_var in ("true", "false", "1", "0")):

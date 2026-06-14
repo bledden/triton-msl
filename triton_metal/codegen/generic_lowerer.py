@@ -193,6 +193,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # array-covered cannot use the top-level multipass wrap and would
         # silently under-cover block_size > num_threads — see _lower_reduce.
         self._control_flow_depth = 0
+        self._current_loop_body_ops = None
         self.env_array = {}  # ssa_id -> (var_name: str, n_elems: int, ty: str)
         # Phase 4c: parallel to env_is_ptr but for the case where the
         # tt.addptr offset is an env_array. Maps ssa_id -> (base_ptr,
