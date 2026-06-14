@@ -3,10 +3,15 @@
 This pins the TRITON_METAL_MEPT=0 ESCAPE-HATCH behavior. As of M5 the
 register-array model is default-ON and computes this kernel at BLOCK>=256 (see
 tests/test_mept_m5_default_gpu.py). With the escape hatch (MEPT=0, pinned by the
-autouse fixture below), a value defined outside a runtime-bound loop and used
-inside it at BLOCK>threadgroup-size can't be resolved on the scalar path -> it
-refuses loudly (the UNKNOWN_ backstop) rather than emitting invalid MSL.
-BLOCK<=128 still runs on the scalar path. (downstream tridec bug 2)
+autouse fixture below), BLOCK<=128 still runs correctly on the scalar path.
+
+Stage A (_cover_inloop_reduce) now COMPUTES simple in-loop reduces with MEPT=0
+when the dependency chain is safely replayable (all index/shape ops, no
+data-bearing loads outside the body). The renamed test
+`test_sum_in_loop_block256_correct_not_refused` asserts correctness for that
+case. The loud-refusal UNKNOWN_ backstop now fires only for non-replayable
+chains (e.g. a load-derived tensor from outside the body); those are exercised
+in tests/test_inloop_reduce_coverage.py.
 """
 import pytest
 

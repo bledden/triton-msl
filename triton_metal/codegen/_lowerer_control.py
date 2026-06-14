@@ -245,12 +245,35 @@ class _ControlFlowMixin:
         # hasn't yet emitted these ops when the scf.for (scalar) is hoisted
         # before it. We only emit ops that are NOT derived from tt.load (safe
         # to emit at any index — their value is index-only, not data-bearing).
+        # Pre-emission block: fires for ALL scf.for (not gated on mept_enabled).
+        # A non-eligible MEPT=1 kernel with a top-level multipass + scf.for also
+        # needs this — narrowing to MEPT=0 would reintroduce UNKNOWN_<id> there.
+        # The `if self.env.get(_oid) is not None: continue` guard makes it a
+        # cheap no-op for normal kernels; the _find_op graph scan only runs for
+        # genuinely-missing ops.
         if ssa.region_ops:
             _body_ids = {o.id for o in ssa.region_ops}
+            # Index-only subset of ops safe to pre-emit at outer body scope.
+            # See _SAFE_REPLAY_OPS in _lowerer_reduce.py for the superset used
+            # inside _cover_inloop_reduce (which adds addptr + type-conv ops).
             _SAFE_PREEMIT_OPS = frozenset({
                 "tt.make_range", "tt.splat", "tt.broadcast", "tt.expand_dims",
                 "arith.constant",
             })
+            # _find_op: recursive op lookup by id across nested regions.
+            # Defined once here (not inside the loop) to avoid re-creation per
+            # iteration.
+            def _find_op(ops, target):
+                for _o in ops:
+                    if _o.id == target:
+                        return _o
+                    if _o.region_ops:
+                        r = _find_op(_o.region_ops, target)
+                        if r: return r
+                    if _o.else_ops:
+                        r = _find_op(_o.else_ops, target)
+                        if r: return r
+                return None
             # Collect referenced external safe ops (BFS over body op inputs)
             _ext_needed = []
             _ext_seen = set()
@@ -262,18 +285,6 @@ class _ControlFlowMixin:
                         continue  # already in env
                     _ext_seen.add(_oid)
                     # Find the producing op
-                    _prod = None
-                    def _find_op(ops, target):
-                        for _o in ops:
-                            if _o.id == target:
-                                return _o
-                            if _o.region_ops:
-                                r = _find_op(_o.region_ops, target)
-                                if r: return r
-                            if _o.else_ops:
-                                r = _find_op(_o.else_ops, target)
-                                if r: return r
-                        return None
                     _prod = _find_op(self.graph.ops, _oid)
                     if (_prod is not None
                             and _prod.op in _SAFE_PREEMIT_OPS

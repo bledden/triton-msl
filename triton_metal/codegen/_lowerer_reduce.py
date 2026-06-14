@@ -85,7 +85,6 @@ class _ReduceScanMixin:
             return None
 
         body_ids = {o.id for o in body_ops}
-        by_id = {o.id: o for o in body_ops}
 
         # The reduce input itself must be produced inside this body.
         if iid not in body_ids:
@@ -140,6 +139,9 @@ class _ReduceScanMixin:
         # not yet be in env (e.g. when running inside a multipass outer loop).
         # We include them in the replay so the inner loop can re-emit them
         # with _needs_wrapping=True (giving _loop_e instead of lid).
+        # Superset of _SAFE_PREEMIT_OPS in _lowerer_control.py; that set is the
+        # index-only subset safe to pre-emit at outer body scope, while this
+        # set covers all ops safe to replay inside the _cover_inloop_reduce loop.
         _SAFE_REPLAY_OPS = frozenset({
             "tt.make_range", "tt.splat", "tt.broadcast", "tt.expand_dims",
             "tt.addptr", "arith.constant", "arith.extf", "arith.truncf",
@@ -202,9 +204,16 @@ class _ReduceScanMixin:
         # Save env bindings the replay will overwrite, so later body ops keep
         # their original in-scope vars (a 2nd reduce's shared elementwise would
         # otherwise reference an out-of-scope name → Metal compile error).
+        # env_array/env_shapes are included: a replayed make_range writes
+        # env_array/env_shapes entries pointing at vars declared INSIDE the
+        # now-closed _loop_e loop; those stale descriptors must not leak to
+        # later body ops or a second in-loop reduce (wrong shape routing /
+        # out-of-scope variable reference → Metal compile error).
         all_replay_ids = list(dep_ids) + list(external_safe_dep_ids)
         saved_env = {rid: self.env.get(rid) for rid in all_replay_ids}
         saved_ty = {rid: self.env_types.get(rid) for rid in all_replay_ids}
+        saved_arr = {rid: self.env_array.get(rid) for rid in all_replay_ids}
+        saved_shp = {rid: self.env_shapes.get(rid) for rid in all_replay_ids}
 
         self._needs_wrapping = True
         # Re-emit external safe index ops first (e.g. make_range → _loop_e)
@@ -229,6 +238,17 @@ class _ReduceScanMixin:
                 self.env_types[rid] = saved_ty[rid]
             elif rid in self.env_types:
                 del self.env_types[rid]
+            # env_array / env_shapes: restore prior value, or DELETE the entry
+            # the replay introduced (so a stale descriptor pointing into the
+            # closed _loop_e loop can't leak to later body ops).
+            if saved_arr[rid] is not None:
+                self.env_array[rid] = saved_arr[rid]
+            elif rid in self.env_array:
+                del self.env_array[rid]
+            if saved_shp[rid] is not None:
+                self.env_shapes[rid] = saved_shp[rid]
+            elif rid in self.env_shapes:
+                del self.env_shapes[rid]
 
         return acc
 
