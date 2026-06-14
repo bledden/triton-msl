@@ -432,6 +432,9 @@ class _ReduceScanMixin:
         # tensor and no array cover would emit a one-element-per-thread cross-
         # lane reduce that SILENTLY sums only the first num_threads elements.
         # Refuse loudly instead of returning a wrong result.
+        # Scope: 1-D full reduces only (len(input_shape)==1). The (1,N) axis==1
+        # fall-through and the ND reduce paths share the same under-coverage gap
+        # but are out of Stage B's 1-D scope (tracked by Task 2 corpus measure).
         if (mept_arr is None
                 and self._control_flow_depth > 0
                 and input_shape is not None

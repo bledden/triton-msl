@@ -28,6 +28,25 @@ if HAS:
             acc = acc + tl.sum(v)
         tl.store(OUT + tl.arange(0, 1), acc)
 
+# All @triton.jit kernels defined in this file.  The autouse fixture below
+# clears their in-process JIT caches before each test.  Extend this tuple
+# when Stage C adds more kernels.
+_MODULE_KERNELS = (_sum_carry_in_loop,) if HAS else ()
+
+
+@pytest.fixture(autouse=True)
+def _clear_jit_cache():
+    """Triton's in-process JIT cache is keyed on signature/constexprs, NOT on
+    TRITON_METAL_MEPT, so a compile made under one flag could be served to a
+    test that sets a different flag — a false negative for the pytest.raises
+    refusal test.  Clear device_caches (a defaultdict keyed by device; its
+    first value is the kernel_cache dict) before each test so every test
+    compiles fresh against the current env."""
+    if HAS:
+        for _fn in _MODULE_KERNELS:
+            _fn.device_caches.clear()
+    yield
+
 
 @requires_metal
 @pytest.mark.parametrize("BLOCK", [256, 512])
@@ -47,6 +66,10 @@ def test_inloop_reduce_small_block_ok(monkeypatch):
     """block_size <= num_threads is fully covered (one elem/thread) → never
     refused, correct under both flags."""
     monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    # BLOCK=128 with the default num_warps=4 → 128 threads, so
+    # block_size (128) <= num_threads (128): the reduce is NOT refused.
+    # Do not lower num_warps here — that would push block_size > num_threads
+    # and silently convert this into a false-positive pass of the refusal test.
     BLOCK, C = 128, 4
     torch.manual_seed(0)
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
