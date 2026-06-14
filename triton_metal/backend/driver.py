@@ -459,6 +459,57 @@ def _get_compile_shader_runtime():
     return _COMPILE_SHADER_RUNTIME
 
 
+# Scalar Triton signature types that torch.mps.compile_shader binds CORRECTLY
+# when passed a raw Python int/float (what the fast-path does). Determined
+# empirically (2026-06-14): for each type, a trivial kernel
+# `kernel void k(device float* o, constant <T>& v, uint i){ o[i]=(float)v; }`
+# was dispatched with a known Python scalar and the result checked.
+#   SAFE  : i32, u32, i64, i8, i16, i1 (bool), fp32
+#           - i64 binds CORRECTLY even for high-bit values (1<<40 verified);
+#             PyTorch passes the full 64-bit value, no 32-bit truncation.
+#   UNSAFE: fp16, bf16 — a raw Python float binds as 0.0 (PyTorch writes 4/8
+#           fp32/fp64 bytes into a 2-byte half/bfloat slot -> garbage). These
+#           are excluded so such kernels fall back to the existing path.
+# Anything not in this set (or unresolvable) -> NOT ok -> fall back. Conservative.
+_COMPILE_SHADER_SAFE_SCALAR_SIGS = frozenset({
+    "i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "fp32",
+})
+
+
+def _compile_shader_scalars_ok(launcher, kargs) -> bool:
+    """True iff every NON-tensor arg in ``kargs`` has a declared scalar
+    signature type that compile_shader binds correctly (see the SAFE set).
+
+    ``kargs`` is the ordered non-constexpr arg list (the same one the fast-path
+    dispatches). The j-th non-constexpr arg maps back to original arg index
+    ``orig_idx[j]``; its declared type is ``signature[arg_names[orig_idx[j]]]``.
+    Any uncertainty (tuple arg, unresolvable type, unknown/unsafe scalar type)
+    -> return False so the launch falls back to the existing path.
+    """
+    try:
+        # Original arg indices of the non-constexpr args, in kargs order.
+        # __call__ builds kargs as [a for i,a in enumerate(args)
+        # if i not in constexpr_indices]; mirror that index mapping here.
+        orig_idx = [i for i in range(len(launcher.arg_names))
+                    if i not in launcher.constexpr_indices]
+        if len(orig_idx) < len(kargs):
+            return False  # can't resolve every karg's declared type -> fall back
+        for j, a in enumerate(kargs):
+            if hasattr(a, "data_ptr"):
+                continue  # tensor (pointer arg) — handled by the MPS check
+            # Non-tensor scalar: resolve its declared signature type.
+            oi = orig_idx[j]
+            name = launcher.arg_names[oi]
+            sig = launcher.signature.get(name)
+            if isinstance(sig, tuple):
+                return False  # tuple/aggregate scalar — uncertain, fall back
+            if sig not in _COMPILE_SHADER_SAFE_SCALAR_SIGS:
+                return False  # unknown or unsafe scalar type (fp16/bf16/...) -> fall back
+        return True
+    except Exception:
+        return False  # any resolution failure -> conservative fall back
+
+
 class MetalLauncher:
     """Triton kernel launcher for Metal backend.
 
@@ -519,14 +570,19 @@ class MetalLauncher:
         # compile_shader zero-copy fast-path (Phase 4). Purely additive: any
         # failure or ineligibility falls through to the existing (correct)
         # host-round-trip driver path below. A wrong result here is the one
-        # unacceptable outcome, so eligibility is conservative and every error
-        # marks the MSL unsupported + falls back.
+        # unacceptable outcome, so eligibility is CONSERVATIVE — fire only for
+        # the well-understood common case (1-D grid, MPS tensors, safe scalar
+        # types) and fall back on anything uncertain. NEVER silent-wrong.
+        #
+        # The entire attempt (runtime acquisition + checks + dispatch) is inside
+        # one try/except: on ANY exception we fall through to the existing path,
+        # marking the MSL unsupported only when it is known.
         import os as _os
         if (self._msl is not None
                 and _os.environ.get("TRITON_METAL_COMPILE_SHADER", "1") != "0"):
-            _rt = _get_compile_shader_runtime()
-            if _rt.available() and not _rt.is_unsupported(self._msl):
-                try:
+            try:
+                _rt = _get_compile_shader_runtime()
+                if _rt.available() and not _rt.is_unsupported(self._msl):
                     # Ordered non-constexpr args (match [[buffer(i)]] order).
                     kargs = [a for i, a in enumerate(args) if i not in self.constexpr_indices]
                     tensors = [a for a in kargs if hasattr(a, "data_ptr")]
@@ -534,24 +590,34 @@ class MetalLauncher:
                     all_mps = bool(tensors) and all(
                         getattr(a, "device", None) is not None
                         and str(a.device).startswith("mps") for a in tensors)
-                    if all_mps:
-                        tg = num_warps * 32
-                        # grid (gridX/Y/Z) = threadgroup counts; total threads = grid*tg per dim.
-                        if gridY == 1 and gridZ == 1:
-                            threads, group_size = gridX * tg, tg
-                        else:
-                            threads = (gridX * tg, gridY, gridZ)
-                            group_size = (tg, 1, 1)
+                    # Every NON-tensor scalar arg must have a compile_shader-safe
+                    # declared type (i32/u32/i64/i8/i16/i1/fp32). fp16/bf16 scalars
+                    # mis-bind to 0.0 through compile_shader -> fall back. (Fix 4.)
+                    scalars_ok = _compile_shader_scalars_ok(self, kargs)
+                    # 1-D-grid only for now: the matmul 2-D template / multi-dim
+                    # grids use a different dispatch convention than this generic
+                    # path, so anything needing a 2-D grid (or gridY/gridZ > 1)
+                    # falls back to the existing path (correct, just slower).
+                    if (all_mps and scalars_ok and not needs_2d_grid
+                            and gridY == 1 and gridZ == 1):
+                        # Match the existing path's threadgroup size EXACTLY
+                        # (threads_per_tg = min(block_size, 1024)); num_warps*32
+                        # disagrees for MEPT/large-BLOCK/clamped kernels. (Fix 1.)
+                        tg = min(block_size, 1024)
+                        threads, group_size = gridX * tg, tg
                         lib = _rt.get_library(self._msl)
                         _rt.dispatch(lib, self.kernel_name, kargs,
                                      threads=threads, group_size=group_size)
                         if launch_exit_hook:
                             launch_exit_hook(launch_metadata)
                         return
+            except Exception:
+                # Any failure -> mark unsupported (when MSL is known) + fall
+                # through to the existing driver path (correct, just slower).
+                try:
+                    _get_compile_shader_runtime().mark_unsupported(self._msl)
                 except Exception:
-                    # Any failure -> mark unsupported + fall through to the
-                    # existing driver path (correct, just slower). NEVER wrong.
-                    _rt.mark_unsupported(self._msl)
+                    pass
 
         # Pack arguments into Metal buffers.
         # Strategy:
