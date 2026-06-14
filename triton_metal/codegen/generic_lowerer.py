@@ -187,6 +187,11 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # on scalar kernels). Specs: docs/superpowers/specs/2026-06-11-mept-
         # register-array-spine-design.md, 2026-06-13-mept-m5-flip-design.md.
         self.mept_enabled = os.environ.get("TRITON_METAL_MEPT", "1") != "0"
+        # Depth of nested control-flow bodies (scf.for/if/while) currently
+        # being lowered. An in-loop reduce (depth > 0) that is not register-
+        # array-covered cannot use the top-level multipass wrap and would
+        # silently under-cover block_size > num_threads — see _lower_reduce.
+        self._control_flow_depth = 0
         self.env_array = {}  # ssa_id -> (var_name: str, n_elems: int, ty: str)
         # Phase 4c: parallel to env_is_ptr but for the case where the
         # tt.addptr offset is an env_array. Maps ssa_id -> (base_ptr,
@@ -1869,11 +1874,23 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         elif op.startswith("math."):
             self._lower_math(ssa)
         elif op == "scf.for":
-            self._lower_scf_for(ssa)
+            self._control_flow_depth += 1
+            try:
+                self._lower_scf_for(ssa)
+            finally:
+                self._control_flow_depth -= 1
         elif op == "scf.if":
-            self._lower_scf_if(ssa)
+            self._control_flow_depth += 1
+            try:
+                self._lower_scf_if(ssa)
+            finally:
+                self._control_flow_depth -= 1
         elif op == "scf.while":
-            self._lower_scf_while(ssa)
+            self._control_flow_depth += 1
+            try:
+                self._lower_scf_while(ssa)
+            finally:
+                self._control_flow_depth -= 1
         elif op in ("scf.yield", "scf.condition"):
             pass  # Handled by parent op
         elif op == "tt.call":

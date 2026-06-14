@@ -422,6 +422,30 @@ class _ReduceScanMixin:
                                       msl_type, shared_dtype, input_shape)
                 return
 
+        # Stage B (in-loop reduction coverage): a 1-D full reduce whose tile
+        # exceeds the threadgroup (block_size > num_threads) is only correct
+        # when its per-thread input already covers the whole tile — either via
+        # the register-array fold (_mept_reduce_fold, applied above, which sets
+        # input_shape=None) or the top-level multipass wrap (which rebinds the
+        # input to a scalar accumulator before reaching here, depth == 0). An
+        # in-loop reduce (inside scf.for/if/while, depth > 0) with a raw block
+        # tensor and no array cover would emit a one-element-per-thread cross-
+        # lane reduce that SILENTLY sums only the first num_threads elements.
+        # Refuse loudly instead of returning a wrong result.
+        if (mept_arr is None
+                and self._control_flow_depth > 0
+                and input_shape is not None
+                and len(input_shape) == 1
+                and input_shape[0] > self.kb.block_size):
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing in-loop reduction: a tile of {input_shape[0]} "
+                f"elements exceeds the {self.kb.block_size}-thread threadgroup "
+                f"and is not register-array-covered, so a cross-lane reduce "
+                f"here would sum only the first {self.kb.block_size} elements "
+                f"(silent-wrong). Use the default register-array path "
+                f"(TRITON_METAL_MEPT unset) or BLOCK <= num_threads.")
+
         # Cast bool (i1) to int before reduction — MSL SIMD intrinsics reject bool
         if input_dtype == "i1" or (isinstance(input_var, str) and input_var in ("true", "false", "1", "0")):
             cast_var = self._next_var("bool_to_int")
