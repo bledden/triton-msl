@@ -1561,6 +1561,7 @@ class MetalBackend(BaseBackend):
         Pipeline: LLVM IR text → metal -c -x ir → .air → metallib
         This bypasses MSL entirely.
         """
+        import shutil
         import time
         import warnings
         from triton_metal.debug import _debug_level, _fallback_mode
@@ -1649,7 +1650,6 @@ class MetalBackend(BaseBackend):
                 os.replace(tmp_metallib_path, metallib_path)
 
             finally:
-                import shutil
                 shutil.rmtree(work, ignore_errors=True)
 
             with open(metallib_path, "rb") as f:
@@ -1895,6 +1895,7 @@ class MetalBackend(BaseBackend):
 
     @staticmethod
     def make_metallib(src, metadata, options):
+        import shutil
         import sys
         import time
         import warnings
@@ -1931,7 +1932,6 @@ class MetalBackend(BaseBackend):
             # All paths are on the same filesystem as metallib_path, so the final
             # os.replace() stays atomic.  The work dir is removed in finally even
             # if compilation fails.
-            import shutil
             work = tempfile.mkdtemp(dir=cache_dir)
             try:
                 metal_path = os.path.join(work, f"{base}.metal")

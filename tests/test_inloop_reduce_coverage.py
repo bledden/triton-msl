@@ -38,8 +38,8 @@ if HAS:
         tl.store(OUT + tl.arange(0, 1), best)
 
 # All @triton.jit kernels defined in this file.  The autouse fixture below
-# clears their in-process JIT caches before each test.  Extend this tuple
-# when Stage C adds more kernels.
+# clears their in-process JIT caches before each test.  Add any new kernel
+# defined in this file to this tuple so the cache flush covers it.
 _MODULE_KERNELS = (_sum_carry_in_loop, _min_blocksum_in_loop) if HAS else ()
 
 

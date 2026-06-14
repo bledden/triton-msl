@@ -73,7 +73,7 @@ def test_make_metallib_concurrent_no_race(tmp_path, monkeypatch):
     def worker():
         for _ in range(10):
             try:
-                data = MetalBackend.make_metallib(_MINIMAL_MSL, metadata, options)
+                data = MetalBackend.make_metallib(_MINIMAL_MSL, dict(metadata), options)
                 assert data and len(data) > 0, "make_metallib returned empty bytes"
             except Exception as exc:  # noqa: BLE001
                 with lock:
