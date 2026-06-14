@@ -89,9 +89,10 @@ def test_inloop_reduce_small_block_ok(monkeypatch):
 
 @requires_metal
 @pytest.mark.parametrize("BLOCK", [128, 256, 512, 1024])
-def test_inloop_where_on_reduce_default_correct(BLOCK):
+def test_inloop_where_on_reduce_default_correct(BLOCK, monkeypatch):
     """Default flag: a where (cmpf+select) consuming an in-loop reduce result
     is register-array-eligible (Stage C) → correct at full SIMD width."""
+    monkeypatch.setenv("TRITON_METAL_MEPT", "1")
     C = 4
     torch.manual_seed(0)
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
