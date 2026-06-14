@@ -1587,15 +1587,21 @@ class MetalBackend(BaseBackend):
 
             metallib_path = os.path.join(cache_dir, f"{base}.metallib")
 
-            # Skip compilation if cached metallib exists.
+            # Skip compilation if cached metallib exists.  The read is wrapped:
+            # a concurrent cache clear (or external rm -rf) can delete the file
+            # between os.path.exists and open() (TOCTOU).  Treat a vanished file
+            # as a cache miss and fall through to (re)compile rather than raising.
             if os.path.exists(metallib_path):
                 if level >= 2:
                     print(
                         f"[triton-metal] make_metallib_from_llir({kernel_name}): cache hit",
                         file=sys.stderr,
                     )
-                with open(metallib_path, "rb") as f:
-                    return f.read()
+                try:
+                    with open(metallib_path, "rb") as f:
+                        return f.read()
+                except FileNotFoundError:
+                    pass  # cached metallib vanished mid-read → recompile below
 
             # Bounded retry loop: each attempt gets a fresh private work dir so
             # intermediates from failed attempts never interfere with the next.
@@ -1702,14 +1708,31 @@ class MetalBackend(BaseBackend):
                             stderr=str(e),
                         ) from e
 
+                    # Read the freshly-placed metallib INSIDE the retry loop, so a
+                    # concurrent cache clear that deletes it between os.replace and
+                    # this read is handled like the other transients (retry; raise
+                    # MetalCompilationError on the last attempt) rather than escaping
+                    # as a bare FileNotFoundError.
+                    try:
+                        with open(metallib_path, "rb") as f:
+                            data = f.read()
+                    except FileNotFoundError as e:
+                        _last_transient_exc = e
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
+                        from triton_metal.errors import MetalCompilationError
+                        raise MetalCompilationError(
+                            f"Metal library read failed (metallib vanished after replace: {e})",
+                            msl_source=air_path,
+                            stderr=str(e),
+                        ) from e
+
                     # Success — break out of the retry loop.
                     break
 
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
-
-            with open(metallib_path, "rb") as f:
-                data = f.read()
 
             if level >= 2:
                 elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -1973,15 +1996,21 @@ class MetalBackend(BaseBackend):
 
             metallib_path = os.path.join(cache_dir, f"{base}.metallib")
 
-            # Skip compilation if cached metallib exists.
+            # Skip compilation if cached metallib exists.  The read is wrapped:
+            # a concurrent cache clear (or external rm -rf) can delete the file
+            # between os.path.exists and open() (TOCTOU).  Treat a vanished file
+            # as a cache miss and fall through to (re)compile rather than raising.
             if os.path.exists(metallib_path):
                 if level >= 2:
                     print(
                         f"[triton-metal] make_metallib({kernel_name}): cache hit",
                         file=sys.stderr,
                     )
-                with open(metallib_path, "rb") as f:
-                    return f.read()
+                try:
+                    with open(metallib_path, "rb") as f:
+                        return f.read()
+                except FileNotFoundError:
+                    pass  # cached metallib vanished mid-read → recompile below
 
             # Resolve Metal standard version for compilation (done once, outside
             # the retry loop — it's deterministic and has no side-effects).
@@ -2103,14 +2132,31 @@ class MetalBackend(BaseBackend):
                             stderr=str(e),
                         ) from e
 
+                    # Read the freshly-placed metallib INSIDE the retry loop, so a
+                    # concurrent cache clear that deletes it between os.replace and
+                    # this read is handled like the other transients (retry; raise
+                    # MetalCompilationError on the last attempt) rather than escaping
+                    # as a bare FileNotFoundError.
+                    try:
+                        with open(metallib_path, "rb") as f:
+                            data = f.read()
+                    except FileNotFoundError as e:
+                        _last_transient_exc = e
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
+                        from triton_metal.errors import MetalCompilationError
+                        raise MetalCompilationError(
+                            f"Metal library read failed (metallib vanished after replace: {e})",
+                            msl_source=air_path,
+                            stderr=str(e),
+                        ) from e
+
                     # Success — break out of the retry loop.
                     break
 
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
-
-            with open(metallib_path, "rb") as f:
-                data = f.read()
 
             if level >= 2:
                 elapsed_ms = (time.perf_counter() - t0) * 1000
