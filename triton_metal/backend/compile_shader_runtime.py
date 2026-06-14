@@ -13,8 +13,8 @@ class CompileShaderRuntime:
     """Compile + cache + dispatch MSL via torch.mps.compile_shader."""
 
     def __init__(self):
-        self._lib_cache = {}          # msl_source -> compiled library
-        self._unsupported = set()     # msl_source hashes that failed; skip fast-path
+        self._lib_cache = {}               # msl_source -> compiled library
+        self._unsupported: set[str] = set()  # msl_source strings that failed; skip fast-path
 
     def available(self) -> bool:
         try:
@@ -26,10 +26,10 @@ class CompileShaderRuntime:
             return False
 
     def is_unsupported(self, msl: str) -> bool:
-        return hash(msl) in self._unsupported
+        return msl in self._unsupported
 
     def mark_unsupported(self, msl: str) -> None:
-        self._unsupported.add(hash(msl))
+        self._unsupported.add(msl)
 
     def get_library(self, msl: str):
         """Compile MSL (cached on the source string). Raises on compile error."""
@@ -40,18 +40,12 @@ class CompileShaderRuntime:
             self._lib_cache[msl] = lib
         return lib
 
-    def dispatch(self, lib, kernel_name: str, tensor_and_scalar_args, scalar_args=None,
-                 *, threads, group_size) -> None:
+    def dispatch(self, lib, kernel_name: str, args, *, threads, group_size) -> None:
         """Dispatch lib.<kernel_name>(*args, threads=..., group_size=...).
 
-        ``tensor_and_scalar_args`` is the ordered argument list (MPS tensors +
-        Python scalars) matching the kernel's [[buffer(i)]] order. ``threads``
-        and ``group_size`` are ints (1-D) or tuples (2-D/3-D). PyTorch binds the
-        MPS tensors zero-copy and enqueues on the MPS stream.
+        ``args`` is the ordered argument list (MPS tensors + Python scalars)
+        matching the kernel's [[buffer(i)]] order. ``threads`` and ``group_size``
+        are ints (1-D) or tuples (2-D/3-D). PyTorch binds the MPS tensors
+        zero-copy and enqueues on the MPS stream.
         """
-        if scalar_args is not None:
-            args = list(tensor_and_scalar_args) + list(scalar_args)
-        else:
-            args = list(tensor_and_scalar_args)
-        fn = getattr(lib, kernel_name)
-        fn(*args, threads=threads, group_size=group_size)
+        getattr(lib, kernel_name)(*args, threads=threads, group_size=group_size)

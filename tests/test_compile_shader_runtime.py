@@ -30,7 +30,7 @@ def test_dispatch_vadd_zero_copy():
     A = torch.randn(N, device="mps"); B = torch.randn(N, device="mps"); OUT = torch.empty(N, device="mps")
     lib = rt.get_library(_VADD)
     assert rt.get_library(_VADD) is lib   # cached (same object)
-    rt.dispatch(lib, "vadd", [A, B, OUT], [N], threads=N, group_size=256)
+    rt.dispatch(lib, "vadd", [A, B, OUT, N], threads=N, group_size=256)
     torch.mps.synchronize()
     torch.testing.assert_close(OUT, A + B, rtol=1e-4, atol=1e-4)
 
@@ -61,7 +61,7 @@ def test_dispatch_reduction_shared_mem():
     X = torch.randn(N, device="mps")
     OUT = torch.empty(N // 256, device="mps")
     lib = rt.get_library(_BLOCKSUM)
-    rt.dispatch(lib, "blocksum", [X, OUT], [N], threads=N, group_size=256)
+    rt.dispatch(lib, "blocksum", [X, OUT, N], threads=N, group_size=256)
     torch.mps.synchronize()
     expected = X.view(N // 256, 256).sum(1)
     torch.testing.assert_close(OUT, expected, rtol=1e-3, atol=1e-3)
