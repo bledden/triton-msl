@@ -599,9 +599,13 @@ class MetalLauncher:
                     # fallback on ANY miss. M%32 is MANDATORY: otherwise the grid
                     # rounds M up and the no-edge-handling template writes past C
                     # (OOB). N%32 / K%8 are the col-strip / MMA-depth requirements.
-                    if fast_matmul is not None and all_mps:
-                        fast_msl, m_idx, n_idx, k_idx, tile_m, tile_n = fast_matmul
-                        if not _rt.is_unsupported(fast_msl):
+                    if (fast_matmul is not None and all_mps
+                            and _os.environ.get("TRITON_METAL_FAST_MATMUL", "1") != "0"):
+                        try:
+                            fast_msl, m_idx, n_idx, k_idx, tile_m, tile_n = fast_matmul
+                        except (TypeError, ValueError):
+                            fast_msl = None
+                        if fast_msl is not None and not _rt.is_unsupported(fast_msl):
                             try:
                                 M = int(kargs[m_idx]); N = int(kargs[n_idx]); K = int(kargs[k_idx])
                                 if (M > 0 and N > 0 and K > 0

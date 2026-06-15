@@ -11,6 +11,20 @@ except Exception:
 requires = pytest.mark.skipif(not HAS, reason="MPS + compile_shader needed")
 
 
+@pytest.fixture(autouse=True)
+def _reset_unsupported():
+    try:
+        from triton_metal.backend.driver import _get_compile_shader_runtime
+        rt = _get_compile_shader_runtime()
+        for attr in ("_unsupported",):
+            obj = getattr(rt, attr, None)
+            if hasattr(obj, "clear"):
+                obj.clear()
+    except Exception:
+        pass
+    yield
+
+
 @triton.jit
 def mm(a_ptr, b_ptr, c_ptr, M, N, K, sam, sak, sbk, sbn, scm, scn,
        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
@@ -69,4 +83,39 @@ def test_misaligned_falls_back(monkeypatch, M, N, K):
     seen = _spy(monkeypatch)
     A, B, C = _launch(M, N, K)                     # M%32!=0 OR N%32!=0 OR K%8!=0
     assert "simdgroup_matmul_fast" not in seen, "misaligned dims must NOT use the fast template"
+    torch.testing.assert_close(C, (A.float() @ B.float()), rtol=2e-2, atol=2e-2)
+
+
+@requires
+def test_flag_off_skips_cached_descriptor(monkeypatch):
+    """A descriptor cached in phase 1 must NOT fire when TRITON_METAL_FAST_MATMUL=0
+    in phase 2. Both phases run in the same process so the kernel stays cached
+    in-process — exactly the scenario Fix 1 (runtime env-var gate) addresses."""
+    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
+
+    # Phase 1: flag ON — compile + cache the descriptor; fast path may fire.
+    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    seen1 = _spy(monkeypatch)
+    _launch(256, 256, 256)
+    # (We don't assert seen1 here — we just want the descriptor cached.)
+
+    # Phase 2: flag OFF — same kernel/shape, no cache clear; fast path must NOT fire.
+    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "0")
+    # Reset the spy list by patching a fresh one (reuse the same rt object).
+    from triton_metal.backend.driver import _get_compile_shader_runtime
+    rt = _get_compile_shader_runtime()
+    seen2 = []
+    orig2 = rt.dispatch
+    def spy2(lib, kernel_name, args, **kw):
+        seen2.append(kernel_name)
+        return orig2(lib, kernel_name, args, **kw)
+    monkeypatch.setattr(rt, "dispatch", spy2)
+
+    A, B, C = _launch(256, 256, 256)
+    torch.mps.synchronize()
+    assert "simdgroup_matmul_fast" not in seen2, (
+        "TRITON_METAL_FAST_MATMUL=0 must suppress dispatch even for a cached descriptor"
+    )
+    # Correctness: result must still match torch matmul (fallback path ran).
     torch.testing.assert_close(C, (A.float() @ B.float()), rtol=2e-2, atol=2e-2)
