@@ -3,9 +3,9 @@
 > Route eligible clean matmuls to the existing, proven `make_simdgroup_matmul_kernel_fast`
 > template (direct device `simdgroup_load`/`simdgroup_store`, register blocking, no
 > threadgroup staging, no serial epilogue) instead of the generic dot lowering's
-> staged kernel (34 barriers, serial fragment-by-fragment masked epilogue). **Measured:
-> the fast template hits 7.8 TFLOP/s = 77% of `torch.matmul`, relerr 0.0 (exact), at
-> fp16 2048³ — vs the generic lowering's ~2.8 TFLOP/s (37%).** Phase 4 (perf), the
+> staged kernel (34 barriers, serial fragment-by-fragment masked epilogue). **Measured
+> at 2048³, relerr 0.0 (exact) both dtypes: fp32 11.2 TFLOP/s = 98% of `torch.matmul`;
+> fp16 7.8 TFLOP/s = 77% — vs the generic lowering's ~2.8 TFLOP/s (37%).** Phase 4 (perf), the
 > matmul lever after compile_shader. Purely additive: ineligible matmuls fall back to
 > the generic lowering unchanged. Prime directive: never silent-wrong.
 
@@ -105,9 +105,16 @@ conservative; the fallback (generic lowering) is correct for everything excluded
 - **Aligned dims (the template's SIZE CONTRACT):** `M % (8·rr) == 0` (rr=4 → M%32==0),
   `N % (32·rc) == 0` (rc=4 → N%128==0), `K % 8 == 0`. The template does **no boundary
   masking** on `simdgroup_store`; ragged dims must fall back.
-- **dtype:** fp16 inputs → fp32 output (proven: relerr 0.0). fp32 in/out only if the fast
-  template supports it (the plan verifies `make_simdgroup_matmul_kernel_fast(dtype="fp32")`;
-  if unsupported, fp32 falls back). bf16 falls back.
+- **Input dtype:** fp16 **and** fp32 — the fast template's `dtype` branch handles both
+  (`make_simdgroup_matmul_kernel_fast(dtype="fp16"|"fp32")`, benchmarked 2026-06-15: fp32
+  11.2 TFLOP/s = 98% of torch, fp16 7.8 TFLOP/s = 77%, both relerr 0.0). bf16 falls back.
+- **Output dtype must be fp32.** The template **always** declares `device float* C`
+  (`simdgroup_store` of a `simdgroup_float8x8` accumulator writes float). So the bound
+  output tensor must be float32: this covers fp32→fp32 (98%) and fp16-input→fp32-output
+  (77%). A fp16-**output** matmul (`acc.to(fp16)` into a `half` C) would bind a half
+  tensor to a float\* buffer → silent-wrong, so it **falls back** in v1. (A fp16-output
+  fast-template variant — cast `float8x8`→`half` on store — is a documented follow-up,
+  not v1; the output-dtype check keeps the gate airtight meanwhile.)
 - **M, N, K available as runtime scalar args** (so the launcher can read them to compute
   `n_groups`). If M/N are compile-time constants only, fall back (or const-fold — plan
   decides; default fall back).
@@ -138,15 +145,17 @@ lowering (current staged kernel) → user's 2-D grid → unchanged.
 1. **Full-suite parity (the gate):** upstream `test_core` dot/matmul families + the full
    ratchet, **both MEPT flags**, with `TRITON_METAL_FAST_MATMUL` on == off. 0 failed,
    identical to tolerance. No perf claim before this is green.
-2. **Parity harness:** a representative matmul set (fp16, aligned 2048³/1024²/512² and
-   non-square; plus ragged/transposed/bf16 cases that MUST fall back) run through both the
-   fast path and the generic lowering, asserting identical-to-tolerance outputs and that
-   the ineligible cases take the fallback (assert kernel name / metadata).
+2. **Parity harness:** a representative matmul set (fp32→fp32 and fp16→fp32, aligned
+   2048³/1024²/512² and non-square; plus the MUST-fall-back set: ragged dims, transposed/
+   strided operands, bf16, fp16-output) run through both the fast path and the generic
+   lowering, asserting identical-to-tolerance outputs and that the ineligible cases take
+   the fallback (assert kernel name / metadata).
 3. **Real kernels:** any project matmul-bearing kernels (and FlashAttention, which has its
    own path) stay green.
-4. **Perf gate (after correctness):** re-bench fast vs generic vs torch at fp16 2048³;
-   assert the eligible class is materially above the generic floor (target ≳ 70% of torch,
-   ≳ 2× over the generic ~2.8 TFLOP/s). Record ON/OFF in `reports/perf_baseline.json`.
+4. **Perf gate (after correctness):** re-bench fast vs generic vs torch at 2048³ for both
+   dtypes; assert the eligible class is materially above the generic floor (fp32 target
+   ≳ 90% of torch ≈ 11 TFLOP/s; fp16 ≳ 70% ≈ 7.5 TFLOP/s; both ≳ 2× the generic ~2.8).
+   Record ON/OFF, both dtypes, in `reports/perf_baseline.json`.
 5. **Fallback paths:** ragged/transposed/bf16/fused-epilogue matmuls run correctly via the
    generic lowering; flag-off path identical to pre-change.
 
@@ -159,8 +168,10 @@ lowering (current staged kernel) → user's 2-D grid → unchanged.
   stays consistent for both driver paths).
 - `fast_matmul` metadata plumbing (where `needs_2d_grid`/`output_indices` are set in
   `compiler.py` / `msl_emitter.py`) and the launcher read.
-- Whether `make_simdgroup_matmul_kernel_fast` supports `dtype="fp32"`; if not, scope to
-  fp16 and document fp32 as a fast-template follow-up.
+- How the output-dtype check is established (the C tensor's dtype + the IR store: direct
+  `acc` store → float C eligible; `acc.to(fp16)` store → half C, fall back). Both fp16 and
+  fp32 inputs are confirmed supported + benchmarked (2026-06-15); no open question on input
+  dtype remains.
 - `rr/rc` tile choice (currently 4/4 → 32×128); confirm 7.8 TFLOP/s is the best static
   choice or whether a second tile (e.g. 8×4) helps tall/skinny shapes (follow-up, not v1).
 
