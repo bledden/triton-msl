@@ -21,5 +21,46 @@
     "total_ms": 21.6,
     "per_kernel_ms": 0.216,
     "n_dispatches": 100
+  },
+  "compile_shader_zero_copy": {
+    "_note": "Phase 4 compile_shader fast-path: ON=TRITON_METAL_COMPILE_SHADER=1 (default), OFF=0. Measured 2026-06-14 on M4 Max (peak 546 GB/s). Reduction is pass-1 scatter-sum (each block→OUT[pid]), not global atomic.",
+    "peak_bw_gbps": 546.0,
+    "platform": "M4 Max",
+    "vector_add_16M": {
+      "on_ms": 0.580,
+      "on_gbps": 347.2,
+      "on_pct_peak": 63.6,
+      "off_ms": 7.513,
+      "off_gbps": 26.8,
+      "off_pct_peak": 4.9,
+      "speedup": 13.0
+    },
+    "elementwise_16M": {
+      "on_ms": 0.426,
+      "on_gbps": 315.1,
+      "on_pct_peak": 57.7,
+      "off_ms": 5.693,
+      "off_gbps": 23.6,
+      "off_pct_peak": 4.3,
+      "speedup": 13.4
+    },
+    "softmax_8Kx1K": {
+      "on_ms": 0.289,
+      "on_gbps": 232.0,
+      "on_pct_peak": 42.5,
+      "off_ms": 5.151,
+      "off_gbps": 13.0,
+      "off_pct_peak": 2.4,
+      "speedup": 17.8
+    },
+    "reduction_16M": {
+      "on_ms": 0.285,
+      "on_gbps": 235.4,
+      "on_pct_peak": 43.1,
+      "off_ms": 2.351,
+      "off_gbps": 28.6,
+      "off_pct_peak": 5.2,
+      "speedup": 8.2
+    }
   }
 }
