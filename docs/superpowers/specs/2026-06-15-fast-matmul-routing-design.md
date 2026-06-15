@@ -6,8 +6,8 @@
 > staged kernel (34 barriers, serial fragment-by-fragment masked epilogue). **Measured
 > at 2048³, relerr 0.0 (exact) both dtypes: fp32 11.2 TFLOP/s = 98% of `torch.matmul`;
 > fp16 7.8 TFLOP/s = 77% — vs the generic lowering's ~2.8 TFLOP/s (37%).** Phase 4 (perf), the
-> matmul lever after compile_shader. Purely additive: ineligible matmuls fall back to
-> the generic lowering unchanged. Prime directive: never silent-wrong.
+> matmul lever after compile_shader. Purely additive: ineligible matmuls run the generic
+> lowering unchanged. Prime directive: never silent-wrong.
 
 ## Problem (profiled + ground-truthed)
 
@@ -23,163 +23,178 @@ BK=32) confirms the inefficiency directly:
   **element-by-element with bounds checks** (`if (gr<_M && gc<_N) c_ptr[...] = half(...)`),
   one fragment at a time — **34 `threadgroup_barrier`s total**.
 
-This is the diagnostic signature observed in profiling (larger tiles make it *slower*,
-2.8→2.4→… TFLOP/s): the kernel is barrier/threadgroup-memory bound, not MMA bound. The
-MMA path *is* firing (`simdgroup_float8x8` accumulators, `simdgroup_half8x8` fragments) —
-it is a template-**quality** problem, not a missed detector.
+This is the diagnostic signature observed in profiling (larger tiles make it *slower*):
+the kernel is barrier/threadgroup-memory bound, not MMA bound. The MMA path *is* firing
+(`simdgroup_float8x8` accumulators, `simdgroup_half8x8` fragments) — it is a
+template-**quality** problem, not a missed detector. The generic kernel itself
+(`make_matmul_kernel`, `_msl_templates.py:448`) is **row-major contiguous** (indexes
+`A[gr*K+gc]`, `B[gr*N+gc]`, `C[gr*N+gc]`, ignores stride args), uses a 1-D flattened `pid`
+grid, bounds-checks edges (handles ragged M/N), and reads runtime `M/N/K` from scalar args
+at buffers 3/4/5 (A/B/C at 0/1/2).
 
-Two other matmul paths exist and were ruled out as the lever:
-- `make_simdgroup_matmul_kernel` (`_msl_templates.py:3628`, the ttgir_parser prebuilt
-  `simdgroup_matmul`, 32×32 staged tile, ~7 TFLOP/s claim) — the standard `@triton.jit`
-  matmul does **not** route here (verified: emitted kernel is named `mm`, the generic
-  lowering, not `simdgroup_matmul`). Swapping it would not help the common case.
-- `make_simdgroup_matmul_kernel_fast` (`_msl_templates.py:3547`) — already implements
-  the optimization (direct device load/store, register blocking rr=rc=4 → 32×128 tile,
-  zero staging, zero epilogue barriers) but is **unwired** (no caller in `triton_metal/`).
-  This is the proven asset to route to.
+The proven asset: `make_simdgroup_matmul_kernel_fast` (`_msl_templates.py:3547`) — direct
+device load/store, register blocking (rr=rc=4 → 32×128 tile), zero staging, zero epilogue
+barriers — but **unwired** (no caller in `triton_metal/`). It assumes the **same** row-major
+layout and the **same** A/B/C@0-2, M/N/K@3-5 arg positions as `make_matmul_kernel`, so it is
+correct on exactly the inputs the generic kernel is correct on — *provided* the runtime dims
+are aligned (it has **no** boundary handling; see contract).
 
-## Approach (confirmed by direct benchmark)
+## Approach: runtime dispatch via the compile_shader path (not compile-time substitution)
 
-Wire the existing fast template into the generic dot lowering as a **whole-kernel
-substitution** gated by an airtight eligibility contract, with the current generic
-lowering as the fallback. We do **not** rewrite the generic lowering's body and we do
-**not** rewrite the fast template — the fast template is proven (7.8 TFLOP/s, relerr 0.0)
-and reused verbatim (only renamed to the user's kernel entry-point name).
+The fast template requires aligned dims and has no edge handling. But the matmul's `M/N/K`
+are **runtime** scalar args (dynamic shapes) — alignment is **not knowable at compile time**.
+A compile-time whole-kernel substitution would bake the fast template into the IR-keyed
+cache and then run it for *any* later shape, including ragged ones → out-of-bounds writes /
+silent-wrong. (Verified: at M=2050 the fast template's grid rounds M up to 2080 and writes
+30 rows past C's end — relerr on the valid region read as 0.0, masking a heap overflow.
+This is exactly the trap the runtime gate prevents.)
+
+So we keep the compiled metallib as the **generic kernel (always correct, always the
+fallback)** and dispatch the fast template **at runtime** through the existing
+`compile_shader` zero-copy path — the infrastructure built in the prior Phase-4 work —
+only when the actual runtime tensors/dims satisfy the contract. This is the same lever
+("route eligible matmuls to the fast template, fall back otherwise"), moved to runtime
+because correctness requires it. It needs no MSL substitution, no kernel rename, no metallib
+changes, and no host-path grid override; it is proven feasible (the 7.8 / 11.2 TFLOP/s
+benchmarks *were* this `compile_shader`-dispatched fast template).
 
 Rejected alternatives:
-- **(Y) Rewrite the generic lowering's kernel body in place** — replace the staged
-  loads + serial epilogue with direct `simdgroup_load`/`simdgroup_store` + register
-  blocking parameterized by the user's arbitrary `BM/BN/BK`. Avoids a grid override
-  (keeps the user's 2-D grid) but is *new* parameterized MMA codegen for arbitrary tile
-  sizes — higher silent-wrong surface than reusing a proven fixed template. Deferred.
-- **(Z) Swap the ttgir_parser prebuilt `simdgroup_matmul` → `_fast`** — doesn't help the
-  common path (standard matmuls don't route there).
+- **Compile-time whole-kernel substitution + launcher grid override** — unsafe for
+  dynamic shapes (above); committed at compile time but alignment is a runtime fact.
+- **Rewrite the generic lowering body** (direct loads/store parameterized by user `BM/BN`)
+  — new parameterized MMA codegen, higher silent-wrong surface than reusing a proven
+  fixed template. Deferred.
+- **Swap the ttgir_parser prebuilt `simdgroup_matmul` → `_fast`** — that path is the
+  legacy opt-in fallback (default-refuses); standard matmuls don't route there.
 
 ## Architecture
 
-The dispatched threadgroup count in the launcher is `gridX·gridY·gridZ` (collapsed to
-1-D unless `needs_2d_grid`), and `grid{X,Y,Z}` come from the **user's** launch lambda
-(`grid=(cdiv(M,BM), cdiv(N,BN))`). There is **no existing grid-override machinery**. The
-fast template uses its own 32×128 tile (`n_groups = ceil(M/32)·ceil(N/128)`, 128 threads,
-1-D `pid [[threadgroup_position_in_grid]]`), independent of the user's `BM/BN`. So wiring
-it in requires computing `n_groups` at dispatch from the runtime M/N values and overriding
-the user's grid. Components:
+Two halves: a compile-time **detector** (additive metadata only — does not change the
+emitted/compiled generic kernel) and a runtime **dispatch gate** in the launcher.
 
-1. **Eligibility detector** (in the dot-lowering path, e.g. `_lowerer_templates.py` /
-   `_lowerer_detection.py`): recognize the clean single-matmul pattern and verify the
-   airtight contract (below). Returns the M/N/K arg indices + dtype on success, `None`
-   otherwise.
+1. **Compile-time eligibility detector** (`GenericLowerer`, in the
+   `_lower_dot_simple_template` path — the exact path eligible kernels already take). When
+   the structural contract holds, it builds the fast-template MSL via
+   `make_simdgroup_matmul_kernel_fast(dtype=<input_dtype>, rr=4, rc=4)` and records a
+   **`fast_matmul` descriptor**; the generic kernel MSL is still emitted and returned
+   unchanged. Descriptor (all cacheable scalars/str so it survives the `.meta.json`
+   disk cache): `(fast_msl, m_idx=3, n_idx=4, k_idx=5, tile_m=32, tile_n=128)`. The fast
+   template's entry name stays `simdgroup_matmul_fast` (compile_shader dispatches by
+   explicit name — no rename needed).
 
-2. **Whole-kernel substitution:** when eligible, emit `make_simdgroup_matmul_kernel_fast(
-   dtype=...)` as the kernel MSL, **renamed** from `simdgroup_matmul_fast` to the user's
-   kernel entry-point name (the launcher dispatches by `self.kernel_name`). The substituted
-   kernel declares buffers `A,B,C,M,N,K` at `[[buffer(0..5)]]`; the launcher binds the
-   full karg list (a_ptr,b_ptr,c_ptr,M,N,K,strides,…) positionally — extra trailing buffer
-   bindings are unused by the kernel (safe), but correctness **depends on** the contract's
-   contiguity guarantee (strides must be the row-major defaults the template assumes).
+2. **Metadata plumbing** (mirrors `mm_two_kernel`): `emit_msl` reads
+   `metadata["fast_matmul"] = getattr(lowerer, "_fast_matmul", None)`; `pack_metadata`
+   appends it to the launcher tuple at **index 7** (after `mm_two_kernel` at 6).
 
-3. **Fast-matmul dispatch metadata:** a new metadata descriptor, e.g.
-   `fast_matmul = {"m_idx": i, "n_idx": j, "tile_m": 32, "tile_n": 128, "threads": 128}`
-   (arg indices into the *non-constexpr* karg list). Threaded through compiler metadata
-   the same way `needs_2d_grid`/`output_indices`/`block_size` are.
+3. **Runtime dispatch gate** (`driver.py` `MetalLauncher.__call__`, inside the existing
+   `compile_shader` try-block, as a branch *before* the elementwise 1-D-grid branch since
+   the fast path computes its own grid). Read `fast_matmul = kernel_metadata[7] if
+   len(kernel_metadata) > 7 else None`. Fire **only** when: `fast_matmul` is present; the
+   runtime is available and the fast MSL isn't marked unsupported; every tensor karg is
+   MPS; and the runtime dims pass the contract `M = int(kargs[m_idx]); N = int(kargs[n_idx]);
+   K = int(kargs[k_idx])` with `M%32==0 and N%32==0 and K%8==0`. Then
+   `n_groups = ceil(M/tile_m) * ceil(N/tile_n)`, `lib = rt.get_library(fast_msl)`,
+   `rt.dispatch(lib, "simdgroup_matmul_fast", kargs, threads=n_groups*128, group_size=128)`,
+   return. Any miss (no descriptor / non-MPS / misaligned / disk-cache-cold so no
+   descriptor / exception) → fall through to the existing path (generic metallib, correct).
 
-4. **Launcher grid override** (`driver.py` `MetalLauncher.__call__`): if `fast_matmul` is
-   present, compute `n_groups = ceil(int(kargs[m_idx]) / tile_m) · ceil(int(kargs[n_idx]) /
-   tile_n)` and dispatch `n_groups` threadgroups of `threads` each (1-D), **ignoring**
-   `gridX/gridY/gridZ`. This composes with the compile_shader fast-path
-   (`threads = n_groups·tile_threads`, `group_size = threads_per_tg`) and with the existing
-   host-round-trip path (`grid = (n_groups, 1, 1)`).
+The generic metallib is **always** the compiled artifact and the fallback; the fast path
+only ever *adds* a faster route for MPS tensors with aligned dims.
 
-## Eligibility contract (airtight — any miss → fall back to generic lowering)
+## Eligibility contract
 
-A wrong matmul is silent-wrong (numerically plausible garbage), so the gate is
-conservative; the fallback (generic lowering) is correct for everything excluded.
+Split into a compile-time structural gate (decides whether a `fast_matmul` descriptor is
+emitted at all) and a runtime gate (decides whether to use it this launch). Both fail
+closed; the generic kernel covers everything excluded.
 
-- **Single clean matmul:** exactly one `tt.dot`, accumulated in a K-loop, with no fused
-  epilogue beyond an optional output dtype cast (`acc.to(fp16)`) — no activation, bias,
-  mask-on-output, or second consumer of the result.
-- **Row-major contiguous A, B, C:** A is `[M,K]` with strides `(K,1)`, B is `[K,N]` with
-  strides `(N,1)`, C is `[M,N]` with strides `(N,1)` — i.e. the exact layout the fast
-  template indexes (`A[gr*K+gc]`, `B[k*N+gc]`, `C[gr*N+gc]`). Established from the addptr
-  pattern in the IR (or refused if not provable). **No transposed/strided operands.**
-- **Aligned dims (the template's SIZE CONTRACT):** `M % (8·rr) == 0` (rr=4 → M%32==0),
-  `N % (32·rc) == 0` (rc=4 → N%128==0), `K % 8 == 0`. The template does **no boundary
-  masking** on `simdgroup_store`; ragged dims must fall back.
-- **Input dtype:** fp16 **and** fp32 — the fast template's `dtype` branch handles both
-  (`make_simdgroup_matmul_kernel_fast(dtype="fp16"|"fp32")`, benchmarked 2026-06-15: fp32
-  11.2 TFLOP/s = 98% of torch, fp16 7.8 TFLOP/s = 77%, both relerr 0.0). bf16 falls back.
-- **Output dtype must be fp32.** The template **always** declares `device float* C`
-  (`simdgroup_store` of a `simdgroup_float8x8` accumulator writes float). So the bound
-  output tensor must be float32: this covers fp32→fp32 (98%) and fp16-input→fp32-output
-  (77%). A fp16-**output** matmul (`acc.to(fp16)` into a `half` C) would bind a half
-  tensor to a float\* buffer → silent-wrong, so it **falls back** in v1. (A fp16-output
-  fast-template variant — cast `float8x8`→`half` on store — is a documented follow-up,
-  not v1; the output-dtype check keeps the gate airtight meanwhile.)
-- **M, N, K available as runtime scalar args** (so the launcher can read them to compute
-  `n_groups`). If M/N are compile-time constants only, fall back (or const-fold — plan
-  decides; default fall back).
+**Compile-time structural (detector returns a descriptor only if ALL hold):**
+- The kernel reaches `_lower_dot_simple_template` — i.e. a single `tt.dot`, K-loop
+  accumulate, pid-tiled, **not** a 3-D/batched dot, no fused epilogue (matmul+softmax and
+  matmul+pointwise-epilogue are detected earlier in `lower()` and take other paths). This
+  is the same path whose generic kernel already assumes row-major A/B/C and A/B/C@0-2,
+  M/N/K@3-5 — so the fast template inherits an identical layout assumption (no new risk).
+- Exactly 3 pointer args (A, B, C) occupying buffers 0/1/2, and ≥3 scalar args; `m_idx=3,
+  n_idx=4, k_idx=5` (the positions `make_matmul_kernel` already binds M/N/K to). If the
+  layout differs, no descriptor (and the generic kernel would already be wrong — we are
+  never worse than it).
+- **Input dtype** fp16 or fp32 (`make_simdgroup_matmul_kernel_fast` supports both;
+  benchmarked). bf16 → no descriptor.
+- **Output dtype fp32.** The fast template always declares `device float* C`. A fp16-output
+  matmul (`acc.to(fp16)` into a `half` C) must not use it → no descriptor (fp16-output fast
+  variant is a follow-up). fp32→fp32 (98%) and fp16-in→fp32-out (77%) both qualify.
 
-Anything not provably meeting **all** of the above → generic lowering, unchanged.
+**Runtime (gate, every launch — this is what makes substitution safe):**
+- Every tensor karg is an MPS tensor (the compile_shader path requires it).
+- `M%32==0 and N%32==0 and K%8==0`, read from the runtime `kargs`. Empirically pinned
+  2026-06-15: N%32 (not N%128) is sufficient (partial 128-col tiles handled); but M%32 is
+  **mandatory** (M%32≠0 → grid rounds M up → OOB store past C; the M=2050 case looked
+  correct by relerr yet overflowed the heap). K%8≠0 and N%32≠0 give wrong results.
+- Else → generic metallib (correct, bounds-checked, any shape).
 
 ## Data flow
 
-Triton compile → dot-lowering: eligible? → **yes:** emit fast template (renamed) + set
-`fast_matmul` metadata → launcher computes `n_groups` from runtime M/N → dispatch 1-D
-(via compile_shader zero-copy or host-round-trip) → result in C. **no:** generic dot
-lowering (current staged kernel) → user's 2-D grid → unchanged.
+Compile: dot-lowering reaches `_lower_dot_simple_template` → structural gate passes? →
+build fast MSL + set `_fast_matmul` descriptor (generic kernel still emitted/compiled) →
+`emit_msl` → `pack_metadata` tuple[7]. Launch: launcher reads `fast_matmul`; MPS tensors +
+runtime M/N/K aligned? → compile_shader the fast template (cached) + dispatch `n_groups`
+1-D grid → result in C. Otherwise → generic metallib (existing path). Flag off, non-MPS,
+ragged, or fp16-output → generic, unchanged.
 
 ## Error handling / integrity (prime directive: never silent-wrong)
 
-- The fast path must produce results **identical to tolerance** to the generic lowering
-  for every eligible kernel — gated by the full-suite run below before default-on.
-- Eligibility is fail-closed: any uncertainty (unprovable strides, ragged dims, unexpected
-  ops, missing runtime M/N) → fall back. The excluded set is fully covered by the generic
-  lowering.
+- The compiled artifact never changes; on any doubt the generic kernel runs. The fast path
+  is a runtime *acceleration*, gated on the actual tensors/dims.
+- Whole runtime attempt is inside the existing `compile_shader` try/except → any exception
+  marks the fast MSL unsupported + falls through to the generic path.
+- **relerr is not sufficient to validate** the fast path (an OOB write can read as relerr
+  0.0). The gate logic (does it fall back on M%32≠0 / N%32≠0 / K%8≠0 / fp16-output /
+  non-MPS?) is tested directly, separately from numeric parity.
 - Flag `TRITON_METAL_FAST_MATMUL` (default-on once the gate is green; `=0` escape hatch),
-  mirroring `TRITON_METAL_MEPT` / `TRITON_METAL_COMPILE_SHADER` — a regression can be
-  bisected/disabled without a code change.
-- `CODEGEN_VERSION` bumped (cache key) since emitted MSL changes for eligible kernels.
+  mirroring `TRITON_METAL_COMPILE_SHADER`. Disables both halves (no descriptor emitted /
+  runtime branch skipped) so a regression bisects without a code change.
+- `CODEGEN_VERSION` bumped (`2026.06.13.2` → next) since metadata/emitted descriptors change.
 
 ## Testing / validation (correctness FIRST, then perf)
 
 1. **Full-suite parity (the gate):** upstream `test_core` dot/matmul families + the full
    ratchet, **both MEPT flags**, with `TRITON_METAL_FAST_MATMUL` on == off. 0 failed,
    identical to tolerance. No perf claim before this is green.
-2. **Parity harness:** a representative matmul set (fp32→fp32 and fp16→fp32, aligned
-   2048³/1024²/512² and non-square; plus the MUST-fall-back set: ragged dims, transposed/
-   strided operands, bf16, fp16-output) run through both the fast path and the generic
-   lowering, asserting identical-to-tolerance outputs and that the ineligible cases take
-   the fallback (assert kernel name / metadata).
-3. **Real kernels:** any project matmul-bearing kernels (and FlashAttention, which has its
-   own path) stay green.
-4. **Perf gate (after correctness):** re-bench fast vs generic vs torch at 2048³ for both
-   dtypes; assert the eligible class is materially above the generic floor (fp32 target
-   ≳ 90% of torch ≈ 11 TFLOP/s; fp16 ≳ 70% ≈ 7.5 TFLOP/s; both ≳ 2× the generic ~2.8).
-   Record ON/OFF, both dtypes, in `reports/perf_baseline.json`.
-5. **Fallback paths:** ragged/transposed/bf16/fused-epilogue matmuls run correctly via the
-   generic lowering; flag-off path identical to pre-change.
+2. **Numeric parity harness:** eligible matmuls (fp32→fp32 and fp16→fp32; aligned square
+   2048³/1024²/512² and non-square incl. N%32-but-not-128, K a non-128 multiple of 8) run
+   through the fast path and the generic kernel — assert identical to tolerance.
+3. **Gate-logic tests (NOT relerr — fall-back behavior):** for each MUST-fall-back case —
+   M%32≠0, N%32≠0, K%8≠0, fp16-output, bf16, non-MPS tensors, transposed/strided non-pid
+   dot (strided generation path), 3-D/batched dot, flag off — assert the generic path runs
+   (no `fast_matmul` descriptor emitted, or the runtime branch not taken; observe via a
+   dispatch counter / hook), so misalignment can never reach the fast template.
+4. **Real kernels:** project matmul-bearing kernels + FlashAttention (own path) stay green.
+5. **Perf gate (after correctness):** re-bench fast vs generic vs torch at 2048³ both
+   dtypes; assert eligible class materially above the generic floor (fp32 ≳ 90% of torch
+   ≈ 11 TFLOP/s; fp16 ≳ 70% ≈ 7.5; both ≳ 2× the generic ~2.8). Record ON/OFF, both
+   dtypes, in `reports/perf_baseline.json`.
 
 ## Open items the plan resolves
 
-- Exact detector location + how the clean-matmul + contiguity pattern is proven from the
-  TTGIR (addptr stride analysis vs requiring explicit stride args == defaults).
-- Renaming mechanism for the substituted MSL entry point (regex on `kernel void
-  simdgroup_matmul_fast` → user name; confirm `self.kernel_name`/`_MSL_BY_NAME` threading
-  stays consistent for both driver paths).
-- `fast_matmul` metadata plumbing (where `needs_2d_grid`/`output_indices` are set in
-  `compiler.py` / `msl_emitter.py`) and the launcher read.
-- How the output-dtype check is established (the C tensor's dtype + the IR store: direct
-  `acc` store → float C eligible; `acc.to(fp16)` store → half C, fall back). Both fp16 and
-  fp32 inputs are confirmed supported + benchmarked (2026-06-15); no open question on input
-  dtype remains.
-- `rr/rc` tile choice (currently 4/4 → 32×128); confirm 7.8 TFLOP/s is the best static
-  choice or whether a second tile (e.g. 8×4) helps tall/skinny shapes (follow-up, not v1).
+- Exact site within `_lower_dot_simple_template` to run the structural gate + build the
+  descriptor (after `out_dtype` is computed; before/after the existing emit).
+- How the structural gate proves "reaches `_lower_dot_simple_template`" cleanly (run it
+  inside that method so it's by construction, vs a separate predicate).
+- `fast_matmul` descriptor exact shape as a cacheable tuple and its `.meta.json`
+  round-trip (str + ints); confirm `getattr(metadata, "fast_matmul", None)` in
+  `pack_metadata` mirrors `mm_two_kernel`.
+- Launcher branch ordering vs the elementwise compile_shader branch and the `mark_unsupported`
+  key (the fast MSL string, distinct from the generic `self._msl`).
+- Disk-cache-cold behavior: a process that loads a cached metallib without re-running
+  `make_msl` — does `fast_matmul` survive via `.meta.json`/`pack_metadata` (preferred) so
+  the fast path still fires, or fall back like the `_MSL_BY_NAME` limitation? (Default:
+  carry it in the cached metadata tuple so it survives.)
 
 ## Out of scope
 
-- Rewriting the generic lowering body (Design Y) — deferred; the fallback stays as-is.
-- Further fast-template tuning (rr/rc sweep, double-buffered K-loop on top of direct loads,
-  bank-conflict layout) to push past 77% of torch — a separate follow-up; this design's
-  lever is the routing (2.8 → 7.8), not template micro-tuning.
-- Batched matmul / `tt.dot` with >2 operands / int8 matmul (own path) / FlashAttention
-  (own path) — unchanged.
+- Compile-time substitution / rewriting the generic lowering body — rejected/deferred above.
+- fp16-**output** fast variant (cast `float8x8`→`half` on store) — follow-up.
+- Accelerating **CPU-tensor** matmuls — the fast path is MPS-only (the compile_shader
+  route); CPU matmuls stay on the generic kernel (rare, already slow). Acceptable.
+- Further fast-template tuning (rr/rc sweep, K-loop double-buffer on top of direct loads,
+  bank-conflict layout) past 77%/98% of torch — separate follow-up.
+- Batched/3-D dot, int8 matmul (own path), FlashAttention (own path) — unchanged.
