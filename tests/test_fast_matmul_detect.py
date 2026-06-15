@@ -109,3 +109,50 @@ def test_flag_off_no_descriptor(monkeypatch):
     A = torch.randn(M, K, device="mps"); B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
     _run(_mm_fp32, A, B, C, M, N, K)
     assert not _descriptors(), "flag off must emit no descriptor"
+
+
+@triton.jit
+def _mm_abbrev(a_ptr, b_ptr, c_ptr, M, N, K,
+               sam, sak, sbk, sbn, scm, scn,
+               BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    """fp32 in -> fp32 out with ABBREVIATED stride-arg names (sam, sak, ...).
+
+    These names do NOT contain 'stride', so _detect_simple_dot does NOT reject
+    them on the has_strides heuristic. The kernel therefore routes through
+    _lower_simple_dot_inline (the _detect_simple_dot path), which is the second
+    bare-matmul lowering path. This test verifies that the new call site at the
+    top of _lower_simple_dot_inline fires the detector and emits the descriptor.
+    """
+    pid_m = tl.program_id(0); pid_n = tl.program_id(1)
+    offm = pid_m * BM + tl.arange(0, BM); offn = pid_n * BN + tl.arange(0, BN); offk = tl.arange(0, BK)
+    a_ptrs = a_ptr + (offm[:, None] * sam + offk[None, :] * sak)
+    b_ptrs = b_ptr + (offk[:, None] * sbk + offn[None, :] * sbn)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k in range(0, K, BK):
+        acc += tl.dot(tl.load(a_ptrs), tl.load(b_ptrs))
+        a_ptrs += BK * sak; b_ptrs += BK * sbk
+    c_ptrs = c_ptr + (offm[:, None] * scm + offn[None, :] * scn)
+    tl.store(c_ptrs, acc)
+
+
+@requires
+def test_abbreviated_name_emits_descriptor(monkeypatch):
+    """Abbreviated stride-arg names route through _lower_simple_dot_inline.
+
+    The new call site at the top of that method must emit the fast_matmul
+    descriptor with indices (3, 4, 5, 32, 128) — same contract as the
+    stride_* path through _lower_dot_simple_template.
+    """
+    shutil.rmtree(CACHE, ignore_errors=True)
+    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    M = N = K = 256
+    A = torch.randn(M, K, device="mps"); B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
+    _run(_mm_abbrev, A, B, C, M, N, K)
+    descs = _descriptors()
+    assert descs, (
+        "expected a fast_matmul descriptor for an abbreviated-name fp32 matmul "
+        "(routes through _lower_simple_dot_inline, not _lower_dot_simple_template)"
+    )
+    msl, m_idx, n_idx, k_idx, tile_m, tile_n = descs[0]
+    assert (m_idx, n_idx, k_idx, tile_m, tile_n) == (3, 4, 5, 32, 128)
+    assert "simdgroup_matmul_fast" in msl
