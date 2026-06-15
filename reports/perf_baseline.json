@@ -23,11 +23,11 @@
     "n_dispatches": 100
   },
   "compile_shader_zero_copy": {
-    "_note": "Phase 4 compile_shader fast-path: ON=TRITON_METAL_COMPILE_SHADER=1 (default), OFF=0. Measured 2026-06-14 on M4 Max (peak 546 GB/s). Reduction is pass-1 scatter-sum (each block→OUT[pid]), not global atomic.",
+    "_note": "Phase 4 compile_shader fast-path: ON=TRITON_METAL_COMPILE_SHADER=1 (default), OFF=0. Measured 2026-06-14 on M4 Max (peak 546 GB/s). Reduction is pass-1 scatter-sum (each block\u2192OUT[pid]), not global atomic.",
     "peak_bw_gbps": 546.0,
     "platform": "M4 Max",
     "vector_add_16M": {
-      "on_ms": 0.580,
+      "on_ms": 0.58,
       "on_gbps": 347.2,
       "on_pct_peak": 63.6,
       "off_ms": 7.513,
@@ -62,5 +62,15 @@
       "off_pct_peak": 5.2,
       "speedup": 8.2
     }
+  },
+  "matmul_2048_fp32": {
+    "name": "matmul_2048_fp32",
+    "min_ms": 1.7821,
+    "tflops": 9.64
+  },
+  "matmul_2048_fp16": {
+    "name": "matmul_2048_fp16",
+    "min_ms": 1.4038,
+    "tflops": 12.24
   }
 }
