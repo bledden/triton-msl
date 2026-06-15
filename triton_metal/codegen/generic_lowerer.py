@@ -107,6 +107,10 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
     def __init__(self, graph: IRGraph, options=None):
         self.graph = graph
+        # Fast-matmul runtime-dispatch descriptor (Phase 4). Set by
+        # _lower_dot_simple_template when an eligible matmul is detected;
+        # read by emit_msl into metadata. None for every other kernel.
+        self._fast_matmul = None
         self.options = options
         self.env = {}           # ssa_id -> MSL variable name
         self.env_types = {}     # ssa_id -> triton dtype string

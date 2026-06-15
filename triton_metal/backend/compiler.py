@@ -188,6 +188,8 @@ class MetalBackend(BaseBackend):
         shared = getattr(metadata, "shared", 0)
         # Two-kernel-split matmul descriptor (#159); None for other kernels.
         mm_two_kernel = getattr(metadata, "mm_two_kernel", None)
+        # Fast-matmul runtime-dispatch descriptor (Phase 4); None for other kernels.
+        fast_matmul = getattr(metadata, "fast_matmul", None)
         return (
             metadata.num_warps,
             metadata.num_ctas,
@@ -196,6 +198,7 @@ class MetalBackend(BaseBackend):
             output_arg_indices,
             needs_2d_grid,
             mm_two_kernel,
+            fast_matmul,
         )
 
     def get_codegen_implementation(self, options):

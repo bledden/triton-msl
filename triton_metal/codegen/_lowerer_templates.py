@@ -2331,6 +2331,12 @@ class _TemplateMixin:
         if len(ptr_args) >= 3:
             out_dtype = _mlir_to_triton_dtype(ptr_args[2].elem_type)
 
+        # Phase 4: record the runtime fast-matmul dispatch descriptor (additive;
+        # the generic kernel below is still emitted + returned). The launcher only
+        # uses it when the RUNTIME tensors are MPS and dims are aligned.
+        self._fast_matmul = self._maybe_fast_matmul_descriptor(
+            ptr_args, scalar_args, dtype, out_dtype)
+
         msl = make_matmul_kernel(
             block_m=block_m, block_n=block_n, block_k=block_k,
             dtype=dtype, out_dtype=out_dtype,
@@ -2351,5 +2357,49 @@ class _TemplateMixin:
             msl = re.sub(r'(?<![a-zA-Z_])C\[', f'{c_name}[', msl)
 
         return msl
+
+    def _maybe_fast_matmul_descriptor(self, ptr_args, scalar_args, in_dtype, out_dtype):
+        """Build the runtime fast-matmul dispatch descriptor, or None.
+
+        Returns (fast_msl, m_idx, n_idx, k_idx, tile_m, tile_n) for the launcher's
+        compile_shader fast path, else None. ADDITIVE: never changes the emitted
+        generic kernel. The fast template (make_simdgroup_matmul_kernel_fast) shares
+        make_matmul_kernel's row-major layout and A/B/C@0-2, M/N/K@3-5 arg positions,
+        so it is correct on exactly the inputs the generic kernel is correct on —
+        and the launcher additionally gates on runtime MPS + M%32/N%32/K%8 alignment
+        (the template has no edge handling; misaligned dims would write OOB). Never
+        silent-wrong: any miss runs the generic kernel.
+        """
+        import os
+        if os.environ.get("TRITON_METAL_FAST_MATMUL", "1") == "0":
+            return None
+        # Output must be fp32: the fast template always declares `device float* C`.
+        if out_dtype not in ("fp32", "f32", "float"):
+            return None
+        # Input dtype: fp16 or fp32 (the template's two supported branches).
+        if in_dtype in ("fp16", "f16"):
+            msl_dtype = "fp16"
+        elif in_dtype in ("fp32", "f32"):
+            msl_dtype = "fp32"
+        else:
+            return None
+        # Exactly 3 pointers (A,B,C) and >=3 scalars; verify the arg ORDER matches
+        # the buffer layout make_matmul_kernel assumes (A/B/C at 0/1/2, M/N/K at
+        # 3/4/5) so m_idx/n_idx/k_idx are correct. If it differs, the generic kernel
+        # is already wrong on this kernel — we are never worse than it.
+        if len(ptr_args) != 3 or len(scalar_args) < 3:
+            return None
+        args = self.graph.args
+        if len(args) < 6:
+            return None
+        if not (args[0].is_ptr and args[1].is_ptr and args[2].is_ptr):
+            return None
+        if args[3].is_ptr or args[4].is_ptr or args[5].is_ptr:
+            return None
+        from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
+        rr = rc = 4
+        fast_msl = make_simdgroup_matmul_kernel_fast(dtype=msl_dtype, rr=rr, rc=rc)
+        # (msl, m_idx, n_idx, k_idx, tile_m, tile_n); tile_m=8*rr, tile_n=32*rc.
+        return (fast_msl, 3, 4, 5, 8 * rr, 32 * rc)
 
 

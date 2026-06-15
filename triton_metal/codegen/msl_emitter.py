@@ -540,6 +540,8 @@ def emit_msl(mod, metadata, options):
             metadata["needs_2d_grid"] = max(used_axes) > 0 if used_axes else False
             # Two-kernel-split matmul descriptor (#159); None for other kernels.
             metadata["mm_two_kernel"] = getattr(lowerer, "_mm_two_kernel", None)
+            # Fast-matmul runtime-dispatch descriptor (Phase 4); None for other kernels.
+            metadata["fast_matmul"] = getattr(lowerer, "_fast_matmul", None)
             _mept_path_log("primary", metadata.get("name", "?"))
             return msl_src
 
