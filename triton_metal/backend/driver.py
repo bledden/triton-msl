@@ -578,44 +578,73 @@ class MetalLauncher:
         # one try/except: on ANY exception we fall through to the existing path,
         # marking the MSL unsupported only when it is known.
         import os as _os
-        if (self._msl is not None
+        fast_matmul = (kernel_metadata[7]
+                       if (kernel_metadata and len(kernel_metadata) > 7) else None)
+        if ((self._msl is not None or fast_matmul is not None)
                 and _os.environ.get("TRITON_METAL_COMPILE_SHADER", "1") != "0"):
             try:
                 _rt = _get_compile_shader_runtime()
-                if _rt.available() and not _rt.is_unsupported(self._msl):
+                if _rt.available():
                     # Ordered non-constexpr args (match [[buffer(i)]] order).
                     kargs = [a for i, a in enumerate(args) if i not in self.constexpr_indices]
                     tensors = [a for a in kargs if hasattr(a, "data_ptr")]
-                    # Eligible only if there is >=1 tensor and EVERY tensor arg is MPS.
                     all_mps = bool(tensors) and all(
                         getattr(a, "device", None) is not None
                         and str(a.device).startswith("mps") for a in tensors)
-                    # Every NON-tensor scalar arg must have a compile_shader-safe
-                    # declared type (i32/u32/i64/i8/i16/i1/fp32). fp16/bf16 scalars
-                    # mis-bind to 0.0 through compile_shader -> fall back. (Fix 4.)
-                    scalars_ok = _compile_shader_scalars_ok(self, kargs)
-                    # 1-D-grid only for now: the matmul 2-D template / multi-dim
-                    # grids use a different dispatch convention than this generic
-                    # path, so anything needing a 2-D grid (or gridY/gridZ > 1)
-                    # falls back to the existing path (correct, just slower).
-                    if (all_mps and scalars_ok and not needs_2d_grid
-                            and gridY == 1 and gridZ == 1):
-                        # Match the existing path's threadgroup size EXACTLY
-                        # (threads_per_tg = min(block_size, 1024)); num_warps*32
-                        # disagrees for MEPT/large-BLOCK/clamped kernels. (Fix 1.)
-                        tg = min(block_size, 1024)
-                        threads, group_size = gridX * tg, tg
-                        lib = _rt.get_library(self._msl)
-                        _rt.dispatch(lib, self.kernel_name, kargs,
-                                     threads=threads, group_size=group_size)
-                        if launch_exit_hook:
-                            launch_exit_hook(launch_metadata)
-                        return
+
+                    # --- Fast-matmul runtime dispatch (Phase 4) ---
+                    # Dispatch the proven simdgroup fast template ONLY for MPS
+                    # tensors with aligned runtime dims. The compiled metallib is
+                    # the generic (bounds-checked, row-major) kernel and is the
+                    # fallback on ANY miss. M%32 is MANDATORY: otherwise the grid
+                    # rounds M up and the no-edge-handling template writes past C
+                    # (OOB). N%32 / K%8 are the col-strip / MMA-depth requirements.
+                    if fast_matmul is not None and all_mps:
+                        fast_msl, m_idx, n_idx, k_idx, tile_m, tile_n = fast_matmul
+                        if not _rt.is_unsupported(fast_msl):
+                            try:
+                                M = int(kargs[m_idx]); N = int(kargs[n_idx]); K = int(kargs[k_idx])
+                                if (M > 0 and N > 0 and K > 0
+                                        and M % tile_m == 0 and N % 32 == 0 and K % 8 == 0):
+                                    import math as _math
+                                    n_groups = _math.ceil(M / tile_m) * _math.ceil(N / tile_n)
+                                    lib = _rt.get_library(fast_msl)
+                                    _rt.dispatch(lib, "simdgroup_matmul_fast", kargs,
+                                                 threads=n_groups * 128, group_size=128)
+                                    if launch_exit_hook:
+                                        launch_exit_hook(launch_metadata)
+                                    return
+                            except Exception:
+                                # Fast path failed -> mark its MSL unsupported and
+                                # fall through to the generic metallib (correct).
+                                try:
+                                    _rt.mark_unsupported(fast_msl)
+                                except Exception:
+                                    pass
+
+                    # --- Existing elementwise 1-D-grid fast path (needs self._msl) ---
+                    if self._msl is not None and not _rt.is_unsupported(self._msl):
+                        # Every NON-tensor scalar arg must have a compile_shader-safe
+                        # declared type (fp16/bf16 scalars mis-bind to 0.0). (Fix 4.)
+                        scalars_ok = _compile_shader_scalars_ok(self, kargs)
+                        # 1-D-grid only: anything needing a 2-D grid (or gridY/gridZ > 1)
+                        # falls back to the existing path (correct, just slower).
+                        if (all_mps and scalars_ok and not needs_2d_grid
+                                and gridY == 1 and gridZ == 1):
+                            tg = min(block_size, 1024)
+                            threads, group_size = gridX * tg, tg
+                            lib = _rt.get_library(self._msl)
+                            _rt.dispatch(lib, self.kernel_name, kargs,
+                                         threads=threads, group_size=group_size)
+                            if launch_exit_hook:
+                                launch_exit_hook(launch_metadata)
+                            return
             except Exception:
                 # Any failure -> mark unsupported (when MSL is known) + fall
                 # through to the existing driver path (correct, just slower).
                 try:
-                    _get_compile_shader_runtime().mark_unsupported(self._msl)
+                    if self._msl is not None:
+                        _get_compile_shader_runtime().mark_unsupported(self._msl)
                 except Exception:
                     pass
 
