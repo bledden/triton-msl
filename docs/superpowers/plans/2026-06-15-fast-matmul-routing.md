@@ -175,62 +175,95 @@ In `triton_metal/codegen/generic_lowerer.py`, in `GenericLowerer.__init__`, imme
         self._fast_matmul = None
 ```
 
-- [ ] **Step 5: Add the detector helper + call it in `_lower_dot_simple_template`**
+- [ ] **Step 5: Add the self-contained detector helper + call it from BOTH bare-matmul inline paths**
 
-In `triton_metal/codegen/_lowerer_templates.py`, inside `_lower_dot_simple_template`, right after `out_dtype` is finalized (after the block ending at line 2332, before the `make_matmul_kernel(...)` call at line 2334), add:
-```python
-        # Phase 4: record the runtime fast-matmul dispatch descriptor (additive;
-        # the generic kernel below is still emitted + returned). The launcher only
-        # uses it when the RUNTIME tensors are MPS and dims are aligned.
-        self._fast_matmul = self._maybe_fast_matmul_descriptor(
-            ptr_args, scalar_args, dtype, out_dtype)
-```
+There are TWO bare-matmul inline lowerings (both run AFTER the matmul+softmax / matmul+epilogue detectors, so both are PURE matmuls): `_lower_simple_dot_inline` (`_lowerer_templates.py:34` — reached via `_detect_simple_dot` for kernels WITHOUT `stride`-named args, e.g. `sam/sak`; delegates to `_lower_k_loop_dot_inline` for the K-loop case) and `_lower_dot_simple_template` (`_lowerer_templates.py:2296` — reached for kernels WITH `stride`-named args). The detector must cover both, so make it **self-contained** (reads `self.graph`, uses `_resolve_dot_ptr_roles` to verify the canonical layout) and call it from both.
 
-Then add this new method to the same class (place it directly after `_lower_dot_simple_template`, after line 2353):
+Add this new method to the class in `_lowerer_templates.py` (place it directly after `_lower_dot_simple_template`, after line 2353):
 ```python
-    def _maybe_fast_matmul_descriptor(self, ptr_args, scalar_args, in_dtype, out_dtype):
+    def _maybe_fast_matmul_descriptor(self):
         """Build the runtime fast-matmul dispatch descriptor, or None.
 
-        Returns (fast_msl, m_idx, n_idx, k_idx, tile_m, tile_n) for the launcher's
-        compile_shader fast path, else None. ADDITIVE: never changes the emitted
-        generic kernel. The fast template (make_simdgroup_matmul_kernel_fast) shares
-        make_matmul_kernel's row-major layout and A/B/C@0-2, M/N/K@3-5 arg positions,
-        so it is correct on exactly the inputs the generic kernel is correct on —
-        and the launcher additionally gates on runtime MPS + M%32/N%32/K%8 alignment
-        (the template has no edge handling; misaligned dims would write OOB). Never
-        silent-wrong: any miss runs the generic kernel.
+        Path-independent: called from BOTH bare-matmul inline lowerings
+        (_lower_simple_dot_inline and _lower_dot_simple_template). Returns
+        (fast_msl, m_idx, n_idx, k_idx, tile_m, tile_n) ONLY when the kernel is a
+        single tt.dot whose A/B/C pointers resolve to the CANONICAL buffer layout
+        (A=arg0, B=arg1, C=arg2 — the buffers the fast template hard-codes) with
+        M/N/K scalar args at 3/4/5, fp16/fp32 input, fp32 output. ADDITIVE: never
+        changes the emitted generic kernel. The launcher additionally gates on
+        runtime MPS + M%32/N%32/K%8 alignment (the fast template has no edge
+        handling; misaligned dims would write OOB). Reordered-pointer kernels
+        (e.g. test_dot_mulbroadcasted's Z,X,Y) resolve to non-canonical roles ->
+        None -> generic kernel. Never silent-wrong.
         """
         import os
         if os.environ.get("TRITON_METAL_FAST_MATMUL", "1") == "0":
             return None
-        # Output must be fp32: the fast template always declares `device float* C`.
+        # Exactly one tt.dot (a matmul), scanning nested regions (K-loop body).
+        def _all(ops):
+            for s in ops:
+                yield s
+                if s.region_ops:
+                    yield from _all(s.region_ops)
+                if s.else_ops:
+                    yield from _all(s.else_ops)
+        dots = [s for s in _all(self.graph.ops) if s.op == "tt.dot"]
+        if len(dots) != 1:
+            return None
+        dot_ssa = dots[0]
+        args = self.graph.args
+        if len(args) < 6:
+            return None
+        all_ptr_args = [a for a in args if a.is_ptr]
+        if len(all_ptr_args) != 3:
+            return None
+        # Resolve A/B/C roles; require the CANONICAL layout A=arg0, B=arg1, C=arg2
+        # (the fast template hard-codes buffers 0/1/2). _resolve_dot_ptr_roles
+        # returns None when it cannot prove the roles -> we refuse (do NOT assume
+        # declaration order). Compare by .name (unique per kernel).
+        roles = self._resolve_dot_ptr_roles(dot_ssa, all_ptr_args)
+        if not roles or len(roles) < 3:
+            return None
+        if not (roles[0].name == args[0].name
+                and roles[1].name == args[1].name
+                and roles[2].name == args[2].name):
+            return None
+        # M/N/K runtime scalars at buffers 3/4/5 (the template binds buffer3=M,
+        # buffer4=N, buffer5=K). The canonical A/B/C@0-2 resolution above confirms
+        # the standard (a,b,c,M,N,K,...) signature; the full ratchet is the net.
+        if args[3].is_ptr or args[4].is_ptr or args[5].is_ptr:
+            return None
+        # Output must be fp32 (template always declares `device float* C`).
+        out_dtype = _mlir_to_triton_dtype(args[2].elem_type)
         if out_dtype not in ("fp32", "f32", "float"):
             return None
-        # Input dtype: fp16 or fp32 (the template's two supported branches).
+        # Input fp16 or fp32 (the template's two supported branches).
+        in_dtype = _mlir_to_triton_dtype(args[0].elem_type)
         if in_dtype in ("fp16", "f16"):
             msl_dtype = "fp16"
         elif in_dtype in ("fp32", "f32"):
             msl_dtype = "fp32"
         else:
             return None
-        # Exactly 3 pointers (A,B,C) and >=3 scalars; verify the arg ORDER matches
-        # the buffer layout make_matmul_kernel assumes (A/B/C at 0/1/2, M/N/K at
-        # 3/4/5) so m_idx/n_idx/k_idx are correct. If it differs, the generic kernel
-        # is already wrong on this kernel — we are never worse than it.
-        if len(ptr_args) != 3 or len(scalar_args) < 3:
-            return None
-        args = self.graph.args
-        if len(args) < 6:
-            return None
-        if not (args[0].is_ptr and args[1].is_ptr and args[2].is_ptr):
-            return None
-        if args[3].is_ptr or args[4].is_ptr or args[5].is_ptr:
-            return None
         from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
         rr = rc = 4
         fast_msl = make_simdgroup_matmul_kernel_fast(dtype=msl_dtype, rr=rr, rc=rc)
         # (msl, m_idx, n_idx, k_idx, tile_m, tile_n); tile_m=8*rr, tile_n=32*rc.
         return (fast_msl, 3, 4, 5, 8 * rr, 32 * rc)
+```
+
+Call site A — in `_lower_dot_simple_template`, right after `out_dtype` is finalized (after the block ending at line 2332, before the `make_matmul_kernel(...)` call at line 2334), add:
+```python
+        # Phase 4: record the runtime fast-matmul dispatch descriptor (additive;
+        # the generic kernel below is still emitted + returned).
+        self._fast_matmul = self._maybe_fast_matmul_descriptor()
+```
+
+Call site B — at the TOP of `_lower_simple_dot_inline` (`_lowerer_templates.py:34`), as the first statement of the method body (BEFORE the `if info.get("has_k_loop"): return self._lower_k_loop_dot_inline(info)` delegation, so it is set for both the loop and non-loop cases), add:
+```python
+        # Phase 4: record the runtime fast-matmul dispatch descriptor (additive;
+        # the generic inline kernel below is still emitted + returned).
+        self._fast_matmul = self._maybe_fast_matmul_descriptor()
 ```
 
 - [ ] **Step 6: Propagate the descriptor into metadata in `emit_msl`**
