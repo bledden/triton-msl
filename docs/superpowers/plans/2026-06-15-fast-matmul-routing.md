@@ -326,6 +326,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Modify: `triton_metal/backend/driver.py:580-620` (`MetalLauncher.__call__` — add fast-matmul branch; share kargs/all_mps)
 - Test: `tests/test_fast_matmul_gate.py`
 
+**Design notes (from Task 1 review):**
+- **Coexistence with `mm_two_kernel` (index 6):** a float-output K-loop matmul can have BOTH `mm_two_kernel` (#159's two-kernel split — a `__mmdirect` kernel in the metallib, dispatched by the existing **host-round-trip** path, which is copy-bound because matmuls use a 2-D grid and never hit the elementwise compile_shader path) AND `fast_matmul` (index 7) set. The launcher must give the **fast-matmul branch precedence**: it runs FIRST and `return`s on success, so the zero-copy compile_shader dispatch wins for aligned+MPS launches. When the fast branch does NOT fire (ragged dims, non-MPS, etc.), control falls through to the existing path, which still handles `mm_two_kernel` correctly. The fast branch dispatches the fast template's OWN compiled library + kernel name `"simdgroup_matmul_fast"` (NOT the metallib's kernel) — so there is no kernel-name confusion with `mm_two_kernel`.
+- **Descriptor may be a list, not a tuple:** the `.meta.json` cache round-trips the descriptor tuple as a JSON array, so on a cache hit `fast_matmul` is a Python `list`. Use **sequence unpacking** (`fast_msl, m_idx, n_idx, k_idx, tile_m, tile_n = fast_matmul`) — which works on both list and tuple — and do NOT `isinstance(..., tuple)`-check it.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_fast_matmul_gate.py`. It spies on the `compile_shader` runtime's `dispatch` to observe WHICH kernel was dispatched (gate logic), independent of numeric parity (relerr cannot prove the fast path — an OOB write reads as 0.0).
