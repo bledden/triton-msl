@@ -613,7 +613,12 @@ class MetalLauncher:
                                     import math as _math
                                     n_groups = _math.ceil(M / tile_m) * _math.ceil(N / tile_n)
                                     lib = _rt.get_library(fast_msl)
-                                    _rt.dispatch(lib, "simdgroup_matmul_fast", kargs,
+                                    # The fast template declares exactly 6 buffers
+                                    # (A,B,C,M,N,K = kargs[:6]); pass only those so we
+                                    # don't rely on compile_shader silently ignoring the
+                                    # trailing stride args (which would self-disable the
+                                    # fast path if that tolerance ever changed).
+                                    _rt.dispatch(lib, "simdgroup_matmul_fast", kargs[:6],
                                                  threads=n_groups * 128, group_size=128)
                                     if launch_exit_hook:
                                         launch_exit_hook(launch_metadata)
