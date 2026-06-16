@@ -73,7 +73,18 @@ oversells it.**
    extend with more catalog entries (dot_scaled, rank≥3 trans, rank≥2 cat/join) over time.
 
 **MAJOR / roadmap (not 1.0 blockers):** FlashAttention head_dim 64/128; published op/dtype
-support matrix; vectorized loads (memory-BW ceiling); fp8/`dot_scaled` (refused — fine).
+support matrix; fp8/`dot_scaled` (refused — fine).
+
+**~~vectorized loads (memory-BW ceiling 64% → ~75-80%)~~ — EXPLORED + DECLINED 2026-06-16.**
+The "75-80%" headroom doesn't exist on this hardware. Probe (M4 Max, vector_add @ 16M):
+at a tuned grid-stride config, `float4` gives only **~3-5%** over scalar (scalar 293-304,
+float4 308-314 GB/s — both ~56-58% of 546), and BOTH are *below* the current production MEPT
+path (347 GB/s, 64%). The 546 GB/s is a raw LPDDR5X figure; the practical memory-bound
+ceiling for elementwise compute is ~58-64% (torch.add itself ≈ 58%), and the current path
+is already at/above it. Vectorized loads add ~3-5% at best for a real codegen change with an
+alignment/contiguity silent-wrong surface — poor ROI. Like the fp16-2× MAJOR, this rested on
+a headline-peak comparison the execution units can't reach; the kernels are already near the
+practical ceiling.
 
 **~~fp16 half-accumulate opt-in (2× fp16)~~ — EXPLORED + DECLINED 2026-06-16.** This MAJOR
 rested on a flawed peak-ratio inference. Empirical probe (M4 Max, 2048³ fp16): half
