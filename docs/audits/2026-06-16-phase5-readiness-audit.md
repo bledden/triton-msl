@@ -62,8 +62,14 @@ oversells it.**
    abandoned-C++-FA reference); state the `--device cpu` method.
 2. **[BLOCKER → FIXED] Overstated perf claims** — the "~13.8 TFLOP/s MLX parity" docstring is
    corrected to measured numbers + honest %-of-peak.
-3. **[BLOCKER] Systematic refusal-coverage test** — enumerate unsupported ops/shapes, assert
-   each refuses loudly (backs the headline safety claim given the silent-wrong history).
+3. **[BLOCKER → FIXED 2026-06-16] Systematic refusal-coverage test** — added
+   `tests/test_refusal_coverage.py`: a consolidated guard asserting representative
+   integrity-prescan-catalog patterns refuse loudly. First case (verified PASSED): a
+   K-loop matmul tiling the output across programs with M/N baked as constexpr (the
+   `test_dot_mulbroadcasted` silent-wrong class) raises `MetalNonRecoverableError` rather
+   than emitting wrong output. Joins the existing per-feature refusal tests
+   (`test_nover_store_refusal`, `test_atomic_nover_refusal`, `test_inloop_reduce_coverage`);
+   extend with more catalog entries (dot_scaled, rank≥3 trans, rank≥2 cat/join) over time.
 
 **MAJOR / roadmap (not 1.0 blockers):** fp16 half-accumulate opt-in (2× fp16); FlashAttention
 head_dim 64/128; published op/dtype support matrix; vectorized loads (memory-BW ceiling);
