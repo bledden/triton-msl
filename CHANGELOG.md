@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Phase 4 — zero-copy execution + fast matmul + Phase-5 readiness audit (2026-06-16)
+
+- **Zero-copy MPS execution** via `torch.mps.compile_shader`: routes emitted MSL through
+  PyTorch's compiler so kernels run against MPS tensors without the per-launch host
+  round-trip. ~10× on memory-bound kernels (vector_add 28 → ~347 GB/s ≈ 64% of the M4 Max
+  546 GB/s roof). Flag `TRITON_METAL_COMPILE_SHADER` (default-on, `=0` escape hatch).
+- **Fast simdgroup matmul** (`make_simdgroup_matmul_kernel_fast`) dispatched zero-copy for
+  aligned MPS matmuls. Measured at 2048³: fp32 ~9.6–11.5 TFLOP/s (~55–62% of the 18.4
+  fp32 peak — competitive with MLX/MPS GEMM), fp16 ~7.8–12, fp16-output ~12.3 — vs the
+  ~2.8 generic fallback. Float accumulation (precision); fp16 output via a cast epilogue.
+  Flag `TRITON_METAL_FAST_MATMUL`; correctness-gated (test_core dot/matmul on==off identical).
+  This is **not** MLX-parity (fp16 runs at ~fp32 rate to keep float accumulation); the
+  earlier "~13.8 TFLOP/s MLX parity" docstring claim was an overstatement and is corrected.
+- **MEPT** multi-element-per-thread register-array model is the default lowering path.
+- **Test suite (Triton 3.7.0):** upstream `test_core.py` **5,335 passed / 0 failed /
+  ~4,007 feature-gap skips** (each a loud refusal or HW-impossible); the single source of
+  truth is `scripts/run_upstream_tests.py` (`--device cpu`), not hand-maintained counts.
+  Project suite **716 passed / 0 failed**. FlashAttention 11/11 at HEAD_DIM=32 via the
+  **Python/MSL** lowering — the C++ MLIR→LLVM path named in the 2026-05-30 snapshot below
+  was shelved (AGX compiler blocker; Python/MSL is primary).
+- **Phase-5 readiness audit** (dual NVIDIA/Triton + MLX/Apple lens) recorded in
+  `docs/audits/2026-06-16-phase5-readiness-audit.md`; remaining pre-1.0 items tracked there.
+
 ### Integrity prescan (silent-wrong → loud refusal)
 
 Added a structural integrity contract: when the compiler recognizes a kernel

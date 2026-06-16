@@ -14,11 +14,16 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
   attempted and correct, ~4,007 documented feature-gap skips (each is either a
   *refused* kernel — fails loudly, never silent-wrong — or a hardware-impossible
   case like FP64). Aligned with Triton [\[2\]](REFERENCES.md) release `3.7.0`.
-- **603 / 603** project tests (codegen, GPU correctness, integration,
-  FlashAttention, MLX backend). FlashAttention path: **11 / 11** at
-  HEAD_DIM=32 (see [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX
-  backend tests; project test-suite size grew from 434 to 603 since
-  `0.1.0-alpha`.
+  Measured by `scripts/run_upstream_tests.py` — the single source of truth for this
+  count — which runs `--device cpu` (torch references compute on CPU while the Metal
+  backend compiles and runs the kernels on the GPU, since upstream `test_core`
+  otherwise assumes CUDA). Re-run it to reproduce; counts in this file and
+  `CHANGELOG.md` are regenerated from it, not hand-maintained.
+- **716 / 716** project tests (codegen, GPU correctness, integration,
+  FlashAttention, MLX backend, and the fast-matmul / compile_shader zero-copy
+  suites). FlashAttention path: **11 / 11** at HEAD_DIM=32 (see
+  [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend tests;
+  project test-suite size grew from 434 → 603 → 716 since `0.1.0-alpha`.
 - **32 / 32** `torch.compile` model tests pass on Python ≤ 3.13 (PyTorch
   Inductor [\[12\]](REFERENCES.md)). On Python 3.14 the suite is honestly
   skipped because PyTorch's own platform guard refuses `torch.compile` on

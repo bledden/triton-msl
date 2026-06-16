@@ -3547,14 +3547,24 @@ kernel void repeat_kv(
 def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4, out_dtype="fp32"):
     """Fast matmul: direct-device simdgroup_load + register blocking (WS1 C.2).
 
-    Reaches MLX parity (~13.8 TFLOP/s fp16 @ 2048, vs ~7.7 for the staged
-    template) by (a) loading simdgroup fragments DIRECTLY from device A/B (no
-    threadgroup staging, no barriers — the GPU cache provides reuse) and
-    (b) register blocking: each simdgroup computes an (8*rr) x (8*rc) output
-    block (rr*rc accumulators), so each loaded a-/b-fragment feeds rc / rr MMAs.
+    Much faster than the staged template by (a) loading simdgroup fragments
+    DIRECTLY from device A/B (no threadgroup staging, no barriers — the GPU
+    cache provides reuse) and (b) register blocking: each simdgroup computes an
+    (8*rr) x (8*rc) output block (rr*rc accumulators), so each loaded a-/b-
+    fragment feeds rc / rr MMAs.
 
-    Genuine fp16: half INPUT fragments (simdgroup_half8x8) with a float
-    ACCUMULATOR; fp16 = input precision, C output is float.
+    Measured throughput (2026-06, M4 Max — 546 GB/s, 18.4/36.9 TFLOP/s fp32/fp16
+    peak), end-to-end at 2048^3 vs the ~2.8 TFLOP/s staged fallback:
+        fp32  ~9.6-11.5 TFLOP/s  (~55-62% of fp32 peak; competitive with MLX/MPS GEMM)
+        fp16  ~7.8-12   TFLOP/s  (~33% of fp16 peak)
+    NOT "MLX parity": fp16 runs at roughly the fp32 rate because the accumulator
+    is float (simdgroup_float8x8) for precision, so the hardware's ~2x fp16
+    matrix throughput is deliberately forgone (a half-accumulate variant could
+    approach fp16 peak at the cost of accuracy).
+
+    INPUT fragments are half/float per `dtype`; the ACCUMULATOR is always float
+    (precision). `out_dtype` selects the C store: "fp32" -> direct `simdgroup_store`
+    to float* C; "fp16" -> half* C via a per-block cast epilogue.
 
     DISPATCH CONTRACT (the caller MUST honour this — different from the staged
     template's grid):

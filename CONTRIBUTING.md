@@ -30,7 +30,7 @@ pip install mlx
 ## Running Tests
 
 ```bash
-# All local tests (~415 tests)
+# All local/project tests (current count is reported in README.md)
 pytest tests/ -v
 
 # Specific test suites
@@ -39,7 +39,12 @@ pytest tests/test_mlx_backend.py -v        # MLX backend (15 tests)
 pytest tests/test_generic_lowerer.py -v    # Codegen unit tests
 pytest tests/test_gpu_correctness.py -v    # GPU correctness
 
-# Upstream Triton test_core.py (~4,279 passing)
+# Upstream Triton test_core.py — this command IS the source of truth for the
+# conformance count (README.md / CHANGELOG.md quote its latest result, dated).
+# It runs with `--device cpu` (torch references compute on CPU while the Metal
+# backend compiles + runs the kernels on the GPU) because upstream test_core
+# assumes CUDA. Re-run it to regenerate reports/upstream_test_core.json; do NOT
+# hand-edit pass counts into the docs.
 python scripts/run_upstream_tests.py --test-file test_core.py --timeout 600
 ```
 
