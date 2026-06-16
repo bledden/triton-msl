@@ -33,8 +33,10 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
   (upstream PR [#9783](https://github.com/triton-lang/triton/pull/9783)).
 - **Integrity contract**: kernels we can lower run correctly; kernels we
   cannot are *refused* (`MetalNonRecoverableError`) — never silent-wrong.
-  See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) "Lowering paths and
-  the integrity model" for the catalog.
+  See [`docs/SUPPORTED_OPS.md`](docs/SUPPORTED_OPS.md) for the supported
+  ops/dtypes matrix + the loud-refusal catalog, and
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) "Lowering paths and the
+  integrity model" for the lowering paths.
 
 See [`REFERENCES.md`](REFERENCES.md) for citations and
 [`docs/superpowers/specs/2026-05-30-triton-metal-roadmap.md`](docs/superpowers/specs/2026-05-30-triton-metal-roadmap.md)
