@@ -618,6 +618,44 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # never computed -> garbage (test_scaled_dot, ~all configs mismatch).
         self._refuse_unsafe_unsupported_ops()
 
+        # Integrity prescan (never silent-wrong): FlashAttention-style kernels
+        # (>= 2 tt.dot with a softmax/exp between them) are validated only for
+        # head_dim <= 64. Above that the attention lowering SILENTLY mis-computes
+        # (head_dim=128 produced garbage — max error ~1000 — with NO error raised
+        # at BLOCK_M=16/8; only the large-block case happened to fail loudly with
+        # OutOfResources). Refuse loudly instead. head_dim 32 and 64 are validated
+        # + supported; large-head_dim FA (tiled threadgroup memory) is future work.
+        def _fa_walk(ops):
+            for _s in ops:
+                yield _s
+                if getattr(_s, "region_ops", None):
+                    yield from _fa_walk(_s.region_ops)
+                if getattr(_s, "else_ops", None):
+                    yield from _fa_walk(_s.else_ops)
+        _fa_ops = list(_fa_walk(self.graph.ops))
+        _fa_dots = [s for s in _fa_ops if s.op == "tt.dot"]
+        # FA-specific gate: >=2 dots with BOTH exp and a max (softmax with the
+        # numerical-stability max between the dots). Requiring the max excludes
+        # non-FA >=2-dot kernels that merely use exp (e.g. a fused MLP with a
+        # gelu/silu activation), so this guard can't over-refuse them.
+        _fa_has_exp = any("exp" in (s.op or "") for s in _fa_ops)
+        _fa_has_max = any("max" in (s.op or "") for s in _fa_ops)
+        if len(_fa_dots) >= 2 and _fa_has_exp and _fa_has_max:
+            _fa_maxdim = 0
+            for _d in _fa_dots:
+                for _oid in (_d.operand_ids or []):
+                    _t = self._find_op_type_str(_oid)
+                    _sh = _extract_shape(_t) if _t else None
+                    if _sh:
+                        _fa_maxdim = max([_fa_maxdim] + list(_sh))
+            if _fa_maxdim > 64:
+                raise MetalNonRecoverableError(
+                    f"FlashAttention head_dim > 64 (a dot tile dimension is "
+                    f"{_fa_maxdim}) is not supported: the attention lowering is "
+                    f"validated only for head_dim <= 64 and silently mis-computes "
+                    f"above it. Refusing to emit silently-wrong output. Use "
+                    f"head_dim <= 64.")
+
         # Check for the fused matmul + row-softmax pattern FIRST — before the
         # simple/K-loop dot detectors. _detect_simple_dot matches any
         # load→dot→store and emits a BARE matmul, silently dropping a softmax

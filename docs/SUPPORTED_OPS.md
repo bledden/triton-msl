@@ -37,7 +37,7 @@
 | `tt.trans` | ✓ (rank ≤ 2) / ✗ (rank ≥ 3 non-identity) | rank-≥3 transpose with a non-identity permutation is refused (#12) |
 | `tt.cat` / `tt.join` | ✓ (rank ≤ 1) / ✗ (rank ≥ 2) | rank-≥2 cat/join refused; `tt.join` result feeding `tt.dot` refused |
 | `tt.dot` inside a `noinline` device function | ✗ refused | not lowered through device-function calls |
-| FlashAttention | ✓ (HEAD_DIM=32) | 11/11 at head_dim 32; head_dim 64/128 is roadmap |
+| FlashAttention | ✓ (head_dim ≤ 64) / ✗ (head_dim > 64) | head_dim 32 and 64 validated (causal + non-causal); **head_dim > 64 refused loudly** — the attention lowering silently mis-computes above 64 (hole closed 2026-06-16); large-head_dim FA is roadmap |
 
 ## Loud-refusal catalog (raises `MetalNonRecoverableError` — never silent-wrong)
 
@@ -66,6 +66,9 @@ silent-wrong producers, closed by the integrity prescan — see `CHANGELOG.md`.)
     parser (which has produced silent-wrongs); set `TRITON_METAL_LEGACY=1` to opt in for debugging.
 17. **`tt.dot` operand shape mismatch** / other unsupported dot shapes.
 18. **Unstructured kernel-level control flow** (`cf.cond_br`, early-return inside a conditional).
+19. **FlashAttention with head_dim > 64** — the attention lowering (≥2 dots + softmax) is
+    validated only for head_dim ≤ 64; above it the kernel silently mis-computes, so the
+    prescan refuses. (head_dim 32 and 64 are supported; large-head_dim FA is future work.)
 
 (Plus `tt.dot_scaled`, rank-≥2 `tt.cat`/`tt.join`, `tt.dot` in a noinline callee, and
 `tt.join`→`tt.dot`, listed by category above.)

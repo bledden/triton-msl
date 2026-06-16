@@ -72,8 +72,22 @@ oversells it.**
    (`test_nover_store_refusal`, `test_atomic_nover_refusal`, `test_inloop_reduce_coverage`);
    extend with more catalog entries (dot_scaled, rank≥3 trans, rank≥2 cat/join) over time.
 
-**MAJOR / roadmap (not 1.0 blockers):** FlashAttention head_dim 64/128; published op/dtype
-support matrix; fp8/`dot_scaled` (refused — fine).
+**MAJOR / roadmap (not 1.0 blockers):** large-head_dim FlashAttention (>64); fp8/`dot_scaled`
+(refused — fine).
+
+**published op/dtype support matrix — DONE 2026-06-16** (`docs/SUPPORTED_OPS.md`, linked from
+README).
+
+**FlashAttention head_dim — ADDRESSED 2026-06-16 (and uncovered + closed a silent-wrong).**
+The audit's "FA only at head_dim 32" was based on an imprecise README — head_dim **64 was
+already supported + tested** (causal + non-causal). Probing head_dim=128 revealed a genuine
+**silent-wrong**: at BLOCK_M=16/8 the attention lowering compiled + ran + produced garbage
+(max error ~1000) with no error (only BLOCK=32 failed loudly, by accident, via OutOfResources).
+Fixed: an FA-pattern prescan guard in `GenericLowerer.lower()` (≥2 dots + exp + max + a dot
+tile dim > 64) now refuses head_dim > 64 loudly (`MetalNonRecoverableError`); README corrected
+(32 **and** 64), `SUPPORTED_OPS.md` updated, test added (`test_head_dim_over_64_refuses`),
+full project suite 720 passed. True large-head_dim FA support (tiled threadgroup memory) is
+the remaining roadmap item.
 
 **~~vectorized loads (memory-BW ceiling 64% → ~75-80%)~~ — EXPLORED + DECLINED 2026-06-16.**
 The "75-80%" headroom doesn't exist on this hardware. Probe (M4 Max, vector_add @ 16M):

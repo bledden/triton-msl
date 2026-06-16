@@ -20,6 +20,11 @@ except ImportError:
 
 requires_triton = pytest.mark.skipif(not _HAS_TRITON, reason="Triton not installed")
 
+try:
+    from triton_metal.errors import MetalNonRecoverableError
+except Exception:
+    MetalNonRecoverableError = Exception
+
 
 @triton.jit
 def _flash_attn_fwd(
@@ -187,3 +192,30 @@ class TestFlashAttention:
         ref = _ref_attention(q, k, v, causal=True)
         assert (out - ref).abs().max().item() < 0.01, \
             f"Causal attention max error: {(out - ref).abs().max().item()}"
+
+    @requires_triton
+    @pytest.mark.parametrize("BLOCK", [16, 8])
+    def test_head_dim_over_64_refuses(self, BLOCK):
+        """Integrity guard: FlashAttention at head_dim > 64 must REFUSE loudly
+        (`MetalNonRecoverableError`), never silently mis-compute. head_dim=128 with
+        small blocks previously produced garbage (max error ~1000) with no error
+        raised; the prescan guard in `lower()` now refuses it. head_dim 32 and 64
+        (tested above) stay supported. Large-head_dim FA is future work."""
+        Z, H, N_CTX, HEAD_DIM = 1, 1, 128, 128
+        torch.manual_seed(42)
+        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        out = torch.empty_like(q)
+        grid = (N_CTX // BLOCK, Z * H)
+        with pytest.raises(MetalNonRecoverableError):
+            _flash_attn_fwd[grid](
+                q, k, v, out,
+                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+                Z, H, N_CTX,
+                BLOCK_M=BLOCK, BLOCK_N=BLOCK, HEAD_DIM=HEAD_DIM,
+                IS_CAUSAL=False,
+            )

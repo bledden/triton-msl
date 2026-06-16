@@ -21,8 +21,9 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
   `CHANGELOG.md` are regenerated from it, not hand-maintained.
 - **716 / 716** project tests (codegen, GPU correctness, integration,
   FlashAttention, MLX backend, and the fast-matmul / compile_shader zero-copy
-  suites). FlashAttention path: **11 / 11** at HEAD_DIM=32 (see
-  [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend tests;
+  suites). FlashAttention path: **11 / 11**, causal + non-causal, at **HEAD_DIM 32
+  and 64** (see [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend
+  tests;
   project test-suite size grew from 434 → 603 → 716 since `0.1.0-alpha`.
 - **32 / 32** `torch.compile` model tests pass on Python ≤ 3.13 (PyTorch
   Inductor [\[12\]](REFERENCES.md)). On Python 3.14 the suite is honestly
