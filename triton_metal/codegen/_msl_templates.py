@@ -3544,7 +3544,7 @@ kernel void repeat_kv(
 """
 
 
-def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4):
+def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4, out_dtype="fp32"):
     """Fast matmul: direct-device simdgroup_load + register blocking (WS1 C.2).
 
     Reaches MLX parity (~13.8 TFLOP/s fp16 @ 2048, vs ~7.7 for the staged
@@ -3578,6 +3578,13 @@ def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4):
     else:
         raise ValueError(f"fast matmul supports fp16/fp32, got {dtype}")
 
+    if out_dtype in ("fp32", "f32"):
+        out_t = "float"
+    elif out_dtype in ("fp16", "f16"):
+        out_t = "half"
+    else:
+        raise ValueError(f"fast matmul out_dtype supports fp16/fp32, got {out_dtype}")
+
     accs = "\n    ".join(
         "simdgroup_float8x8 " + ", ".join(f"c{r}_{c}(0)" for c in range(rc))
         + ";" for r in range(rr))
@@ -3592,9 +3599,26 @@ def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4):
             inner.append(
                 f"simdgroup_multiply_accumulate(c{r}_{c}, a_frag, b{c}, c{r}_{c});")
     inner = "\n        ".join(inner)
-    stores = "\n    ".join(
-        f"simdgroup_store(c{r}_{c}, C + (row_base + {r * 8}u) * N + col0 + {c * 8}u, N);"
-        for r in range(rr) for c in range(rc))
+    if out_dtype in ("fp16", "f16"):
+        _tiisg_param = ",\n    uint tiisg [[thread_index_in_simdgroup]]"
+        _scratch_line = "    threadgroup float scratch[4 * 64];\n"
+        _epi = []
+        for r in range(rr):
+            for c in range(rc):
+                _epi.append(f"simdgroup_store(c{r}_{c}, scratch + sgitg*64u, 8);")
+                _epi.append("simdgroup_barrier(mem_flags::mem_threadgroup);")
+                _epi.append(
+                    f"for (uint i = tiisg; i < 64u; i += 32u) {{ "
+                    f"C[(row_base + {r * 8}u + i / 8u) * N + col0 + {c * 8}u + i % 8u] "
+                    f"= half(scratch[sgitg*64u + i]); }}")
+                _epi.append("simdgroup_barrier(mem_flags::mem_threadgroup);")
+        stores = "\n    ".join(_epi)
+    else:
+        _tiisg_param = ""
+        _scratch_line = ""
+        stores = "\n    ".join(
+            f"simdgroup_store(c{r}_{c}, C + (row_base + {r * 8}u) * N + col0 + {c * 8}u, N);"
+            for r in range(rr) for c in range(rc))
 
     return f"""#include <metal_stdlib>
 #include <metal_simdgroup_matrix>
@@ -3603,18 +3627,18 @@ using namespace metal;
 kernel void simdgroup_matmul_fast(
     device const {in_t}* A [[buffer(0)]],
     device const {in_t}* B [[buffer(1)]],
-    device float* C [[buffer(2)]],
+    device {out_t}* C [[buffer(2)]],
     constant uint& M [[buffer(3)]],
     constant uint& N [[buffer(4)]],
     constant uint& K [[buffer(5)]],
     uint pid [[threadgroup_position_in_grid]],
-    uint sgitg [[simdgroup_index_in_threadgroup]]
+    uint sgitg [[simdgroup_index_in_threadgroup]]{_tiisg_param}
 ) {{
     uint ntc = (N + {32 * rc - 1}u) / {32 * rc}u;
     uint row_base = (pid / ntc) * {8 * rr}u;
     uint col0 = (pid % ntc) * {32 * rc}u + sgitg * {8 * rc}u;
     if (col0 >= N) return;   // partial column tile: this simdgroup is OOB (uniform)
-    {accs}
+{_scratch_line}    {accs}
     {in_frag} a_frag, {bdecl};
     for (uint k = 0u; k < K; k += 8u) {{
         {loads_b}

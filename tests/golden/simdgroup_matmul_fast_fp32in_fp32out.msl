@@ -1,0 +1,66 @@
+#include <metal_stdlib>
+#include <metal_simdgroup_matrix>
+using namespace metal;
+
+kernel void simdgroup_matmul_fast(
+    device const float* A [[buffer(0)]],
+    device const float* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant uint& M [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    constant uint& K [[buffer(5)]],
+    uint pid [[threadgroup_position_in_grid]],
+    uint sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    uint ntc = (N + 127u) / 128u;
+    uint row_base = (pid / ntc) * 32u;
+    uint col0 = (pid % ntc) * 128u + sgitg * 32u;
+    if (col0 >= N) return;   // partial column tile: this simdgroup is OOB (uniform)
+    simdgroup_float8x8 c0_0(0), c0_1(0), c0_2(0), c0_3(0);
+    simdgroup_float8x8 c1_0(0), c1_1(0), c1_2(0), c1_3(0);
+    simdgroup_float8x8 c2_0(0), c2_1(0), c2_2(0), c2_3(0);
+    simdgroup_float8x8 c3_0(0), c3_1(0), c3_2(0), c3_3(0);
+    simdgroup_float8x8 a_frag, b0, b1, b2, b3;
+    for (uint k = 0u; k < K; k += 8u) {
+        simdgroup_load(b0, B + k * N + col0 + 0u, N);
+        simdgroup_load(b1, B + k * N + col0 + 8u, N);
+        simdgroup_load(b2, B + k * N + col0 + 16u, N);
+        simdgroup_load(b3, B + k * N + col0 + 24u, N);
+        simdgroup_load(a_frag, A + (row_base + 0u) * K + k, K);
+        simdgroup_multiply_accumulate(c0_0, a_frag, b0, c0_0);
+        simdgroup_multiply_accumulate(c0_1, a_frag, b1, c0_1);
+        simdgroup_multiply_accumulate(c0_2, a_frag, b2, c0_2);
+        simdgroup_multiply_accumulate(c0_3, a_frag, b3, c0_3);
+        simdgroup_load(a_frag, A + (row_base + 8u) * K + k, K);
+        simdgroup_multiply_accumulate(c1_0, a_frag, b0, c1_0);
+        simdgroup_multiply_accumulate(c1_1, a_frag, b1, c1_1);
+        simdgroup_multiply_accumulate(c1_2, a_frag, b2, c1_2);
+        simdgroup_multiply_accumulate(c1_3, a_frag, b3, c1_3);
+        simdgroup_load(a_frag, A + (row_base + 16u) * K + k, K);
+        simdgroup_multiply_accumulate(c2_0, a_frag, b0, c2_0);
+        simdgroup_multiply_accumulate(c2_1, a_frag, b1, c2_1);
+        simdgroup_multiply_accumulate(c2_2, a_frag, b2, c2_2);
+        simdgroup_multiply_accumulate(c2_3, a_frag, b3, c2_3);
+        simdgroup_load(a_frag, A + (row_base + 24u) * K + k, K);
+        simdgroup_multiply_accumulate(c3_0, a_frag, b0, c3_0);
+        simdgroup_multiply_accumulate(c3_1, a_frag, b1, c3_1);
+        simdgroup_multiply_accumulate(c3_2, a_frag, b2, c3_2);
+        simdgroup_multiply_accumulate(c3_3, a_frag, b3, c3_3);
+    }
+    simdgroup_store(c0_0, C + (row_base + 0u) * N + col0 + 0u, N);
+    simdgroup_store(c0_1, C + (row_base + 0u) * N + col0 + 8u, N);
+    simdgroup_store(c0_2, C + (row_base + 0u) * N + col0 + 16u, N);
+    simdgroup_store(c0_3, C + (row_base + 0u) * N + col0 + 24u, N);
+    simdgroup_store(c1_0, C + (row_base + 8u) * N + col0 + 0u, N);
+    simdgroup_store(c1_1, C + (row_base + 8u) * N + col0 + 8u, N);
+    simdgroup_store(c1_2, C + (row_base + 8u) * N + col0 + 16u, N);
+    simdgroup_store(c1_3, C + (row_base + 8u) * N + col0 + 24u, N);
+    simdgroup_store(c2_0, C + (row_base + 16u) * N + col0 + 0u, N);
+    simdgroup_store(c2_1, C + (row_base + 16u) * N + col0 + 8u, N);
+    simdgroup_store(c2_2, C + (row_base + 16u) * N + col0 + 16u, N);
+    simdgroup_store(c2_3, C + (row_base + 16u) * N + col0 + 24u, N);
+    simdgroup_store(c3_0, C + (row_base + 24u) * N + col0 + 0u, N);
+    simdgroup_store(c3_1, C + (row_base + 24u) * N + col0 + 8u, N);
+    simdgroup_store(c3_2, C + (row_base + 24u) * N + col0 + 16u, N);
+    simdgroup_store(c3_3, C + (row_base + 24u) * N + col0 + 24u, N);
+}
