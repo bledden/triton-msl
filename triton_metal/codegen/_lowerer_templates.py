@@ -2428,9 +2428,15 @@ class _TemplateMixin:
         # the standard (a,b,c,M,N,K,...) signature; the full ratchet is the net.
         if args[3].is_ptr or args[4].is_ptr or args[5].is_ptr:
             return None
-        # Output must be fp32 (template always declares `device float* C`).
-        out_dtype = _mlir_to_triton_dtype(args[2].elem_type)
-        if out_dtype not in ("fp32", "f32", "float"):
+        # Output dtype selects the template variant: fp32 -> direct float* store,
+        # fp16 -> half* C + cast epilogue (float accumulation preserved either way).
+        # bf16 / other output -> ineligible (fall back to the generic kernel).
+        out_dtype_t = _mlir_to_triton_dtype(args[2].elem_type)
+        if out_dtype_t in ("fp32", "f32", "float"):
+            msl_out = "fp32"
+        elif out_dtype_t in ("fp16", "f16"):
+            msl_out = "fp16"
+        else:
             return None
         # Input fp16 or fp32 (the template's two supported branches).
         in_dtype = _mlir_to_triton_dtype(args[0].elem_type)
@@ -2442,7 +2448,7 @@ class _TemplateMixin:
             return None
         from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
         rr = rc = 4
-        fast_msl = make_simdgroup_matmul_kernel_fast(dtype=msl_dtype, rr=rr, rc=rc)
+        fast_msl = make_simdgroup_matmul_kernel_fast(dtype=msl_dtype, rr=rr, rc=rc, out_dtype=msl_out)
         # (msl, m_idx, n_idx, k_idx, tile_m, tile_n); tile_m=8*rr, tile_n=32*rc.
         return (fast_msl, 3, 4, 5, 8 * rr, 32 * rc)
 

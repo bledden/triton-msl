@@ -44,7 +44,7 @@ def _mm_fp32(a_ptr, b_ptr, c_ptr, M, N, K,
 def _mm_fp16_out(a_ptr, b_ptr, c_ptr, M, N, K,
                  stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
-    """fp16 in -> fp16 out (NOT eligible: fast template is float* output only)."""
+    """fp16 in -> fp16 out (fast template now supports half* C via cast epilogue)."""
     pid_m = tl.program_id(0); pid_n = tl.program_id(1)
     offm = pid_m * BM + tl.arange(0, BM); offn = pid_n * BN + tl.arange(0, BN); offk = tl.arange(0, BK)
     a_ptrs = a_ptr + (offm[:, None] * stride_am + offk[None, :] * stride_ak)
@@ -55,6 +55,23 @@ def _mm_fp16_out(a_ptr, b_ptr, c_ptr, M, N, K,
         a_ptrs += BK * stride_ak; b_ptrs += BK * stride_bk
     c_ptrs = c_ptr + (offm[:, None] * stride_cm + offn[None, :] * stride_cn)
     tl.store(c_ptrs, acc.to(tl.float16))
+
+
+@triton.jit
+def _mm_bf16_out(a_ptr, b_ptr, c_ptr, M, N, K,
+                 stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+                 BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    """bf16 in -> bf16 out (NOT eligible: bf16 output is not supported by fast template)."""
+    pid_m = tl.program_id(0); pid_n = tl.program_id(1)
+    offm = pid_m * BM + tl.arange(0, BM); offn = pid_n * BN + tl.arange(0, BN); offk = tl.arange(0, BK)
+    a_ptrs = a_ptr + (offm[:, None] * stride_am + offk[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offk[:, None] * stride_bk + offn[None, :] * stride_bn)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k in range(0, K, BK):
+        acc += tl.dot(tl.load(a_ptrs), tl.load(b_ptrs))
+        a_ptrs += BK * stride_ak; b_ptrs += BK * stride_bk
+    c_ptrs = c_ptr + (offm[:, None] * stride_cm + offn[None, :] * stride_cn)
+    tl.store(c_ptrs, acc.to(tl.bfloat16))
 
 
 def _descriptors():
@@ -90,15 +107,37 @@ def test_eligible_fp32_emits_descriptor(monkeypatch):
 
 
 @requires
-def test_fp16_output_no_descriptor(monkeypatch):
+def test_fp16_output_emits_half_variant_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
     monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps", dtype=torch.float16)
     B = torch.randn(K, N, device="mps", dtype=torch.float16)
-    C = torch.empty(M, N, device="mps", dtype=torch.float16)   # fp16 OUTPUT -> must NOT use float* template
+    C = torch.empty(M, N, device="mps", dtype=torch.float16)   # fp16 OUTPUT
     _run(_mm_fp16_out, A, B, C, M, N, K)
-    assert not _descriptors(), "fp16-output matmul must not emit a fast_matmul descriptor"
+    descs = _descriptors()
+    assert descs, "fp16-output matmul must now emit a fast_matmul descriptor"
+    msl, m_idx, n_idx, k_idx, tile_m, tile_n = descs[0]
+    assert (m_idx, n_idx, k_idx, tile_m, tile_n) == (3, 4, 5, 32, 128)
+    assert "device half* C [[buffer(2)]]" in msl          # the fp16-output variant
+    assert "half(scratch[sgitg*64u + i])" in msl
+
+
+@requires
+def test_bf16_output_no_descriptor(monkeypatch):
+    shutil.rmtree(CACHE, ignore_errors=True)
+    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    M = N = K = 256
+    A = torch.randn(M, K, device="mps", dtype=torch.bfloat16)
+    B = torch.randn(K, N, device="mps", dtype=torch.bfloat16)
+    C = torch.empty(M, N, device="mps", dtype=torch.bfloat16)
+    # bf16 generic-lowering may fail to compile (known Metal limitation); either way
+    # the detector must NOT emit a fast_matmul descriptor for bf16 output.
+    try:
+        _run(_mm_bf16_out, A, B, C, M, N, K)
+    except Exception:
+        pass
+    assert not _descriptors(), "bf16-output matmul must NOT emit a descriptor (deferred)"
 
 
 @requires
