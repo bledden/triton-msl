@@ -65,12 +65,17 @@
   },
   "matmul_2048_fp32": {
     "name": "matmul_2048_fp32",
-    "min_ms": 1.7821,
-    "tflops": 9.64
+    "min_ms": 1.4906,
+    "tflops": 11.53
   },
   "matmul_2048_fp16": {
     "name": "matmul_2048_fp16",
-    "min_ms": 1.4038,
-    "tflops": 12.24
+    "min_ms": 1.3912,
+    "tflops": 12.35
+  },
+  "matmul_2048_fp16out": {
+    "name": "matmul_2048_fp16out",
+    "min_ms": 1.4053,
+    "tflops": 12.22
   }
 }
