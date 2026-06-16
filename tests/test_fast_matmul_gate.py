@@ -119,3 +119,52 @@ def test_flag_off_skips_cached_descriptor(monkeypatch):
     )
     # Correctness: result must still match torch matmul (fallback path ran).
     torch.testing.assert_close(C, (A.float() @ B.float()), rtol=2e-2, atol=2e-2)
+
+
+@triton.jit
+def mm_f16(a_ptr, b_ptr, c_ptr, M, N, K, sam, sak, sbk, sbn, scm, scn,
+           BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid_m = tl.program_id(0); pid_n = tl.program_id(1)
+    offm = pid_m * BM + tl.arange(0, BM); offn = pid_n * BN + tl.arange(0, BN); offk = tl.arange(0, BK)
+    a_ptrs = a_ptr + (offm[:, None] * sam + offk[None, :] * sak)
+    b_ptrs = b_ptr + (offk[:, None] * sbk + offn[None, :] * sbn)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k in range(0, K, BK):
+        acc += tl.dot(tl.load(a_ptrs), tl.load(b_ptrs))
+        a_ptrs += BK * sak; b_ptrs += BK * sbk
+    c_ptrs = c_ptr + (offm[:, None] * scm + offn[None, :] * scn)
+    tl.store(c_ptrs, acc.to(tl.float16))
+
+
+def _launch_f16(M, N, K):
+    A = torch.randn(M, K, device="mps", dtype=torch.float16)
+    B = torch.randn(K, N, device="mps", dtype=torch.float16)
+    C = torch.empty(M, N, device="mps", dtype=torch.float16)
+    grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
+    mm_f16[grid](A, B, C, M, N, K, A.stride(0), A.stride(1), B.stride(0), B.stride(1),
+                 C.stride(0), C.stride(1), BM=64, BN=64, BK=32)
+    torch.mps.synchronize()
+    return A, B, C
+
+
+@requires
+def test_fp16out_aligned_fires_fast(monkeypatch):
+    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
+    seen = _spy(monkeypatch)
+    A, B, C = _launch_f16(256, 256, 256)
+    assert "simdgroup_matmul_fast" in seen
+    torch.testing.assert_close(C, (A.float() @ B.float()).half(), rtol=2e-2, atol=2e-2)
+
+
+@requires
+@pytest.mark.parametrize("M,N,K", [(258, 256, 256), (256, 258, 256), (256, 256, 252)])
+def test_fp16out_misaligned_falls_back(monkeypatch, M, N, K):
+    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
+    seen = _spy(monkeypatch)
+    A, B, C = _launch_f16(M, N, K)
+    assert "simdgroup_matmul_fast" not in seen
+    torch.testing.assert_close(C, (A.float() @ B.float()).half(), rtol=2e-2, atol=2e-2)
