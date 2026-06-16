@@ -48,10 +48,11 @@ oversells it.**
   `make_simdgroup_matmul_kernel_fast` docstring claimed "~13.8 TFLOP/s MLX parity"; measured
   is ~8-12 and only ~33% of fp16 peak — well below MLX's hand-tuned kernels. Corrected in
   this audit to measured %-of-peak with the no-MLX-parity caveat.
-- **[MAJOR]** fp16 2× left on the table (float accumulation); memory-bound 64% vs an
-  ~75-80% ceiling (vectorized loads — a documented follow-up); bf16 *input* unsupported by
-  the fast template; the generic/staged fallback (serial `tg_st` epilogue, ~34 barriers) is
-  poor Metal (but correct).
+- **[MAJOR]** memory-bound 64% vs an ~75-80% ceiling (vectorized loads — a documented
+  follow-up); bf16 *input* unsupported by the fast template; the generic/staged fallback
+  (serial `tg_st` epilogue, ~34 barriers) is poor Metal (but correct). (The "fp16 2× left
+  on the table" claim was retracted — see the EXPLORED+DECLINED note in the synthesis: the
+  matrix unit isn't 2× for half accumulation, so fp16≈fp32 is near-optimal here.)
 - **Honest positioning:** not beating MLX on raw kernel perf (won't — it's hand-tuned by the
   HW team). The value prop is *the Triton programming model on Apple GPUs*, which MLX doesn't
   offer. Lead with that; don't claim parity.
@@ -71,9 +72,19 @@ oversells it.**
    (`test_nover_store_refusal`, `test_atomic_nover_refusal`, `test_inloop_reduce_coverage`);
    extend with more catalog entries (dot_scaled, rank≥3 trans, rank≥2 cat/join) over time.
 
-**MAJOR / roadmap (not 1.0 blockers):** fp16 half-accumulate opt-in (2× fp16); FlashAttention
-head_dim 64/128; published op/dtype support matrix; vectorized loads (memory-BW ceiling);
-fp8/`dot_scaled` (refused — fine).
+**MAJOR / roadmap (not 1.0 blockers):** FlashAttention head_dim 64/128; published op/dtype
+support matrix; vectorized loads (memory-BW ceiling); fp8/`dot_scaled` (refused — fine).
+
+**~~fp16 half-accumulate opt-in (2× fp16)~~ — EXPLORED + DECLINED 2026-06-16.** This MAJOR
+rested on a flawed peak-ratio inference. Empirical probe (M4 Max, 2048³ fp16): half
+accumulators (`simdgroup_half8x8`) give only **~6% speedup (12.6 vs 11.9 TFLOP/s) at a real
+accuracy cost (relerr 1.75e-2 vs 0.0)**. Apple's simdgroup-matrix unit runs at ~the same
+rate regardless of float-vs-half accumulator — its throughput is gated by the matrix unit,
+not accumulator precision — so the 36.9 TFLOP/s "fp16 peak" is a vector-ALU FMA figure the
+matrix path cannot reach by changing accumulators. **Correction to the audit:** fp16 matmul
+≈ fp32 matmul (~60% of the *fp32* matrix ceiling) is the expected, near-optimal behavior;
+the current float accumulation is the right choice (same speed, full precision). Not worth a
+speed/accuracy knob for ~6%.
 
 **Through-line:** the *engineering* is largely 1.0-ready (integrity contract + fp32/memory
 perf are genuinely good); the **public claims weren't yet matched to measured reality** —
