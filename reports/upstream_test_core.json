@@ -1,17 +1,17 @@
 {
   "test_file": "test_core.py",
   "backend": "metal",
-  "total": 9168,
-  "passed": 5531,
+  "total": 9194,
+  "passed": 5559,
   "failed": 0,
-  "skipped": 3637,
+  "skipped": 3635,
   "errors": 0,
-  "pass_rate": 60.3,
+  "pass_rate": 60.5,
   "failure_categories": {},
   "pytest_summary": {
     "warnings": 96,
-    "passed": 5531,
-    "skipped": 3811
+    "passed": 5559,
+    "skipped": 3783
   },
   "passed_tests": [
     "unit/language/test_core.py::test_scalar_overflow",

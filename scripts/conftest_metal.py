@@ -343,16 +343,13 @@ UNIMPLEMENTED_FEATURES = {
     # exposes a separate codegen path we don\'t yet emit correctly.
     "test_pipeline_matmul",
     "test_indirect_matmul",
-    # Triton-to-Gluon translator tests instantiate ``TranslatorTarget``
-    # from the kernel\'s arch; Apple\'s ``apple-m4-max`` arch string
-    # isn\'t in the enum and ``ValueError`` is raised before the
-    # translator runs. Strictly an upstream Gluon-tool gap.
-    "test_split",
-    "test_reduce_to_scalar",
-    "test_atomic_add",
-    "test_cat",
-    "test_triton_reshape_trans",
-    "test_simple_kernel",
+    # NOTE: the Triton-to-Gluon translator tool tests (test_split,
+    # test_reduce_to_scalar, test_atomic_add, test_cat, test_triton_reshape_trans,
+    # test_simple_kernel — all in unit/tools/test_triton_to_gluon.py) used to live
+    # here as bare base names. That WRONGLY skipped the CORE test_core tests of the
+    # same name (test_cat L1945, test_split L2176 — both pass and were deliberately
+    # enabled, see "test_cat … Enabled" above). Moved to _GLUON_TOOL_UNIMPLEMENTED
+    # below and matched by FILE PATH so the core tests run (reclaimed 2026-06-17).
     # slice_kernel hits its own ``builtin function cannot be scanned``
     # assertion against ``BuiltinFunctionType`` on Python 3.14 — this
     # is an upstream slicing-tool bug independent of Metal.
@@ -402,10 +399,12 @@ UNIMPLEMENTED_FEATURES = {
     # "test_nested_while",
     # atomic_cas test uses while loop internally (serialized_add kernel)
     "test_atomic_cas",  # Multi-program sync: 2000 threadgroups need global lock
-    # tl.range — loop fusion not implemented
+    # tl.range — loop fusion not implemented (fuse / fuse_dependent test actual
+    # loop fusion). test_tl_range_num_stages RECLAIMED 2026-06-17: num_stages is a
+    # scheduling hint Metal ignores while still computing the matmul correctly
+    # (passes torch.testing.assert_close rtol/atol 1e-3).
     "test_tl_range_fuse",
     "test_tl_range_fuse_dependent",
-    "test_tl_range_num_stages",
     # int64 loop induction variable: HANGS (re-verified, audit #163) — the i64
     # loop bound/step lowering does not terminate, wedging the run. Genuine gap
     # (not "no int64 support" — scalar int64 compute works); keep skipped until
@@ -429,18 +428,36 @@ UNIMPLEMENTED_FEATURES = {
     # Misc
     # "test_optimize_thread_locality",  # Enabled: (see above)
     # "test_unsigned_name_mangling",  # Testing: abs on uint32/int32
-    # Mixed uint16/float16 modulus — type promotion edge case
-    "test_bin_op[1-uint16-float16-%]",
+    # test_bin_op[1-uint16-float16-%] RECLAIMED 2026-06-17: Metal computes the
+    # fp32-promoted modulus correctly vs the np.fmod(float32) reference.
     "test_where[1-*int32]",  # Pointer type in where/select
     # Wraps the launch in ``with torch.cuda.device(...)`` (CUDA-only context)
     # and does a 3-D-grid atomic_add over a zero-strided (broadcast) view;
     # both the CUDA harness call and the broadcast-stride atomic are
     # unsupported here.
     "test_zero_strided_tensors",
-    "test_pointer_arguments",  # Metal accepts CPU tensors (no ValueError)
+    # test_pointer_arguments: [cuda] (no-CUDA host) and [cpu] (asserts a launch
+    # ValueError that Metal doesn't raise — it accepts CPU tensors) stay skipped;
+    # [cpu_pinned] RECLAIMED 2026-06-17 (else-branch just launches — a real pass).
+    "test_pointer_arguments[cuda]",
+    "test_pointer_arguments[cpu]",
     # "test_masked_load_shared_memory",  # Enabled: non-square K via strided template
     # "test_dot_without_load",  # Enabled: constant-input dot template
     # "test_dot3d",  # Enabled: 3D batched dot via strided template with batch loop
+}
+
+# Gluon-translator tool tests (unit/tools/test_triton_to_gluon.py): the translator
+# rejects Apple's ``apple-m4-max`` arch string (ValueError before it runs). These
+# share BASE NAMES with core test_core tests, so they are matched by FILE PATH (see
+# pytest_collection_modifyitems) — never by bare name — to avoid wrongly skipping
+# the passing core tests of the same name.
+_GLUON_TOOL_UNIMPLEMENTED = {
+    "test_split",
+    "test_reduce_to_scalar",
+    "test_atomic_add",
+    "test_cat",
+    "test_triton_reshape_trans",
+    "test_simple_kernel",
 }
 
 
@@ -456,6 +473,12 @@ def pytest_collection_modifyitems(config, items):
 
         # Skip unimplemented features (by base name or full parametrized name)
         if func_name in UNIMPLEMENTED_FEATURES or item.name in UNIMPLEMENTED_FEATURES:
+            item.add_marker(skip_unimplemented)
+            continue
+
+        # Gluon-translator tool tests: scope by FILE PATH (these base names
+        # collide with passing core test_core tests; see _GLUON_TOOL_UNIMPLEMENTED).
+        if "test_triton_to_gluon" in test_id and func_name in _GLUON_TOOL_UNIMPLEMENTED:
             item.add_marker(skip_unimplemented)
             continue
 
