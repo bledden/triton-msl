@@ -1,157 +1,40 @@
-............s...........s...........s...........s...........s........... [  0%]
-s...........s...........s...........s...........s.ssssssssssss.......... [  1%]
-s...........s...........s...........s...........s...........s........... [  2%]
-s...........s...........s...........s...........s.ssssssssssss.......... [  3%]
-s...........s...........s...........s...........s...........s........... [  3%]
-s...........s...........s...........s...........s.ssssssssssss.......... [  4%]
-s...........s...........s...........s...........s...........s........... [  5%]
-s...........s...........s...........s...........s.ssssssssssss.......... [  6%]
-s...........s...........s...........s...........s...........s.........s. [  6%]
-s...........s...........s...........s...........s.ssssssssssss.......... [  7%]
-s.....................ss.............................................s.. [  8%]
-........s...........s..........s...........s..........s...........s..... [  9%]
-.....s...........s..........s...........s..........s...........s........ [ 10%]
-..s...........s..........s...........s..........s...........s..........s [ 10%]
-.sssssssssssssssssssssss..........s..........s...........s..........s... [ 11%]
-........s..........s...........s..........s...........s..........s...... [ 12%]
-.....s..........s...........s..........s...........s..........s......... [ 13%]
-..s..........s...........s..........s.sssssssssssssssssssssss..........s [ 13%]
-..........s...........s..........s...........s..........s...........s... [ 14%]
-.......s...........s..........s...........s..........s...........s...... [ 15%]
-....s...........s..........s...........s..........s...........s......... [ 16%]
-.s...........s..........s.sssssssssssssssssssssss..........s..........s. [ 16%]
-..........s..........s...........s..........s...........s..........s.... [ 17%]
-.......s..........s...........s..........s...........s..........s....... [ 18%]
-....s..........s...........s..........s...........s..........s.sssssssss [ 19%]
-ssssssssssssss..........s..........s...........s..........s...........s. [ 20%]
-.........s...........s..........s...........s..........s...........s.... [ 20%]
-......s...........s..........s...........s..........s...........s....... [ 21%]
-...s...........s..........s...........s..........s.sssssssssssssssssssss [ 22%]
-ss..........s..........s...........s..........s...........s..........s.. [ 23%]
-.........s..........s...........s..........s...........s..........s..... [ 23%]
-......s..........s...........s..........s...........s..........s........ [ 24%]
-...s..........s.sssssssssssssssssssssss..........s..........s........... [ 25%]
-................................................................s....... [ 26%]
-...s..........s..........s..........s..........s..........s..........s.. [ 26%]
-........s..........ssssssssssss..........s..........s..........s........ [ 27%]
-..s..........s..........s..........s..........s..........s..........ssss [ 28%]
-ssssssss..........s..........s..........s..........s..........s......... [ 29%]
-.s..........s..........s..........s..........ssssssssssss..........s.... [ 30%]
-......s..........s..........s..........s..........s..........s.......... [ 30%]
-s..........s..........ssssssssssss..........s..........s..........s..... [ 31%]
-.....s..........s..........s..........s..........s..........s..........s [ 32%]
-sssssssssss..........s..........s..........s..........s..........s...... [ 33%]
-....s..........s..........s..........s..........ssssssssssss............ [ 33%]
-................s.........s...s..s.s...........s........................ [ 34%]
-.ssssssssssssssssssss.s.s..ss...........s.s..ss....s...s..s.......ssssss [ 35%]
-..s..sss..ssss..ssss..ssssss..ssss..ssss..ssssss..ssss..ssss..ssssss..ss [ 36%]
-ss..ssss..ssssss..ssss..ssss..sssss...sss...sss...sssss...sss...sss...ss [ 36%]
-sss...sss...sss...sssss...sss...sss...sssss...sss...sss...ssssss..ssss.. [ 37%]
-ssss..ssssss..ssss..ssss..ssssss..ssss..ssss..ssssss..ssss..ssss..ssssss [ 38%]
-..ssss..ssss..sssss...sss...sss...sssss...sss...sss...sssss...sss...sss. [ 39%]
-..sssss...sss...sss...sssss...sss...sss...sss.ss.sssss.sssss.sssss.sssss [ 40%]
-.sssss.sssss.sssss.sssss.sssss.sssssssssssssssssssssssssssss.ss.ss.ss.ss [ 40%]
-.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss [ 41%]
-.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss [ 42%]
-.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss [ 43%]
-.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss.ss..sssssssssssssssssssssssss [ 43%]
-sssssssssssssssssssssssss....................sssssssssssssssssssssssssss [ 44%]
-ssssssssssssssssssssssssssssssssss........sssss.sssss..........s........ [ 45%]
-..s..........s..........s..........s..........s..........s..........s... [ 46%]
-.......s..........ssssssssssss.....................................sssss [ 47%]
-sssssssssssssssssssssssssssssssss........s.........s.....s...s.......... [ 47%]
-.......ssss............ssss........ssss................ssss............s [ 48%]
-sss........ssss................ssss............ssss........ssss......... [ 49%]
-.......ssss............ssss........ssss................ssss............s [ 50%]
-sss........ssss................ssss............ssss........ssss......... [ 50%]
-.......ssss............ssss........ssss................................. [ 51%]
-.....................sssss.............................................. [ 52%]
-.....................................ss.............................sss. [ 53%]
-........................ssssssssssss..............................ssssss [ 53%]
-ssssss..............................ssssssssssss........................ [ 54%]
-......ssssssssssss..............................ssssssssssss............ [ 55%]
-..................ssssssssssss..............................ssssssssssss [ 56%]
-..............................ssssssssssss...............ss....ss....ss. [ 57%]
-ssssssssssss...ss....ss....ss....ss....ss.ssssssssssss...ss....ss....ss. [ 57%]
-...ss....ss.ssssssssssss...ss....ss....ss....ss....ss.ssssssssssss...ss. [ 58%]
-...ss...................ssssssssssss..............................ssssss [ 59%]
-ssssss..............................ssssssssssss........................ [ 60%]
-......ssssssssssss..............................ssssssssssss............ [ 60%]
-..................ssssssssssss..............................ssssssssssss [ 61%]
-..............................ssssssssssss...............ss....ss....ss. [ 62%]
-ssssssssssss...ss....ss....ss....ss....ss.ssssssssssss...ss....ss....ss. [ 63%]
-...ss....ss.ssssssssssss...ss....ss....ss....ss....ss.ssssssssssss...ss. [ 63%]
-...ss..s.......sss..............ssssss...ssssss...ssssss...ssssss...ssss [ 64%]
-ss...sssssss.ss............sssssssssssssssssssssssssssssssssssssssssssss [ 65%]
-sssssssssssssssssssssssssssssssssssssssssssssssssssssss...sssssssss...ss [ 66%]
-sssssss...sssssssss...sssssssss...sssssssss...sssssssss...sssssssss...ss [ 67%]
-sssssss...sssssssss...sssssssss...sssssssss...sssssssss...sssssssss...ss [ 67%]
-sssssss...sssssssss...sssssssss...sssssssss...sssssssss...sssssssss...ss [ 68%]
-sssssss...sssss......................................................... [ 69%]
-........................................................................ [ 70%]
-........................................................................ [ 70%]
-........................................................................ [ 71%]
-....................................................ss.sssssssssssssssss [ 72%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 73%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 73%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 74%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 75%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 76%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 77%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 77%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 78%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 79%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 80%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 80%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 81%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 82%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 83%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 84%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 84%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 85%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 86%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 87%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 87%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 88%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 89%]
-ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 90%]
-sssssssssssssssssssssssssssssssssssssssssssssssssssssssssss....s....s... [ 90%]
-.s....s....s....s....s....s....s....s....s....s....s....s....s....s....s [ 91%]
-....s....s....s...ss....s...ss....s...ss....s...ss....s...ss....s.ssss.. [ 92%]
-.ss.ssss...ss.ssss...ss.ssss...ss.ssss...sssssssssssssssssssssssssssssss [ 93%]
-sssssssssssssssssssssssssss..........s...........s...........s.......... [ 94%]
-........................................................................ [ 94%]
-........................................................................ [ 95%]
-.......................................ssssssssssssssssssss............. [ 96%]
-.........................s.........sss.................................. [ 97%]
-.................................ss.ss...........sssss.ssssssssss....... [ 97%]
-....ssssssss..s.....ssss...ssssssssssssssssssssssss....sssssssssssssss.. [ 98%]
-................sss.ss...sss.s...sss.s...........s...........s.......... [ 99%]
-.s...........s.............s........................ss                   [100%]
-=============================== warnings summary ===============================
-python/test/unit/language/test_core.py: 532 warnings
-  /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread/triton_metal/codegen/generic_lowerer.py:2832: UserWarning: FP64 (double) is not supported on Apple Silicon GPUs. Type 'fp64' will be downcast to float32. Cast to float32 explicitly to silence this warning.
-    store_type = triton_type_to_msl(store_dtype)
+Triton Upstream Test Results: test_core.py
+Backend: metal
+==================================================
 
-python/test/unit/language/test_core.py: 532 warnings
-  /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread/triton_metal/codegen/msl_emitter.py:42: UserWarning: FP64 (double) is not supported on Apple Silicon GPUs. Type 'fp64' will be downcast to float32. Cast to float32 explicitly to silence this warning.
-    return triton_type_to_msl(dtype)
+Total:   9168
+Passed:  5531 (60.3%)
+Failed:  0
+Skipped: 3637
+Errors:  0
 
-python/test/unit/language/test_core.py: 532 warnings
-  /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread/triton_metal/codegen/msl_emitter.py:76: UserWarning: FP64 (double) is not supported on Apple Silicon GPUs. Type 'fp64' will be downcast to float32. Cast to float32 explicitly to silence this warning.
-    inner = triton_type_to_msl(self.dtype)
+Failure Categories:
 
-python/test/unit/language/test_core.py: 95 warnings
-  /Users/bledden/Documents/triton/python/test/unit/language/test_core.py:293: RuntimeWarning: overflow encountered in cast
-    z_ref = z_ref.astype(dtype_z)
+Pytest summary (cross-check):
+  passed: 5531
+  skipped: 3811
+  warnings: 96
 
-python/test/unit/language/test_core.py: 592 warnings
-  /Users/bledden/Documents/triton/python/triton/compiler/code_generator.py:629: DeprecationWarning: AnnAssign.__init__ missing 1 required positional argument: 'simple'. This will become an error in Python 3.15.
-    init_node = ast.AnnAssign(target=st_target, value=default_value, annotation=annotation)
+Sample passing tests:
+  unit/language/test_core.py::test_scalar_overflow
+  unit/language/test_core.py::test_dtype_codegen
+  unit/language/test_core.py::test_bin_op[1-int8-int8-+]
+  unit/language/test_core.py::test_bin_op[1-int8-int16-+]
+  unit/language/test_core.py::test_bin_op[1-int8-int32-+]
+  unit/language/test_core.py::test_bin_op[1-int8-int64-+]
+  unit/language/test_core.py::test_bin_op[1-int8-uint8-+]
+  unit/language/test_core.py::test_bin_op[1-int8-uint16-+]
+  unit/language/test_core.py::test_bin_op[1-int8-uint32-+]
+  unit/language/test_core.py::test_bin_op[1-int8-uint64-+]
+  unit/language/test_core.py::test_bin_op[1-int8-float16-+]
+  unit/language/test_core.py::test_bin_op[1-int8-float32-+]
+  unit/language/test_core.py::test_bin_op[1-int8-bfloat16-+]
+  unit/language/test_core.py::test_bin_op[1-int16-int8-+]
+  unit/language/test_core.py::test_bin_op[1-int16-int16-+]
+  unit/language/test_core.py::test_bin_op[1-int16-int32-+]
+  unit/language/test_core.py::test_bin_op[1-int16-int64-+]
+  unit/language/test_core.py::test_bin_op[1-int16-uint8-+]
+  unit/language/test_core.py::test_bin_op[1-int16-uint16-+]
+  unit/language/test_core.py::test_bin_op[1-int16-uint32-+]
 
-python/test/unit/language/test_core.py::test_trans_reshape
-  /Users/bledden/Documents/triton/python/triton/language/core.py:2541: UserWarning: tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.
-    warn("tl.make_block_ptr is deprecated. Use TensorDescriptor or tl.make_tensor_descriptor instead.")
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-5335 passed, 4007 skipped, 2284 warnings in 845.21s (0:14:05)
+Sample failing tests:

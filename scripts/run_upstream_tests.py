@@ -45,14 +45,24 @@ def run_tests(test_dir, test_file, timeout=900):
     # of the editable install at ~/Documents/triton-metal. Mirrors
     # scripts/run_upstream_test.sh.
     repo_root = str(Path(__file__).resolve().parent.parent)
+    scripts_dir = str(Path(__file__).resolve().parent)
+    # Pin imports to this checkout (repo_root) AND put scripts/ on the path so the
+    # ``-p conftest_metal`` plugin below is importable. conftest_metal holds the
+    # skip rules for hardware-unsupported dtypes/precisions (fp64, fp8, 64-bit
+    # atomics, ...). WITHOUT it, the full upstream suite runs those cases and they
+    # surface as loud failures instead of the documented feature-gap skips — which
+    # is exactly the 5,335/0/4,007 (skip-aware) vs 6,542/2,494 (unfiltered)
+    # discrepancy. Mirrors scripts/run_upstream_test.sh.
+    _pp_prefix = repo_root + os.pathsep + scripts_dir
     env["PYTHONPATH"] = (
-        repo_root + (os.pathsep + env["PYTHONPATH"]) if env.get("PYTHONPATH")
-        else repo_root
+        _pp_prefix + (os.pathsep + env["PYTHONPATH"]) if env.get("PYTHONPATH")
+        else _pp_prefix
     )
 
     cmd = [
         sys.executable, "-m", "pytest",
         str(test_path),
+        "-p", "conftest_metal",
         "--device", "cpu",
         "--tb=line",
         "-v",

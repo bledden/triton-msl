@@ -45,7 +45,7 @@ pytest tests/test_gpu_correctness.py -v    # GPU correctness
 # backend compiles + runs the kernels on the GPU) because upstream test_core
 # assumes CUDA. Re-run it to regenerate reports/upstream_test_core.json; do NOT
 # hand-edit pass counts into the docs.
-python scripts/run_upstream_tests.py --test-file test_core.py --timeout 600
+python scripts/run_upstream_tests.py --test-file test_core.py --timeout 1800  # ~14 min
 ```
 
 ## Running Benchmarks

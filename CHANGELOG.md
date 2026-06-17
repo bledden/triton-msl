@@ -16,9 +16,10 @@
   This is **not** MLX-parity (fp16 runs at ~fp32 rate to keep float accumulation); the
   earlier "~13.8 TFLOP/s MLX parity" docstring claim was an overstatement and is corrected.
 - **MEPT** multi-element-per-thread register-array model is the default lowering path.
-- **Test suite (Triton 3.7.0):** upstream `test_core.py` **5,335 passed / 0 failed /
-  ~4,007 feature-gap skips** (each a loud refusal or HW-impossible); the single source of
-  truth is `scripts/run_upstream_tests.py` (`--device cpu`), not hand-maintained counts.
+- **Test suite (Triton 3.7.0):** upstream `test_core.py` **5,531 passed / 0 failed /
+  ~3,811 feature-gap skips** (each a loud refusal or HW-impossible); the single source of
+  truth is `scripts/run_upstream_tests.py` (`--device cpu`, which loads the `conftest_metal`
+  skip plugin), not hand-maintained counts.
   Project suite **716 passed / 0 failed**. FlashAttention 11/11 at HEAD_DIM=32 via the
   **Python/MSL** lowering — the C++ MLIR→LLVM path named in the 2026-05-30 snapshot below
   was shelved (AGX compiler blocker; Python/MSL is primary).

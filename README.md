@@ -10,8 +10,8 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
 
 **Alpha** — actively developed, not yet production-ready.
 
-- **0 failures** across the upstream Triton `test_core.py` suite — 5,335 kernels
-  attempted and correct, ~4,007 documented feature-gap skips (each is either a
+- **0 failures** across the upstream Triton `test_core.py` suite — 5,531 kernels
+  attempted and correct, ~3,811 documented feature-gap skips (each is either a
   *refused* kernel — fails loudly, never silent-wrong — or a hardware-impossible
   case like FP64). Aligned with Triton [\[2\]](REFERENCES.md) release `3.7.0`.
   Measured by `scripts/run_upstream_tests.py` — the single source of truth for this
