@@ -219,3 +219,35 @@ class TestFlashAttention:
                 BLOCK_M=BLOCK, BLOCK_N=BLOCK, HEAD_DIM=HEAD_DIM,
                 IS_CAUSAL=False,
             )
+
+    @requires_triton
+    @pytest.mark.parametrize("HEAD_DIM", [32, 64])
+    @pytest.mark.parametrize("BLOCK", [16, 8])
+    def test_small_block_refuses(self, BLOCK, HEAD_DIM):
+        """Integrity guard for the small-BLOCK silent-wrong hole (closed 2026-06-17).
+
+        The attention lowering is validated ONLY at BLOCK_M = BLOCK_N = 32. With a
+        block tile dimension < 32 it silently mis-computes (rows past the first turn
+        to garbage, max err 28..1e4) — and this happens even for the otherwise
+        SUPPORTED head_dim 32 and 64, which the older head_dim>64 guard did not
+        catch. The prescan now refuses any FA-pattern kernel whose smallest dot
+        tile dim is < 32. (head_dim 32/64 at BLOCK=32 stay supported — tested above.)
+        """
+        Z, H, N_CTX = 1, 1, 16
+        torch.manual_seed(42)
+        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        out = torch.empty_like(q)
+        grid = (N_CTX // BLOCK, Z * H)
+        with pytest.raises(MetalNonRecoverableError):
+            _flash_attn_fwd[grid](
+                q, k, v, out,
+                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+                Z, H, N_CTX,
+                BLOCK_M=BLOCK, BLOCK_N=BLOCK, HEAD_DIM=HEAD_DIM,
+                IS_CAUSAL=False,
+            )

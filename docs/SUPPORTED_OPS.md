@@ -37,7 +37,7 @@
 | `tt.trans` | ✓ (rank ≤ 2) / ✗ (rank ≥ 3 non-identity) | rank-≥3 transpose with a non-identity permutation is refused (#12) |
 | `tt.cat` / `tt.join` | ✓ (rank ≤ 1) / ✗ (rank ≥ 2) | rank-≥2 cat/join refused; `tt.join` result feeding `tt.dot` refused |
 | `tt.dot` inside a `noinline` device function | ✗ refused | not lowered through device-function calls |
-| FlashAttention | ✓ (head_dim ≤ 64) / ✗ (head_dim > 64) | head_dim 32 and 64 validated (causal + non-causal); **head_dim > 64 refused loudly** — the attention lowering silently mis-computes above 64 (hole closed 2026-06-16); large-head_dim FA is roadmap |
+| FlashAttention | ✓ (`BLOCK_M=BLOCK_N=32`, head_dim ≤ 64) / ✗ (otherwise) | validated only at **BLOCK_M = BLOCK_N = 32** with head_dim 32 or 64 (causal + non-causal). **Refused loudly** outside that: `head_dim > 64` and **`BLOCK_M`/`BLOCK_N` < 32** (the small-block case silently mis-computed for *any* head_dim incl. 32/64 — a hole the old head_dim>64 guard missed, closed 2026-06-17). Larger blocks/head_dim are roadmap (need tiled threadgroup memory) |
 
 ## Loud-refusal catalog (raises `MetalNonRecoverableError` — never silent-wrong)
 
@@ -66,9 +66,13 @@ silent-wrong producers, closed by the integrity prescan — see `CHANGELOG.md`.)
     parser (which has produced silent-wrongs); set `TRITON_METAL_LEGACY=1` to opt in for debugging.
 17. **`tt.dot` operand shape mismatch** / other unsupported dot shapes.
 18. **Unstructured kernel-level control flow** (`cf.cond_br`, early-return inside a conditional).
-19. **FlashAttention with head_dim > 64** — the attention lowering (≥2 dots + softmax) is
-    validated only for head_dim ≤ 64; above it the kernel silently mis-computes, so the
-    prescan refuses. (head_dim 32 and 64 are supported; large-head_dim FA is future work.)
+19. **FlashAttention outside the validated tile** — the attention lowering (≥2 `tt.dot` +
+    `exp` + `max`) is validated only at `BLOCK_M = BLOCK_N = 32`, head_dim ≤ 64. The prescan
+    refuses two out-of-range cases: **(a)** head_dim > 64 (max dot tile dim > 64), and
+    **(b)** `BLOCK_M`/`BLOCK_N` < 32 (min dot tile dim < 32). Case (b) silently mis-computed
+    (rows past the first turned to garbage) for *any* head_dim — including the otherwise
+    supported 32/64 — and was a silent-wrong hole the old head_dim>64-only guard missed
+    (closed 2026-06-17). Larger tiles/head_dim (tiled threadgroup memory) are future work.
 
 (Plus `tt.dot_scaled`, rank-≥2 `tt.cat`/`tt.join`, `tt.dot` in a noinline callee, and
 `tt.join`→`tt.dot`, listed by category above.)

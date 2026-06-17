@@ -210,10 +210,12 @@ matrix and the loud-refusal catalog.
 
 ### FlashAttention
 
-A full FlashAttention v2 forward (causal + non-causal, **head_dim ≤ 64**) runs
-through the standard `@triton.jit` path — see
-[`tests/test_flash_attention.py`](tests/test_flash_attention.py) for the kernel and
-launch. (head_dim > 64 is refused; large-head_dim support is on the roadmap.)
+A full FlashAttention v2 forward (causal + non-causal) runs through the standard
+`@triton.jit` path at the **validated tile `BLOCK_M = BLOCK_N = 32`, head_dim ≤ 64** —
+see [`tests/test_flash_attention.py`](tests/test_flash_attention.py) for the kernel and
+launch. Out-of-range configs are **refused loudly** (`MetalNonRecoverableError`, never
+silent-wrong): head_dim > 64, and block tiles below 32. Larger tiles/head_dim (tiled
+threadgroup memory) are on the roadmap.
 
 ### Tuning flags
 
@@ -233,7 +235,7 @@ All default-on; set to `0` to disable (an escape hatch for bisecting a regressio
 | **Elementwise** | add, sub, mul, div, exp, log, sqrt, abs, neg, SiLU, GELU, sigmoid, tanh, ReLU, leaky ReLU, clamp, FMA |
 | **Reductions** | sum, max, min, argmax, argmin, xor_sum |
 | **Dot product** | `tl.dot` with strided matmul template, all epilogues (add, softmax, chain-dot, transpose) |
-| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at **HEAD_DIM 32 and 64** via the Python MSL path. head_dim > 64 is refused (`MetalNonRecoverableError`, never silent-wrong); large-head_dim support is on the roadmap. |
+| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at the validated tile **`BLOCK_M=BLOCK_N=32`, HEAD_DIM 32 and 64** via the Python MSL path. Out-of-range configs (head_dim > 64; block tiles < 32) are refused (`MetalNonRecoverableError`, never silent-wrong); larger tiles/head_dim are on the roadmap. |
 | **Normalization** | Layer norm, RMS norm, batch norm |
 | **Type casts** | FP32, FP16, BF16, INT8, INT16, INT32, bool |
 | **Control flow** | `scf.for`, `scf.if`, while loops |

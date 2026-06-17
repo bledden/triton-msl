@@ -642,19 +642,43 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         _fa_has_max = any("max" in (s.op or "") for s in _fa_ops)
         if len(_fa_dots) >= 2 and _fa_has_exp and _fa_has_max:
             _fa_maxdim = 0
+            _fa_mindim = 1 << 30
             for _d in _fa_dots:
                 for _oid in (_d.operand_ids or []):
                     _t = self._find_op_type_str(_oid)
                     _sh = _extract_shape(_t) if _t else None
                     if _sh:
-                        _fa_maxdim = max([_fa_maxdim] + list(_sh))
+                        _dims = [d for d in _sh if d > 1]  # ignore broadcast/size-1
+                        if _dims:
+                            _fa_maxdim = max([_fa_maxdim] + _dims)
+                            _fa_mindim = min([_fa_mindim] + _dims)
+            # Empirically mapped failure boundary (2026-06-17): the attention
+            # lowering is validated only at BLOCK_M = BLOCK_N = 32, head_dim in
+            # {32, 64}. Two distinct out-of-range failure modes — only ONE was
+            # being guarded before, leaving a silent-wrong hole:
+            #   (a) max dot-tile dim > 64 (head_dim > 64): at the real BLOCK=32 this
+            #       fails LOUDLY with OutOfResources, but refuse here for a clear
+            #       message rather than a cryptic pipeline-state error.
+            #   (b) min dot-tile dim < 32 (BLOCK_M/BLOCK_N below 32): SILENTLY
+            #       mis-computes — rows past the first become garbage (max err
+            #       28..1e4) — for ANY head_dim, INCLUDING the otherwise-supported
+            #       32 and 64. The old head_dim>64 guard missed this entirely
+            #       (head_dim=64, BLOCK=16 returned silent garbage). (BLOCK > 32 is
+            #       already refused by other guards before reaching here.)
             if _fa_maxdim > 64:
                 raise MetalNonRecoverableError(
                     f"FlashAttention head_dim > 64 (a dot tile dimension is "
                     f"{_fa_maxdim}) is not supported: the attention lowering is "
-                    f"validated only for head_dim <= 64 and silently mis-computes "
-                    f"above it. Refusing to emit silently-wrong output. Use "
-                    f"head_dim <= 64.")
+                    f"validated only for head_dim <= 64. Refusing to emit "
+                    f"silently-wrong output. Use head_dim <= 64.")
+            if _fa_mindim < 32:
+                raise MetalNonRecoverableError(
+                    f"FlashAttention with a block tile dimension < 32 (smallest "
+                    f"dot tile dimension is {_fa_mindim}) is not supported: the "
+                    f"attention lowering silently mis-computes for BLOCK_M/BLOCK_N "
+                    f"below 32 (rows past the first become garbage), for any "
+                    f"head_dim. Refusing to emit silently-wrong output. Use "
+                    f"BLOCK_M = BLOCK_N = 32.")
 
         # Check for the fused matmul + row-softmax pattern FIRST — before the
         # simple/K-loop dot detectors. _detect_simple_dot matches any

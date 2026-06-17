@@ -89,6 +89,18 @@ tile dim > 64) now refuses head_dim > 64 loudly (`MetalNonRecoverableError`); RE
 full project suite 720 passed. True large-head_dim FA support (tiled threadgroup memory) is
 the remaining roadmap item.
 
+**FA boundary CORRECTED + a second silent-wrong hole closed (2026-06-17).** Mapping the
+full BLOCK × head_dim grid empirically revealed the 2026-06-16 diagnosis was incomplete:
+the attention lowering is validated only at **BLOCK_M = BLOCK_N = 32**. head_dim = 128 at
+that real block size fails *loudly* (OutOfResources), not silently. The actual silent-wrong
+trigger is **BLOCK_M/BLOCK_N < 32** — which mis-computes (rows past the first → garbage,
+err 28..1e4) for *any* head_dim, **including the otherwise-supported 32 and 64**. The
+head_dim>64-only guard missed this (e.g. head_dim=64, BLOCK=16 returned silent garbage).
+Fixed: the prescan now also refuses when the min dot-tile dim < 32. Verified: validated
+range (BLOCK=32, head_dim 32/64) still passes ~3e-7; all out-of-range configs refuse loudly;
+FA suite 17/17 (added `test_small_block_refuses`), project suite 724 passed. CODEGEN_VERSION
+bumped to 2026.06.17.1.
+
 **~~vectorized loads (memory-BW ceiling 64% → ~75-80%)~~ — EXPLORED + DECLINED 2026-06-16.**
 The "75-80%" headroom doesn't exist on this hardware. Probe (M4 Max, vector_add @ 16M):
 at a tuned grid-stride config, `float4` gives only **~3-5%** over scalar (scalar 293-304,

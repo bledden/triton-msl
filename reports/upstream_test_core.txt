@@ -13,7 +13,7 @@ Failure Categories:
 Pytest summary (cross-check):
   passed: 5559
   skipped: 3783
-  warnings: 96
+  warnings: 2296
 
 Sample passing tests:
   unit/language/test_core.py::test_scalar_overflow

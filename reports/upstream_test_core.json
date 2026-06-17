@@ -9,7 +9,7 @@
   "pass_rate": 60.5,
   "failure_categories": {},
   "pytest_summary": {
-    "warnings": 96,
+    "warnings": 2296,
     "passed": 5559,
     "skipped": 3783
   },
