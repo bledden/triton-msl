@@ -130,6 +130,102 @@ out = mx.zeros((n,))
 results = triton_call(add_kernel, x, y, out, n, grid=(4,), BLOCK=256)
 ```
 
+### MPS tensors — zero-copy
+
+The same `@triton.jit` kernel runs **zero-copy** on `torch` MPS tensors: the driver
+dispatches the emitted Metal through `torch.mps.compile_shader`, skipping the host
+round-trip (~10× faster on memory-bound kernels; on by default, no code change):
+
+```python
+x = torch.randn(n, device="mps")
+y = torch.randn(n, device="mps")
+out = torch.empty(n, device="mps")
+add_kernel[(n + 255) // 256,](x, y, out, n, BLOCK=256)  # runs on the GPU, no copy
+```
+
+### Matmul (`tl.dot`)
+
+Aligned fp16/fp32 matmuls (M%32, N%32, K%8) on MPS tensors take a direct
+simdgroup-matrix path (~11–12 TFLOP/s on M4 Max), dispatched zero-copy:
+
+```python
+@triton.jit
+def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
+                  sam, sak, sbk, sbn, scm, scn,
+                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid_m = tl.program_id(0); pid_n = tl.program_id(1)
+    offm = pid_m * BM + tl.arange(0, BM)
+    offn = pid_n * BN + tl.arange(0, BN)
+    offk = tl.arange(0, BK)
+    a = a_ptr + (offm[:, None] * sam + offk[None, :] * sak)
+    b = b_ptr + (offk[:, None] * sbk + offn[None, :] * sbn)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k in range(0, K, BK):
+        acc += tl.dot(tl.load(a), tl.load(b))
+        a += BK * sak; b += BK * sbk
+    tl.store(c_ptr + (offm[:, None] * scm + offn[None, :] * scn), acc.to(tl.float16))
+
+M = N = K = 2048
+A = torch.randn(M, K, device="mps", dtype=torch.float16)
+B = torch.randn(K, N, device="mps", dtype=torch.float16)
+C = torch.empty(M, N, device="mps", dtype=torch.float16)
+matmul_kernel[(M // 64, N // 64)](
+    A, B, C, M, N, K,
+    A.stride(0), A.stride(1), B.stride(0), B.stride(1), C.stride(0), C.stride(1),
+    BM=64, BN=64, BK=32)
+```
+
+### Integrity contract — refused, never silently wrong
+
+A kernel triton-metal **cannot lower correctly raises `MetalNonRecoverableError`**
+rather than returning garbage. For example, a pid-tiled matmul that bakes its M/N
+dims as `constexpr` (so the true output strides can't be recovered) is refused:
+
+```python
+from triton_metal.errors import MetalNonRecoverableError
+
+@triton.jit
+def matmul_baked_dims(a_ptr, b_ptr, c_ptr, K,
+                      M: tl.constexpr, N: tl.constexpr,
+                      BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid_m = tl.program_id(0); pid_n = tl.program_id(1)
+    offm = pid_m * BM + tl.arange(0, BM)
+    offn = pid_n * BN + tl.arange(0, BN)
+    offk = tl.arange(0, BK)
+    a = a_ptr + (offm[:, None] * K + offk[None, :])
+    b = b_ptr + (offk[:, None] * BN + offn[None, :])
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for _k in range(0, K, BK):
+        acc += tl.dot(tl.load(a), tl.load(b)); a += BK; b += BK * BN
+    tl.store(c_ptr + (offm[:, None] * BN + offn[None, :]), acc)
+
+try:
+    matmul_baked_dims[(2, 2)](A, B, C, K, M=64, N=64, BM=32, BN=32, BK=32)
+except MetalNonRecoverableError as e:
+    print("refused (not silent-wrong):", e)
+```
+
+See [`docs/SUPPORTED_OPS.md`](docs/SUPPORTED_OPS.md) for the full op/dtype support
+matrix and the loud-refusal catalog.
+
+### FlashAttention
+
+A full FlashAttention v2 forward (causal + non-causal, **head_dim ≤ 64**) runs
+through the standard `@triton.jit` path — see
+[`tests/test_flash_attention.py`](tests/test_flash_attention.py) for the kernel and
+launch. (head_dim > 64 is refused; large-head_dim support is on the roadmap.)
+
+### Tuning flags
+
+All default-on; set to `0` to disable (an escape hatch for bisecting a regression):
+
+| Flag | Effect when disabled |
+|------|----------------------|
+| `TRITON_METAL_COMPILE_SHADER=0` | Use the host-copy driver instead of the zero-copy `compile_shader` dispatch |
+| `TRITON_METAL_FAST_MATMUL=0` | Use the generic matmul instead of the fast simdgroup-matrix path |
+| `TRITON_METAL_MEPT=0` | Disable the multi-element-per-thread register-array model |
+| `TRITON_METAL_LEGACY=1` | Opt **in** to the heuristic legacy text parser (off by default — it can be silent-wrong) |
+
 ## What Works
 
 | Category | Operations |
@@ -137,7 +233,7 @@ results = triton_call(add_kernel, x, y, out, n, grid=(4,), BLOCK=256)
 | **Elementwise** | add, sub, mul, div, exp, log, sqrt, abs, neg, SiLU, GELU, sigmoid, tanh, ReLU, leaky ReLU, clamp, FMA |
 | **Reductions** | sum, max, min, argmax, argmin, xor_sum |
 | **Dot product** | `tl.dot` with strided matmul template, all epilogues (add, softmax, chain-dot, transpose) |
-| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at HEAD_DIM=32 via the default Python MSL path (C++ plugin is experimental); dedicated `qk = q @ trans(k)` lowering in `DotOpToLLVM.cpp`. HEAD_DIM=64 is part of the WS1 register-array spine. |
+| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at **HEAD_DIM 32 and 64** via the Python MSL path. head_dim > 64 is refused (`MetalNonRecoverableError`, never silent-wrong); large-head_dim support is on the roadmap. |
 | **Normalization** | Layer norm, RMS norm, batch norm |
 | **Type casts** | FP32, FP16, BF16, INT8, INT16, INT32, bool |
 | **Control flow** | `scf.for`, `scf.if`, while loops |
@@ -160,27 +256,29 @@ results = triton_call(add_kernel, x, y, out, n, grid=(4,), BLOCK=256)
 
 ## Performance (M4 Max [\[13\]](REFERENCES.md))
 
-Benchmarks from Triton tutorials, measured 2026-04 (see
-`reports/perf_baseline.json`):
+Current numbers via the zero-copy `compile_shader` path (default-on); see
+`reports/perf_baseline.json`. Hardware peak: 546 GB/s memory, 18.4 / 36.9 TFLOP/s
+fp32 / fp16.
 
-| Kernel | Size | Throughput | vs CPU | % of peak |
-|--------|------|-----------|--------|-----------|
-| Vector add | 16M elements | 137.5 GB/s | 0.93× | ~25% of 546 GB/s |
-| Softmax | 8192×1024 | 109.4 GB/s | **1.26×** | ~20% of 546 GB/s |
-| Matmul | 512×512 | 826 GFLOP/s | 0.32× | (compute-bound; well below peak) |
-| Layer norm | 4096×1024 | 77.5 GB/s | 0.34× | ~14% of 546 GB/s |
+| Kernel | Size | Throughput | % of peak | vs host-copy path |
+|--------|------|-----------|-----------|-------------------|
+| Vector add | 16M | 347 GB/s | 64% | **13×** |
+| Elementwise | 16M | 315 GB/s | 58% | 13.4× |
+| Softmax | 8192×1024 | 232 GB/s | 42% | **17.8×** |
+| Reduction | 16M | 235 GB/s | 43% | 8.2× |
+| Matmul (fp32) | 2048³ | 11.4 TFLOP/s | 62% of fp32 peak | ~4× generic |
+| Matmul (fp16) | 2048³ | 12.4 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
 
-**These numbers reflect the *current* state, not the *target*.** The
-register-array spine (WS1 of the active roadmap) is explicitly designed to
-move them toward the hardware roofline. "Optimal bounds given by the
-hardware" is defined empirically by the WS0/C6 profiling+disassembly
-harness: *saturate the limiting hardware counter, verified in the
-disassembly*. See the roadmap for the methodology.
+\* fp16 matmul runs at roughly the fp32 matrix-unit rate (float accumulation for
+precision); Apple's simdgroup-matrix unit isn't faster for half accumulation, so the
+36.9 TFLOP/s fp16 figure is an unreachable vector-ALU peak. The ~58–64% memory-bound
+and ~60% fp32-matmul numbers are **near the practical ceilings** for these kernel
+classes on this hardware (the raw 546 / 18.4 / 36.9 spec peaks are not reachable by
+compute) — see the Phase-5 readiness audit (`docs/audits/`).
 
-**Known bottleneck**: ~0.15 ms buffer copy overhead per kernel launch when
-using MPS tensors (MPS→CPU→Metal→CPU→MPS). Use CPU tensors for best
-performance, or the MLX backend [\[7\]](REFERENCES.md) for zero-copy
-dispatch via `mx.fast.metal_kernel`.
+**MPS tensors run zero-copy** via `torch.mps.compile_shader` (default-on) — the prior
+host-round-trip copy bottleneck is gone. CPU tensors and the MLX backend
+[\[7\]](REFERENCES.md) (`mx.fast.metal_kernel`) also dispatch zero-copy.
 
 ## Architecture
 
