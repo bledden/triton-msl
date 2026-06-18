@@ -4369,6 +4369,315 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         if dst_shape:
             self.env_shapes[ssa.id] = dst_shape
 
+    def _detect_flash_attention(self):
+        """Recognize a FlashAttention forward kernel and extract its params.
+
+        Returns ``None`` when the kernel is NOT an FA pattern (fewer than two
+        ``tt.dot`` ops, or no exp + max — i.e. no softmax-with-stability
+        between the dots). Returns a fully-resolved param dict when EVERY field
+        is recovered unambiguously::
+
+            {
+              "q", "k", "v", "out": kernel-arg indices of the four pointers,
+              "strides": {"q":[z,h,m,k], "k":[...], "v":[...], "o":[...]},
+                          (16 stride kernel-arg indices, 4 per pointer),
+              "Z", "H", "N_CTX": kernel-arg indices of the batch/head/ctx
+                          scalars,
+              "block_m", "block_n", "head_dim": tile dims from the dot shapes,
+              "causal": bool, "scale": float, "out_dtype": str,
+            }
+
+        Raises ``MetalNonRecoverableError`` when the kernel IS an FA pattern
+        (>= 2 dots + exp + max) but ANY field — a pointer role, any of the 16
+        strides, a constexpr, or the dtype — cannot be resolved unambiguously.
+        This refuse-on-ambiguity is the project's prime directive: a single
+        mis-read stride would silently mis-compute, so we never return a
+        partially-guessed dict. (Refusing a *non-canonical* FA kernel is the
+        correct, safe outcome — Task 3's tiled MSL template only handles the
+        canonical addressing.)
+
+        This is pure IR analysis (no GPU). It is NOT yet wired into
+        ``lower()`` — Task 3 does the routing.
+        """
+        from triton_metal.errors import MetalNonRecoverableError
+
+        # --- FA gate: identical to the prescan in lower() ---------------------
+        # >= 2 tt.dot with BOTH exp and a max between them (softmax with the
+        # numerical-stability max). Requiring the max excludes non-FA >=2-dot
+        # kernels that merely use exp (e.g. a fused MLP with a gelu/silu).
+        def _fa_walk(ops):
+            for _s in ops:
+                yield _s
+                if getattr(_s, "region_ops", None):
+                    yield from _fa_walk(_s.region_ops)
+                if getattr(_s, "else_ops", None):
+                    yield from _fa_walk(_s.else_ops)
+
+        all_ops = list(_fa_walk(self.graph.ops))
+        dots = [s for s in all_ops if s.op == "tt.dot"]
+        has_exp = any("exp" in (s.op or "") for s in all_ops)
+        has_max = any("max" in (s.op or "") for s in all_ops)
+        if not (len(dots) >= 2 and has_exp and has_max):
+            return None
+
+        # Past this point the kernel IS an FA pattern: any unresolved field is
+        # a hard refusal, never a guess.
+        def _refuse(field):
+            raise MetalNonRecoverableError(
+                f"FlashAttention recognized but {field} could not be resolved; "
+                f"refusing rather than guess")
+
+        op_by_id = {}
+
+        def _collect(ops):
+            for s in ops:
+                op_by_id[s.id] = s
+                if s.region_ops:
+                    _collect(s.region_ops)
+                if s.else_ops:
+                    _collect(s.else_ops)
+        _collect(self.graph.ops)
+
+        arg_by_id = {a.id: a for a in self.graph.args}
+
+        # The two dots, in IR order: dot 0 = QK^T (operands Q, K), dot 1 = P@V
+        # (operand 1 = V; operand 0 = the softmax probs P, which has NO load).
+        # Order by position in the flat op list so dot 0 is the QK matmul.
+        order = {s.id: i for i, s in enumerate(all_ops)}
+        dot_qk, dot_pv = sorted(dots, key=lambda d: order[d.id])[:2]
+
+        # --- helpers: trace an addptr chain back to (base_ptr_arg, 4 strides) -
+        def _skip_layout(sid):
+            seen = set()
+            while sid in op_by_id and sid not in seen:
+                seen.add(sid)
+                op = op_by_id[sid]
+                if op.op == "ttg.convert_layout" and op.operand_ids:
+                    sid = op.operand_ids[0]
+                    continue
+                break
+            return sid
+
+        def _stride_from_index_term(term_id):
+            """``arith.muli(index, tt.splat(STRIDE_ARG))`` (possibly through a
+            ``tt.broadcast``) -> the stride kernel-arg index, or None."""
+            tid = _skip_layout(term_id)
+            op = op_by_id.get(tid)
+            if op is None:
+                return None
+            if op.op == "tt.broadcast" and op.operand_ids:
+                return _stride_from_index_term(op.operand_ids[0])
+            if op.op != "arith.muli":
+                return None
+            for oid in op.operand_ids:
+                sub = op_by_id.get(oid)
+                if sub is not None and sub.op == "tt.splat" and sub.operand_ids:
+                    a = arg_by_id.get(sub.operand_ids[0])
+                    if a is not None and not a.is_ptr:
+                        return a.index
+            return None
+
+        def _scalar_stride_from_muli(muli_id):
+            """``arith.muli(program_id_or_derived, STRIDE_ARG)`` scalar ->
+            stride kernel-arg index, or None."""
+            op = op_by_id.get(muli_id)
+            if op is None or op.op != "arith.muli":
+                return None
+            for oid in op.operand_ids:
+                a = arg_by_id.get(oid)
+                if a is not None and not a.is_ptr:
+                    return a.index
+            return None
+
+        def _extract_ptr_strides(addr_id):
+            """Walk the ``[BLOCK, HEAD_DIM]`` tensor-of-pointers addptr chain
+            built by the standard 4-D addressing pattern::
+
+                ptr + off_z*sz + off_h*sh
+                    + row_idx[:,None]*srow + col_idx[None,:]*scol
+
+            Returns ``(base_ptr_arg_index, [sz, sh, srow, scol])`` (all arg
+            indices), or ``None`` if any leg deviates from the pattern.
+            """
+            if addr_id is None:
+                return None
+            addr_id = _skip_layout(addr_id)
+            op = op_by_id.get(addr_id)
+            # terminal: addptr(broadcast(row_ptr_2d), broadcast(col_term))
+            if op is None or op.op != "tt.addptr" or len(op.operand_ids) < 2:
+                return None
+            col_stride = _stride_from_index_term(op.operand_ids[1])
+            # row side: broadcast -> addptr(splat(scalar_base), row_term)
+            row_side = _skip_layout(op.operand_ids[0])
+            rop = op_by_id.get(row_side)
+            if rop is not None and rop.op == "tt.broadcast" and rop.operand_ids:
+                row_side = _skip_layout(rop.operand_ids[0])
+                rop = op_by_id.get(row_side)
+            if rop is None or rop.op != "tt.addptr" or len(rop.operand_ids) < 2:
+                return None
+            row_stride = _stride_from_index_term(rop.operand_ids[1])
+            splat_base = op_by_id.get(rop.operand_ids[0])
+            if splat_base is None or splat_base.op != "tt.splat" \
+                    or not splat_base.operand_ids:
+                return None
+            # scalar chain: addptr(addptr(PTR, muli(off_z, SZ)), muli(off_h, SH))
+            scal = op_by_id.get(splat_base.operand_ids[0])
+            if scal is None or scal.op != "tt.addptr" or len(scal.operand_ids) < 2:
+                return None
+            h_stride = _scalar_stride_from_muli(scal.operand_ids[1])
+            inner = op_by_id.get(scal.operand_ids[0])
+            if inner is None or inner.op != "tt.addptr" \
+                    or len(inner.operand_ids) < 2:
+                return None
+            z_stride = _scalar_stride_from_muli(inner.operand_ids[1])
+            base = arg_by_id.get(inner.operand_ids[0])
+            if base is None or not base.is_ptr:
+                return None
+            strides = [z_stride, h_stride, row_stride, col_stride]
+            if any(s is None for s in strides):
+                return None
+            return base.index, strides
+
+        def _load_addr_for_dot_operand(operand_id, _depth=0):
+            """From a dot operand SSA id, walk back through the
+            local_load -> (memdesc_trans?) -> local_alloc -> (mulf scale?) ->
+            tt.load chain to the load's ADDRESS operand id, or None when the
+            operand has no backing load (e.g. the softmax probs P)."""
+            if _depth > 32:
+                return None
+            sid = operand_id
+            seen = set()
+            while sid in op_by_id and sid not in seen:
+                seen.add(sid)
+                op = op_by_id[sid]
+                if op.op in ("ttg.local_load", "ttg.local_alloc",
+                             "ttg.memdesc_trans", "tt.trans", "tt.reshape",
+                             "ttg.convert_layout") and op.operand_ids:
+                    sid = op.operand_ids[0]
+                    continue
+                if op.op == "tt.load" and op.operand_ids:
+                    return op.operand_ids[0]
+                if op.op == "arith.mulf":
+                    # Q is scaled (q * qk_scale) before the local_alloc; follow
+                    # whichever operand traces to a load.
+                    for oid in op.operand_ids:
+                        r = _load_addr_for_dot_operand(oid, _depth + 1)
+                        if r is not None:
+                            return r
+                    return None
+                break
+            return None
+
+        # --- pointer roles + strides -----------------------------------------
+        q_addr = _load_addr_for_dot_operand(dot_qk.operand_ids[0])
+        k_addr = _load_addr_for_dot_operand(dot_qk.operand_ids[1])
+        v_addr = _load_addr_for_dot_operand(dot_pv.operand_ids[1])
+        q_res = _extract_ptr_strides(q_addr)
+        k_res = _extract_ptr_strides(k_addr)
+        v_res = _extract_ptr_strides(v_addr)
+        if q_res is None:
+            _refuse("the Q pointer/stride chain")
+        if k_res is None:
+            _refuse("the K pointer/stride chain")
+        if v_res is None:
+            _refuse("the V pointer/stride chain")
+
+        # Store target = Out. There must be exactly one tt.store.
+        stores = [s for s in all_ops if s.op == "tt.store"]
+        if len(stores) != 1 or not stores[0].operand_ids:
+            _refuse("the output store")
+        o_res = _extract_ptr_strides(stores[0].operand_ids[0])
+        if o_res is None:
+            _refuse("the Out pointer/stride chain")
+
+        q_idx, q_strides = q_res
+        k_idx, k_strides = k_res
+        v_idx, v_strides = v_res
+        o_idx, o_strides = o_res
+
+        # Four DISTINCT pointer roles.
+        if len({q_idx, k_idx, v_idx, o_idx}) != 4:
+            _refuse("four distinct pointer roles")
+
+        # --- tile dims from the dot shapes -----------------------------------
+        # dot 0 (QK^T): A = [block_m, head_dim], result = [block_m, block_n].
+        a_shape = _extract_shape(self._find_op_type_str(dot_qk.operand_ids[0]))
+        qk_out_shape = _extract_shape(dot_qk.type_str or "")
+        # dot 1 (P@V): result = [block_m, head_dim].
+        pv_out_shape = _extract_shape(dot_pv.type_str or "")
+        if (not a_shape or len(a_shape) != 2
+                or not qk_out_shape or len(qk_out_shape) != 2
+                or not pv_out_shape or len(pv_out_shape) != 2):
+            _refuse("the dot tile shapes")
+        block_m, head_dim = a_shape
+        if qk_out_shape[0] != block_m:
+            _refuse("a consistent block_m across the two dots")
+        block_n = qk_out_shape[1]
+        if tuple(pv_out_shape) != (block_m, head_dim):
+            _refuse("a consistent [block_m, head_dim] P@V output")
+
+        # --- Z / H / N_CTX scalar arg indices --------------------------------
+        scalar_by_name = {a.name: a for a in self.graph.args if not a.is_ptr}
+        z_arg = scalar_by_name.get("Z")
+        h_arg = scalar_by_name.get("H")
+        n_ctx_arg = scalar_by_name.get("N_CTX")
+        if z_arg is None or h_arg is None or n_ctx_arg is None:
+            _refuse("the Z/H/N_CTX scalar args")
+
+        # --- causal: an arith.select of shape [block_m, block_n] whose operands
+        # include the QK dot result (the tl.where(mask, qk, -inf) causal mask).
+        causal = False
+        for s in all_ops:
+            if s.op == "arith.select":
+                sel_shape = _extract_shape(s.type_str or "")
+                if (tuple(sel_shape) == (block_m, block_n)
+                        and dot_qk.id in (s.operand_ids or [])):
+                    causal = True
+                    break
+
+        # --- scale: the constant multiplied into Q before the first dot
+        # (q * qk_scale, qk_scale = 1/sqrt(head_dim)). Find the arith.mulf
+        # feeding dot 0's A operand whose other input is an arith.constant.
+        scale = None
+        scale_id = _skip_layout(dot_qk.operand_ids[0])
+        seen = set()
+        while scale_id in op_by_id and scale_id not in seen:
+            seen.add(scale_id)
+            op = op_by_id[scale_id]
+            if op.op == "arith.mulf":
+                for oid in op.operand_ids:
+                    sub = op_by_id.get(oid)
+                    if sub is not None and sub.op == "arith.constant":
+                        v = sub.attrs.get("value")
+                        if isinstance(v, (int, float)):
+                            scale = float(v)
+                break
+            if op.operand_ids and op.op in (
+                    "ttg.local_load", "ttg.local_alloc", "ttg.memdesc_trans",
+                    "tt.trans", "tt.reshape", "ttg.convert_layout"):
+                scale_id = op.operand_ids[0]
+                continue
+            break
+        if scale is None:
+            _refuse("the softmax scale constant")
+
+        # --- out_dtype: the output pointer's element type --------------------
+        out_arg = arg_by_id.get(self.graph.args[o_idx].id)
+        out_dtype = out_arg.elem_type if out_arg is not None else None
+        if not out_dtype:
+            _refuse("the output dtype")
+
+        return {
+            "q": q_idx, "k": k_idx, "v": v_idx, "out": o_idx,
+            "strides": {
+                "q": q_strides, "k": k_strides,
+                "v": v_strides, "o": o_strides,
+            },
+            "Z": z_arg.index, "H": h_arg.index, "N_CTX": n_ctx_arg.index,
+            "block_m": block_m, "block_n": block_n, "head_dim": head_dim,
+            "causal": causal, "scale": scale, "out_dtype": out_dtype,
+        }
+
     def _find_op_type_str(self, ssa_id: int) -> str:
         """Find the type_str for an SSA value by searching ops, recursing
         into nested scf regions (region_ops = body/then, else_ops = while
