@@ -165,6 +165,45 @@ def test_fa_pattern_with_unresolvable_stride_refuses():
 
 
 @requires_triton
+def test_fa_near_miss_refuses_through_lower():
+    """End-to-end integrity: a near-miss FA kernel refuses through lower(), not just
+    at the detector unit level.
+
+    This test parallels ``test_fa_pattern_with_unresolvable_stride_refuses`` but
+    drives the refusal through the FULL ``lower()`` call path (the same path a
+    real @triton.jit invocation would take), confirming the never-silent-wrong
+    boundary is enforced at both layers — detector level AND compile/lower level.
+
+    Construction: take the real FA graph, break the stride_qm splat so the Q
+    pointer/stride chain cannot be resolved, then call ``lo.lower()``.  ``lower()``
+    fires the FA prescan (>= 2 dots + exp + max, maxdim==128), calls
+    ``_detect_flash_attention()``, which raises ``MetalNonRecoverableError`` rather
+    than returning a partially-guessed dict — and that error propagates out through
+    ``lower()`` to the caller.
+    """
+    from triton_metal.errors import MetalNonRecoverableError
+
+    lo = _build_fa_lowerer(causal=False, head_dim=128, block=32)
+
+    qm_id = next(a.id for a in lo.graph.args if a.name == "stride_qm")
+
+    def _break(ops):
+        for s in ops:
+            if s.op == "tt.splat" and s.operand_ids == [qm_id]:
+                s.operand_ids = []
+            if s.region_ops:
+                _break(s.region_ops)
+            if s.else_ops:
+                _break(s.else_ops)
+    _break(lo.graph.ops)
+
+    # The refusal must surface through lower() — not just the detector method.
+    with pytest.raises(MetalNonRecoverableError,
+                       match="Q pointer/stride chain"):
+        lo.lower()
+
+
+@requires_triton
 def test_non_fa_kernel_returns_none():
     """A plain vector-add kernel (no dots) is not an FA pattern → None."""
     from triton.compiler import ASTSource

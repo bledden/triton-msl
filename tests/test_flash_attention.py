@@ -295,11 +295,14 @@ class TestFlashAttention:
     @requires_triton
     @pytest.mark.parametrize("BLOCK", [16, 8])
     def test_head_dim_over_64_refuses(self, BLOCK):
-        """Integrity guard: FlashAttention at head_dim > 64 must REFUSE loudly
-        (`MetalNonRecoverableError`), never silently mis-compute. head_dim=128 with
-        small blocks previously produced garbage (max error ~1000) with no error
-        raised; the prescan guard in `lower()` now refuses it. head_dim 32 and 64
-        (tested above) stay supported. Large-head_dim FA is future work."""
+        """Integrity guard: FlashAttention at head_dim=128 with BLOCK < 32 must
+        REFUSE loudly (`MetalNonRecoverableError`), never silently mis-compute.
+        head_dim=128 with small blocks (8 or 16) previously produced garbage
+        (max error ~1000) with no error raised; the prescan guard in `lower()`
+        now refuses it. head_dim 32 and 64 at BLOCK=32 stay supported.
+        head_dim=128 at BLOCK=32 (fp32 and fp16) is now routed to the tiled FA2
+        MSL template (Task 1–5); what remains refused is head_dim > 128 and
+        BLOCK_M/BLOCK_N < 32."""
         Z, H, N_CTX, HEAD_DIM = 1, 1, 128, 128
         torch.manual_seed(42)
         q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
@@ -318,6 +321,82 @@ class TestFlashAttention:
                 BLOCK_M=BLOCK, BLOCK_N=BLOCK, HEAD_DIM=HEAD_DIM,
                 IS_CAUSAL=False,
             )
+
+    @requires_triton
+    @pytest.mark.parametrize("HEAD_DIM", [256])
+    def test_head_dim_above_cap_refuses(self, HEAD_DIM):
+        """Integrity: head_dim > 128 at BLOCK=32 must REFUSE loudly, never route.
+
+        The tiled FA2 template is validated only for head_dim=128. A kernel with
+        head_dim=256 has a maximum dot-tile dimension > 64 and is NOT routed
+        (routing fires only at maxdim==128); it falls through to the
+        `_fa_maxdim > 64` prescan guard which raises `MetalNonRecoverableError`.
+
+        Integrity guarantee: never-silent-wrong — the boundary between the routed
+        cap (128) and the refuse fence (> 64) is tested here explicitly.
+
+        Note: HEAD_DIM must be a power of 2 (Triton arange constraint); non-power-
+        of-2 sizes (e.g. 192) are refused earlier by the Triton frontend.
+        """
+        Z, H, N_CTX, BLOCK = 1, 1, 64, 32
+        torch.manual_seed(42)
+        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        out = torch.empty_like(q)
+        grid = (N_CTX // BLOCK, Z * H)
+        with pytest.raises(MetalNonRecoverableError,
+                           match="head_dim > 64"):
+            _flash_attn_fwd[grid](
+                q, k, v, out,
+                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+                Z, H, N_CTX,
+                BLOCK_M=BLOCK, BLOCK_N=BLOCK, HEAD_DIM=HEAD_DIM,
+                IS_CAUSAL=False,
+            )
+
+    @requires_triton
+    def test_bf16_large_head_refuses(self):
+        """Integrity: bfloat16 at head_dim=128, BLOCK=32 must REFUSE, never route.
+
+        The tiled FA2 MSL template only handles fp32 and fp16 output (the routing
+        gate checks `out_dtype in ("f32", "f16")`). A bf16 kernel detects as FA
+        (dots + exp + max are present, head_dim=128), the detector returns
+        out_dtype="bf16", the routing condition fails, and the kernel falls through
+        to the `_fa_maxdim > 64` prescan guard which raises
+        `MetalNonRecoverableError`. The refusal happens at compile/lower time —
+        bf16 is never silently emitted as a wrong-dtype computation.
+
+        If the Triton frontend rejects bf16 before reaching the lowerer (e.g.
+        type-system error in tl.store/tl.dot), that is also acceptable: we assert
+        that compilation raises — NOT that output is silently wrong.
+        """
+        Z, H, N_CTX, HEAD_DIM, BLOCK = 1, 1, 64, 128, 32
+        torch.manual_seed(42)
+        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.bfloat16)
+        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.bfloat16)
+        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.bfloat16)
+        out = torch.empty_like(q)
+        grid = (N_CTX // BLOCK, Z * H)
+        # Both MetalNonRecoverableError (lowerer-level refuse) and Exception
+        # sub-types from the Triton frontend (type rejection) are acceptable here;
+        # what's NOT acceptable is silent success with wrong output.
+        with pytest.raises((MetalNonRecoverableError, Exception)) as exc_info:
+            _flash_attn_fwd[grid](
+                q, k, v, out,
+                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+                Z, H, N_CTX,
+                BLOCK_M=BLOCK, BLOCK_N=BLOCK, HEAD_DIM=HEAD_DIM,
+                IS_CAUSAL=False,
+            )
+        # Whatever layer rejected it, verify it was not a silent success:
+        assert exc_info.value is not None, "expected a loud refusal, got silent run"
 
     @requires_triton
     @pytest.mark.parametrize("HEAD_DIM", [32, 64])

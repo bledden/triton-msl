@@ -87,6 +87,22 @@ def test_tiled_fa_emits_chunk_loop():
     assert "threadgroup float acc" in src
 
 
+def test_standalone_fp16_decl():
+    """Standalone (arg_decls=None) fp16 path emits ``device const half* Q``.
+
+    The standalone form (used by the fixture in test_fa_tiled_template.py) is
+    only exercised end-to-end for fp32; this 1-line assertion covers the fp16
+    branch of the canonical ABI emission so a future change to elem_t won't
+    silently regress the pointer type.
+    """
+    src = make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
+                                            out_dtype="fp16")
+    assert "device const half* Q" in src, (
+        "expected 'device const half* Q' in standalone fp16 MSL; "
+        f"got pointer decl: {src[src.find('device const'):src.find('device const')+40]!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Finding 1: scale parameter — golden/structure assertions
 # ---------------------------------------------------------------------------
