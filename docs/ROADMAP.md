@@ -1,11 +1,66 @@
 # triton-metal Implementation Roadmap
 
-> Last updated: 2026-04-09
->
-> Current state: **0.1.0-alpha** -- 4,280/8,952 upstream tests passing (47.8%), 23/32 torch.compile (9 regressions from PyTorch 2.11 2D patterns), 14/15 MLX.
-> Codebase: ~5,600 LOC generic_lowerer.py, ~5,200 LOC msl_emitter.py, ~1,300 LOC mlir_walker.py, ~740 LOC driver.py.
+> Last updated: 2026-06-17 (status section refreshed). The dated phase tables further
+> below were authored **2026-04-09** and are kept as a detailed reference — but much of
+> Phase 0–1 + 2A + 6A has since landed. **Read "Current status" first for what's actually
+> done vs. remaining.**
 
-This document tracks every remaining work item for triton-metal, organized into phased delivery with explicit dependencies, scope estimates, and file-level change lists.
+This document tracks remaining work for triton-metal, organized into phased delivery with
+dependencies, scope estimates, and file-level change lists.
+
+---
+
+## Current status (2026-06-17) — supersedes the 2026-04-09 status line
+
+**0.1.0-alpha; first public release 2026-06-16.** Upstream `test_core.py`: **5,559 passed /
+0 failed / ~3,783 skipped** via `scripts/run_upstream_tests.py` (`--device cpu`, which loads
+the `conftest_metal` skip plugin). The skips are hardware-impossible (fp64, fp8/microscaling,
+64-bit atomics, TMA, device printf) or unimplemented features — **each refused loudly, never
+silent-wrong**. Project suite **754 / 0**; FlashAttention causal + non-causal at head_dim
+32 / 64 / 128.
+
+### Landed since this roadmap was written (2026-04-09)
+- **Phase 0** (foundation) — all items.
+- **Phase 1A–1D** — 2D tensor semantics, `ttg.local_alloc` shared memory, generic `tt.dot` via
+  simdgroup MMA, K-loop. Matmul + attention now lower generically.
+- **MEPT register-array spine** (not in the old plan) — multi-element-per-thread is the DEFAULT
+  lowering path (`TRITON_METAL_MEPT=0` escape hatch), retiring the 1-elem-per-thread model.
+- **2A** buffer-copy elimination — done via **zero-copy `torch.mps.compile_shader`** (~10× on
+  memory-bound; vector_add 28 → 347 GB/s ≈ 64% of the M4 Max 546 GB/s roof).
+- **Fast simdgroup matmul** — zero-copy, fp32/fp16/fp16-out, ~55–62% of fp32 peak.
+- **6A FlashAttention** — done, incl. **large head_dim** (128 @ BLOCK=32, fp32 + fp16, causal +
+  non-causal) via a head-dim-tiled template + refuse-on-ambiguity routing.
+- **Integrity contract** — `_refuse_unsafe_unsupported_ops` prescan (~24 guard sites), the
+  published refusal catalog (`SUPPORTED_OPS.md`), systematic refusal-coverage tests.
+- **Phase-5 honesty audit** (dual NVIDIA/MLX lens) + first public push.
+- **2E** (shared-mem aliasing) — partially realized ad hoc (the FA head-dim tiling); a general
+  pass remains open.
+
+### Remaining — re-prioritized for the current state
+1. **Training / backward pass** (old Phase 5) — biggest capability gap; **inference-only** today.
+2. **Dynamic shapes** (1H) — runtime-symbolic dispatch; needed for `torch.compile` variable shapes.
+3. **Distribution & upstream** — PyPI wheel (6E), official Triton backend submission (6C),
+   M1–M4 CI matrix, broader real-model testing beyond `test_core`.
+4. **Incremental op coverage** (all refuse loudly today, so safe to defer): noinline-dot (1E),
+   `tl.range` loop fusion (1F), 2D gather, multi-program atomics / cooperative sync (1G),
+   rank-≥2 cat/join, `map_elementwise` pack/multi-output, the i64 loop-induction-var hang,
+   unstructured control flow (`cf.cond_br`).
+5. **Performance** — near practical Apple ceilings per the Phase-5 audit (matmul ~60%,
+   memory-bound ~64%; **fp16-2× and vectorized-loads explored + declined**). Open: FA perf pass
+   (serialized acc-rescale), larger FA blocks / head_dim>128, autotuning beyond 1D blocks (2C),
+   shared-mem aliasing (2E), kernel fusion (2B).
+6. **Forward-looking / HW-gated**: M5 tensor-op matmul (3A), Metal 4 command model (3B), native
+   fp8/microscaling (3C) — await Apple HW/SDK.
+7. **Hardware-impossible (never; correctly refused)**: fp64, native fp8 matrix, 64-bit atomics,
+   TMA, device printf.
+
+### Plan assumptions that have since changed
+- The **C++ MLIR pass / port** (old 6D + the port-first roadmap) was **SHELVED** on an AGX
+  compiler blocker — **Python/MSL is the primary path** (language decision 2026-06-11).
+- Performance headroom is smaller than the old plan assumed: the Phase-5 audit measured matmul
+  ~60% and memory-bound ~64% as near the practical Apple ceiling.
+
+---
 
 ### Strategic Principles (from TorchTPU, TurboQuant, kforge research)
 
