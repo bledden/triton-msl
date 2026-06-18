@@ -25,6 +25,11 @@ try:
 except Exception:
     MetalNonRecoverableError = Exception
 
+try:
+    from triton.compiler.errors import CompilationError as _TritonCompilationError
+except Exception:
+    _TritonCompilationError = RuntimeError
+
 
 @triton.jit
 def _flash_attn_fwd(
@@ -373,6 +378,12 @@ class TestFlashAttention:
         If the Triton frontend rejects bf16 before reaching the lowerer (e.g.
         type-system error in tl.store/tl.dot), that is also acceptable: we assert
         that compilation raises — NOT that output is silently wrong.
+
+        Observed (2026-06-17): triton.compiler.errors.CompilationError —
+        "Both operands must be same dtype. Got fp32 and bf16" — raised at the
+        tl.dot type-checking layer before our lowerer is even reached.
+        MetalNonRecoverableError is kept in the tuple for the future case where
+        a Triton version accepts the bf16 types and our lowerer refuses it instead.
         """
         Z, H, N_CTX, HEAD_DIM, BLOCK = 1, 1, 64, 128, 32
         torch.manual_seed(42)
@@ -381,10 +392,16 @@ class TestFlashAttention:
         v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.bfloat16)
         out = torch.empty_like(q)
         grid = (N_CTX // BLOCK, Z * H)
-        # Both MetalNonRecoverableError (lowerer-level refuse) and Exception
-        # sub-types from the Triton frontend (type rejection) are acceptable here;
-        # what's NOT acceptable is silent success with wrong output.
-        with pytest.raises((MetalNonRecoverableError, Exception)) as exc_info:
+        # Narrowed to the two semantically-meaningful exception types:
+        #   - _TritonCompilationError: frontend type-system rejection (current behavior)
+        #   - MetalNonRecoverableError: lowerer-level refusal (future fallback path)
+        # A bare Exception would also catch fixture bugs (AttributeError, KeyError, etc.)
+        # masking unrelated crashes. The match= regex enforces the refusal is about
+        # bf16/dtype/head_dim — not an unrelated crash.
+        with pytest.raises(
+            (MetalNonRecoverableError, _TritonCompilationError),
+            match=r"bf16|bfloat16|dtype|not supported|unsupported|head_dim",
+        ):
             _flash_attn_fwd[grid](
                 q, k, v, out,
                 q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -395,8 +412,6 @@ class TestFlashAttention:
                 BLOCK_M=BLOCK, BLOCK_N=BLOCK, HEAD_DIM=HEAD_DIM,
                 IS_CAUSAL=False,
             )
-        # Whatever layer rejected it, verify it was not a silent success:
-        assert exc_info.value is not None, "expected a loud refusal, got silent run"
 
     @requires_triton
     @pytest.mark.parametrize("HEAD_DIM", [32, 64])
