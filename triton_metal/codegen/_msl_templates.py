@@ -1818,7 +1818,7 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
                                       arg_decls=None, bindings=None,
                                       kernel_name="flash_attention",
                                       scale=None):
-    """Generate a HEAD-DIM-TILED FlashAttention-2 kernel for Metal (fp32).
+    """Generate a HEAD-DIM-TILED FlashAttention-2 kernel for Metal (fp32/fp16).
 
     Same online-softmax FA2 algorithm as ``make_flash_attention_kernel`` but with
     two structural changes that let it run at large ``head_dim`` (e.g. 128) on
@@ -1873,7 +1873,11 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
         BLOCK_N:  KV rows staged per inner loop step.
         Dc:       Head-dim chunk width (default 64).
         causal:   Reserved; only False is supported/validated here.
-        out_dtype: Reserved; only "fp32" is supported here.
+        out_dtype: Input/output element type. "fp32"/"f32" (default) emits
+            float Q/K/V/Out; "fp16"/"f16" emits half Q/K/V/Out, promotes to
+            float on every load, keeps ALL compute + acc + softmax in fp32, and
+            casts to half on the final Out store (the proven cast-epilogue from
+            ``make_simdgroup_matmul_kernel_fast``). The scale stays fp32.
         arg_decls: Optional list of MSL ``[[buffer(N)]]`` declaration lines for
             the kernel signature, in binding order. When ``None`` the canonical
             full ABI is emitted (Q,K,V,Out, 16 strides, Z,H,N_CTX — used by the
@@ -1892,9 +1896,21 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
             detected value is baked, so a kernel that uses a non-standard scale
             (e.g. a learned temperature) computes correctly.
     """
-    if out_dtype != "fp32":
-        raise ValueError(f"make_flash_attention_kernel_tiled: only out_dtype='fp32' "
-                         f"is supported (got {out_dtype!r})")
+    # Element type of the Q/K/V/Out device buffers. fp16 inputs are promoted to
+    # float on load and the result is cast back to half on store (cast epilogue,
+    # mirroring make_simdgroup_matmul_kernel_fast); all interior compute stays
+    # fp32. Accept both the "fpNN" and MLIR-style "fNN" spellings so the routed
+    # path (which passes info["out_dtype"], e.g. "f16") and the standalone path
+    # ("fp16") agree.
+    if out_dtype in ("fp32", "f32"):
+        elem_t = "float"
+        store_cast = lambda expr: expr          # noqa: E731  (float -> float, no-op)
+    elif out_dtype in ("fp16", "f16"):
+        elem_t = "half"
+        store_cast = lambda expr: f"half({expr})"  # noqa: E731  (float -> half)
+    else:
+        raise ValueError(f"make_flash_attention_kernel_tiled: out_dtype must be "
+                         f"one of fp32/f32/fp16/f16 (got {out_dtype!r})")
     if causal:
         raise ValueError("make_flash_attention_kernel_tiled: only causal=False "
                          "is supported in this template")
@@ -1920,10 +1936,10 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
         # Canonical full ABI: Q,K,V,Out (0..3), 16 strides (4..19), Z,H,N_CTX
         # (20..22). Each logical name is its own buffer arg of the same name.
         _ptr_decls = [
-            "    device const float* Q [[buffer(0)]]",
-            "    device const float* K [[buffer(1)]]",
-            "    device const float* V [[buffer(2)]]",
-            "    device float* Out [[buffer(3)]]",
+            f"    device const {elem_t}* Q [[buffer(0)]]",
+            f"    device const {elem_t}* K [[buffer(1)]]",
+            f"    device const {elem_t}* V [[buffer(2)]]",
+            f"    device {elem_t}* Out [[buffer(3)]]",
         ]
         arg_decls = list(_ptr_decls)
         for i, name in enumerate(_LOGICAL):
@@ -1943,7 +1959,7 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
     return f"""#include <metal_stdlib>
 using namespace metal;
 
-// Head-dim-tiled FlashAttention-2 (fp32, non-causal).
+// Head-dim-tiled FlashAttention-2 ({elem_t} in/out, fp32 compute, non-causal).
 // Layout: Q,K,V,Out are [Z, H, N_CTX, D]; addressing via the (possibly
 // specialization-folded) strides. Buffer ABI matches the kernel's REAL present
 // arg order. The softmax scale (1/sqrt(D)) is baked (kernel has no scale arg).
@@ -2112,7 +2128,7 @@ kernel void {kernel_name}(
         if (q_row < N_CTX) {{
             float l_val = tg_l[r];
             float o = (l_val > 0.0f) ? (acc[i] / l_val) : 0.0f;
-            Out[o_base + q_row * o_sm + c * o_sk] = o;
+            Out[o_base + q_row * o_sm + c * o_sk] = {store_cast("o")};
         }}
     }}
 }}

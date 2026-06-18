@@ -682,13 +682,14 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             #       (head_dim=64, BLOCK=16 returned silent garbage). (BLOCK > 32 is
             #       already refused by other guards before reaching here.)
             #
-            # ROUTE the one supported large-head_dim config to the head-dim-tiled
+            # ROUTE the supported large-head_dim configs to the head-dim-tiled
             # FA2 template (Task 1) BEFORE the head_dim>64 refusal: head_dim=128,
-            # BLOCK_M=BLOCK_N=32, fp32, non-causal. _detect_flash_attention raises
-            # on ANY ambiguity (a mis-read stride would silently mis-compute), so
-            # reaching the template means every param resolved unambiguously.
-            # fp16 (out_dtype "f16") and causal stay refused for now — they fall
-            # through to the head_dim>64 guard below, which still refuses them.
+            # BLOCK_M=BLOCK_N=32, non-causal, fp32 (Task 3) OR fp16 (Task 4 —
+            # fp16 in / fp32 accumulate / fp16 out via the cast epilogue).
+            # _detect_flash_attention raises on ANY ambiguity (a mis-read stride
+            # would silently mis-compute), so reaching the template means every
+            # param resolved unambiguously. CAUSAL stays refused for now (Task 5)
+            # — it falls through to the head_dim>64 guard below, which refuses it.
             #
             # Only consult the detector when a dot tile reaches 128 — i.e. the
             # head_dim the tiled template targets. head_dim 32/64 lower through
@@ -701,7 +702,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 if (info is not None
                         and info["block_m"] == 32 and info["block_n"] == 32
                         and info["head_dim"] == 128
-                        and info["out_dtype"] == "f32"
+                        and info["out_dtype"] in ("f32", "f16")
                         and not info["causal"]):
                     return self._lower_flash_attention_template(info)
 
@@ -4634,8 +4635,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         def _load_addr_for_dot_operand(operand_id, _depth=0):
             """From a dot operand SSA id, walk back through the
             local_load -> (memdesc_trans?) -> local_alloc -> (mulf scale?) ->
-            tt.load chain to the load's ADDRESS operand id, or None when the
-            operand has no backing load (e.g. the softmax probs P)."""
+            (extf/truncf dtype-cast?) -> tt.load chain to the load's ADDRESS
+            operand id, or None when the operand has no backing load (e.g. the
+            softmax probs P).
+
+            ``arith.extf``/``arith.truncf`` are walked through because a fp16 FA
+            kernel casts a dot operand to a common dtype before the dot
+            (``tl.dot(q, tl.trans(k).to(q.dtype))`` — the QK operands must share
+            a dtype; for fp16 inputs ``q`` is already fp32 after ``q*scale``, so
+            ``k`` widens via ``arith.extf``). These conversions do not change the
+            ADDRESS the load reads from, so it is safe to see through them to the
+            backing load (and refusing-on-ambiguity still holds — the address
+            chain itself is unchanged)."""
             if _depth > 32:
                 return None
             sid = operand_id
@@ -4645,7 +4656,8 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 op = op_by_id[sid]
                 if op.op in ("ttg.local_load", "ttg.local_alloc",
                              "ttg.memdesc_trans", "tt.trans", "tt.reshape",
-                             "ttg.convert_layout") and op.operand_ids:
+                             "ttg.convert_layout",
+                             "arith.extf", "arith.truncf") and op.operand_ids:
                     sid = op.operand_ids[0]
                     continue
                 if op.op == "tt.load" and op.operand_ids:
@@ -4780,8 +4792,8 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
     def _lower_flash_attention_template(self, info: dict) -> str:
         """Emit the head-dim-tiled FA2 MSL (Task 1) for a detected FA kernel.
 
-        Called from ``lower()`` only for the validated config: head_dim=128,
-        BLOCK_M=BLOCK_N=32, fp32 output, non-causal. ``info`` comes from
+        Called from ``lower()`` only for the validated configs: head_dim=128,
+        BLOCK_M=BLOCK_N=32, non-causal, fp32 OR fp16 output. ``info`` comes from
         ``_detect_flash_attention`` (which refuses on any ambiguity).
 
         ABI reconciliation (the crux). The launcher binds the flat non-constexpr
@@ -4911,8 +4923,13 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # Emit under the kernel's real (sanitized) name so it matches
         # metadata["name"] the driver loads from the metallib (emit_msl sets
         # name = _sanitize_msl_name(graph.func_name) before lower()).
+        # out_dtype comes from the detector as an MLIR spelling ("f32"/"f16");
+        # the template accepts both spellings. fp16 emits half Q/K/V/Out (the
+        # arg_decls above already use the args' real elem_type, so the pointer
+        # types match) and applies the promote-on-load / cast-on-store epilogue.
         msl = make_flash_attention_kernel_tiled(
-            head_dim, block_m, block_n, Dc=64, causal=False, out_dtype="fp32",
+            head_dim, block_m, block_n, Dc=64, causal=False,
+            out_dtype=info["out_dtype"],
             arg_decls=arg_decls, bindings=bindings,
             kernel_name=_sanitize_msl_name(self.graph.func_name),
             scale=info["scale"],

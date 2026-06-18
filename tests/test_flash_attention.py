@@ -77,7 +77,11 @@ def _flash_attn_fwd(
         k = tl.load(k_ptrs, mask=(start_n + offs_n)[:, None] < N_CTX, other=0.0)
 
         # QK^T [BLOCK_M, BLOCK_N]
-        qk = tl.dot(q, tl.trans(k))
+        # Both dot operands must share a dtype (Triton frontend rejects a mixed
+        # fp32xfp16 tl.dot). `q` was promoted to fp32 by `q = q * qk_scale`
+        # (fp32 scalar), so cast `k` to q's dtype: a no-op for fp32 inputs,
+        # and fp32 for fp16 inputs (keeping the QK accumulate in fp32).
+        qk = tl.dot(q, tl.trans(k).to(q.dtype))
 
         # Causal mask
         if IS_CAUSAL:
@@ -97,8 +101,11 @@ def _flash_attn_fwd(
         v_ptrs = V + off_z * stride_vz + off_h * stride_vh + (start_n + offs_n)[:, None] * stride_vn + offs_d[None, :] * stride_vk
         v = tl.load(v_ptrs, mask=(start_n + offs_n)[:, None] < N_CTX, other=0.0)
 
-        # Accumulate P @ V
-        acc += tl.dot(p.to(tl.float32), v)
+        # Accumulate P @ V. Both dot operands must share a dtype; `p` is fp32
+        # (from tl.exp). Cast `v` UP to fp32 (a no-op for fp32 inputs) so the
+        # PV accumulate stays in fp32 for both fp32 and fp16 inputs — matching
+        # the head-dim-tiled template's fp32-accumulate semantics.
+        acc += tl.dot(p.to(tl.float32), v.to(tl.float32))
         m_i = m_new
 
     # Normalize
@@ -194,26 +201,36 @@ class TestFlashAttention:
             f"Causal attention max error: {(out - ref).abs().max().item()}"
 
     @requires_triton
+    @pytest.mark.parametrize("dtype,tol", [
+        (torch.float32, 0.01),
+        # fp16 in / fp32 accumulate / fp16 out: the cast-epilogue template
+        # (Task 4) rounds the output to half on store, so the bar is looser
+        # (fp16 ~3-decimal mantissa) but still a real correctness check vs the
+        # torch fp16 reference — NOT a silent-wrong escape hatch.
+        (torch.float16, 0.05),
+    ])
     @pytest.mark.parametrize("Z,H,N_CTX,HEAD_DIM", [
         (1, 1, 64, 128),
         (1, 1, 128, 128),
         (1, 2, 96, 128),
         (2, 2, 64, 128),
     ])
-    def test_non_causal_large_head(self, Z, H, N_CTX, HEAD_DIM):
-        """Non-causal attention at head_dim=128, BLOCK_M=BLOCK_N=32, fp32.
+    def test_non_causal_large_head(self, Z, H, N_CTX, HEAD_DIM, dtype, tol):
+        """Non-causal attention at head_dim=128, BLOCK_M=BLOCK_N=32.
 
         Routed to the head-dim-tiled FA2 MSL template (Task 1) via the
         detector (Task 2). The un-tiled lowering OOMs at head_dim=128;
         the tiled template stages [BLOCK, Dc] head-dim chunks to fit the
-        32 KB threadgroup-memory budget. Same correctness bar (1e-2) as
-        the head_dim<=64 cases above. fp16 / causal stay refused (future).
-        """
+        32 KB threadgroup-memory budget. fp32 (1e-2) and fp16 (5e-2, fp16
+        output rounding) are both routed (Task 3 / Task 4); the fp16 path
+        reads Q/K/V as half, promotes to float, keeps all compute + acc +
+        softmax in fp32, and casts to half on the final store. Causal stays
+        refused (Task 5)."""
         BLOCK_M = BLOCK_N = 32
         torch.manual_seed(42)
-        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
-        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
-        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=dtype)
+        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=dtype)
+        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=dtype)
         out = torch.empty_like(q)
 
         grid = (N_CTX // BLOCK_M, Z * H)
@@ -227,9 +244,10 @@ class TestFlashAttention:
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=HEAD_DIM,
             IS_CAUSAL=False,
         )
-        ref = _ref_attention(q, k, v, causal=False)
-        assert (out - ref).abs().max().item() < 0.01, \
-            f"Non-causal large-head attention max error: {(out - ref).abs().max().item()}"
+        # Reference in fp32 for a stable target, compared in the kernel's dtype.
+        ref = _ref_attention(q.float(), k.float(), v.float(), causal=False).to(dtype)
+        assert (out - ref).abs().max().item() < tol, \
+            f"Non-causal large-head ({dtype}) max error: {(out - ref).abs().max().item()}"
 
     @requires_triton
     def test_causal_large_head_still_refuses(self):
