@@ -1872,7 +1872,10 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
         BLOCK_M:  Query rows per threadgroup.
         BLOCK_N:  KV rows staged per inner loop step.
         Dc:       Head-dim chunk width (default 64).
-        causal:   Reserved; only False is supported/validated here.
+        causal:   If True, apply causal mask: kv positions where kv_row > q_row
+            are masked to -INFINITY in the online-softmax loop (before exp),
+            so they contribute zero to numerator and denominator. Works
+            identically for fp32 and fp16 (mask is on the fp32 score).
         out_dtype: Input/output element type. "fp32"/"f32" (default) emits
             float Q/K/V/Out; "fp16"/"f16" emits half Q/K/V/Out, promotes to
             float on every load, keeps ALL compute + acc + softmax in fp32, and
@@ -1911,9 +1914,16 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
     else:
         raise ValueError(f"make_flash_attention_kernel_tiled: out_dtype must be "
                          f"one of fp32/f32/fp16/f16 (got {out_dtype!r})")
+    # Causal mask expression: emitted into the online-softmax row loop.
+    # When causal=True the mask excludes kv positions *after* the query position
+    # (kv_row > q_row), mapping those scores to -INFINITY before exp/sum.
+    # q_row and kv_row are already in scope at the insertion point.
     if causal:
-        raise ValueError("make_flash_attention_kernel_tiled: only causal=False "
-                         "is supported in this template")
+        score_guard = "(kv_row < N_CTX && kv_row <= q_row)"
+        prob_guard  = "(kv_row < N_CTX && kv_row <= q_row)"
+    else:
+        score_guard = "(kv_row < N_CTX)"
+        prob_guard  = "(kv_row < N_CTX)"
     if head_dim % Dc != 0:
         raise ValueError(f"make_flash_attention_kernel_tiled: head_dim ({head_dim}) "
                          f"must be a multiple of Dc ({Dc})")
@@ -1959,7 +1969,7 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
     return f"""#include <metal_stdlib>
 using namespace metal;
 
-// Head-dim-tiled FlashAttention-2 ({elem_t} in/out, fp32 compute, non-causal).
+// Head-dim-tiled FlashAttention-2 ({elem_t} in/out, fp32 compute, {"causal" if causal else "non-causal"}).
 // Layout: Q,K,V,Out are [Z, H, N_CTX, D]; addressing via the (possibly
 // specialization-folded) strides. Buffer ABI matches the kernel's REAL present
 // arg order. The softmax scale (1/sqrt(D)) is baked (kernel has no scale arg).
@@ -2057,11 +2067,11 @@ kernel void {kernel_name}(
                 float m_prev = tg_m[r];
                 float l_prev = tg_l[r];
 
-                // Row max over valid KV positions (apply scale; mask OOB -> -inf).
+                // Row max over valid KV positions (apply scale; mask OOB/causal -> -inf).
                 float m_new = m_prev;
                 for (uint cj = 0u; cj < BN; cj++) {{
                     uint kv_row = kv_start + cj;
-                    float s = (kv_row < N_CTX) ? (tg_S[r * BN + cj] * scale)
+                    float s = {score_guard} ? (tg_S[r * BN + cj] * scale)
                                                : -INFINITY;
                     tg_S[r * BN + cj] = s;   // store scaled score in place
                     m_new = max(m_new, s);
@@ -2072,7 +2082,7 @@ kernel void {kernel_name}(
                 float l_new = l_prev * alpha;
                 for (uint cj = 0u; cj < BN; cj++) {{
                     uint kv_row = kv_start + cj;
-                    float p = (kv_row < N_CTX) ? exp(tg_S[r * BN + cj] - m_new) : 0.0f;
+                    float p = {prob_guard} ? exp(tg_S[r * BN + cj] - m_new) : 0.0f;
                     tg_S[r * BN + cj] = p;   // store P in place of S
                     l_new += p;
                 }}

@@ -684,12 +684,12 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             #
             # ROUTE the supported large-head_dim configs to the head-dim-tiled
             # FA2 template (Task 1) BEFORE the head_dim>64 refusal: head_dim=128,
-            # BLOCK_M=BLOCK_N=32, non-causal, fp32 (Task 3) OR fp16 (Task 4 —
-            # fp16 in / fp32 accumulate / fp16 out via the cast epilogue).
+            # BLOCK_M=BLOCK_N=32, fp32 (Task 3) OR fp16 (Task 4 — fp16 in /
+            # fp32 accumulate / fp16 out via the cast epilogue), causal OR
+            # non-causal (Task 5 — causal mask in the online-softmax loop).
             # _detect_flash_attention raises on ANY ambiguity (a mis-read stride
             # would silently mis-compute), so reaching the template means every
-            # param resolved unambiguously. CAUSAL stays refused for now (Task 5)
-            # — it falls through to the head_dim>64 guard below, which refuses it.
+            # param resolved unambiguously.
             #
             # Only consult the detector when a dot tile reaches 128 — i.e. the
             # head_dim the tiled template targets. head_dim 32/64 lower through
@@ -702,8 +702,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 if (info is not None
                         and info["block_m"] == 32 and info["block_n"] == 32
                         and info["head_dim"] == 128
-                        and info["out_dtype"] in ("f32", "f16")
-                        and not info["causal"]):
+                        and info["out_dtype"] in ("f32", "f16")):
                     return self._lower_flash_attention_template(info)
 
             if _fa_maxdim > 64:
@@ -4793,7 +4792,8 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         """Emit the head-dim-tiled FA2 MSL (Task 1) for a detected FA kernel.
 
         Called from ``lower()`` only for the validated configs: head_dim=128,
-        BLOCK_M=BLOCK_N=32, non-causal, fp32 OR fp16 output. ``info`` comes from
+        BLOCK_M=BLOCK_N=32, causal OR non-causal, fp32 OR fp16 output. ``info``
+        comes from
         ``_detect_flash_attention`` (which refuses on any ambiguity).
 
         ABI reconciliation (the crux). The launcher binds the flat non-constexpr
@@ -4928,7 +4928,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # arg_decls above already use the args' real elem_type, so the pointer
         # types match) and applies the promote-on-load / cast-on-store epilogue.
         msl = make_flash_attention_kernel_tiled(
-            head_dim, block_m, block_n, Dc=64, causal=False,
+            head_dim, block_m, block_n, Dc=64, causal=info["causal"],
             out_dtype=info["out_dtype"],
             arg_decls=arg_decls, bindings=bindings,
             kernel_name=_sanitize_msl_name(self.graph.func_name),

@@ -250,33 +250,47 @@ class TestFlashAttention:
             f"Non-causal large-head ({dtype}) max error: {(out - ref).abs().max().item()}"
 
     @requires_triton
-    def test_causal_large_head_still_refuses(self):
-        """Integrity: CAUSAL FA at head_dim=128, BLOCK=32 must STAY refused.
+    @pytest.mark.parametrize("dtype,tol", [
+        (torch.float32, 0.01),
+        (torch.float16, 0.05),
+    ])
+    @pytest.mark.parametrize("Z,H,N_CTX,HEAD_DIM", [
+        (1, 1, 64, 128),
+        (1, 1, 128, 128),
+        (1, 2, 96, 128),
+        (2, 2, 64, 128),
+    ])
+    def test_causal_large_head(self, Z, H, N_CTX, HEAD_DIM, dtype, tol):
+        """Causal attention at head_dim=128, BLOCK_M=BLOCK_N=32 (Task 5).
 
-        The tiled template (Task 1) routes only the NON-causal fp32 head_dim=128
-        config (Task 3). Causal is future work (Task 5) — the detector flags
-        `causal=True`, the routing condition excludes it, and it falls through to
-        the head_dim>64 guard which refuses loudly. Never silently mis-compute a
-        config the template doesn't handle."""
-        Z, H, N_CTX, HEAD_DIM = 1, 1, 64, 128
+        Routed to the head-dim-tiled FA2 MSL template (same template as
+        non-causal, Task 1) via the detector (Task 2). The causal mask is
+        applied in the online-softmax loop: positions where kv_pos > q_pos
+        are masked to -INFINITY before the exp, so they contribute zero to
+        the softmax numerator and denominator. Tolerances: fp32 < 0.01,
+        fp16 < 0.05 (cast-epilogue rounding)."""
         BLOCK_M = BLOCK_N = 32
         torch.manual_seed(42)
-        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
-        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
-        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=dtype)
+        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=dtype)
+        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=dtype)
         out = torch.empty_like(q)
+
         grid = (N_CTX // BLOCK_M, Z * H)
-        with pytest.raises(MetalNonRecoverableError, match="head_dim > 64"):
-            _flash_attn_fwd[grid](
-                q, k, v, out,
-                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-                Z, H, N_CTX,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=HEAD_DIM,
-                IS_CAUSAL=True,
-            )
+        _flash_attn_fwd[grid](
+            q, k, v, out,
+            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+            Z, H, N_CTX,
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=HEAD_DIM,
+            IS_CAUSAL=True,
+        )
+        # Reference in fp32 for a stable target, compared in the kernel's dtype.
+        ref = _ref_attention(q.float(), k.float(), v.float(), causal=True).to(dtype)
+        assert (out - ref).abs().max().item() < tol, \
+            f"Causal large-head ({dtype}) max error: {(out - ref).abs().max().item()}"
 
     @requires_triton
     @pytest.mark.parametrize("BLOCK", [16, 8])
