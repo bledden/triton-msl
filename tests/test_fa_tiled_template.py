@@ -85,3 +85,65 @@ def test_tiled_fa_emits_chunk_loop():
     assert "device const float* Q" in src and "device float* Out" in src
     assert "for (uint dc = 0" in src  # head-dim chunk loop present
     assert "threadgroup float acc" in src
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: scale parameter — golden/structure assertions
+# ---------------------------------------------------------------------------
+
+def test_explicit_scale_baked_verbatim():
+    """When scale=0.5 is passed, the template bakes 0.5 exactly (not 1/sqrt(D))."""
+    import math
+    src = make_flash_attention_kernel_tiled(128, 32, 32, Dc=64, causal=False,
+                                            out_dtype="fp32", scale=0.5)
+    # The baked constant must be 0.5, not the canonical 1/sqrt(128).
+    canonical = 1.0 / math.sqrt(128.0)
+    assert repr(0.5) + "f" in src, \
+        f"expected '0.5f' in MSL but not found; snippet: {src[src.find('scale'):][:80]}"
+    # Ensure the canonical value is NOT baked when scale=0.5 is provided.
+    assert repr(canonical) + "f" not in src, \
+        f"canonical scale {canonical!r} must not appear when scale=0.5 is explicitly given"
+
+
+def test_scale_none_uses_canonical():
+    """scale=None (default) falls back to 1/sqrt(head_dim) as before."""
+    import math
+    src = make_flash_attention_kernel_tiled(128, 32, 32, Dc=64, causal=False,
+                                            out_dtype="fp32", scale=None)
+    canonical = 1.0 / math.sqrt(128.0)
+    assert repr(canonical) + "f" in src, \
+        f"expected canonical scale {canonical!r}f in MSL; not found"
+
+
+def test_lower_passes_detected_scale():
+    """_lower_flash_attention_template passes info['scale'] to the template.
+
+    Two-part assertion:
+    1. Structural: confirm ``make_flash_attention_kernel_tiled`` with an explicit
+       ``scale=0.5`` bakes 0.5 into the MSL (not 1/sqrt(D)).  This validates
+       the template half of Finding 1.
+    2. Source-level: confirm the call site in ``_lower_flash_attention_template``
+       passes ``scale=info["scale"]`` — verified by inspecting the method's source
+       so this test breaks if the kwarg is ever removed without a replacement.
+    """
+    import math
+    import inspect
+
+    # Part 1: template bakes the provided scale, not the canonical one.
+    src_05 = make_flash_attention_kernel_tiled(128, 32, 32, Dc=64, causal=False,
+                                               out_dtype="fp32", scale=0.5)
+    canonical = 1.0 / math.sqrt(128.0)
+    assert repr(0.5) + "f" in src_05, \
+        f"scale=0.5 not baked into MSL; snippet: {src_05[src_05.find('scale'):][:80]}"
+    assert repr(canonical) + "f" not in src_05, \
+        f"canonical scale {canonical!r} must NOT appear when scale=0.5 is given"
+
+    # Part 2: the lowerer call site passes info["scale"].
+    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    src_lower = inspect.getsource(
+        GenericLowerer._lower_flash_attention_template  # type: ignore[attr-defined]
+    )
+    assert 'scale=info["scale"]' in src_lower, (
+        '_lower_flash_attention_template must pass scale=info["scale"] to '
+        'make_flash_attention_kernel_tiled — detected scale is not being forwarded'
+    )

@@ -4618,6 +4618,17 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             # resolved fold — a None here means the row leg didn't parse.
             if any(s is None for s in strides):
                 return None
+            # Defensive: the ROW stride (strides[2]) is the BLOCK_M/BLOCK_N-row
+            # stride, equal to head_dim for a [Z,H,N_CTX,head_dim] tensor. It is
+            # NEVER legitimately 1/folded (head_dim is always >1 for FA). If it
+            # resolved to C1, the addptr chain was mis-parsed and we'd silently
+            # compute wrong addresses — refuse rather than risk it.  The COLUMN
+            # stride (strides[3]) IS legitimately C1 (contiguous innermost stride).
+            if strides[2] == C1:
+                from triton_metal.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "FlashAttention row stride resolved to 1; expected head_dim "
+                    "— refusing rather than risk wrong addressing")
             return base.index, strides
 
         def _load_addr_for_dot_operand(operand_id, _depth=0):
@@ -4904,6 +4915,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             head_dim, block_m, block_n, Dc=64, causal=False, out_dtype="fp32",
             arg_decls=arg_decls, bindings=bindings,
             kernel_name=_sanitize_msl_name(self.graph.func_name),
+            scale=info["scale"],
         )
 
         # 1024 threads/threadgroup (BLOCK_M * BLOCK_N) — the metallib dispatch

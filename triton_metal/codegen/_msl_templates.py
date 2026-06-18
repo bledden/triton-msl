@@ -1816,7 +1816,8 @@ kernel void flash_attention(
 def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
                                       Dc=64, causal=False, out_dtype="fp32",
                                       arg_decls=None, bindings=None,
-                                      kernel_name="flash_attention"):
+                                      kernel_name="flash_attention",
+                                      scale=None):
     """Generate a HEAD-DIM-TILED FlashAttention-2 kernel for Metal (fp32).
 
     Same online-softmax FA2 algorithm as ``make_flash_attention_kernel`` but with
@@ -1884,6 +1885,12 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
             o_sz o_sh o_sm o_sk Z H N_CTX``) to its MSL expression — the buffer
             arg name when present at runtime, or a baked literal (e.g. ``1u``)
             when the arg was specialized out. Required iff ``arg_decls`` is given.
+        scale: The softmax scale to bake as a compile-time constant.  When
+            ``None`` (default), ``1/sqrt(head_dim)`` is computed and used —
+            matching the canonical FA kernel.  When provided (e.g. from
+            ``_detect_flash_attention``'s ``info["scale"]``), the EXACT
+            detected value is baked, so a kernel that uses a non-standard scale
+            (e.g. a learned temperature) computes correctly.
     """
     if out_dtype != "fp32":
         raise ValueError(f"make_flash_attention_kernel_tiled: only out_dtype='fp32' "
@@ -1901,7 +1908,10 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
     TPG = BLOCK_M * BLOCK_N          # threads per threadgroup
     KV_STAGE = max(BLOCK_M, BLOCK_N) * Dc  # shared K/V staging buffer size
     import math as _math
-    SCALE = 1.0 / _math.sqrt(float(head_dim))  # baked: kernel has no scale arg
+    # When ``scale`` is provided (e.g. from the detector's info["scale"]), bake
+    # THAT exact value so a kernel with a non-standard temperature computes
+    # correctly.  When None, fall back to the canonical 1/sqrt(head_dim).
+    SCALE = float(scale) if scale is not None else 1.0 / _math.sqrt(float(head_dim))
 
     _LOGICAL = ["q_sz", "q_sh", "q_sm", "q_sk", "k_sz", "k_sh", "k_sn", "k_sk",
                 "v_sz", "v_sh", "v_sn", "v_sk", "o_sz", "o_sh", "o_sm", "o_sk",
