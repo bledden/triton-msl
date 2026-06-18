@@ -1813,6 +1813,267 @@ kernel void flash_attention(
 """
 
 
+def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
+                                      Dc=64, causal=False, out_dtype="fp32"):
+    """Generate a HEAD-DIM-TILED FlashAttention-2 kernel for Metal (fp32).
+
+    Same online-softmax FA2 algorithm as ``make_flash_attention_kernel`` but with
+    two structural changes that let it run at large ``head_dim`` (e.g. 128) on
+    Apple GPUs (32 KB threadgroup-memory limit), where the un-tiled template
+    OOMs / OutOfResources:
+
+      (a) GENERAL STRIDED addressing for a ``[Z, H, N_CTX, head_dim]`` layout
+          using 16 strides (Q,K,V,O x stride(0..3)), replacing the collapsed
+          ``head_offset + row*D + col`` indexing.
+
+      (b) HEAD-DIM TILING: a ``for (uint dc = 0; dc < D; dc += Dc)`` loop that
+          stages only ``[BLOCK, Dc]``-wide K/V slices at a time. The output
+          accumulator ``acc[BLOCK_M*D]`` and scores ``tg_S[BLOCK_M*BLOCK_N]``
+          stay resident; per KV-block the score ``S[i,j] += sum_{c<Dc} Q[i,c]*Kc[j,c]``
+          is accumulated across chunks, then ``acc[i,d] += sum_j P[i,j]*Vc[j,c]``
+          is accumulated chunk-by-chunk (each chunk owns a disjoint slice of D,
+          so the online-softmax alpha-rescale of acc happens exactly once per
+          element per KV-block).
+
+    Threadgroup-memory budget (BLOCK_M=BLOCK_N=32, D=128, Dc=64, fp32):
+        tg_S   : 32*32*4      =  4 KB
+        acc    : 32*128*4     = 16 KB
+        tg_KV  : 32*64*4      =  8 KB   (shared: Kc in the QK phase, Vc in the PV phase)
+        tg_m/l : 32*4*2       = ~0.25 KB
+        Total  : ~28.25 KB    (< 32 KB)
+
+    Q is read directly from device memory in the QK phase (it cannot also be
+    staged at Dc=64 without exceeding 32 KB: acc 16 + S 4 + Qc 8 + Kc 8 = 36 KB).
+    Staging K (and reusing that buffer for V) keeps the high-reuse operand resident
+    while fitting the budget; this is correctness-first, not bandwidth-optimal.
+
+    Buffer ABI (binding order), matched by the standalone test:
+        Q, K, V, Out            device pointers (float)
+        Z, H, N_CTX             uint
+        16 strides              uint, order: Q.{z,h,m,k}, K.{z,h,n,k},
+                                V.{z,h,n,k}, O.{z,h,m,k}  (each tensor's stride(0..3))
+        scale                   float (typically 1/sqrt(head_dim))
+
+    Grid: ``(N_CTX // BLOCK_M, Z*H)`` threadgroups (linearized into ``pid``).
+    Threads/threadgroup: ``BLOCK_M * BLOCK_N`` (1024 at 32x32, Metal's max).
+
+    Args:
+        head_dim: Head dimension D. Must be a multiple of Dc.
+        BLOCK_M:  Query rows per threadgroup.
+        BLOCK_N:  KV rows staged per inner loop step.
+        Dc:       Head-dim chunk width (default 64).
+        causal:   Reserved; only False is supported/validated here.
+        out_dtype: Reserved; only "fp32" is supported here.
+    """
+    if out_dtype != "fp32":
+        raise ValueError(f"make_flash_attention_kernel_tiled: only out_dtype='fp32' "
+                         f"is supported (got {out_dtype!r})")
+    if causal:
+        raise ValueError("make_flash_attention_kernel_tiled: only causal=False "
+                         "is supported in this template")
+    if head_dim % Dc != 0:
+        raise ValueError(f"make_flash_attention_kernel_tiled: head_dim ({head_dim}) "
+                         f"must be a multiple of Dc ({Dc})")
+
+    TPG = BLOCK_M * BLOCK_N          # threads per threadgroup
+    KV_STAGE = max(BLOCK_M, BLOCK_N) * Dc  # shared K/V staging buffer size
+
+    return f"""#include <metal_stdlib>
+using namespace metal;
+
+// Head-dim-tiled FlashAttention-2 (fp32, non-causal).
+// Layout: Q,K,V,Out are [Z, H, N_CTX, D]; addressing via the 16 strides.
+kernel void flash_attention(
+    device const float* Q [[buffer(0)]],
+    device const float* K [[buffer(1)]],
+    device const float* V [[buffer(2)]],
+    device float* Out [[buffer(3)]],
+    constant uint& Z [[buffer(4)]],
+    constant uint& H [[buffer(5)]],
+    constant uint& N_CTX [[buffer(6)]],
+    constant uint& q_sz [[buffer(7)]],
+    constant uint& q_sh [[buffer(8)]],
+    constant uint& q_sm [[buffer(9)]],
+    constant uint& q_sk [[buffer(10)]],
+    constant uint& k_sz [[buffer(11)]],
+    constant uint& k_sh [[buffer(12)]],
+    constant uint& k_sn [[buffer(13)]],
+    constant uint& k_sk [[buffer(14)]],
+    constant uint& v_sz [[buffer(15)]],
+    constant uint& v_sh [[buffer(16)]],
+    constant uint& v_sn [[buffer(17)]],
+    constant uint& v_sk [[buffer(18)]],
+    constant uint& o_sz [[buffer(19)]],
+    constant uint& o_sh [[buffer(20)]],
+    constant uint& o_sm [[buffer(21)]],
+    constant uint& o_sk [[buffer(22)]],
+    constant float& scale [[buffer(23)]],
+    uint pid [[threadgroup_position_in_grid]],
+    uint lid [[thread_position_in_threadgroup]]
+) {{
+    const uint BM = {BLOCK_M}u;
+    const uint BN = {BLOCK_N}u;
+    const uint D  = {head_dim}u;
+    const uint DC = {Dc}u;
+    const uint TPG = {TPG}u;
+
+    // Linearized grid: pid in [0, n_q_blocks * (Z*H)).
+    uint n_q_blocks = (N_CTX + BM - 1u) / BM;
+    uint q_block = pid % n_q_blocks;
+    uint zh      = pid / n_q_blocks;
+    uint z = zh / H;
+    uint h = zh % H;
+    uint q_start = q_block * BM;
+
+    // Per-(z,h) base offsets into each tensor.
+    uint q_base = z * q_sz + h * q_sh;
+    uint k_base = z * k_sz + h * k_sh;
+    uint v_base = z * v_sz + h * v_sh;
+    uint o_base = z * o_sz + h * o_sh;
+
+    // Threadgroup memory.
+    threadgroup float tg_S[{BLOCK_M} * {BLOCK_N}];   // BM x BN scores / probs
+    threadgroup float acc[{BLOCK_M} * {head_dim}];   // BM x D output accumulator
+    threadgroup float tg_KV[{KV_STAGE}];             // shared: Kc (QK) then Vc (PV)
+    threadgroup float tg_m[{BLOCK_M}];               // running row max
+    threadgroup float tg_l[{BLOCK_M}];               // running row sum
+
+    // Init acc, m, l.
+    for (uint i = lid; i < BM * D; i += TPG) {{
+        acc[i] = 0.0f;
+    }}
+    if (lid < BM) {{
+        tg_m[lid] = -INFINITY;
+        tg_l[lid] = 0.0f;
+    }}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint n_kv_blocks = (N_CTX + BN - 1u) / BN;
+    for (uint kv_block = 0u; kv_block < n_kv_blocks; kv_block++) {{
+        uint kv_start = kv_block * BN;
+
+        // ---- Score phase: tg_S = (scale * Q) @ K^T, accumulated over head-dim chunks ----
+        for (uint i = lid; i < BM * BN; i += TPG) {{
+            tg_S[i] = 0.0f;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint dc = 0u; dc < D; dc += DC) {{
+            // Stage Kc[BN, DC] for this chunk into tg_KV.
+            for (uint i = lid; i < BN * DC; i += TPG) {{
+                uint r = i / DC;          // kv row within block
+                uint c = i % DC;          // head-dim col within chunk
+                uint kv_row = kv_start + r;
+                tg_KV[i] = (kv_row < N_CTX)
+                    ? K[k_base + kv_row * k_sn + (dc + c) * k_sk]
+                    : 0.0f;
+            }}
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Accumulate this chunk's contribution to S. Q read from device.
+            for (uint i = lid; i < BM * BN; i += TPG) {{
+                uint r = i / BN;          // query row within block
+                uint cj = i % BN;         // kv row within block
+                uint q_row = q_start + r;
+                uint kv_row = kv_start + cj;
+                if (q_row < N_CTX && kv_row < N_CTX) {{
+                    float dot = 0.0f;
+                    for (uint c = 0u; c < DC; c++) {{
+                        float qv = Q[q_base + q_row * q_sm + (dc + c) * q_sk];
+                        dot += qv * tg_KV[cj * DC + c];
+                    }}
+                    tg_S[i] += dot;
+                }}
+            }}
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }}
+
+        // ---- Online-softmax update (one thread per query row) ----
+        if (lid < BM) {{
+            uint r = lid;
+            uint q_row = q_start + r;
+            if (q_row < N_CTX) {{
+                float m_prev = tg_m[r];
+                float l_prev = tg_l[r];
+
+                // Row max over valid KV positions (apply scale; mask OOB -> -inf).
+                float m_new = m_prev;
+                for (uint cj = 0u; cj < BN; cj++) {{
+                    uint kv_row = kv_start + cj;
+                    float s = (kv_row < N_CTX) ? (tg_S[r * BN + cj] * scale)
+                                               : -INFINITY;
+                    tg_S[r * BN + cj] = s;   // store scaled score in place
+                    m_new = max(m_new, s);
+                }}
+
+                // P = exp(S - m_new); rescale running sum.
+                float alpha = exp(m_prev - m_new);
+                float l_new = l_prev * alpha;
+                for (uint cj = 0u; cj < BN; cj++) {{
+                    uint kv_row = kv_start + cj;
+                    float p = (kv_row < N_CTX) ? exp(tg_S[r * BN + cj] - m_new) : 0.0f;
+                    tg_S[r * BN + cj] = p;   // store P in place of S
+                    l_new += p;
+                }}
+
+                // Stash alpha in tg_m so all threads can rescale acc in the PV phase.
+                tg_m[r] = m_new;
+                tg_l[r] = l_new;
+                // Reuse acc-rescale: scale this row's resident acc by alpha now.
+                for (uint d = 0u; d < D; d++) {{
+                    acc[r * D + d] *= alpha;
+                }}
+            }} else {{
+                // Padding row: zero its probabilities so it contributes nothing.
+                for (uint cj = 0u; cj < BN; cj++) {{
+                    tg_S[r * BN + cj] = 0.0f;
+                }}
+            }}
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Output phase: acc[i, dc+c] += sum_j P[i,j] * Vc[j, c], per chunk ----
+        for (uint dc = 0u; dc < D; dc += DC) {{
+            // Stage Vc[BN, DC] for this chunk into tg_KV (reusing the K buffer).
+            for (uint i = lid; i < BN * DC; i += TPG) {{
+                uint r = i / DC;
+                uint c = i % DC;
+                uint kv_row = kv_start + r;
+                tg_KV[i] = (kv_row < N_CTX)
+                    ? V[v_base + kv_row * v_sn + (dc + c) * v_sk]
+                    : 0.0f;
+            }}
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // acc update for this chunk's D-slice.
+            for (uint i = lid; i < BM * DC; i += TPG) {{
+                uint r = i / DC;
+                uint c = i % DC;
+                float o_val = 0.0f;
+                for (uint cj = 0u; cj < BN; cj++) {{
+                    o_val += tg_S[r * BN + cj] * tg_KV[cj * DC + c];
+                }}
+                acc[r * D + (dc + c)] += o_val;
+            }}
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }}
+    }}
+
+    // ---- Final normalize + write out: Out = acc / l ----
+    for (uint i = lid; i < BM * D; i += TPG) {{
+        uint r = i / D;
+        uint c = i % D;
+        uint q_row = q_start + r;
+        if (q_row < N_CTX) {{
+            float l_val = tg_l[r];
+            float o = (l_val > 0.0f) ? (acc[i] / l_val) : 0.0f;
+            Out[o_base + q_row * o_sm + c * o_sk] = o;
+        }}
+    }}
+}}
+"""
+
+
 def make_rope_attention_kernel(head_dim=64, block_size=256):
     """Generate a fused RoPE + single-query attention kernel.
 
