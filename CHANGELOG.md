@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### FlashAttention — large head_dim + integrity hardening (2026-06-17)
+
+- **head_dim 128 @ `BLOCK_M=BLOCK_N=32`** now supported (fp32 + fp16, causal + non-causal).
+  A real `@triton.jit` FlashAttention-2 kernel is routed to a new head-dim-tiled FA2 MSL
+  template (`make_flash_attention_kernel_tiled`) that chunks the head dimension to fit
+  Metal's 32 KB threadgroup budget (the un-tiled lowering hit `OutOfResources` at 128).
+  Routing is a prescan detector with **refuse-on-any-ambiguity** — an FA-shaped kernel whose
+  pointers/strides/scale can't be resolved unambiguously is refused, never guessed; the
+  detector is robust to Triton's `equal_to_1` arg specialization. Stays FA2 (FA3/FA4 are
+  Hopper/Blackwell async-hardware co-designs with no Apple analog).
+- **Closed a small-block silent-wrong hole:** FlashAttention at `BLOCK_M`/`BLOCK_N` < 32
+  silently mis-computed (rows past the first → garbage) for *any* head_dim — including the
+  otherwise-supported 32/64 — which the previous head_dim>64-only guard missed. The prescan
+  now refuses min-dot-tile-dim < 32. head_dim > 128, other block sizes, and bf16 matmul
+  inputs are refused loudly.
+- **Skip-list reclaim:** +28 upstream `test_core` passes recovered from over-broad skips
+  (a Gluon-tool base-name collision wrongly skipping core `test_cat`/`test_split`, plus
+  `test_tl_range_num_stages`, a uint16/fp16 modulus, `test_pointer_arguments[cpu_pinned]`) —
+  each verified a real pass, not a loose-assertion false-pass.
+- **Tooling:** `scripts/run_upstream_tests.py` now loads `-p conftest_metal`, so the cited
+  source-of-truth command reproduces the documented conformance number.
+
 ### Phase 4 — zero-copy execution + fast matmul + Phase-5 readiness audit (2026-06-16)
 
 - **Zero-copy MPS execution** via `torch.mps.compile_shader`: routes emitted MSL through
@@ -20,9 +42,9 @@
   ~3,783 feature-gap skips** (each a loud refusal or HW-impossible); the single source of
   truth is `scripts/run_upstream_tests.py` (`--device cpu`, which loads the `conftest_metal`
   skip plugin), not hand-maintained counts.
-  Project suite **716 passed / 0 failed**. FlashAttention 11/11 at HEAD_DIM=32 via the
-  **Python/MSL** lowering — the C++ MLIR→LLVM path named in the 2026-05-30 snapshot below
-  was shelved (AGX compiler blocker; Python/MSL is primary).
+  Project suite **754 passed / 0 failed**. FlashAttention causal + non-causal at HEAD_DIM
+  32 / 64 / 128 via the **Python/MSL** lowering — the C++ MLIR→LLVM path named in the
+  2026-05-30 snapshot below was shelved (AGX compiler blocker; Python/MSL is primary).
 - **Phase-5 readiness audit** (dual NVIDIA/Triton + MLX/Apple lens) recorded in
   `docs/audits/2026-06-16-phase5-readiness-audit.md`; remaining pre-1.0 items tracked there.
 

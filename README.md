@@ -19,10 +19,11 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
   backend compiles and runs the kernels on the GPU, since upstream `test_core`
   otherwise assumes CUDA). Re-run it to reproduce; counts in this file and
   `CHANGELOG.md` are regenerated from it, not hand-maintained.
-- **716 / 716** project tests (codegen, GPU correctness, integration,
+- **754 / 754** project tests (codegen, GPU correctness, integration,
   FlashAttention, MLX backend, and the fast-matmul / compile_shader zero-copy
-  suites). FlashAttention path: **11 / 11**, causal + non-causal, at **HEAD_DIM 32
-  and 64** (see [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend
+  suites). FlashAttention: causal + non-causal at **HEAD_DIM 32 / 64 / 128**
+  (head_dim 128 fp32 + fp16 via the head-dim-tiled template; see
+  [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend
   tests;
   project test-suite size grew from 434 → 603 → 716 since `0.1.0-alpha`.
 - **32 / 32** `torch.compile` model tests pass on Python ≤ 3.13 (PyTorch
@@ -211,11 +212,14 @@ matrix and the loud-refusal catalog.
 ### FlashAttention
 
 A full FlashAttention v2 forward (causal + non-causal) runs through the standard
-`@triton.jit` path at the **validated tile `BLOCK_M = BLOCK_N = 32`, head_dim ≤ 64** —
+`@triton.jit` path at **`BLOCK_M = BLOCK_N = 32`** for **head_dim 32, 64, and 128** —
 see [`tests/test_flash_attention.py`](tests/test_flash_attention.py) for the kernel and
-launch. Out-of-range configs are **refused loudly** (`MetalNonRecoverableError`, never
-silent-wrong): head_dim > 64, and block tiles below 32. Larger tiles/head_dim (tiled
-threadgroup memory) are on the roadmap.
+launch. head_dim 32/64 use the generic lowering; **head_dim 128** is routed to a
+head-dim-tiled FA2 MSL template (**fp32 + fp16**) that chunks the head dimension to fit
+Metal's 32 KB threadgroup budget. Out-of-range configs are **refused loudly**
+(`MetalNonRecoverableError`, never silent-wrong): head_dim > 128, block tiles ≠ 32, bf16
+inputs, and any FA-shaped kernel whose strides/scale can't be resolved unambiguously.
+Larger blocks and head_dim > 128 are on the roadmap.
 
 ### Tuning flags
 
@@ -235,7 +239,7 @@ All default-on; set to `0` to disable (an escape hatch for bisecting a regressio
 | **Elementwise** | add, sub, mul, div, exp, log, sqrt, abs, neg, SiLU, GELU, sigmoid, tanh, ReLU, leaky ReLU, clamp, FMA |
 | **Reductions** | sum, max, min, argmax, argmin, xor_sum |
 | **Dot product** | `tl.dot` with strided matmul template, all epilogues (add, softmax, chain-dot, transpose) |
-| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at the validated tile **`BLOCK_M=BLOCK_N=32`, HEAD_DIM 32 and 64** via the Python MSL path. Out-of-range configs (head_dim > 64; block tiles < 32) are refused (`MetalNonRecoverableError`, never silent-wrong); larger tiles/head_dim are on the roadmap. |
+| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at **`BLOCK_M=BLOCK_N=32`, HEAD_DIM 32 / 64 / 128** via the Python MSL path (head_dim 128 routed to a head-dim-tiled FA2 template, fp32 + fp16). Out-of-range configs (head_dim > 128; block tiles ≠ 32; bf16) are refused (`MetalNonRecoverableError`, never silent-wrong); larger blocks/head_dim are on the roadmap. |
 | **Normalization** | Layer norm, RMS norm, batch norm |
 | **Type casts** | FP32, FP16, BF16, INT8, INT16, INT32, bool |
 | **Control flow** | `scf.for`, `scf.if`, while loops |
