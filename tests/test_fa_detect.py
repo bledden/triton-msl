@@ -159,7 +159,8 @@ def test_fa_pattern_with_unresolvable_stride_refuses():
                 _break(s.else_ops)
     _break(lo.graph.ops)
 
-    with pytest.raises(MetalNonRecoverableError):
+    with pytest.raises(MetalNonRecoverableError,
+                       match="Q pointer/stride chain"):
         lo._detect_flash_attention()
 
 

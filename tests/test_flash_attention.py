@@ -194,6 +194,73 @@ class TestFlashAttention:
             f"Causal attention max error: {(out - ref).abs().max().item()}"
 
     @requires_triton
+    @pytest.mark.parametrize("Z,H,N_CTX,HEAD_DIM", [
+        (1, 1, 64, 128),
+        (1, 1, 128, 128),
+        (1, 2, 96, 128),
+        (2, 2, 64, 128),
+    ])
+    def test_non_causal_large_head(self, Z, H, N_CTX, HEAD_DIM):
+        """Non-causal attention at head_dim=128, BLOCK_M=BLOCK_N=32, fp32.
+
+        Routed to the head-dim-tiled FA2 MSL template (Task 1) via the
+        detector (Task 2). The un-tiled lowering OOMs at head_dim=128;
+        the tiled template stages [BLOCK, Dc] head-dim chunks to fit the
+        32 KB threadgroup-memory budget. Same correctness bar (1e-2) as
+        the head_dim<=64 cases above. fp16 / causal stay refused (future).
+        """
+        BLOCK_M = BLOCK_N = 32
+        torch.manual_seed(42)
+        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        out = torch.empty_like(q)
+
+        grid = (N_CTX // BLOCK_M, Z * H)
+        _flash_attn_fwd[grid](
+            q, k, v, out,
+            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+            Z, H, N_CTX,
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=HEAD_DIM,
+            IS_CAUSAL=False,
+        )
+        ref = _ref_attention(q, k, v, causal=False)
+        assert (out - ref).abs().max().item() < 0.01, \
+            f"Non-causal large-head attention max error: {(out - ref).abs().max().item()}"
+
+    @requires_triton
+    def test_causal_large_head_still_refuses(self):
+        """Integrity: CAUSAL FA at head_dim=128, BLOCK=32 must STAY refused.
+
+        The tiled template (Task 1) routes only the NON-causal fp32 head_dim=128
+        config (Task 3). Causal is future work (Task 5) — the detector flags
+        `causal=True`, the routing condition excludes it, and it falls through to
+        the head_dim>64 guard which refuses loudly. Never silently mis-compute a
+        config the template doesn't handle."""
+        Z, H, N_CTX, HEAD_DIM = 1, 1, 64, 128
+        BLOCK_M = BLOCK_N = 32
+        torch.manual_seed(42)
+        q = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        k = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        v = torch.randn(Z, H, N_CTX, HEAD_DIM, device='cpu', dtype=torch.float32)
+        out = torch.empty_like(q)
+        grid = (N_CTX // BLOCK_M, Z * H)
+        with pytest.raises(MetalNonRecoverableError, match="head_dim > 64"):
+            _flash_attn_fwd[grid](
+                q, k, v, out,
+                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+                Z, H, N_CTX,
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=HEAD_DIM,
+                IS_CAUSAL=True,
+            )
+
+    @requires_triton
     @pytest.mark.parametrize("BLOCK", [16, 8])
     def test_head_dim_over_64_refuses(self, BLOCK):
         """Integrity guard: FlashAttention at head_dim > 64 must REFUSE loudly

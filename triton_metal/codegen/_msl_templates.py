@@ -1814,7 +1814,9 @@ kernel void flash_attention(
 
 
 def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
-                                      Dc=64, causal=False, out_dtype="fp32"):
+                                      Dc=64, causal=False, out_dtype="fp32",
+                                      arg_decls=None, bindings=None,
+                                      kernel_name="flash_attention"):
     """Generate a HEAD-DIM-TILED FlashAttention-2 kernel for Metal (fp32).
 
     Same online-softmax FA2 algorithm as ``make_flash_attention_kernel`` but with
@@ -1847,14 +1849,21 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
     Staging K (and reusing that buffer for V) keeps the high-reuse operand resident
     while fitting the budget; this is correctness-first, not bandwidth-optimal.
 
-    Buffer ABI (binding order), matched by the standalone test:
-        Q, K, V, Out            device pointers (float)
-        Z, H, N_CTX             uint
+    Buffer ABI (binding order) — matches the REAL ``_flash_attn_fwd`` kernel's
+    non-constexpr argument order (the launcher binds ``kargs[N]`` -> ``buffer(N)``,
+    where ``kargs`` is the flat non-constexpr arg list in declaration order), so a
+    routed @triton.jit FA kernel binds correctly without any reordering:
+        Q, K, V, Out            device pointers (float)   buffers 0..3
         16 strides              uint, order: Q.{z,h,m,k}, K.{z,h,n,k},
-                                V.{z,h,n,k}, O.{z,h,m,k}  (each tensor's stride(0..3))
-        scale                   float (typically 1/sqrt(head_dim))
+                                V.{z,h,n,k}, O.{z,h,m,k}              buffers 4..19
+        Z, H, N_CTX             uint                                 buffers 20..22
+    The softmax ``scale = 1/sqrt(head_dim)`` is BAKED in as a compile-time
+    constant — the real kernel computes ``qk_scale`` internally and has NO scale
+    arg, so the template must not expect one.
 
-    Grid: ``(N_CTX // BLOCK_M, Z*H)`` threadgroups (linearized into ``pid``).
+    Grid: ``(N_CTX // BLOCK_M, Z*H)`` threadgroups; the kernel uses
+    ``program_id(0)`` (q-block, ``pid.x``) and ``program_id(1)`` (z*h, ``pid.y``),
+    so the dispatch preserves the 2-D threadgroup grid.
     Threads/threadgroup: ``BLOCK_M * BLOCK_N`` (1024 at 32x32, Metal's max).
 
     Args:
@@ -1864,6 +1873,17 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
         Dc:       Head-dim chunk width (default 64).
         causal:   Reserved; only False is supported/validated here.
         out_dtype: Reserved; only "fp32" is supported here.
+        arg_decls: Optional list of MSL ``[[buffer(N)]]`` declaration lines for
+            the kernel signature, in binding order. When ``None`` the canonical
+            full ABI is emitted (Q,K,V,Out, 16 strides, Z,H,N_CTX — used by the
+            standalone test). The ROUTED path passes the REAL kernel's present
+            args (some strides / Z / H are ``equal_to_1``-specialized away), so
+            the [[buffer(N)]] order matches the launcher's binding exactly.
+        bindings: Optional dict mapping each logical name
+            (``q_sz q_sh q_sm q_sk k_sz k_sh k_sn k_sk v_sz v_sh v_sn v_sk
+            o_sz o_sh o_sm o_sk Z H N_CTX``) to its MSL expression — the buffer
+            arg name when present at runtime, or a baked literal (e.g. ``1u``)
+            when the arg was specialized out. Required iff ``arg_decls`` is given.
     """
     if out_dtype != "fp32":
         raise ValueError(f"make_flash_attention_kernel_tiled: only out_dtype='fp32' "
@@ -1874,53 +1894,68 @@ def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
     if head_dim % Dc != 0:
         raise ValueError(f"make_flash_attention_kernel_tiled: head_dim ({head_dim}) "
                          f"must be a multiple of Dc ({Dc})")
+    if (arg_decls is None) != (bindings is None):
+        raise ValueError("make_flash_attention_kernel_tiled: arg_decls and "
+                         "bindings must be provided together (or both omitted)")
 
     TPG = BLOCK_M * BLOCK_N          # threads per threadgroup
     KV_STAGE = max(BLOCK_M, BLOCK_N) * Dc  # shared K/V staging buffer size
+    import math as _math
+    SCALE = 1.0 / _math.sqrt(float(head_dim))  # baked: kernel has no scale arg
+
+    _LOGICAL = ["q_sz", "q_sh", "q_sm", "q_sk", "k_sz", "k_sh", "k_sn", "k_sk",
+                "v_sz", "v_sh", "v_sn", "v_sk", "o_sz", "o_sh", "o_sm", "o_sk",
+                "Z", "H", "N_CTX"]
+    if arg_decls is None:
+        # Canonical full ABI: Q,K,V,Out (0..3), 16 strides (4..19), Z,H,N_CTX
+        # (20..22). Each logical name is its own buffer arg of the same name.
+        _ptr_decls = [
+            "    device const float* Q [[buffer(0)]]",
+            "    device const float* K [[buffer(1)]]",
+            "    device const float* V [[buffer(2)]]",
+            "    device float* Out [[buffer(3)]]",
+        ]
+        arg_decls = list(_ptr_decls)
+        for i, name in enumerate(_LOGICAL):
+            arg_decls.append(f"    constant uint& arg_{name} [[buffer({4 + i})]]")
+        bindings = {name: f"arg_{name}" for name in _LOGICAL}
+
+    missing = [n for n in _LOGICAL if n not in bindings]
+    if missing:
+        raise ValueError(f"make_flash_attention_kernel_tiled: bindings missing "
+                         f"{missing}")
+    sig = ",\n".join(arg_decls)
+    # Local aliases so the body references uniform names regardless of which
+    # strides/dims are real buffer args vs baked constants.
+    bind_lines = "\n".join(
+        f"    const uint {name} = {bindings[name]};" for name in _LOGICAL)
 
     return f"""#include <metal_stdlib>
 using namespace metal;
 
 // Head-dim-tiled FlashAttention-2 (fp32, non-causal).
-// Layout: Q,K,V,Out are [Z, H, N_CTX, D]; addressing via the 16 strides.
-kernel void flash_attention(
-    device const float* Q [[buffer(0)]],
-    device const float* K [[buffer(1)]],
-    device const float* V [[buffer(2)]],
-    device float* Out [[buffer(3)]],
-    constant uint& Z [[buffer(4)]],
-    constant uint& H [[buffer(5)]],
-    constant uint& N_CTX [[buffer(6)]],
-    constant uint& q_sz [[buffer(7)]],
-    constant uint& q_sh [[buffer(8)]],
-    constant uint& q_sm [[buffer(9)]],
-    constant uint& q_sk [[buffer(10)]],
-    constant uint& k_sz [[buffer(11)]],
-    constant uint& k_sh [[buffer(12)]],
-    constant uint& k_sn [[buffer(13)]],
-    constant uint& k_sk [[buffer(14)]],
-    constant uint& v_sz [[buffer(15)]],
-    constant uint& v_sh [[buffer(16)]],
-    constant uint& v_sn [[buffer(17)]],
-    constant uint& v_sk [[buffer(18)]],
-    constant uint& o_sz [[buffer(19)]],
-    constant uint& o_sh [[buffer(20)]],
-    constant uint& o_sm [[buffer(21)]],
-    constant uint& o_sk [[buffer(22)]],
-    constant float& scale [[buffer(23)]],
-    uint pid [[threadgroup_position_in_grid]],
-    uint lid [[thread_position_in_threadgroup]]
+// Layout: Q,K,V,Out are [Z, H, N_CTX, D]; addressing via the (possibly
+// specialization-folded) strides. Buffer ABI matches the kernel's REAL present
+// arg order. The softmax scale (1/sqrt(D)) is baked (kernel has no scale arg).
+kernel void {kernel_name}(
+{sig},
+    uint3 pid3 [[threadgroup_position_in_grid]],
+    uint lid [[thread_index_in_threadgroup]]
 ) {{
     const uint BM = {BLOCK_M}u;
     const uint BN = {BLOCK_N}u;
     const uint D  = {head_dim}u;
     const uint DC = {Dc}u;
     const uint TPG = {TPG}u;
+    const float scale = {SCALE!r}f;
 
-    // Linearized grid: pid in [0, n_q_blocks * (Z*H)).
-    uint n_q_blocks = (N_CTX + BM - 1u) / BM;
-    uint q_block = pid % n_q_blocks;
-    uint zh      = pid / n_q_blocks;
+    // Logical stride / dim aliases (buffer arg or baked constant).
+{bind_lines}
+
+    // Grid: (n_q_blocks, Z*H). program_id(0) = q-block (pid3.x),
+    //                          program_id(1) = z*h    (pid3.y).
+    uint q_block = pid3.x;
+    uint zh      = pid3.y;
     uint z = zh / H;
     uint h = zh % H;
     uint q_start = q_block * BM;

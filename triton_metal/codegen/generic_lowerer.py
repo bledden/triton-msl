@@ -40,6 +40,19 @@ from triton_metal.codegen._lowerer_helpers import (
 )
 from triton_metal.codegen._device_func_lowerer import _DeviceFuncLowerer
 from triton_metal.codegen._lowerer_templates import _TemplateMixin
+
+
+def _op_is_exp(op_name: str) -> bool:
+    """True iff ``op_name`` is the exponential op (``math.exp`` / ``math.exp2``
+    / ``tt.exp``), used by the FlashAttention softmax gate.
+
+    Matches the op suffix precisely rather than a substring: a bare
+    ``"exp" in op`` also matches ``tt.expand_dims``, which would wrongly pull a
+    non-FA kernel (>=2 dots + max + expand_dims) into FlashAttention handling.
+    """
+    if not op_name:
+        return False
+    return op_name in ("math.exp", "math.exp2", "tt.exp")
 from triton_metal.codegen._lowerer_detection import _DetectionMixin
 from triton_metal.codegen._lowerer_emission import _EmissionMixin
 from triton_metal.codegen._lowerer_reduce import _ReduceScanMixin
@@ -638,7 +651,10 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # numerical-stability max between the dots). Requiring the max excludes
         # non-FA >=2-dot kernels that merely use exp (e.g. a fused MLP with a
         # gelu/silu activation), so this guard can't over-refuse them.
-        _fa_has_exp = any("exp" in (s.op or "") for s in _fa_ops)
+        # Match the actual exp op (math.exp / math.exp2 / tt.exp) precisely — a
+        # bare ``"exp" in op`` also matches ``tt.expand_dims``, which would wrongly
+        # pull a non-FA >=2-dot + max + expand_dims kernel into FA handling.
+        _fa_has_exp = any(_op_is_exp(s.op) for s in _fa_ops)
         _fa_has_max = any("max" in (s.op or "") for s in _fa_ops)
         if len(_fa_dots) >= 2 and _fa_has_exp and _fa_has_max:
             _fa_maxdim = 0
@@ -665,6 +681,30 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             #       32 and 64. The old head_dim>64 guard missed this entirely
             #       (head_dim=64, BLOCK=16 returned silent garbage). (BLOCK > 32 is
             #       already refused by other guards before reaching here.)
+            #
+            # ROUTE the one supported large-head_dim config to the head-dim-tiled
+            # FA2 template (Task 1) BEFORE the head_dim>64 refusal: head_dim=128,
+            # BLOCK_M=BLOCK_N=32, fp32, non-causal. _detect_flash_attention raises
+            # on ANY ambiguity (a mis-read stride would silently mis-compute), so
+            # reaching the template means every param resolved unambiguously.
+            # fp16 (out_dtype "f16") and causal stay refused for now — they fall
+            # through to the head_dim>64 guard below, which still refuses them.
+            #
+            # Only consult the detector when a dot tile reaches 128 — i.e. the
+            # head_dim the tiled template targets. head_dim 32/64 lower through
+            # the normal generic/C++ path (validated, supported) and must NOT be
+            # routed here; invoking the refuse-on-ambiguity detector on them
+            # would wrongly block a previously-working kernel whose (different)
+            # addressing the FA stride-walker doesn't model.
+            if _fa_maxdim == 128:
+                info = self._detect_flash_attention()
+                if (info is not None
+                        and info["block_m"] == 32 and info["block_n"] == 32
+                        and info["head_dim"] == 128
+                        and info["out_dtype"] == "f32"
+                        and not info["causal"]):
+                    return self._lower_flash_attention_template(info)
+
             if _fa_maxdim > 64:
                 raise MetalNonRecoverableError(
                     f"FlashAttention head_dim > 64 (a dot tile dimension is "
@@ -4415,7 +4455,10 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         all_ops = list(_fa_walk(self.graph.ops))
         dots = [s for s in all_ops if s.op == "tt.dot"]
-        has_exp = any("exp" in (s.op or "") for s in all_ops)
+        # Match the exp op (math.exp / math.exp2 / tt.exp) precisely — ``"exp" in
+        # op`` would also match ``tt.expand_dims`` and mis-classify a non-FA
+        # >=2-dot + max + expand_dims kernel as FA.
+        has_exp = any(_op_is_exp(s.op) for s in all_ops)
         has_max = any("max" in (s.op or "") for s in all_ops)
         if not (len(dots) >= 2 and has_exp and has_max):
             return None
@@ -4458,9 +4501,24 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 break
             return sid
 
+        # A stride entry is EITHER a runtime kernel-arg index (int) OR the
+        # marker ``"c1"`` (the stride was specialized to the constant 1 and
+        # folded out of the arg list). Triton's ``equal_to_1`` specialization
+        # elides any arg whose value is 1 (e.g. a contiguous tensor's innermost
+        # stride, or Z/H == 1), so the real compiled FA kernel has FEWER than 16
+        # stride args. The detector must report which strides are present-as-args
+        # vs folded so the template binds only the runtime args and bakes the
+        # constants; refusing here would wrongly reject the canonical kernel.
+        C1 = "c1"
+
         def _stride_from_index_term(term_id):
-            """``arith.muli(index, tt.splat(STRIDE_ARG))`` (possibly through a
-            ``tt.broadcast``) -> the stride kernel-arg index, or None."""
+            """An index term contributing ``index * STRIDE`` to an address.
+            Returns the stride kernel-arg index (int) for
+            ``arith.muli(index, tt.splat(STRIDE_ARG))`` (through an optional
+            ``tt.broadcast``); returns ``C1`` when the term is a bare index
+            (``broadcast(expand_dims(make_range))`` etc.) — i.e. the stride was
+            folded to 1; returns ``None`` only when the term is an ``arith.muli``
+            whose multiplier is NOT a kernel-arg splat (genuinely unresolvable)."""
             tid = _skip_layout(term_id)
             op = op_by_id.get(tid)
             if op is None:
@@ -4468,7 +4526,10 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             if op.op == "tt.broadcast" and op.operand_ids:
                 return _stride_from_index_term(op.operand_ids[0])
             if op.op != "arith.muli":
-                return None
+                # No explicit multiply: the index is added directly => stride 1
+                # (folded). The op is the index expression itself (make_range /
+                # expand_dims / splat-of-pid / addi), not an unresolved value.
+                return C1
             for oid in op.operand_ids:
                 sub = op_by_id.get(oid)
                 if sub is not None and sub.op == "tt.splat" and sub.operand_ids:
@@ -4496,8 +4557,14 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 ptr + off_z*sz + off_h*sh
                     + row_idx[:,None]*srow + col_idx[None,:]*scol
 
-            Returns ``(base_ptr_arg_index, [sz, sh, srow, scol])`` (all arg
-            indices), or ``None`` if any leg deviates from the pattern.
+            Returns ``(base_ptr_arg_index, [sz, sh, srow, scol])`` where each
+            stride is a runtime kernel-arg index (int) or the marker ``C1``
+            (folded to 1). The scalar batch/head offset chain may be 2-level
+            (``addptr(addptr(PTR, muli(off_z,SZ)), muli(off_h,SH))``) or
+            collapsed to 1-level (when ``off_h*SH`` folded because H==1 ->
+            off_h==0); a missing leg is reported as ``C1``. Returns ``None`` only
+            if a genuinely-required leg (the terminal addptr / row leg / base
+            pointer) is structurally absent or unresolvable.
             """
             if addr_id is None:
                 return None
@@ -4520,20 +4587,35 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             if splat_base is None or splat_base.op != "tt.splat" \
                     or not splat_base.operand_ids:
                 return None
-            # scalar chain: addptr(addptr(PTR, muli(off_z, SZ)), muli(off_h, SH))
+            # scalar chain: addptr([addptr(PTR, muli(off_z, SZ))], muli(off_h, SH))
+            # (2-level), or addptr(PTR, muli(off_hz, SZ)) (1-level, when off_h*SH
+            # folded because H==1 -> off_h==0). Discriminate on whether the outer
+            # addptr's pointer operand is the base-ptr ARG (1-level) or another
+            # addptr (2-level).
             scal = op_by_id.get(splat_base.operand_ids[0])
             if scal is None or scal.op != "tt.addptr" or len(scal.operand_ids) < 2:
                 return None
-            h_stride = _scalar_stride_from_muli(scal.operand_ids[1])
+            outer_stride = _scalar_stride_from_muli(scal.operand_ids[1])
+            inner_arg = arg_by_id.get(scal.operand_ids[0])
             inner = op_by_id.get(scal.operand_ids[0])
-            if inner is None or inner.op != "tt.addptr" \
-                    or len(inner.operand_ids) < 2:
+            if inner_arg is not None and inner_arg.is_ptr:
+                # 1-level: addptr(PTR, muli(off_hz, SZ)); h-stride folded (H==1).
+                z_stride = outer_stride
+                h_stride = C1
+                base = inner_arg
+            elif inner is not None and inner.op == "tt.addptr" \
+                    and len(inner.operand_ids) >= 2:
+                # 2-level: addptr(addptr(PTR, muli(off_z,SZ)), muli(off_h,SH)).
+                z_stride = _scalar_stride_from_muli(inner.operand_ids[1])
+                h_stride = outer_stride
+                base = arg_by_id.get(inner.operand_ids[0])
+            else:
                 return None
-            z_stride = _scalar_stride_from_muli(inner.operand_ids[1])
-            base = arg_by_id.get(inner.operand_ids[0])
             if base is None or not base.is_ptr:
                 return None
             strides = [z_stride, h_stride, row_stride, col_stride]
+            # row stride (the BLOCK dimension) must be a real runtime arg or a
+            # resolved fold — a None here means the row leg didn't parse.
             if any(s is None for s in strides):
                 return None
             return base.index, strides
@@ -4617,12 +4699,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             _refuse("a consistent [block_m, head_dim] P@V output")
 
         # --- Z / H / N_CTX scalar arg indices --------------------------------
+        # Z and H are ``equal_to_1``-specialized away when they equal 1 (the
+        # batch=1 / heads=1 case), so they may be ABSENT from the arg list; a
+        # folded scalar is the constant 1 (reported as ``"c1"``). N_CTX drives
+        # the bounds masks and is never specialized to 1, so it must be present.
         scalar_by_name = {a.name: a for a in self.graph.args if not a.is_ptr}
         z_arg = scalar_by_name.get("Z")
         h_arg = scalar_by_name.get("H")
         n_ctx_arg = scalar_by_name.get("N_CTX")
-        if z_arg is None or h_arg is None or n_ctx_arg is None:
-            _refuse("the Z/H/N_CTX scalar args")
+        if n_ctx_arg is None:
+            _refuse("the N_CTX scalar arg")
+        z_val = z_arg.index if z_arg is not None else C1
+        h_val = h_arg.index if h_arg is not None else C1
 
         # --- causal: an arith.select of shape [block_m, block_n] whose operands
         # include the QK dot result (the tl.where(mask, qk, -inf) causal mask).
@@ -4673,10 +4761,161 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 "q": q_strides, "k": k_strides,
                 "v": v_strides, "o": o_strides,
             },
-            "Z": z_arg.index, "H": h_arg.index, "N_CTX": n_ctx_arg.index,
+            "Z": z_val, "H": h_val, "N_CTX": n_ctx_arg.index,
             "block_m": block_m, "block_n": block_n, "head_dim": head_dim,
             "causal": causal, "scale": scale, "out_dtype": out_dtype,
         }
+
+    def _lower_flash_attention_template(self, info: dict) -> str:
+        """Emit the head-dim-tiled FA2 MSL (Task 1) for a detected FA kernel.
+
+        Called from ``lower()`` only for the validated config: head_dim=128,
+        BLOCK_M=BLOCK_N=32, fp32 output, non-causal. ``info`` comes from
+        ``_detect_flash_attention`` (which refuses on any ambiguity).
+
+        ABI reconciliation (the crux). The launcher binds the flat non-constexpr
+        arg list positionally: ``kargs[N] -> buffer(N)``. So the emitted MSL's
+        ``[[buffer(N)]]`` declarations are built DIRECTLY from ``self.graph.args``
+        (the ground truth for binding order), one buffer per present arg, using
+        each arg's own name. Triton's ``equal_to_1`` specialization elides any
+        runtime arg whose value is 1 (a contiguous tensor's innermost stride;
+        Z/H when batch/heads == 1), so the real kernel has FEWER than the
+        idealized 23 args — and a varying count depending on the data. The
+        detector (``info``) reports, per logical stride/dim, either the runtime
+        arg INDEX or the marker ``"c1"`` (folded to 1); we map those to MSL
+        expressions: the arg's name (a buffer) or the literal ``1u``. The real
+        kernel computes ``qk_scale = 1/sqrt(HEAD_DIM)`` internally — there is NO
+        scale arg — so the template BAKES the scale as a constant.
+        """
+        from triton_metal.errors import MetalNonRecoverableError
+        from triton_metal.codegen.msl_types import triton_type_to_msl
+        from triton_metal.codegen._msl_templates import (
+            make_flash_attention_kernel_tiled,
+        )
+
+        head_dim = info["head_dim"]
+        block_m = info["block_m"]
+        block_n = info["block_n"]
+        C1 = "c1"
+
+        # The four pointer roles must be the first four args in canonical order
+        # (Q,K,V,Out = 0,1,2,3) — the template hard-codes Q/K/V/Out at buffers
+        # 0..3. The detector already required four DISTINCT roles; enforce the
+        # ORDER the template assumes (a permuted order would bind wrongly).
+        if not (info["q"] == 0 and info["k"] == 1
+                and info["v"] == 2 and info["out"] == 3):
+            raise MetalNonRecoverableError(
+                "FlashAttention recognized but Q/K/V/Out are not the first four "
+                f"kernel args in order (got q={info['q']},k={info['k']},"
+                f"v={info['v']},out={info['out']}). Refusing to bind buffers in "
+                "the wrong order rather than risk silently-wrong output.")
+
+        # Defense-in-depth (carry item 2): cross-check Q/K/Out roles against the
+        # generic dot-pointer resolver. dot 0 is QK^T (operands Q, K) and the
+        # single store targets Out, so _resolve_dot_ptr_roles(dot0, ...) returns
+        # [Q, K, Out, <extras incl. V>]. V is the 2nd operand of dot 1 (P@V), not
+        # dot 0, so it is NOT verifiable this way and is intentionally not cross-
+        # checked here — the detector's V stride-chain trace stands for it.
+        def _fa_walk(ops):
+            for s in ops:
+                yield s
+                if getattr(s, "region_ops", None):
+                    yield from _fa_walk(s.region_ops)
+                if getattr(s, "else_ops", None):
+                    yield from _fa_walk(s.else_ops)
+        _all = list(_fa_walk(self.graph.ops))
+        _dots = [s for s in _all if s.op == "tt.dot"]
+        _order = {s.id: i for i, s in enumerate(_all)}
+        _dot_qk = sorted(_dots, key=lambda d: _order[d.id])[0]
+        _ptr_args = [a for a in self.graph.args if a.is_ptr]
+        roles = self._resolve_dot_ptr_roles(_dot_qk, _ptr_args)
+        if roles is not None and len(roles) >= 3:
+            r_idx = {"q": roles[0].index, "k": roles[1].index, "out": roles[2].index}
+            if any(r_idx[k] != info[k] for k in ("q", "k", "out")):
+                raise MetalNonRecoverableError(
+                    "FlashAttention Q/K/Out pointer roles disagree between the FA "
+                    "detector and the generic dot-pointer resolver "
+                    f"(detector q={info['q']},k={info['k']},out={info['out']}; "
+                    f"resolver q={r_idx['q']},k={r_idx['k']},out={r_idx['out']}). "
+                    "Refusing rather than risk a mis-bound buffer.")
+
+        # Build the [[buffer(N)]] declarations from the ACTUAL arg list so the
+        # binding order matches the launcher exactly: pointers as device buffers,
+        # scalars as constant uint& (every present stride/Z/H/N_CTX is i32).
+        # Pointers KEEP the names Q/K/V/Out the template body uses (buffers
+        # 0..3). Scalar arg NAMES are positional (``fa_arg{i}``) and deliberately
+        # NOT the triton names — those (``N_CTX``, ``Z``, ``H`` ...) would collide
+        # with the template's logical-alias locals. Binding is by buffer INDEX,
+        # so the scalar name is free. A index->msl-name map resolves logical dims.
+        ptr_names = {info["q"]: "Q", info["k"]: "K",
+                     info["v"]: "V", info["out"]: "Out"}
+        args = self.graph.args
+        arg_decls = []
+        name_by_index = {}
+        for i, a in enumerate(args):
+            if i != a.index:
+                # Arg list must be densely 0-indexed by position for the
+                # positional buffer binding to be valid.
+                raise MetalNonRecoverableError(
+                    "FlashAttention arg list is not densely indexed; refusing "
+                    "rather than risk a mis-bound buffer.")
+            if a.is_ptr:
+                m = triton_type_to_msl(a.elem_type)
+                qual = "device const" if i != info["out"] else "device"
+                arg_decls.append(
+                    f"    {qual} {m}* {ptr_names[i]} [[buffer({i})]]")
+                name_by_index[i] = ptr_names[i]
+            else:
+                buf_name = f"fa_arg{i}"
+                arg_decls.append(f"    constant uint& {buf_name} [[buffer({i})]]")
+                name_by_index[i] = buf_name
+
+        def _expr(entry):
+            """Map a detector stride/dim entry (arg index or 'c1') to an MSL
+            expression: the buffer arg's name, or the literal 1u when folded."""
+            if entry == C1:
+                return "1u"
+            if isinstance(entry, int) and entry in name_by_index:
+                return name_by_index[entry]
+            # Unresolvable — must not silently bake a wrong value.
+            raise MetalNonRecoverableError(
+                "FlashAttention stride/dim could not be mapped to a kernel arg; "
+                "refusing rather than risk silently-wrong output.")
+
+        qs, ks, vs, os_ = (info["strides"]["q"], info["strides"]["k"],
+                           info["strides"]["v"], info["strides"]["o"])
+        bindings = {
+            "q_sz": _expr(qs[0]), "q_sh": _expr(qs[1]),
+            "q_sm": _expr(qs[2]), "q_sk": _expr(qs[3]),
+            "k_sz": _expr(ks[0]), "k_sh": _expr(ks[1]),
+            "k_sn": _expr(ks[2]), "k_sk": _expr(ks[3]),
+            "v_sz": _expr(vs[0]), "v_sh": _expr(vs[1]),
+            "v_sn": _expr(vs[2]), "v_sk": _expr(vs[3]),
+            "o_sz": _expr(os_[0]), "o_sh": _expr(os_[1]),
+            "o_sm": _expr(os_[2]), "o_sk": _expr(os_[3]),
+            "Z": _expr(info["Z"]), "H": _expr(info["H"]),
+            "N_CTX": _expr(info["N_CTX"]),
+        }
+
+        # Emit under the kernel's real (sanitized) name so it matches
+        # metadata["name"] the driver loads from the metallib (emit_msl sets
+        # name = _sanitize_msl_name(graph.func_name) before lower()).
+        msl = make_flash_attention_kernel_tiled(
+            head_dim, block_m, block_n, Dc=64, causal=False, out_dtype="fp32",
+            arg_decls=arg_decls, bindings=bindings,
+            kernel_name=_sanitize_msl_name(self.graph.func_name),
+        )
+
+        # 1024 threads/threadgroup (BLOCK_M * BLOCK_N) — the metallib dispatch
+        # reads this as threads-per-threadgroup.
+        self.effective_block_size = block_m * block_n
+        # The kernel uses program_id(0) (q-block) AND program_id(1) (z*h); force
+        # the 2-D threadgroup grid (n_q_blocks, Z*H, 1) so the template's pid3.x /
+        # pid3.y resolve correctly (emit_msl derives needs_2d_grid from this).
+        self._used_pid_axes = {0, 1}
+        # Mark the Out pointer as the (only) output for precise copy-back.
+        self._prescan_stores()
+        return msl
 
     def _find_op_type_str(self, ssa_id: int) -> str:
         """Find the type_str for an SSA value by searching ops, recursing
