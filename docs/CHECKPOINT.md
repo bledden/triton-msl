@@ -7,9 +7,15 @@ env, then begin **#4 (incremental op coverage)** — #1 and #3 are DONE.
 - Worktree: `.claude/worktrees/multi-element-per-thread` (branch
   `worktree-multi-element-per-thread`). Run all commands from the worktree; merge to main via
   `git -C ~/Documents/triton-metal merge --ff-only worktree-multi-element-per-thread`.
-- `origin/main` @ **968dc87** (#1 + #3 merged/pushed). Branch is **2 commits ahead**: autotune fix
-  `77bd87d` (#3 correction) + 2D-gather refusal `97a82b3` (#4) — **NOT pushed/merged.** Push needs
-  explicit user confirmation.
+- `origin/main` @ **968dc87** (#1 + #3 merged/pushed). Branch is **ahead** with: autotune-off
+  `77bd87d` + 2D-gather refusal `97a82b3` + checkpoint `bcb3ba8` + **persistent-reduction underfill
+  filter `fac6176`** — **NOT pushed/merged.** Push needs explicit user confirmation.
+- **#3 autotune silent-wrong is now ROOT-FIXED (`fac6176`), not just mitigated.** The exact
+  culprit was an under-filling persistent-reduction config (`__safe_softmax` XBLOCK=1/rnumel=16/
+  num_warps=2 → unmasked duplicate lanes → all-zero softmax → corrupt grads). The filter drops
+  `XBLOCK*rnumel < num_warps*32` configs so it can't be generated; verified autotune-ON 15/15 +
+  a force-every-config correctness scan = 0 divergent. autotune-off (`77bd87d`) stays as
+  determinism + blanket safety, but the bug class is now structurally unreachable regardless.
 - KNOWN unrelated flake: `test_fast_matmul_perf::test_fast_matmul_throughput[fp16]` dips below its
   5.5 TFLOP/s floor under **thermal throttling** after long test runs (whole matmul baseline was
   ~30% depressed: fp32 7.92 vs ~10-12 cool). Hand-written compile_shader path, NOT torch.compile —
