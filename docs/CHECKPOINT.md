@@ -1,16 +1,30 @@
-# CHECKPOINT — start here to resume (last updated 2026-06-18)
+# CHECKPOINT — start here to resume (last updated 2026-06-19)
 
-Single "start here" pointer after a compaction / fresh session. Read this, confirm the
-env, then begin **#2 (PyPI publishing)** — #1, #3 DONE; #4 substantially done (2D gather
-landed; remaining coverage items are safely refused, not blocking).
+Single "start here" pointer after a compaction / fresh session. Read this, confirm the env.
+**FULL REBRAND `triton_metal`→`triton_msl` / `triton-metal`→`triton-msl` is DONE** (this session).
+Remaining = finalize the held PyPI publish, push, rename the GitHub repo, and (follow-up) rebuild
+the shelved C++ extension. #1 inductor, #3 training, #4 2D-gather all landed BEFORE the rebrand.
 
 ## Where things stand
 - Worktree: `.claude/worktrees/multi-element-per-thread` (branch
-  `worktree-multi-element-per-thread`). Run all commands from the worktree; merge to main via
+  `worktree-multi-element-per-thread`). Run all commands from the worktree; the local clone dir
+  stays `~/Documents/triton-metal` (NOT renamed — only the package/dist/GitHub repo are). Merge via
   `git -C ~/Documents/triton-metal merge --ff-only worktree-multi-element-per-thread`.
-- `origin/main` @ **2ce413b** (#1 + #3 incl. autotune root-fix + #4 gather-refusal all
-  merged/pushed). Branch is **ahead** with **2D-gather implementation `1e904e8`** (#4) —
-  **NOT pushed/merged.** Push needs explicit user confirmation.
+- `origin/main` @ **95d0239** (#1 + #3 + #4 2D-gather merged/pushed pre-rebrand). Branch is
+  **4 commits ahead, NOT pushed** (push needs explicit user confirmation): `d58c1ad` PyPI prep →
+  `9414271` full rename → `e2e4f5c` case-variant fixups → `d8d4209` clone-path fixup.
+- **FULL REBRAND (`9414271` + fixups):** import pkg + dir `triton_metal`→`triton_msl` (git mv),
+  dist `triton-msl`, env vars `TRITON_MSL_*` (HARD rename), cache stems, entry-point
+  `metal = triton_msl.backend`, URLs → github.com/bledden/triton-msl, C++ csrc `TritonMSLToLLVM`.
+  Apple-Metal terms KEPT (the `metal` backend/device id, `Metal*` classes, MSL, `.metal`). tridec
+  (`5804837`) + tridec-serve (`c75cdd3`) + this MEMORY also renamed. Verified: import triton_msl +
+  sole `metal→triton_msl.backend` entry-point; project suite **787/0**; cross-repo audit clean
+  (KEEP-corruption zero). `dist/triton_msl-0.1.0a1` wheel rebuilt + twine-checked, ready to upload.
+  **C++ FOLLOW-UP:** 21 csrc tests skip "not built" — the rename invalidated the pre-built
+  `_triton_metal_cpp.so`; rebuild the shelved ext as `_triton_msl_cpp` (manual cmake, AGX-gated).
+- **PENDING user actions:** (a) rename GitHub repo bledden/triton-metal→triton-msl (URLs already
+  point there; then `git remote set-url`); (b) confirm merge + push; (c) `twine upload`
+  `dist/triton_msl-0.1.0a1.*` (production upload is classifier-gated — user runs it).
 - **#4 2D tt.gather IMPLEMENTED (`1e904e8`):** axis=0 (incl. ragged row counts) + same-shape
   axis=1, via full-tile shared staging; upstream `test_gather[[4,4]->[8,4],0]` now PASSES
   (+1 conformance). Refused loudly (HW/scope): tiles >1024 threads, ragged axis=1, MEPT operands.
@@ -27,16 +41,20 @@ landed; remaining coverage items are safely refused, not blocking).
   unaffected by any inductor/codegen change here. Re-run cool to confirm; do not lower the floor.
 - **Env (local, NOT in git):** python **3.14.4**, torch **2.12.1** (do NOT downgrade Python).
   Rollback if needed: `pip install --break-system-packages torch==2.9.1`.
-- Health: project suite **799/0** (was 754; +38 torch.compile + model tests, +7 training tests,
-  all un-gated); upstream `test_core` **5,559/0/~3,783** (skip-aware, via
-  `scripts/run_upstream_tests.py`). FlashAttention causal + non-causal at head_dim 32/64/128.
-  **`torch.compile` routes through triton-msl** — inference + training, static + `dynamic=True`.
+- Health: project suite **787/0** post-rebrand (was 808/0; the −21 = the C++ csrc tests now
+  SKIP "not built" pending the `_triton_msl_cpp` rebuild — NOT failures); upstream `test_core`
+  **5,559/0/~3,783** pre-rebrand (skip-aware, via `scripts/run_upstream_tests.py` — re-running
+  post-rebrand to reconfirm; first attempt hit the 900s thermal timeout, re-run at `--timeout 2400`;
+  rename is pure-identifier so conformance is expected unchanged). FlashAttention causal +
+  non-causal at head_dim 32/64/128. **`torch.compile` routes through triton-msl** (inference +
+  training, static + `dynamic=True`).
 - Prime directive ALWAYS: never silent-wrong — refuse loudly or fall back, never emit a guessed
   kernel. Every push needs explicit user confirmation (local commits/merges are fine).
 
 ## Agreed priority order
-~~#1 inductor backend port~~ **DONE** → ~~#3 training/backward~~ **DONE** → **#4 incremental op
-coverage (NEXT)** → #2 PyPI publishing.
+~~#1 inductor backend port~~ **DONE** → ~~#3 training/backward~~ **DONE** → ~~#4 incremental op
+coverage (2D gather)~~ **DONE** → **#2 PyPI publishing (in progress — full rebrand to `triton-msl`
+done; held on the GitHub-repo rename + user `twine upload`)**.
 
 ## #1 — inductor / torch.compile coverage — DONE (2026-06-18, commit 9eb6d31)
 Not a tier-by-tier port — it was a single registration-ordering bug + 3 latent silent-wrong
