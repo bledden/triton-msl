@@ -4,6 +4,15 @@
 > all real features (well-maintained skip-list); 2D gather is the highest-value pick (gather/
 > embedding-style lookups are common). 1D gather already works; this adds 2D.
 
+> **STATUS 2026-06-18: IMPLEMENTED (axis 0 + same-shape axis 1).** 2D `tt.gather` now lowers
+> via full-tile shared staging (`_lower_tt_gather_2d` in generic_lowerer.py): axis=0 (incl.
+> ragged row counts) and same-shape axis=1, for tiles ≤ 1024 threads. Also fixed the walker to
+> parse the gather `axis` attribute (`_extract_attrs`). The upstream `test_gather[[4,4]→[8,4],0]`
+> case now PASSES (un-skipped in conftest_metal); the two `[128,64]` cases stay skipped (>1024
+> threads / ragged axis=1 — refused loudly). Tests: `tests/test_gather_2d.py` (10). Remaining
+> (refused loudly, future work): tiles > 1024 (strided multi-pass staging), ragged axis=1,
+> register-array operands.
+
 > **UPDATE 2026-06-18:** while scoping this, found that 2D `tt.gather` was **silently wrong**
 > (the 1D shared-memory path ran on 2D input and mis-computed by ~3.0), not refused — only the
 > conftest skip hid it. A **loud refusal now guards it** (`_lower_tt_gather` raises

@@ -629,17 +629,39 @@ def pytest_collection_modifyitems(config, items):
                         reason=f"Metal: histogram_mask 2*M={2*M} exceeds 1024 thread limit"))
                     continue
 
-        # Skip gather configs that exceed Metal capabilities
+        # Skip gather configs that exceed Metal capabilities.
+        # 2D tt.gather is now supported for axis=0 when the columns match, the
+        # source fits the index/thread grid, and the index tile fits a
+        # 1024-thread threadgroup (one element per thread; see
+        # _lower_tt_gather_2d). Larger tiles (>1024 threads) and ragged axis=1
+        # are refused loudly by the backend (Metal threadgroup limit / unimpl),
+        # so keep those skipped as feature gaps; un-skip the supported case so
+        # it counts as a real pass.
         if func_name == "test_gather":
             callspec = getattr(item, "callspec", None)
             if callspec:
                 src_shape = callspec.params.get("src_shape", [])
                 indices_shape = callspec.params.get("indices_shape", [])
-                # Skip 2D gather (needs 2D shared memory indexing)
+                axis = callspec.params.get("axis", 0)
                 if len(src_shape) > 1 or len(indices_shape) > 1:
-                    item.add_marker(pytest.mark.skip(
-                        reason=f"Metal: 2D gather not yet supported"))
-                    continue
+                    src_total = 1
+                    for d in src_shape:
+                        src_total *= d
+                    idx_total = 1
+                    for d in indices_shape:
+                        idx_total *= d
+                    supported_2d = (
+                        len(src_shape) == 2 and len(indices_shape) == 2
+                        and axis == 0
+                        and src_shape[1] == indices_shape[1]
+                        and src_total <= idx_total
+                        and idx_total <= 1024)
+                    if not supported_2d:
+                        item.add_marker(pytest.mark.skip(
+                            reason="Metal: 2D gather supported only for axis=0 "
+                                   "within a 1024-thread threadgroup; larger "
+                                   "tiles and ragged axis=1 are refused loudly"))
+                        continue
 
         # Skip thread_locality configs where BLOCK_M*BLOCK_N > 1024 threads
         if func_name == "test_optimize_thread_locality":

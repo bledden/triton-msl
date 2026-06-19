@@ -5465,24 +5465,16 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         src_shape = _extract_shape(self._find_op_type_str(ssa.operand_ids[0]))
         idx_shape = _extract_shape(self._find_op_type_str(ssa.operand_ids[1]))
 
-        # This path lowers only the 1D gather (out[i] = src[idx[i]]): it stages
-        # one src element per thread to a flat shared buffer and reads
-        # shared[idx]. A genuinely 2D gather has per-axis semantics
-        # (out[i,j] = src[idx[i,j], j] for axis=0, or src[i, idx[i,j]] for
-        # axis=1) that this flat staging does NOT implement -- running it would
-        # SILENTLY return wrong values (verified: a 2D axis-0 gather mis-computes
-        # by ~3.0). Refuse loudly instead. 2D gather is tracked work
-        # (docs/superpowers/plans/2026-06-18-2d-gather-coverage.md).
+        # 2D gather has per-axis semantics (out[i,j] = src[idx[i,j], j] for
+        # axis=0, src[i, idx[i,j]] for axis=1) that the 1D flat-staging path
+        # below does NOT implement. Dispatch to the dedicated 2D handler, which
+        # implements the supported shapes and refuses the rest loudly (never
+        # silently wrong). See docs/superpowers/plans/2026-06-18-2d-gather-coverage.md.
         def _effective_rank(shape):
             return sum(1 for d in (shape or []) if d != 1)
         if _effective_rank(src_shape) > 1 or _effective_rank(idx_shape) > 1:
-            from triton_metal.errors import MetalNonRecoverableError
-            raise MetalNonRecoverableError(
-                "tt.gather: only 1D gather is supported; a 2D gather "
-                f"(src shape {tuple(src_shape or ())}, index shape "
-                f"{tuple(idx_shape or ())}) has per-axis semantics the 1D "
-                "shared-memory path cannot lower correctly. Refusing rather than "
-                "emitting silently-wrong values. (2D gather is planned work.)")
+            self._lower_tt_gather_2d(ssa, src_var, idx_var, src_shape, idx_shape)
+            return
 
         S = src_shape[0] if src_shape else self.effective_block_size
 
@@ -5504,6 +5496,121 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # Each thread gathers: result = shared[idx]
         result_var = self._next_var("gathered")
         self.kb.raw_line(f"    {msl_type} {result_var} = {shared_name}[(uint){idx_var}];")
+
+        self.env[ssa.id] = result_var
+        self.env_types[ssa.id] = src_dtype
+        out_shape = _extract_shape(ssa.type_str)
+        if out_shape:
+            self.env_shapes[ssa.id] = tuple(out_shape)
+
+    def _lower_tt_gather_2d(self, ssa: SSAValue, src_var, idx_var,
+                            src_shape, idx_shape):
+        """2D tt.gather via full-tile shared-memory staging.
+
+            axis=0:  out[i, j] = src[index[i, j], j]   ->  shared[idx*N + col]
+            axis=1:  out[i, j] = src[i, index[i, j]]   ->  shared[row*N + idx]
+
+        Each thread owns one output element at (row = lid / N, col = lid % N)
+        and its own per-thread ``src``/``idx`` value. The gather needs an
+        arbitrary OTHER element of the source row/column, so the whole source
+        tile is staged into threadgroup memory first, then indexed.
+
+        Supported (else refuse loudly -- never silently wrong):
+          - src and index share the same 2D shape (so a thread's flat ``lid``
+            equals its row*N+col in BOTH, making the staging
+            ``shared[lid] = src`` exact). A ragged gather axis is refused.
+          - one element per thread: the 2D kernel launches M*N threads, so the
+            tile must fit Metal's 1024-thread threadgroup (and 32 KB shared).
+          - scalar (non-register-array) operands.
+        """
+        from triton_metal.errors import MetalNonRecoverableError
+        axis = ssa.attrs.get("axis", 0)
+
+        if (not src_shape or not idx_shape
+                or len(src_shape) != 2 or len(idx_shape) != 2):
+            raise MetalNonRecoverableError(
+                f"2D tt.gather: expected 2D src and index (got src "
+                f"{tuple(src_shape or ())}, index {tuple(idx_shape or ())}).")
+        if axis not in (0, 1):
+            raise MetalNonRecoverableError(
+                f"2D tt.gather: unsupported axis {axis} (only 0 and 1).")
+        # Register-array (multi-element-per-thread) operands aren't a single
+        # per-thread scalar, so the flat ``shared[lid] = src`` staging would
+        # mis-map. Refuse rather than guess.
+        if (ssa.operand_ids[0] in self.env_array
+                or ssa.operand_ids[1] in self.env_array):
+            raise MetalNonRecoverableError(
+                "2D tt.gather: register-array (multi-element-per-thread) operands "
+                "are not yet supported; refusing rather than mis-staging.")
+
+        # Shape compatibility per axis. The output/index drives the thread grid
+        # (block_size == idx rows*cols); the SOURCE tile is staged into shared.
+        #   axis=0 (gather rows): out[i,j]=src[idx[i,j],j]. src and index must
+        #     share the COLUMN count N; the row counts may differ (ragged) — the
+        #     index picks any source row. Read shared[idx*N + col].
+        #   axis=1 (gather cols): out[i,j]=src[i,idx[i,j]]. Supported only for the
+        #     same-shape case (a ragged source column count remaps the per-thread
+        #     src load in a way this flat staging doesn't track) — refuse ragged.
+        N = src_shape[1]
+        if axis == 0:
+            if src_shape[1] != idx_shape[1]:
+                raise MetalNonRecoverableError(
+                    f"2D tt.gather axis=0 requires matching column counts "
+                    f"(src {tuple(src_shape)} vs index {tuple(idx_shape)}); refusing.")
+        else:  # axis == 1
+            if tuple(src_shape) != tuple(idx_shape):
+                raise MetalNonRecoverableError(
+                    f"2D tt.gather axis=1 (ragged) is not yet lowered "
+                    f"(src {tuple(src_shape)} vs index {tuple(idx_shape)}); refusing.")
+
+        src_total = src_shape[0] * src_shape[1]
+        idx_total = idx_shape[0] * idx_shape[1]
+        # One thread per element: the index tile drives the 2D thread grid, which
+        # must fit Metal's 1024-thread threadgroup. The source is staged one
+        # element per thread too, so it must also fit AND not exceed the thread
+        # count (else some source rows go un-staged). Larger tiles need a strided
+        # multi-pass staging (future work) -- refuse rather than mis-stage.
+        if idx_total > 1024 or src_total > 1024:
+            raise MetalNonRecoverableError(
+                f"2D tt.gather: tile too large (src {src_total}, index {idx_total} "
+                "elems) for one-element-per-thread staging in a 1024-thread "
+                "threadgroup. Refusing; strided multi-pass staging is future work.")
+        if src_total > idx_total:
+            raise MetalNonRecoverableError(
+                f"2D tt.gather: source ({src_total} elems) larger than the index/"
+                f"thread grid ({idx_total}); cannot stage every source element. Refusing.")
+
+        src_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
+        is_float = src_dtype.startswith("fp") or src_dtype.startswith("bf")
+        msl_type = "float" if is_float else "int"
+        shared_dtype = "fp32" if is_float else "i32"
+        zero = "0.0f" if is_float else "0"
+
+        lid = self._lid_expr
+        shared_name = f"gather2d_shared_{self._shared_counter}"
+        self._shared_counter += 1
+        self.kb.declare_threadgroup_array(shared_name, dtype=shared_dtype, size=src_total)
+
+        # Stage the full source tile: thread lid holds src flat[lid]
+        # (row*N + col == lid for a row-major src_rows*N tile), for lid < src_total.
+        self.kb.raw_line(f"    if ({lid} < {src_total}u) {shared_name}[{lid}] = {src_var};")
+        self.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+
+        if axis == 0:
+            # out[i,j] = src[idx[i,j], j]: row picked by idx, col = lid % N.
+            gathered = f"(uint){idx_var} * {N}u + ({lid} % {N}u)"
+        else:
+            # out[i,j] = src[i, idx[i,j]]: row = lid / N, col picked by idx.
+            gathered = f"({lid} / {N}u) * {N}u + (uint){idx_var}"
+
+        # Guard the read by the OUTPUT thread grid (lid < idx_total); out-of-range
+        # threads hold a garbage idx and the store masks them out, but avoid an
+        # out-of-bounds shared read here. For in-range threads the computed index
+        # is in [0, src_total) by construction (idx in [0, src_rows), col in [0,N)).
+        result_var = self._next_var("gathered2d")
+        self.kb.raw_line(
+            f"    {msl_type} {result_var} = ({lid} < {idx_total}u) ? "
+            f"{shared_name}[{gathered}] : {zero};")
 
         self.env[ssa.id] = result_var
         self.env_types[ssa.id] = src_dtype

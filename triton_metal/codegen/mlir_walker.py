@@ -1207,6 +1207,13 @@ class MLIRWalker:
             axis = op.get_int_attr("axis")
             attrs["axis"] = axis if axis is not None else 0
 
+        elif name == "tt.gather":
+            # The gather axis (0 = gather rows per column, 1 = gather columns
+            # per row). Needed by the 2D gather lowering; without it the lowerer
+            # would default to axis 0 and silently mis-index an axis-1 gather.
+            axis = op.get_int_attr("axis")
+            attrs["axis"] = axis if axis is not None else 0
+
         elif name == "arith.constant":
             # `get_constant_value` (added in upstream triton 6cfdc3c37) handles
             # both scalar IntegerAttr and splat DenseIntElementsAttr — strictly
