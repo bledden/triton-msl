@@ -16,9 +16,10 @@ dependencies, scope estimates, and file-level change lists.
 0 failed / ~3,783 skipped** via `scripts/run_upstream_tests.py` (`--device cpu`, which loads
 the `conftest_metal` skip plugin). The skips are hardware-impossible (fp64, fp8/microscaling,
 64-bit atomics, TMA, device printf) or unimplemented features — **each refused loudly, never
-silent-wrong**. Project suite **792 / 0** (incl. 38 `torch.compile` + real-model tests now
-un-gated); FlashAttention causal + non-causal at head_dim 32 / 64 / 128. **`torch.compile`
-routes through triton-metal on Metal** (static + dynamic shapes; see below).
+silent-wrong**. Project suite **799 / 0** (incl. 38 `torch.compile` + real-model tests + 7
+training tests, all un-gated); FlashAttention causal + non-causal at head_dim 32 / 64 / 128.
+**`torch.compile` routes through triton-metal on Metal** — inference *and* training (forward +
+backward), static + dynamic shapes; see below.
 
 ### Landed since this roadmap was written (2026-04-09)
 - **Phase 0** (foundation) — all items.
@@ -45,9 +46,20 @@ routes through triton-metal on Metal** (static + dynamic shapes; see below).
   cache corruption; `_MSL_BY_NAME` cross-graph cache-key collision; the `triton_per_*` softmax
   template mapping `xnumel`=row-count as the row length → 4×-wrong reductions). Closes the
   "torch.compile produces wrong values for unsupported patterns" honesty concern (old 1A/0h).
+- **Training / backward pass (2026-06-18)** — falls out of the inductor port: AOTAutograd's
+  backward graph is just more Triton kernels (matmul→matmul, the embedding scatter-add,
+  softmax/layernorm/attention backwards) that lower through triton-metal. `torch.compile`d
+  **MLP, CNN, and transformer (w/ embedding) train + converge, matching eager** (grads + an
+  8-step Adam loop, `tests/test_training.py`). Fixed one backward-only codegen gap:
+  `embedding_dense_backward`'s grad zero-init (a masked MEPT store of a constant to a 1D buffer)
+  emitted a malformed `ptr[off][lid]` — the MEPT scatter now broadcasts splat/constant values.
+  The old "custom `autograd.Function` wrappers" framing (Phase 5) is obsolete — AOTAutograd
+  handles autograd; we just lower its kernels.
 
 ### Remaining — re-prioritized for the current state
-1. **Training / backward pass** (old Phase 5) — biggest capability gap; **inference-only** today.
+1. ~~**Training / backward pass** (old Phase 5)~~ — **DONE** for the torch.compile path (see
+   "Landed 2026-06-18"). Remaining sub-items: optimizer-step fusion / `torch.compile`-d
+   optimizers, gradient-checkpointing, and larger end-to-end training runs (real datasets).
 2. ~~**Dynamic shapes** (1H)~~ — **DONE** via the inductor port (`torch.compile(dynamic=True)`
    verified; single graph across variable seq lengths). Hand-written `@triton.jit` kernels already
    took runtime dims. Remaining sub-item: stress dynamic shapes on larger real models.

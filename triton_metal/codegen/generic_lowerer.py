@@ -2789,16 +2789,34 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         val_id = ssa.operand_ids[1]
 
         # Phase 4c: MEPT array scatter. When the pointer was assembled
-        # via a tt.addptr with an array offset AND the value is an
-        # env_array of matching length, emit per-position writes.
-        # Honors an optional mask operand (array or scalar form).
+        # via a tt.addptr with an array offset, emit per-position writes for
+        # all n MEPT elements. The value is either an env_array of matching
+        # length (write val[i]) OR a splat-like scalar/constant (broadcast the
+        # same value to every position). The splat case matters because a
+        # constant-0 store (e.g. embedding_dense_backward's grad zero-init)
+        # registers as a SCALAR in self.env, not env_array — without handling
+        # it here the store falls through to the scalar path, which can't see
+        # the MEPT pointer array (it lives in env_ptr_array, not env_is_ptr)
+        # and emits a malformed `ptr[off][lid]` double-subscript that fails to
+        # compile. Only broadcast values KNOWN to be splat (uniform across
+        # positions) — never guess an untracked array (that would be silent-wrong).
         ptr_arr_info = self.env_ptr_array.get(ptr_id)
         val_arr_info = self.env_array.get(val_id)
+        val_is_splat = val_id in self._is_splat
         if (self.mept_enabled and ptr_arr_info is not None
-                and val_arr_info is not None
-                and ptr_arr_info[2] == val_arr_info[1]):
+                and ((val_arr_info is not None
+                      and ptr_arr_info[2] == val_arr_info[1])
+                     or (val_arr_info is None and val_is_splat))):
             base_ptr, off_arr, n = ptr_arr_info
-            val_arr, _vn, _vty = val_arr_info
+            if val_arr_info is not None:
+                _val_arr = val_arr_info[0]
+                def _mept_val_at(i, _a=_val_arr):
+                    return f"{_a}[{i}]"
+            else:
+                # Splat/constant: same scalar written to every MEPT position.
+                _splat_val = self._lookup(val_id)
+                def _mept_val_at(i, _v=_splat_val):
+                    return _v
             # Optional mask is the third operand if present.
             mask_var = None
             mask_is_array = False
@@ -2823,7 +2841,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                     store_dtype = _mlir_to_triton_dtype(arg.elem_type)
                     break
             for i in range(n):
-                cast_val = self._fp8_cast_val(f"{val_arr}[{i}]", store_dtype)
+                cast_val = self._fp8_cast_val(_mept_val_at(i), store_dtype)
                 write = f"{base_ptr}[{off_arr}[{i}]] = {cast_val};"
                 if mask_var is None:
                     self.kb.raw_line(f"    {write}")

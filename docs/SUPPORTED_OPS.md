@@ -45,6 +45,7 @@
 |---|---|---|
 | `torch.compile(model, backend="inductor")` on `"mps"` | ✓ | routes through `triton_metal.inductor.register_metal_triton_backend()` → inductor `TritonScheduling` → triton-metal → MSL. Verified on elementwise, linear, conv, norms (layer/group/instance/batch), pooling, embedding, softmax/log-softmax, residual blocks, transformer encoders, multi-layer GPT, LSTM, and HF GPT-2 (cosine > 0.98). |
 | dynamic shapes (`torch.compile(..., dynamic=True)`) | ✓ | symbolic dims flow to the lowerer; a **single compiled graph** serves variable sequence lengths (no per-shape recompile). |
+| **training** (forward + backward) | ✓ | `torch.compile`d models train through AOTAutograd: the backward graph is ordinary Triton kernels (matmul→matmul, embedding scatter-add, softmax/layernorm/attention backwards) lowered by triton-metal. MLP / CNN / transformer (w/ embedding) converge and match eager gradients (`tests/test_training.py`). Optimizer step runs eager (or compile it separately). |
 | compile parallelism | single-process (enforced) | the backend pins inductor to `compile_threads=1` + `autotune_in_subproc=False`: Metal/PyObjC is **not fork-safe**, so a forked compile worker crashes (and a crash mid-write can corrupt the on-disk cache → silent-wrong). This is a correctness requirement, not a perf tweak. |
 | op inductor can't lower to a triton kernel | falls back loudly / to eager | inductor raises `InductorError` (loud) rather than emitting wrong values; conv/matmul may use aten extern kernels (correct, not routed through our MMA path). |
 
