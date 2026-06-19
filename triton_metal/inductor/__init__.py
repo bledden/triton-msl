@@ -82,6 +82,25 @@ def register_metal_triton_backend():
     if hasattr(_ind_config, "autotune_in_subproc"):
         _ind_config.autotune_in_subproc = False
 
+    # Disable inductor's multi-config kernel autotuning. It benchmarks several
+    # tile configs per kernel and keeps the "fastest" by wall-clock — but on
+    # Metal that is doubly unsafe:
+    #   (a) Metal timing is coarse/noisy, so the winning config varies run to
+    #       run (nondeterministic kernel selection), and
+    #   (b) some configs it explores (sizePerThread > 1, i.e. XBLOCK/R0_BLOCK
+    #       wider than the threadgroup) our flat lid-based MSL lowering does NOT
+    #       cover — it silently computes the wrong reduction (the same class the
+    #       _patch_reduction_configs filter and the n>1 store refusal guard
+    #       against).
+    # Together these produced a NONDETERMINISTIC wrong gradient — a transformer
+    # `head.weight` grad off by ~0.11 on roughly 1 in 4 cold runs, exact on the
+    # rest. Pinning to the single default (correct, deterministic) config makes
+    # the compiled result reproducible and correct. Correctness > the autotuning
+    # speedup; our real perf comes from the hand-written fast paths, not from
+    # autotuning inductor's generic tiles.
+    if hasattr(_ind_config, "triton") and hasattr(_ind_config.triton, "autotune_pointwise"):
+        _ind_config.triton.autotune_pointwise = False
+
     register_backend_for_device(
         "mps",
         TritonScheduling,
