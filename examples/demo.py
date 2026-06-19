@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Triton-Metal Demo: Compile and run Metal GPU kernels on Apple Silicon.
+"""Triton-MSL Demo: Compile and run Metal GPU kernels on Apple Silicon.
 
 This script demonstrates the full triton-msl kernel pipeline:
   1. Generate MSL (Metal Shading Language) source from Python
@@ -603,7 +603,7 @@ def print_device_info(device):
 
 def main():
     print("=" * 60)
-    print("  Triton-Metal: GPU Kernel Compiler for Apple Silicon")
+    print("  Triton-MSL: GPU Kernel Compiler for Apple Silicon")
     print("=" * 60)
 
     device, queue = get_metal_device()

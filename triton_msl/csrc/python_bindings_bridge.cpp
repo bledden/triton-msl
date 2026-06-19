@@ -44,7 +44,7 @@ extern "C" void triton_msl_register_passes() {
 // triton-ext compatible plugin entry point.
 // This allows loading our passes via TRITON_PASS_PLUGIN_PATH without
 // the pybind11 module overhead.
-extern "C" void tritonMetalRegisterPasses(void) {
+extern "C" void tritonMSLRegisterPasses(void) {
     mlir::triton_msl::registerTritonMSLToLLVMPasses();
 }
 

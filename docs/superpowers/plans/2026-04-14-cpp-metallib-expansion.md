@@ -545,7 +545,7 @@ In `triton_msl/csrc/python_bindings_bridge.cpp`, add a plugin-compatible entry p
 // triton-ext compatible plugin entry point.
 // This allows loading our passes via TRITON_PASS_PLUGIN_PATH without
 // the pybind11 module overhead.
-extern "C" void tritonMetalRegisterPasses(void) {
+extern "C" void tritonMSLRegisterPasses(void) {
     mlir::triton_msl::registerTritonMSLToLLVMPasses();
 }
 ```
