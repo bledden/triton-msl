@@ -7,16 +7,16 @@ import triton  # noqa: F401
 
 
 def test_fallback_refuses_by_default(monkeypatch):
-    from triton_metal.codegen import msl_emitter
-    from triton_metal.errors import MetalNonRecoverableError
-    monkeypatch.delenv("TRITON_METAL_LEGACY", raising=False)
+    from triton_msl.codegen import msl_emitter
+    from triton_msl.errors import MetalNonRecoverableError
+    monkeypatch.delenv("TRITON_MSL_LEGACY", raising=False)
     with pytest.raises(MetalNonRecoverableError):
         msl_emitter._legacy_fallback("module {}", {}, None, "lowerer failed")
 
 
 def test_fallback_allowed_when_opted_in(monkeypatch):
-    from triton_metal.codegen import msl_emitter
-    monkeypatch.setenv("TRITON_METAL_LEGACY", "1")
+    from triton_msl.codegen import msl_emitter
+    monkeypatch.setenv("TRITON_MSL_LEGACY", "1")
     try:
         msl_emitter._legacy_fallback("module {}", {}, None, "lowerer failed")
     except Exception as e:

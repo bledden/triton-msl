@@ -1,4 +1,4 @@
-"""Performance regression detection for triton-metal.
+"""Performance regression detection for triton-msl.
 
 Runs key benchmarks and compares against a stored baseline.
 Exits with non-zero status if any benchmark regresses >15%.
@@ -211,14 +211,14 @@ def check_regression(current, baseline):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="triton-metal performance regression detection")
+    parser = argparse.ArgumentParser(description="triton-msl performance regression detection")
     parser.add_argument("--update-baseline", action="store_true",
                         help="Save current results as new baseline")
     parser.add_argument("--json", action="store_true",
                         help="Print results as JSON")
     args = parser.parse_args()
 
-    print("Running triton-metal benchmarks...", file=sys.stderr)
+    print("Running triton-msl benchmarks...", file=sys.stderr)
     results = run_all()
 
     if args.json:

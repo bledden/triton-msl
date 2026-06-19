@@ -43,11 +43,11 @@ computes now.
 
 ## How to pick it up
 
-It's merged into `main` (`CODEGEN_VERSION 2026.06.13`). Update your triton-metal
+It's merged into `main` (`CODEGEN_VERSION 2026.06.13`). Update your triton-msl
 checkout to HEAD and **clear the metallib cache once** after updating:
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 ```
 
 (The cache key includes the codegen version, so stale entries won't be served —
@@ -55,7 +55,7 @@ but clearing once after the bump is the clean move.)
 
 ## Escape hatch + integrity
 
-If you ever need to bisect a suspected regression, `TRITON_METAL_MEPT=0` reverts to
+If you ever need to bisect a suspected regression, `TRITON_MSL_MEPT=0` reverts to
 the previous scalar/wrap-loop path (the BLOCK ≤ 128 behavior) per run. The
 integrity model is unchanged: genuinely-unsupported patterns still refuse loudly
 with `MetalNonRecoverableError` (never silent-wrong). The one known remaining
@@ -65,4 +65,4 @@ send it over and we'll scope it.
 
 Send the new receipts once you've lifted to 256+.
 
-— triton-metal dev session, 2026-06-13
+— triton-msl dev session, 2026-06-13

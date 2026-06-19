@@ -32,7 +32,7 @@ def _compile_to_ttgir(kernel_fn, sig, constexprs=None):
     """
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
 
     target = GPUTarget("metal", "apple-m4", 32)
     backend = MetalBackend(target)
@@ -64,7 +64,7 @@ def _compile_to_ttgir(kernel_fn, sig, constexprs=None):
 @requires_metal
 def test_walker_vector_add():
     """Walker extracts correct structure from vector_add kernel."""
-    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.mlir_walker import walk_ttgir
 
     @triton.jit
     def vector_add(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
@@ -111,7 +111,7 @@ def test_walker_vector_add():
 @requires_metal
 def test_walker_scalar_mul():
     """Walker extracts correct structure from scalar multiply kernel."""
-    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.mlir_walker import walk_ttgir
 
     @triton.jit
     def scalar_mul(x_ptr, out_ptr, n, scale, BLOCK_SIZE: tl.constexpr):
@@ -142,7 +142,7 @@ def test_walker_scalar_mul():
 @requires_metal
 def test_walker_sum_reduction():
     """Walker extracts tt.reduce with body region."""
-    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.mlir_walker import walk_ttgir
 
     @triton.jit
     def sum_kernel(input_ptr, output_ptr, n_elements,
@@ -186,7 +186,7 @@ def test_walker_sum_reduction():
 @requires_metal
 def test_walker_fp16_cast():
     """Walker handles FP16 type cast operations (extf/truncf)."""
-    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.mlir_walker import walk_ttgir
 
     @triton.jit
     def cast_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
@@ -223,7 +223,7 @@ def test_walker_fp16_cast():
 @requires_metal
 def test_walker_constants():
     """Walker extracts arith.constant values correctly."""
-    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.mlir_walker import walk_ttgir
 
     @triton.jit
     def const_kernel(x_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
@@ -258,7 +258,7 @@ def test_walker_constants():
 @requires_metal
 def test_walker_ssa_connectivity():
     """Verify SSA operand IDs correctly reference previous results."""
-    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.mlir_walker import walk_ttgir
 
     @triton.jit
     def simple_add(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
@@ -307,7 +307,7 @@ def test_walker_ssa_connectivity():
 @requires_metal
 def test_walker_comparison():
     """Walker extracts comparison predicates."""
-    from triton_metal.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.mlir_walker import walk_ttgir
 
     @triton.jit
     def cmp_kernel(x_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
@@ -339,7 +339,7 @@ def test_walker_comparison():
 
 def test_parse_blocked_layout():
     """_parse_blocked_layout extracts sizePerThread from TTGIR text."""
-    from triton_metal.codegen.mlir_walker import _parse_blocked_layout
+    from triton_msl.codegen.mlir_walker import _parse_blocked_layout
 
     text = '#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>'
     layout = _parse_blocked_layout(text)
@@ -351,7 +351,7 @@ def test_parse_blocked_layout():
 
 def test_parse_blocked_layout_2d():
     """_parse_blocked_layout handles 2D layouts."""
-    from triton_metal.codegen.mlir_walker import _parse_blocked_layout
+    from triton_msl.codegen.mlir_walker import _parse_blocked_layout
 
     text = '#blocked = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>'
     layout = _parse_blocked_layout(text)
@@ -363,6 +363,6 @@ def test_parse_blocked_layout_2d():
 
 def test_parse_blocked_layout_missing():
     """_parse_blocked_layout returns None when no layout present."""
-    from triton_metal.codegen.mlir_walker import _parse_blocked_layout
+    from triton_msl.codegen.mlir_walker import _parse_blocked_layout
 
     assert _parse_blocked_layout("no layout here") is None

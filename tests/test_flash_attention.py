@@ -21,7 +21,7 @@ except ImportError:
 requires_triton = pytest.mark.skipif(not _HAS_TRITON, reason="Triton not installed")
 
 try:
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
 except Exception:
     MetalNonRecoverableError = Exception
 

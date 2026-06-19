@@ -117,7 +117,7 @@ def test_matmul_chained_pointwise():
 def test_matmul_unsupported_epilogue_still_refuses():
     # A non-softmax reduce epilogue is not representable -> must REFUSE loudly
     # (never silently drop), the #157 integrity boundary.
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
     a, b = _ab(); c = torch.zeros(M, N)
     with pytest.raises(Exception) as ei:
         _mm_rowreduce[(1,)](a, b, c, M=M, N=N, K=K)
@@ -141,7 +141,7 @@ def test_matmul_runtime_scalar_epilogue_refuses_not_silentwrong():
     # lowered by the per-element emitter (the scalar is a kernel-arg leaf). It
     # must REFUSE LOUDLY (MetalNonRecoverableError), never silently resolve the
     # scalar to 0 (-> wrong output) nor crash the MSL compiler. #158 integrity.
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
     a, b = _ab(); c = torch.zeros(M, N)
     with pytest.raises(MetalNonRecoverableError):
         _mm_scale_runtime_arg[(1,)](a, b, c, 2.5, M=M, N=N, K=K)

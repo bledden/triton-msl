@@ -1,4 +1,4 @@
-# Supported ops & dtypes — triton-metal
+# Supported ops & dtypes — triton-msl
 
 > What lowers, what refuses, what the hardware can't do. **The integrity contract:** a
 > kernel we can lower runs correctly; a kernel we cannot is **refused loudly**
@@ -44,14 +44,14 @@
 
 | capability | status | detail |
 |---|---|---|
-| `torch.compile(model, backend="inductor")` on `"mps"` | ✓ | routes through `triton_metal.inductor.register_metal_triton_backend()` → inductor `TritonScheduling` → triton-metal → MSL. Verified on elementwise, linear, conv, norms (layer/group/instance/batch), pooling, embedding, softmax/log-softmax, residual blocks, transformer encoders, multi-layer GPT, LSTM, and HF GPT-2 (cosine > 0.98). |
+| `torch.compile(model, backend="inductor")` on `"mps"` | ✓ | routes through `triton_msl.inductor.register_metal_triton_backend()` → inductor `TritonScheduling` → triton-msl → MSL. Verified on elementwise, linear, conv, norms (layer/group/instance/batch), pooling, embedding, softmax/log-softmax, residual blocks, transformer encoders, multi-layer GPT, LSTM, and HF GPT-2 (cosine > 0.98). |
 | dynamic shapes (`torch.compile(..., dynamic=True)`) | ✓ | symbolic dims flow to the lowerer; a **single compiled graph** serves variable sequence lengths (no per-shape recompile). |
-| **training** (forward + backward) | ✓ | `torch.compile`d models train through AOTAutograd: the backward graph is ordinary Triton kernels (matmul→matmul, embedding scatter-add, softmax/layernorm/attention backwards) lowered by triton-metal. MLP / CNN / transformer (w/ embedding) converge and match eager gradients (`tests/test_training.py`). Optimizer step runs eager (or compile it separately). |
+| **training** (forward + backward) | ✓ | `torch.compile`d models train through AOTAutograd: the backward graph is ordinary Triton kernels (matmul→matmul, embedding scatter-add, softmax/layernorm/attention backwards) lowered by triton-msl. MLP / CNN / transformer (w/ embedding) converge and match eager gradients (`tests/test_training.py`). Optimizer step runs eager (or compile it separately). |
 | compile parallelism | single-process (enforced) | the backend pins inductor to `compile_threads=1` + `autotune_in_subproc=False`: Metal/PyObjC is **not fork-safe**, so a forked compile worker crashes (and a crash mid-write can corrupt the on-disk cache → silent-wrong). This is a correctness requirement, not a perf tweak. |
 | op inductor can't lower to a triton kernel | falls back loudly / to eager | inductor raises `InductorError` (loud) rather than emitting wrong values; conv/matmul may use aten extern kernels (correct, not routed through our MMA path). |
 
 > Note: torch 2.10+ ships a *native* MPS inductor backend (`MetalScheduling`); registering
-> triton-metal's backend takes priority and routes `torch.compile` through **our** kernels.
+> triton-msl's backend takes priority and routes `torch.compile` through **our** kernels.
 
 ## Loud-refusal catalog (raises `MetalNonRecoverableError` — never silent-wrong)
 
@@ -77,7 +77,7 @@ silent-wrong producers, closed by the integrity prescan — see `CHANGELOG.md`.)
 14. **n>1-per-thread tensor store** (BLOCK > num_threads, uncovered) — fix: `num_warps = BLOCK/32`.
 15. **In-loop reduction over a tile larger than the threadgroup**, uncovered by the register array.
 16. **Unlowerable kernel** — refuses rather than fall back to the heuristic legacy text
-    parser (which has produced silent-wrongs); set `TRITON_METAL_LEGACY=1` to opt in for debugging.
+    parser (which has produced silent-wrongs); set `TRITON_MSL_LEGACY=1` to opt in for debugging.
 17. **`tt.dot` operand shape mismatch** / other unsupported dot shapes.
 18. **Unstructured kernel-level control flow** (`cf.cond_br`, early-return inside a conditional).
 19. **FlashAttention outside the supported tiles** — the attention lowering (≥2 `tt.dot` +

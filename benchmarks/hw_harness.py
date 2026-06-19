@@ -44,9 +44,9 @@ from typing import Callable, List, Optional
 import Metal
 import Foundation
 
-from triton_metal.profiling.metal_bench import MetalBenchmark
-from triton_metal.profiling import roofline, disasm
-from triton_metal.codegen.msl_emitter import (
+from triton_msl.profiling.metal_bench import MetalBenchmark
+from triton_msl.profiling import roofline, disasm
+from triton_msl.codegen.msl_emitter import (
     make_vector_add_kernel, make_silu_kernel, make_reduce_kernel,
     make_softmax_kernel, make_layer_norm_kernel, make_matmul_kernel,
     make_simdgroup_matmul_kernel, make_simdgroup_matmul_kernel_fast,
@@ -64,7 +64,7 @@ def _compile(device, msl_src, kernel_name=None):
         m = re.findall(r"kernel\s+void\s+(\w+)", msl_src)
         assert m, "no `kernel void <name>` found in MSL"
         kernel_name = m[0]
-    cache = os.path.join(tempfile.gettempdir(), "triton_metal_hw_harness")
+    cache = os.path.join(tempfile.gettempdir(), "triton_msl_hw_harness")
     os.makedirs(cache, exist_ok=True)
     h = hashlib.sha256(msl_src.encode()).hexdigest()[:16]
     base = os.path.join(cache, f"{kernel_name}_{h}")

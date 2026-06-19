@@ -25,13 +25,13 @@ def _sum_in_loop(X, OUT, N, n_tiles, BLOCK: tl.constexpr):
 
 
 def _emit(fn, sig, cst, mept):
-    os.environ["TRITON_METAL_FORCE_PYTHON"] = "1"
-    os.environ["TRITON_METAL_MEPT"] = "1" if mept else "0"
-    import triton_metal.codegen.generic_lowerer as G
-    import triton_metal.codegen.msl_emitter as M
+    os.environ["TRITON_MSL_FORCE_PYTHON"] = "1"
+    os.environ["TRITON_MSL_MEPT"] = "1" if mept else "0"
+    import triton_msl.codegen.generic_lowerer as G
+    import triton_msl.codegen.msl_emitter as M
     importlib.reload(G)
     importlib.reload(M)
-    from triton_metal.backend.compiler import MetalBackend
+    from triton_msl.backend.compiler import MetalBackend
     t = GPUTarget("metal", "apple-m4", 32)
     be = MetalBackend(t)
     o = be.parse_options({"num_warps": 4})
@@ -56,5 +56,5 @@ def test_sum_in_loop_block256_emits_array_no_unknown():
 
 
 def teardown_module(module):
-    os.environ.pop("TRITON_METAL_MEPT", None)
-    os.environ.pop("TRITON_METAL_FORCE_PYTHON", None)
+    os.environ.pop("TRITON_MSL_MEPT", None)
+    os.environ.pop("TRITON_MSL_FORCE_PYTHON", None)

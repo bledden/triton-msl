@@ -15,9 +15,9 @@
 | File | Responsibility |
 |------|---------------|
 | `tests/test_cpp_backend.py` | End-to-end C++ metallib tests (SCF loops, float args, wrapping, reductions) |
-| `triton_metal/backend/compiler.py` | `_metallib_via_cpp` — wrapping loop for >1024, SCF gating |
-| `triton_metal/csrc/lib/Conversion/ElementwiseOpToLLVM.cpp` | C++ MLIR patterns (if needed for new ops) |
-| `triton_metal/csrc/python_bindings_bridge.cpp` | LLVM IR post-processing (wrapping loop injection) |
+| `triton_msl/backend/compiler.py` | `_metallib_via_cpp` — wrapping loop for >1024, SCF gating |
+| `triton_msl/csrc/lib/Conversion/ElementwiseOpToLLVM.cpp` | C++ MLIR patterns (if needed for new ops) |
+| `triton_msl/csrc/python_bindings_bridge.cpp` | LLVM IR post-processing (wrapping loop injection) |
 | `scripts/conftest_metal.py` | Skip list updates for newly-passing upstream tests |
 
 ---
@@ -46,7 +46,7 @@ def test_scf_for_accumulation():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
 
     @triton.jit
     def accum_kernel(x_ptr, out_ptr, K: tl.constexpr, BLOCK: tl.constexpr):
@@ -70,12 +70,12 @@ def test_scf_for_accumulation():
     max_err = (out - expected).abs().max().item()
     assert max_err < 1e-4, f"scf.for accumulation: max error {max_err}"
 
-    os.environ.pop("TRITON_METAL_USE_CPP", None)
+    os.environ.pop("TRITON_MSL_USE_CPP", None)
 ```
 
 - [ ] **Step 2: Run the test**
 
-Run: `TRITON_METAL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_scf_for_accumulation -v -s`
+Run: `TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_scf_for_accumulation -v -s`
 Expected: Either PASS (SCF already works) or FAIL with a specific error to fix.
 
 - [ ] **Step 3: Fix any issues that arise**
@@ -83,17 +83,17 @@ Expected: Either PASS (SCF already works) or FAIL with a specific error to fix.
 If the test fails, the most likely causes are:
 1. `scf.for` with `iter_args` producing LLVM phi nodes that the typed-pointer conversion doesn't handle — fix in `_opaque_to_typed_ptrs`
 2. `scf.yield` result types not matching after tensor→scalar conversion — fix in ElementwiseOpToLLVM.cpp
-3. Metal compiler rejecting the branch structure — dump LLVM IR via `TRITON_METAL_DUMP_DIR=/tmp/debug` and fix
+3. Metal compiler rejecting the branch structure — dump LLVM IR via `TRITON_MSL_DUMP_DIR=/tmp/debug` and fix
 
 - [ ] **Step 4: Run full test suite to verify no regressions**
 
-Run: `TRITON_METAL_USE_CPP=1 .venv/bin/python -m pytest tests/ --timeout=120 -q`
+Run: `TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/ --timeout=120 -q`
 Expected: 469 passed, 7 skipped
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/test_cpp_backend.py triton_metal/backend/compiler.py
+git add tests/test_cpp_backend.py triton_msl/backend/compiler.py
 git commit -m "test: verify scf.for accumulation through C++ metallib path"
 ```
 
@@ -121,7 +121,7 @@ def test_scf_if_conditional():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
 
     @triton.jit
     def clamp_kernel(x_ptr, out_ptr, lo, hi, n, BLOCK: tl.constexpr):
@@ -144,17 +144,17 @@ def test_scf_if_conditional():
     max_err = (out - expected).abs().max().item()
     assert max_err < 1e-5, f"scf.if clamp: max error {max_err}"
 
-    os.environ.pop("TRITON_METAL_USE_CPP", None)
+    os.environ.pop("TRITON_MSL_USE_CPP", None)
 ```
 
 - [ ] **Step 2: Run the test**
 
-Run: `TRITON_METAL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_scf_if_conditional -v -s`
+Run: `TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_scf_if_conditional -v -s`
 Expected: PASS (tl.where lowers to arith.select, not scf.if — but validates the float scalar arg path with `lo`/`hi`)
 
 - [ ] **Step 3: Run full test suite**
 
-Run: `TRITON_METAL_USE_CPP=1 .venv/bin/python -m pytest tests/ --timeout=120 -q`
+Run: `TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/ --timeout=120 -q`
 Expected: 469 passed, 7 skipped
 
 - [ ] **Step 4: Commit**
@@ -171,8 +171,8 @@ git commit -m "test: verify conditional clamp kernel through C++ metallib path"
 Currently, kernels with `make_range end > 1024` fall back to MSL. The C++ per-thread model uses one thread per element, but Metal caps threadgroups at 1024. The fix: cap `block_size` at 1024 and inject a wrapping loop in the LLVM IR so each thread processes multiple elements: `for (lid; lid < N; lid += block_size)`.
 
 **Files:**
-- Modify: `triton_metal/backend/compiler.py:158-193` (the `_metallib_via_cpp` closure)
-- Modify: `triton_metal/csrc/python_bindings_bridge.cpp` (wrapping loop injection)
+- Modify: `triton_msl/backend/compiler.py:158-193` (the `_metallib_via_cpp` closure)
+- Modify: `triton_msl/csrc/python_bindings_bridge.cpp` (wrapping loop injection)
 - Modify: `tests/test_cpp_backend.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -191,7 +191,7 @@ def test_wrapping_loop_large_block():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
 
     @triton.jit
     def scale_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
@@ -211,17 +211,17 @@ def test_wrapping_loop_large_block():
     max_err = (out - x * 2.0).abs().max().item()
     assert max_err < 1e-5, f"wrapping loop: max error {max_err}"
 
-    os.environ.pop("TRITON_METAL_USE_CPP", None)
+    os.environ.pop("TRITON_MSL_USE_CPP", None)
 ```
 
 - [ ] **Step 2: Run test to verify it fails (currently falls back to MSL)**
 
-Run: `TRITON_METAL_USE_CPP=1 TRITON_METAL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_wrapping_loop_large_block -v -s`
+Run: `TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_wrapping_loop_large_block -v -s`
 Expected: PASS via MSL fallback (no `make_metallib_from_llir` in debug output). The test passes but doesn't use C++.
 
 - [ ] **Step 3: Remove the >1024 early return in `_metallib_via_cpp`**
 
-In `triton_metal/backend/compiler.py`, replace the early-return guard with wrapping loop logic:
+In `triton_msl/backend/compiler.py`, replace the early-return guard with wrapping loop logic:
 
 ```python
                 if ttgir_text and not MetalBackend._has_complex_ops(ttgir_text):
@@ -416,11 +416,11 @@ This is a text-level LLVM IR transformation. The per-thread model uses `%lid` (t
         return result
 ```
 
-**Note:** This is a complex text-level LLVM IR transformation. The exact implementation will need adjustment based on the actual LLVM IR structure. The entry block label (`%5`) in the phi node must match the actual LLVM label. Dump the LLVM IR with `TRITON_METAL_DUMP_DIR=/tmp/debug` and adjust accordingly. The key insight: our generated LLVM IR has a predictable structure because it comes from our own C++ pass pipeline.
+**Note:** This is a complex text-level LLVM IR transformation. The exact implementation will need adjustment based on the actual LLVM IR structure. The entry block label (`%5`) in the phi node must match the actual LLVM label. Dump the LLVM IR with `TRITON_MSL_DUMP_DIR=/tmp/debug` and adjust accordingly. The key insight: our generated LLVM IR has a predictable structure because it comes from our own C++ pass pipeline.
 
 - [ ] **Step 5: Run test to verify C++ path is used**
 
-Run: `TRITON_METAL_USE_CPP=1 TRITON_METAL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_wrapping_loop_large_block -v -s`
+Run: `TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_wrapping_loop_large_block -v -s`
 Expected: PASS, with `make_metallib_from_llir` in debug output (NOT `make_metallib`)
 
 - [ ] **Step 6: Test multiple block sizes**
@@ -438,7 +438,7 @@ def test_wrapping_loop_sizes(block_size):
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
 
     @triton.jit
     def scale_k(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
@@ -458,18 +458,18 @@ def test_wrapping_loop_sizes(block_size):
     max_err = (out - x * 3.0).abs().max().item()
     assert max_err < 1e-5, f"BLOCK={block_size}: max error {max_err}"
 
-    os.environ.pop("TRITON_METAL_USE_CPP", None)
+    os.environ.pop("TRITON_MSL_USE_CPP", None)
 ```
 
 - [ ] **Step 7: Run full test suite**
 
-Run: `TRITON_METAL_USE_CPP=1 .venv/bin/python -m pytest tests/ --timeout=120 -q`
+Run: `TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/ --timeout=120 -q`
 Expected: 469+ passed (new tests added), 7 skipped
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add triton_metal/backend/compiler.py tests/test_cpp_backend.py
+git add triton_msl/backend/compiler.py tests/test_cpp_backend.py
 git commit -m "feat: wrapping loop for >1024 elements in C++ metallib path"
 ```
 
@@ -477,11 +477,11 @@ git commit -m "feat: wrapping loop for >1024 elements in C++ metallib path"
 
 ### Task 4: Upstream triton-ext Alignment Assessment
 
-Our C++ nano backend (`_triton_metal_cpp`) is already the foundation for triton-ext compatibility. This task documents what's needed and makes concrete alignment changes.
+Our C++ nano backend (`_triton_msl_cpp`) is already the foundation for triton-ext compatibility. This task documents what's needed and makes concrete alignment changes.
 
 **Files:**
 - Create: `docs/triton-ext-alignment.md`
-- Modify: `triton_metal/csrc/CMakeLists.txt` (if build changes needed)
+- Modify: `triton_msl/csrc/CMakeLists.txt` (if build changes needed)
 
 - [ ] **Step 1: Document the triton-ext gap analysis**
 
@@ -492,7 +492,7 @@ Create `docs/triton-ext-alignment.md`:
 
 ## Current Architecture
 
-triton-metal uses two compilation paths:
+triton-msl uses two compilation paths:
 1. **Python MSL path** (primary): TTGIR → Python walker/lowerer → MSL text → xcrun metal → metallib
 2. **C++ LLVM IR path** (expanding): TTGIR → C++ MLIR passes → LLVM IR → xcrun metal → metallib
 
@@ -506,8 +506,8 @@ triton-ext expects C++ shared libraries that:
 
 ## What We Have (aligned)
 
-- `_triton_metal_cpp.cpython-*.so` — pybind11 module with:
-  - `register_metal_passes()` — registers `convert-triton-metal-to-llvm` pass
+- `_triton_msl_cpp.cpython-*.so` — pybind11 module with:
+  - `register_metal_passes()` — registers `convert-triton-msl-to-llvm` pass
   - `run_to_llvm(mlir_text)` — full pipeline: parse → SCF→CF → Metal→LLVM → export
 - C++ MLIR patterns in `ElementwiseOpToLLVM.cpp`:
   - 16 Triton op patterns (load, store, reduce, etc.)
@@ -518,12 +518,12 @@ triton-ext expects C++ shared libraries that:
 ## What's Needed for triton-ext
 
 1. **Pass plugin interface**: Export passes as loadable `.so` (not pybind11 module)
-   - Add: `extern "C" void registerTritonMetalPasses(mlir::DialectRegistry &)`
+   - Add: `extern "C" void registerTritonMSLPasses(mlir::DialectRegistry &)`
    - Build: separate `.so` target without pybind11 dependency
 
 2. **Python hook integration**: Use `add_stages_inspection_hook` instead of
    monkey-patching `add_stages()`
-   - Currently: `TRITON_METAL_USE_CPP=1` env var + overriding stages in add_stages
+   - Currently: `TRITON_MSL_USE_CPP=1` env var + overriding stages in add_stages
    - Target: register as triton-ext plugin that inserts passes automatically
 
 3. **TableGen op definitions**: If we define custom Metal ops
@@ -539,60 +539,60 @@ Port to triton-ext plugin when the ecosystem stabilizes and we need upstream mer
 
 - [ ] **Step 2: Add a C++ plugin export function**
 
-In `triton_metal/csrc/python_bindings_bridge.cpp`, add a plugin-compatible entry point alongside the existing pybind11 interface:
+In `triton_msl/csrc/python_bindings_bridge.cpp`, add a plugin-compatible entry point alongside the existing pybind11 interface:
 
 ```cpp
 // triton-ext compatible plugin entry point.
 // This allows loading our passes via TRITON_PASS_PLUGIN_PATH without
 // the pybind11 module overhead.
 extern "C" void tritonMetalRegisterPasses(void) {
-    mlir::triton_metal::registerTritonMetalToLLVMPasses();
+    mlir::triton_msl::registerTritonMSLToLLVMPasses();
 }
 ```
 
 - [ ] **Step 3: Add CMake target for standalone plugin .so**
 
-In `triton_metal/csrc/CMakeLists.txt`, add after the existing `triton_metal_backend` target:
+In `triton_msl/csrc/CMakeLists.txt`, add after the existing `triton_msl_backend` target:
 
 ```cmake
 # ---------------------------------------------------------------------------
 # triton-ext compatible plugin shared library
 # Loads via TRITON_PASS_PLUGIN_PATH without pybind11 dependency.
 # ---------------------------------------------------------------------------
-add_library(triton_metal_plugin SHARED
-    $<TARGET_OBJECTS:TritonMetalToLLVM>
+add_library(triton_msl_plugin SHARED
+    $<TARGET_OBJECTS:TritonMSLToLLVM>
     ${TRITON_IR_OBJS}
     python_bindings_bridge.cpp
 )
 
-target_link_libraries(triton_metal_plugin PRIVATE ${LIBTRITON_PATH})
-target_include_directories(triton_metal_plugin PRIVATE
+target_link_libraries(triton_msl_plugin PRIVATE ${LIBTRITON_PATH})
+target_include_directories(triton_msl_plugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-set_target_properties(triton_metal_plugin PROPERTIES
-    OUTPUT_NAME "triton_metal_plugin"
+set_target_properties(triton_msl_plugin PROPERTIES
+    OUTPUT_NAME "triton_msl_plugin"
 )
 set_source_files_properties(
     python_bindings_bridge.cpp
     PROPERTIES COMPILE_FLAGS "-fno-rtti"
 )
 
-install(TARGETS triton_metal_plugin LIBRARY DESTINATION lib)
+install(TARGETS triton_msl_plugin LIBRARY DESTINATION lib)
 ```
 
 - [ ] **Step 4: Build and verify the plugin .so**
 
 Run:
 ```bash
-cd triton_metal/csrc/build
-cmake .. && cmake --build . --target triton_metal_plugin --parallel
+cd triton_msl/csrc/build
+cmake .. && cmake --build . --target triton_msl_plugin --parallel
 ```
-Expected: `libtriton_metal_plugin.dylib` built successfully
+Expected: `libtriton_msl_plugin.dylib` built successfully
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docs/triton-ext-alignment.md triton_metal/csrc/python_bindings_bridge.cpp triton_metal/csrc/CMakeLists.txt
+git add docs/triton-ext-alignment.md triton_msl/csrc/python_bindings_bridge.cpp triton_msl/csrc/CMakeLists.txt
 git commit -m "feat: triton-ext alignment — plugin export + gap analysis doc"
 ```
 
@@ -610,7 +610,7 @@ Many tests in `conftest_metal.py` were skipped during early development and may 
 Run:
 ```bash
 cd /Users/bledden/Documents/triton/python/test/unit/language
-TRITON_METAL_USE_CPP=1 .venv/bin/python -m pytest test_core.py -x --timeout=120 -q --confcutdir=. -p no:conftest 2>&1 | tail -20
+TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest test_core.py -x --timeout=120 -q --confcutdir=. -p no:conftest 2>&1 | tail -20
 ```
 
 Record the current pass/fail/skip counts.
@@ -681,7 +681,7 @@ import triton.language as tl
 
 CACHE_DIRS = [
     os.path.expanduser("~/.triton/cache"),
-    os.path.expanduser("~/.cache/triton_metal"),
+    os.path.expanduser("~/.cache/triton_msl"),
 ]
 
 
@@ -739,9 +739,9 @@ N = 1024
 def bench_path(use_cpp):
     """Benchmark all kernels with C++ or MSL path."""
     if use_cpp:
-        os.environ["TRITON_METAL_USE_CPP"] = "1"
+        os.environ["TRITON_MSL_USE_CPP"] = "1"
     else:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
     results = {}
     for name, (kernel, make_args, constexprs) in KERNELS.items():

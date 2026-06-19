@@ -6,23 +6,23 @@
 
 **Architecture:** Three layers. **B** — refuse the uncovered in-loop reduce loudly (restores the loud-refusal contract). **C** — array-wire `arith.cmpf` so the common `where`-on-reduce shape becomes register-array-eligible and routes to the already-correct fold (default flag only). **A** — measure the residual surface B refuses; build body-local multipass replay only if that surface is non-empty (it is the only correctness path under `MEPT=0`).
 
-**Tech Stack:** Python MSL-source backend codegen (`triton_metal/codegen/`), pytest against Apple Metal GPU (serial), upstream `test_core` ratchet via `scripts/run_upstream_test.sh`.
+**Tech Stack:** Python MSL-source backend codegen (`triton_msl/codegen/`), pytest against Apple Metal GPU (serial), upstream `test_core` ratchet via `scripts/run_upstream_test.sh`.
 
 **Spec:** `docs/superpowers/specs/2026-06-13-inloop-reduce-coverage-design.md`
 
 **Conventions for every GPU/ratchet run in this plan:**
-- Clear the cache first: `rm -rf ~/.cache/triton_metal ~/.triton/cache` (the key includes the effective MEPT flag, but clear anyway when verifying codegen changes).
+- Clear the cache first: `rm -rf ~/.cache/triton_msl ~/.triton/cache` (the key includes the effective MEPT flag, but clear anyway when verifying codegen changes).
 - Project GPU tests run from the worktree root: `python3 -m pytest tests/<file> -q` (serial; do not parallelize Metal tests).
 - Upstream ratchet (default flag): `bash scripts/run_upstream_test.sh unit/language/test_core.py -q`
-- Upstream ratchet (escape hatch): `TRITON_METAL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q`
+- Upstream ratchet (escape hatch): `TRITON_MSL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q`
 - Baseline to hold/raise: `test_core` **5531 passed / 0 failed** (both flag directions); project suite **0 failed**.
 
 ---
 
 ## File Structure
 
-- `triton_metal/codegen/generic_lowerer.py` — `__init__` gets `_control_flow_depth`; `_lower_op` increments it around control-flow dispatch; `_MEPT_SAFE_OPS` gains `arith.cmpf`; `_lower_cmpf` gains the MEPT array branch (Tasks 1, 3).
-- `triton_metal/codegen/_lowerer_reduce.py` — `_lower_reduce` gains the B refusal for the uncovered 1-D in-loop case; (Task 6, conditional) body-local multipass coverage.
+- `triton_msl/codegen/generic_lowerer.py` — `__init__` gets `_control_flow_depth`; `_lower_op` increments it around control-flow dispatch; `_MEPT_SAFE_OPS` gains `arith.cmpf`; `_lower_cmpf` gains the MEPT array branch (Tasks 1, 3).
+- `triton_msl/codegen/_lowerer_reduce.py` — `_lower_reduce` gains the B refusal for the uncovered 1-D in-loop case; (Task 6, conditional) body-local multipass coverage.
 - `tests/test_inloop_reduce_coverage.py` — new GPU regression test (Tasks 1, 3, 6).
 - `tests/test_reduceresult_select_DIAG.py` — existing temporary diagnostic; deleted in Task 7 (its assertions are absorbed into the kept test).
 - `scripts/conftest_metal.py` — only touched if Task 2/5 finds a now-refused upstream test needs an explicit skip (correctness-honest).
@@ -32,8 +32,8 @@
 ## Task 1: B — refuse the uncovered in-loop reduce
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py` (`__init__` ~line 190; `_lower_op` lines 1871-1876)
-- Modify: `triton_metal/codegen/_lowerer_reduce.py` (`_lower_reduce`, after the 2D/3D/ND dispatch returns ~line 424, before the i64 path at 431 and the 1-D path at 436)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (`__init__` ~line 190; `_lower_op` lines 1871-1876)
+- Modify: `triton_msl/codegen/_lowerer_reduce.py` (`_lower_reduce`, after the 2D/3D/ND dispatch returns ~line 424, before the i64 path at 431 and the 1-D path at 436)
 - Test: `tests/test_inloop_reduce_coverage.py`
 
 - [ ] **Step 1: Write the failing test (B refuses under MEPT=0)**
@@ -55,7 +55,7 @@ try:
     import triton
     import triton.language as tl
     import Metal
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
     HAS = Metal.MTLCreateSystemDefaultDevice() is not None
 except Exception:
     HAS = False
@@ -77,7 +77,7 @@ if HAS:
 def test_inloop_reduce_mept0_refuses(BLOCK, monkeypatch):
     """MEPT=0: an in-loop reduce with block>num_threads is uncovered → refuse
     loudly (was silent-wrong before Stage B)."""
-    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    monkeypatch.setenv("TRITON_MSL_MEPT", "0")
     C = 4
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
     OUT = torch.zeros(1, device="mps", dtype=torch.float32)
@@ -89,7 +89,7 @@ def test_inloop_reduce_mept0_refuses(BLOCK, monkeypatch):
 def test_inloop_reduce_small_block_ok(monkeypatch):
     """block_size <= num_threads is fully covered (one elem/thread) → never
     refused, correct under both flags."""
-    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    monkeypatch.setenv("TRITON_MSL_MEPT", "0")
     BLOCK, C = 128, 4
     torch.manual_seed(0)
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
@@ -100,7 +100,7 @@ def test_inloop_reduce_small_block_ok(monkeypatch):
 
 - [ ] **Step 2: Run the test, verify it FAILS (currently silent-wrong, not refusing)**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py -q`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py -q`
 Expected: `test_inloop_reduce_mept0_refuses` FAILS (`DID NOT RAISE MetalNonRecoverableError` — today it returns a wrong value). `test_inloop_reduce_small_block_ok` PASSES.
 
 - [ ] **Step 3: Add the control-flow depth counter**
@@ -158,28 +158,28 @@ In `_lowerer_reduce.py` `_lower_reduce`, immediately after the 2D dispatch block
                 and input_shape is not None
                 and len(input_shape) == 1
                 and input_shape[0] > self.kb.block_size):
-            from triton_metal.errors import MetalNonRecoverableError
+            from triton_msl.errors import MetalNonRecoverableError
             raise MetalNonRecoverableError(
                 f"Refusing in-loop reduction: a tile of {input_shape[0]} "
                 f"elements exceeds the {self.kb.block_size}-thread threadgroup "
                 f"and is not register-array-covered, so a cross-lane reduce "
                 f"here would sum only the first {self.kb.block_size} elements "
                 f"(silent-wrong). Use the default register-array path "
-                f"(TRITON_METAL_MEPT unset) or BLOCK <= num_threads.")
+                f"(TRITON_MSL_MEPT unset) or BLOCK <= num_threads.")
 ```
 
 Note: `mept_arr` and `input_shape` are already in scope here (computed at lines ~392-398 and ~381-383). When `mept_arr` is not None, line ~398 sets `input_shape=None`, so the condition naturally skips the array-covered case.
 
 - [ ] **Step 5: Run the test, verify it PASSES**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py -q`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py -q`
 Expected: both tests PASS (`_mept0_refuses` now raises `MetalNonRecoverableError`; `_small_block_ok` still correct).
 
 - [ ] **Step 6: Sanity — default flag still computes the eligible plain-sum correctly**
 
 Run:
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 python3 -c "
 import torch, triton, triton.language as tl
 from tests.test_inloop_reduce_coverage import _sum_carry_in_loop
@@ -193,7 +193,7 @@ Expected: `default-flag 256: OK` (the eligible register-array path covers it; B 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add tests/test_inloop_reduce_coverage.py triton_metal/codegen/generic_lowerer.py triton_metal/codegen/_lowerer_reduce.py
+git add tests/test_inloop_reduce_coverage.py triton_msl/codegen/generic_lowerer.py triton_msl/codegen/_lowerer_reduce.py
 git commit -m "fix(reduce): refuse uncovered in-loop reduction (Stage B) instead of silent-wrong
 
 A tt.reduce inside scf.for/if/while with block_size > num_threads and no
@@ -211,20 +211,20 @@ Add a control-flow depth counter and refuse loudly in _lower_reduce."
 
 - [ ] **Step 1: Full ratchet, default flag — classify any newly-refused tests**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -15`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -15`
 Expected: at most a handful of new errors, each a `MetalNonRecoverableError` from the Stage-B message. For each, classify: (a) **cmpf-bearing** in-loop reduce → C will restore it (re-checked at Task 3 Step 7); (b) **other-ineligible** in-loop reduce that was previously *silently wrong* → correctly converted to loud (record for a conftest skip / Stage-A candidate); (c) **previously-passing-correctly** → impossible for this shape (would have been silent-wrong), so treat as a **B false-positive** and fix B's condition before continuing. If `0` new errors, even better.
 
 - [ ] **Step 2: Full ratchet, escape hatch**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && TRITON_METAL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -15`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && TRITON_MSL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -15`
 Expected: `0 failed`. Because the `MEPT=0` ratchet passed before (and `MEPT=0` has no array cover), no currently-passing `test_core` kernel can be an uncovered in-loop-reduce-over-threads case — so B fires on nothing here. If any new error appears, it is a B false-positive (Step 1 case c) — investigate and fix before continuing.
 
 - [ ] **Step 3: Project suite, both flags**
 
 Run:
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/ -q 2>&1 | tail -15
-rm -rf ~/.cache/triton_metal ~/.triton/cache && TRITON_METAL_MEPT=0 python3 -m pytest tests/ -q 2>&1 | tail -15
+rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/ -q 2>&1 | tail -15
+rm -rf ~/.cache/triton_msl ~/.triton/cache && TRITON_MSL_MEPT=0 python3 -m pytest tests/ -q 2>&1 | tail -15
 ```
 Expected: `0 failed` both. (`test_inloop_reduce_where.py` — the prior select-fix regression — must still pass: those kernels are MEPT-eligible, so B does not fire.)
 
@@ -248,7 +248,7 @@ in-loop reduces (tridec relay, repro)'>"
 ## Task 3: C — array-wire `arith.cmpf`
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py` (`_MEPT_SAFE_OPS` ~line 82; the EXCLUDED comment ~lines 60-62/81; `_lower_cmpf` lines 3769-3820)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (`_MEPT_SAFE_OPS` ~line 82; the EXCLUDED comment ~lines 60-62/81; `_lower_cmpf` lines 3769-3820)
 - Test: `tests/test_inloop_reduce_coverage.py`
 
 - [ ] **Step 1: Write the failing test (default-flag where-on-reduce correctness)**
@@ -283,7 +283,7 @@ def test_inloop_where_on_reduce_default_correct(BLOCK):
 
 - [ ] **Step 2: Run, verify it FAILS at BLOCK 256/512/1024**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py::test_inloop_where_on_reduce_default_correct -q`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py::test_inloop_where_on_reduce_default_correct -q`
 Expected: BLOCK 128 PASSES; BLOCK 256/512/1024 FAIL (cmpf makes the kernel ineligible → currently silent-wrong OR, if Stage B's depth check catches it under the default flag... it does NOT: under the default flag the reduce is still ineligible, so today it is silent-wrong, and after Stage B it now REFUSES at 256+ under the default flag too). Either way: not yet correct → FAIL. This is the failing state Stage C fixes.
 
 - [ ] **Step 3: Add `arith.cmpf` to `_MEPT_SAFE_OPS` and fix the comment**
@@ -360,7 +360,7 @@ Replace the body of `_lower_cmpf` (lines 3769-3820) with a version that factors 
 
 - [ ] **Step 5: Run the C test, verify it PASSES at all widths**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py -q`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py -q`
 Expected: all tests PASS, including `test_inloop_where_on_reduce_default_correct` at 128/256/512/1024. (`test_inloop_reduce_mept0_refuses` still passes — under `MEPT=0` cmpf wiring is inert, so that kernel still refuses.)
 
 - [ ] **Step 6: Verify MEPT=0 codegen is byte-identical for a cmpf kernel**
@@ -376,8 +376,8 @@ def kf(X, OUT, BLOCK: tl.constexpr):
 X=torch.randn(128,device="mps"); OUT=torch.zeros(128,device="mps")
 print(kf.warmup(X, OUT, BLOCK=128, grid=(1,)).asm["msl"])
 PY
-rm -rf ~/.cache/triton_metal ~/.triton/cache; TRITON_METAL_MEPT=0 python3 /tmp/cmpf_parity.py > /tmp/cmpf_after.txt
-git stash; rm -rf ~/.cache/triton_metal ~/.triton/cache; TRITON_METAL_MEPT=0 python3 /tmp/cmpf_parity.py > /tmp/cmpf_before.txt; git stash pop
+rm -rf ~/.cache/triton_msl ~/.triton/cache; TRITON_MSL_MEPT=0 python3 /tmp/cmpf_parity.py > /tmp/cmpf_after.txt
+git stash; rm -rf ~/.cache/triton_msl ~/.triton/cache; TRITON_MSL_MEPT=0 python3 /tmp/cmpf_parity.py > /tmp/cmpf_before.txt; git stash pop
 diff /tmp/cmpf_before.txt /tmp/cmpf_after.txt && echo "BYTE-IDENTICAL"
 ```
 Expected: `BYTE-IDENTICAL` (no diff). If the kernel above is MEPT-eligible at BLOCK=128 (one elem/thread, no array), the scalar cmpf path is exercised and must be unchanged.
@@ -386,8 +386,8 @@ Expected: `BYTE-IDENTICAL` (no diff). If the kernel above is MEPT-eligible at BL
 
 Run:
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache && bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -8
-rm -rf ~/.cache/triton_metal ~/.triton/cache && TRITON_METAL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -8
+rm -rf ~/.cache/triton_msl ~/.triton/cache && bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -8
+rm -rf ~/.cache/triton_msl ~/.triton/cache && TRITON_MSL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -8
 ```
 Expected: `>= 5531 passed, 0 failed` both directions. cmpf-wiring must not regress (it widens the eligible set; the risk is a too-wide safe set — watch `test_where`, masked-store, `test_reduce`/`test_argmin`/`test_argmax` families especially).
 
@@ -395,15 +395,15 @@ Expected: `>= 5531 passed, 0 failed` both directions. cmpf-wiring must not regre
 
 Run:
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/ -q 2>&1 | tail -8
-rm -rf ~/.cache/triton_metal ~/.triton/cache && TRITON_METAL_MEPT=0 python3 -m pytest tests/ -q 2>&1 | tail -8
+rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/ -q 2>&1 | tail -8
+rm -rf ~/.cache/triton_msl ~/.triton/cache && TRITON_MSL_MEPT=0 python3 -m pytest tests/ -q 2>&1 | tail -8
 ```
 Expected: `0 failed` both.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add tests/test_inloop_reduce_coverage.py triton_metal/codegen/generic_lowerer.py
+git add tests/test_inloop_reduce_coverage.py triton_msl/codegen/generic_lowerer.py
 git commit -m "feat(mept): array-wire arith.cmpf (Stage C) — routes where-on-reduce to the correct path
 
 cmpf was excluded from _MEPT_SAFE_OPS, forcing where-on-reduce kernels to the
@@ -421,7 +421,7 @@ byte-identical. Full ratchet green both directions."
 
 - [ ] **Step 1: Re-run the residual surface under the default flag, post-C**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -8`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -8`
 Confirm `0 failed`. The default-flag residual after C = Task 2's default residual minus any cmpf-bearing kernels now eligible. Record the count.
 
 - [ ] **Step 2: Decide**
@@ -449,7 +449,7 @@ Append:
 def test_inloop_reduce_mept0_correct(BLOCK, monkeypatch):
     """Stage A: under MEPT=0, an in-loop reduce with block>num_threads computes
     correctly via body-local multipass coverage (no longer refuses)."""
-    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    monkeypatch.setenv("TRITON_MSL_MEPT", "0")
     C = 4
     torch.manual_seed(0)
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
@@ -462,7 +462,7 @@ Also delete `test_inloop_reduce_mept0_refuses` (its kernel now computes correctl
 
 - [ ] **Step 2: Run, verify it FAILS (currently refuses)**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py::test_inloop_reduce_mept0_correct -q`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py::test_inloop_reduce_mept0_correct -q`
 Expected: FAIL with `MetalNonRecoverableError` (Stage B still refuses; A not yet built).
 
 ---
@@ -471,7 +471,7 @@ Expected: FAIL with `MetalNonRecoverableError` (Stage B still refuses; A not yet
 
 > Only if Task 4 decided to build Stage A.
 
-**Files:** Modify: `triton_metal/codegen/_lowerer_reduce.py` (`_lower_reduce`, replace the Stage-B refusal with coverage for the same condition)
+**Files:** Modify: `triton_msl/codegen/_lowerer_reduce.py` (`_lower_reduce`, replace the Stage-B refusal with coverage for the same condition)
 
 - [ ] **Step 1: Replace the B refusal with body-local strided coverage**
 
@@ -489,7 +489,7 @@ Where Task 1 raised `MetalNonRecoverableError`, instead emit a per-thread stride
                 input_var = covered_var
                 input_shape = None  # now one partial per thread
             else:
-                from triton_metal.errors import MetalNonRecoverableError
+                from triton_msl.errors import MetalNonRecoverableError
                 raise MetalNonRecoverableError(
                     "Refusing in-loop reduction the body-local multipass "
                     "cover could not handle (non-replayable input chain).")
@@ -506,7 +506,7 @@ This duplicates no machinery the codebase lacks; it extends the existing `_needs
 
 - [ ] **Step 2: Run the A test, verify PASS**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py -q`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_inloop_reduce_coverage.py -q`
 Expected: `test_inloop_reduce_mept0_correct` PASSES at 256/512; all others PASS.
 
 - [ ] **Step 3: Ratchet both flags + project suite**
@@ -517,7 +517,7 @@ Expected: `>= 5531 passed, 0 failed` (ratchet, both flags) and `0 failed` (proje
 - [ ] **Step 4: Commit**
 
 ```bash
-git add triton_metal/codegen/_lowerer_reduce.py tests/test_inloop_reduce_coverage.py
+git add triton_msl/codegen/_lowerer_reduce.py tests/test_inloop_reduce_coverage.py
 git commit -m "feat(reduce): body-local multipass coverage for in-loop reductions (Stage A)
 
 An in-loop reduce with block_size > num_threads on the non-array path now
@@ -545,9 +545,9 @@ Run: `git rm -f tests/test_reduceresult_select_DIAG.py 2>/dev/null || rm -f test
 
 Run:
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache && bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -6
-rm -rf ~/.cache/triton_metal ~/.triton/cache && TRITON_METAL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -6
-rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/ -q 2>&1 | tail -6
+rm -rf ~/.cache/triton_msl ~/.triton/cache && bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -6
+rm -rf ~/.cache/triton_msl ~/.triton/cache && TRITON_MSL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -6
+rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/ -q 2>&1 | tail -6
 ```
 Expected: `>= 5531 passed, 0 failed` (both ratchet directions); project `0 failed`.
 

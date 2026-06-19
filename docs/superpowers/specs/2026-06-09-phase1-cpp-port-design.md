@@ -7,7 +7,7 @@
 ## Decisions
 - Routing: **C++ default-on per family**. A family ships to the allowlist the
   moment its corpus slice + differential gate pass. Python serves unported
-  families during transition; `TRITON_METAL_FORCE_PYTHON=1` escape hatch.
+  families during transition; `TRITON_MSL_FORCE_PYTHON=1` escape hatch.
 - Refusal parity: every refusal the Python path raises must also refuse in
   C++ (consume refusal_catalog `--json` contract).
 - Ratchet: full fresh-cache `test_core` 5,335/0 holds at every family flip;

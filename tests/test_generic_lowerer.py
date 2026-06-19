@@ -31,7 +31,7 @@ def _compile_to_ttgir(kernel_fn, sig, constexprs=None):
     """Compile a @triton.jit kernel through TTIR and TTGIR stages."""
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
-    from triton_metal.backend.compiler import MetalBackend
+    from triton_msl.backend.compiler import MetalBackend
 
     target = GPUTarget("metal", "apple-m4", 32)
     backend = MetalBackend(target)
@@ -53,8 +53,8 @@ def _compile_to_ttgir(kernel_fn, sig, constexprs=None):
 
 def _lower_to_msl(mod, metadata, options):
     """Walk TTGIR module and lower to MSL."""
-    from triton_metal.codegen.mlir_walker import walk_ttgir
-    from triton_metal.codegen.generic_lowerer import lower_ir_graph
+    from triton_msl.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.generic_lowerer import lower_ir_graph
 
     graph = walk_ttgir(mod, options)
     msl = lower_ir_graph(graph, options)
@@ -99,9 +99,9 @@ def test_dot_scaled_refuses_not_silently_wrong():
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
     from triton._C.libtriton import ir
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.msl_emitter import emit_msl
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.msl_emitter import emit_msl
+    from triton_msl.errors import MetalNonRecoverableError
 
     @triton.jit
     def k(a_base, b_base, out, BM: tl.constexpr, BN: tl.constexpr,
@@ -144,9 +144,9 @@ def test_constexpr_dim_matmul_refuses_not_silently_wrong():
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
     from triton._C.libtriton import ir
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.msl_emitter import emit_msl
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.msl_emitter import emit_msl
+    from triton_msl.errors import MetalNonRecoverableError
 
     @triton.jit
     def kernel(Z, X, Y, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
@@ -200,9 +200,9 @@ def test_unstructured_cf_refuses_not_silently_wrong():
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
     from triton._C.libtriton import ir
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.msl_emitter import emit_msl
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.msl_emitter import emit_msl
+    from triton_msl.errors import MetalNonRecoverableError
 
     def _emit(fn, sig):
         target = GPUTarget("metal", "apple-m4", 32)
@@ -684,7 +684,7 @@ def test_lower_int_to_float():
 @requires_metal
 def test_emit_msl_uses_new_codegen_for_elementwise():
     """Verify the full emit_msl pipeline uses the new walker+lowerer for elementwise."""
-    from triton_metal.codegen.msl_emitter import emit_msl
+    from triton_msl.codegen.msl_emitter import emit_msl
 
     @triton.jit
     def add_kernel(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
@@ -717,7 +717,7 @@ def test_emit_msl_uses_new_codegen_for_elementwise():
 @requires_metal
 def test_emit_msl_handles_matmul_via_new_pipeline():
     """Verify emit_msl routes matmul (tt.dot) through the new pipeline."""
-    from triton_metal.codegen.msl_emitter import emit_msl
+    from triton_msl.codegen.msl_emitter import emit_msl
 
     @triton.jit
     def matmul_kernel(
@@ -779,7 +779,7 @@ def test_emit_msl_handles_matmul_via_new_pipeline():
 @requires_metal
 def test_no_legacy_fallback_for_standard_kernels():
     """No standard kernel should fall back to the legacy parser."""
-    from triton_metal.codegen.msl_emitter import emit_msl
+    from triton_msl.codegen.msl_emitter import emit_msl
     import warnings
 
     kernels = {}
@@ -1126,7 +1126,7 @@ def test_multipass_sum_reduce():
 
 def test_parse_blocked_field_extracts_lists():
     """`_parse_blocked_field` pulls the four required int lists."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
 
     mod_text = (
         "#bar = #ttg.blocked<{sizePerThread = [1, 4], "
@@ -1156,8 +1156,8 @@ def test_parse_blocked_field_extracts_lists():
 
 def test_track_n_elems_blocked_layout():
     """Tracking computes elements-per-thread from a #ttg.blocked layout."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     # sizePerThread=[4], threadsPerWarp=[32], warpsPerCTA=[4] →
     # 4 warps * 32 lanes = 128 threads, 4 elems/thread → 512 total.
@@ -1183,8 +1183,8 @@ def test_track_n_elems_blocked_layout():
 
 def test_track_n_elems_linear_layout():
     """Tracking computes elements-per-thread from a #ttg.linear layout."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     # 2 register bases → 4 elements per thread.
     mod_text = (
@@ -1210,8 +1210,8 @@ def test_track_n_elems_linear_layout():
 
 def test_track_n_elems_scalar_defaults_to_one():
     """Scalar types (no shape) always track as 1 element per thread."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     class _Options:
         num_warps = 4
@@ -1228,8 +1228,8 @@ def test_track_n_elems_scalar_defaults_to_one():
 
 def test_track_n_elems_unresolved_alias_falls_back():
     """Without mod_text or alias, tracking falls back to numel/num_threads."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     class _Options:
         num_warps = 4  # 128 threads
@@ -1250,79 +1250,79 @@ def test_track_n_elems_unresolved_alias_falls_back():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4b scaffolding: _var_array + TRITON_METAL_MEPT flag
+# Phase 4b scaffolding: _var_array + TRITON_MSL_MEPT flag
 # ---------------------------------------------------------------------------
 
 
 def test_mept_flag_defaults_on():
-    """Without TRITON_METAL_MEPT in env, the feature flag is ON (default since M5)."""
+    """Without TRITON_MSL_MEPT in env, the feature flag is ON (default since M5)."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.pop("TRITON_METAL_MEPT", None)
+    saved = os.environ.pop("TRITON_MSL_MEPT", None)
     try:
         lowerer = GenericLowerer(graph, _Options())
         assert lowerer.mept_enabled is True
         assert lowerer.env_array == {}
     finally:
         if saved is not None:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_mept_flag_off_when_env_zero():
-    """TRITON_METAL_MEPT=0 is the escape hatch to the scalar path (default since M5)."""
+    """TRITON_MSL_MEPT=0 is the escape hatch to the scalar path (default since M5)."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "0"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         assert lowerer.mept_enabled is False
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_mept_flag_on_when_env_set():
-    """With TRITON_METAL_MEPT=1, the feature flag is on."""
+    """With TRITON_MSL_MEPT=1, the feature flag is on."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         assert lowerer.mept_enabled is True
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_var_array_emits_declaration_and_initializers():
     """`_var_array` emits `T name[N];` plus per-index assignments."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
@@ -1342,9 +1342,9 @@ def test_var_array_emits_declaration_and_initializers():
 
 def test_var_array_rejects_empty_exprs():
     """`_var_array` requires at least one expression."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
@@ -1359,8 +1359,8 @@ def test_var_array_rejects_empty_exprs():
 
 def test_lookup_array_lifts_scalar():
     """`_lookup_array` lifts a scalar env entry to (name, 1, "")."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     class _Options:
         num_warps = 4
@@ -1377,9 +1377,9 @@ def test_lookup_array_lifts_scalar():
 
 def test_emit_passthrough_propagates_env_array():
     """`_emit_passthrough` carries env_array entry from src to dst."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
@@ -1405,16 +1405,16 @@ def test_emit_passthrough_propagates_env_array():
 def test_emit_cast_emits_array_when_mept_on_and_src_is_array():
     """`_emit_cast` produces per-element casts when MEPT + array src."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1438,24 +1438,24 @@ def test_emit_cast_emits_array_when_mept_on_and_src_is_array():
             assert f"{name}[{i}] = static_cast<float>(v_src[{i}]);" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_unary_emits_array_when_mept_on_and_src_is_array():
     """`_emit_unary` produces per-element unary ops when MEPT + array src."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1477,24 +1477,24 @@ def test_emit_unary_emits_array_when_mept_on_and_src_is_array():
             assert f"{name}[{i}] = -v_src[{i}];" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_binary_emits_array_when_both_operands_are_arrays():
     """`_emit_binary` produces per-element binary ops when both src arrays."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1519,24 +1519,24 @@ def test_emit_binary_emits_array_when_both_operands_are_arrays():
             assert f"{name}[{i}] = a[{i}] + b[{i}];" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_binary_emits_scalar_when_mept_off():
     """Flag-off keeps scalar form even if env_array is populated."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "0"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1558,24 +1558,24 @@ def test_emit_binary_emits_scalar_when_mept_off():
         assert "= a + b;" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_binary_broadcasts_scalar_against_array():
     """Array `a` + scalar `b` broadcasts b across array positions."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1598,24 +1598,24 @@ def test_emit_binary_broadcasts_scalar_against_array():
             assert f"{name}[{i}] = a[{i}] + b_scalar;" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_binary_broadcasts_scalar_against_array_b_side():
     """Scalar `a` + array `b` broadcasts a across array positions."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1638,24 +1638,24 @@ def test_emit_binary_broadcasts_scalar_against_array_b_side():
             assert f"{name}[{i}] = a_scalar * b[{i}];" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_builtin_binary_array_path():
     """`_emit_builtin_binary` emits fn(a, b) per array position when MEPT on."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1678,24 +1678,24 @@ def test_emit_builtin_binary_array_path():
             assert f"{name}[{i}] = pow(a[{i}], b[{i}]);" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_builtin_binary_scalar_path_unchanged():
     """Flag-off keeps the existing fn(a, b) scalar emission."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "0"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1716,24 +1716,24 @@ def test_emit_builtin_binary_scalar_path_unchanged():
         assert "pow(a, b)" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_nan_propagating_minmax_array_path():
     """`_emit_nan_propagating_minmax` emits per-position when MEPT on."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1760,24 +1760,24 @@ def test_emit_nan_propagating_minmax_array_path():
             assert expected in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_uitofp_array_path():
     """`_emit_uitofp` emits per-element float conversion when MEPT on."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1803,24 +1803,24 @@ def test_emit_uitofp_array_path():
             )
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_int_cast_array_path():
     """`_emit_int_cast` emits per-element extension when MEPT on."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1842,24 +1842,24 @@ def test_emit_int_cast_array_path():
             assert f"{name}[{i}] = static_cast<int>(v_src[{i}]);" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_math_unary_array_path():
     """`_lower_math` unary ops emit per-position calls when MEPT on."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1880,24 +1880,24 @@ def test_lower_math_unary_array_path():
             assert f"{name}[{i}] = exp(v_src[{i}]);" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_math_fma_array_path():
     """`_lower_math` fma emits per-position fma(a, b, c) when MEPT on."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -1924,25 +1924,25 @@ def test_lower_math_fma_array_path():
             )
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_make_range_emits_array_when_mept_and_n_elems():
     """`_lower_make_range` produces idx[N] when MEPT on + n_elems > 1."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[],
                     block_size=512, num_warps=4)
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=512)
@@ -1973,9 +1973,9 @@ def test_lower_make_range_emits_array_when_mept_and_n_elems():
             assert f"{name}[{i}] = lid * 4u + {i}u;" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_make_range_scalar_when_single_pass_inactive():
@@ -1984,17 +1984,17 @@ def test_lower_make_range_scalar_when_single_pass_inactive():
     ``_mept_single_pass`` was set by the eligibility prescan, which never runs
     in this direct unit test. (MEPT=0 also keeps it off end to end.)"""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[],
                     block_size=512, num_warps=4)
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "0"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=512)
@@ -2018,24 +2018,24 @@ def test_lower_make_range_scalar_when_single_pass_inactive():
         assert lowerer.env[42] == "lid"
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_addptr_emits_ptr_array_when_offset_is_array():
     """`_lower_addptr` records env_ptr_array when offset has env_array."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2061,24 +2061,24 @@ def test_lower_addptr_emits_ptr_array_when_offset_is_array():
         assert off_name == "off"
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_addptr_combines_scalar_parent_with_array_offset():
     """Parent ptr has scalar offset; new addptr offset is array."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2108,24 +2108,24 @@ def test_lower_addptr_combines_scalar_parent_with_array_offset():
             assert f"{off_name}[{i}] = base_off + off[{i}];" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_load_array_path_via_env_ptr_array():
     """`_lower_load` emits per-position reads when ptr has env_ptr_array."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2150,24 +2150,24 @@ def test_lower_load_array_path_via_env_ptr_array():
             )
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_load_array_with_array_mask_and_other():
     """`_lower_load` honors array-form mask + array-form other."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2200,24 +2200,24 @@ def test_lower_load_array_with_array_mask_and_other():
             ) in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_load_array_with_scalar_mask_and_scalar_other():
     """Scalar mask broadcasts across array positions; scalar 'other'."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2248,24 +2248,24 @@ def test_lower_load_array_with_scalar_mask_and_scalar_other():
             ) in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_load_array_fp8_unmasked():
     """FP8 array load emits raw[N] uchar gather + val[N] float convert."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2294,24 +2294,24 @@ def test_lower_load_array_fp8_unmasked():
             assert f"x_ptr[off[{i}]]" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_load_array_fp8_with_array_mask_and_other():
     """FP8 + array mask + array other emits the full conditional chain."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2349,24 +2349,24 @@ def test_lower_load_array_fp8_with_array_mask_and_other():
             )
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_store_array_path_scatters_to_env_ptr_array():
     """`_lower_store` writes val[i] -> base[off[i]] when MEPT round-trip."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2388,26 +2388,26 @@ def test_lower_store_array_path_scatters_to_env_ptr_array():
             assert f"out_ptr[off[{i}]] = vals[{i}];" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_mept_round_trip_load_op_store():
     """End-to-end: make_range → addptr → load → unary → addptr → store
     emits a fully array-form pipeline when MEPT is on."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[], block_size=512,
                     num_warps=4)
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=512)
@@ -2485,24 +2485,24 @@ def test_mept_round_trip_load_op_store():
             )
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_store_array_path_with_array_mask():
     """`_lower_store` honors array-form mask (per-position if-write)."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2527,24 +2527,24 @@ def test_lower_store_array_path_with_array_mask():
             assert f"out_ptr[off[{i}]] = vals[{i}];" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_store_array_path_with_scalar_mask():
     """Scalar mask broadcasts across all per-position writes."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2568,26 +2568,26 @@ def test_lower_store_array_path_with_scalar_mask():
             assert f"out_ptr[off[{i}]] = vals[{i}];" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_make_range_uses_linear_layout_position_when_available():
     """`_lower_make_range` consults env_layout for non-contiguous math."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
-    from triton_metal.codegen._linear_layout import LinearLayout
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen._linear_layout import LinearLayout
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[], block_size=512,
                     num_warps=4)
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=512)
@@ -2633,25 +2633,25 @@ def test_lower_make_range_uses_linear_layout_position_when_available():
         assert " ^ " in body or "& 4)" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_make_range_scalar_when_n_elems_is_one():
     """Even with MEPT on, n_elems=1 keeps the scalar form."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[],
                     block_size=128, num_warps=4)
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=128)
@@ -2672,24 +2672,24 @@ def test_lower_make_range_scalar_when_n_elems_is_one():
         assert lowerer.env[42] == "lid"
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_math_binary_array_path():
     """`_lower_math` binary fns (pow, copysign, atan2) take array path."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2712,24 +2712,24 @@ def test_lower_math_binary_array_path():
             assert f"{name}[{i}] = pow(a[{i}], b[{i}]);" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_lower_math_roundeven_array_path():
     """`_lower_math` roundeven / trunc go through unary MEPT path."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2750,24 +2750,24 @@ def test_lower_math_roundeven_array_path():
             assert f"{name}[{i}] = rint(v_src[{i}]);" in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_binary_mismatched_array_lengths_falls_through():
     """Different-length arrays aren't supported — falls back to scalar."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2788,24 +2788,24 @@ def test_emit_binary_mismatched_array_lengths_falls_through():
         assert 200 not in lowerer.env_array
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_unary_emits_scalar_when_mept_off():
     """With MEPT off, `_emit_unary` keeps the existing scalar form."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "0"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2825,24 +2825,24 @@ def test_emit_unary_emits_scalar_when_mept_off():
         assert "v_src[0]" not in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_cast_emits_scalar_when_mept_off():
     """With MEPT off, `_emit_cast` keeps the existing scalar form."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "0"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "0"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=256)
@@ -2863,16 +2863,16 @@ def test_emit_cast_emits_scalar_when_mept_off():
         assert "v_src[0]" not in body
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 def test_emit_passthrough_no_env_array_when_src_has_none():
     """Without a source env_array entry, dst gets none either."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
@@ -2895,8 +2895,8 @@ def test_emit_passthrough_no_env_array_when_src_has_none():
 
 def test_lookup_array_returns_env_array_entry():
     """`_lookup_array` returns env_array directly when present."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
 
     class _Options:
         num_warps = 4
@@ -2926,9 +2926,9 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
     from triton._C.libtriton import ir
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.mlir_walker import walk_ttgir
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
 
     @triton.jit
     def vector_add(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
@@ -2939,11 +2939,11 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
         tl.store(out_ptr + offsets, a + b, mask=mask)
 
     def lower(flag_on: bool):
-        saved = os.environ.get("TRITON_METAL_MEPT")
+        saved = os.environ.get("TRITON_MSL_MEPT")
         if flag_on:
-            os.environ["TRITON_METAL_MEPT"] = "1"
+            os.environ["TRITON_MSL_MEPT"] = "1"
         else:
-            os.environ["TRITON_METAL_MEPT"] = "0"
+            os.environ["TRITON_MSL_MEPT"] = "0"
         try:
             target = GPUTarget("metal", "apple-m4", 32)
             backend = MetalBackend(target)
@@ -2967,9 +2967,9 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
             return GenericLowerer(graph, options).lower()
         finally:
             if saved is None:
-                os.environ.pop("TRITON_METAL_MEPT", None)
+                os.environ.pop("TRITON_MSL_MEPT", None)
             else:
-                os.environ["TRITON_METAL_MEPT"] = saved
+                os.environ["TRITON_MSL_MEPT"] = saved
 
     off = lower(False)
     on = lower(True)
@@ -2989,10 +2989,10 @@ def test_mept_flag_actually_changes_output_when_layout_supports_it():
 def test_mept_convert_layout_shuffle_emits_position_redistribution():
     """`_lower_convert_layout` shuffles a register array via shared memory
     using src/dst LinearLayout positions."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
-    from triton_metal.codegen._linear_layout import LinearLayout
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen._linear_layout import LinearLayout
 
     class _Options:
         num_warps = 4
@@ -3057,9 +3057,9 @@ def test_mept_convert_layout_shuffle_emits_position_redistribution():
 
 def test_mept_reduce_fold_emits_per_thread_fold():
     """`_mept_reduce_fold` collapses arr[0..n-1] with the combine op."""
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
@@ -3095,16 +3095,16 @@ def test_mept_reduce_fold_emits_per_thread_fold():
 def test_mept_reduce_uses_fold_when_operand_is_array():
     """`_lower_reduce` folds an env_array operand then 1-D reduces."""
     import os
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.mlir_walker import IRGraph, SSAValue
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import IRGraph, SSAValue
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     class _Options:
         num_warps = 4
 
     graph = IRGraph(func_name="t", args=[], ops=[])
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         lowerer = GenericLowerer(graph, _Options())
         lowerer.kb = KernelBuilder("t", block_size=128)
@@ -3135,9 +3135,9 @@ def test_mept_reduce_uses_fold_when_operand_is_array():
         assert 52 in lowerer.env
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
 
 @requires_triton
@@ -3154,9 +3154,9 @@ def test_mept_bf16_store_casts_to_buffer_dtype():
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
     from triton._C.libtriton import ir
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.mlir_walker import walk_ttgir
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
 
     @triton.jit
     def add1_bf16(x_ptr, o_ptr, BLOCK: tl.constexpr):
@@ -3164,8 +3164,8 @@ def test_mept_bf16_store_casts_to_buffer_dtype():
         x = tl.load(x_ptr + off)
         tl.store(o_ptr + off, x + 1.0)
 
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         target = GPUTarget("metal", "apple-m4", 32)
         backend = MetalBackend(target)
@@ -3187,9 +3187,9 @@ def test_mept_bf16_store_casts_to_buffer_dtype():
         msl = GenericLowerer(graph, options).lower()
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
     # MEPT active (array form), store casts to bfloat, and it compiles.
     assert "[4];" in msl, f"expected MEPT array form, got:\n{msl}"
@@ -3219,9 +3219,9 @@ def test_mept_no_double_count_with_wrap_loop():
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
     from triton._C.libtriton import ir
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.mlir_walker import walk_ttgir
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
 
     @triton.jit
     def copy_unmasked(x_ptr, o_ptr, BLOCK: tl.constexpr):
@@ -3252,15 +3252,15 @@ def test_mept_no_double_count_with_wrap_loop():
         lowerer = GenericLowerer(graph, options)
         return lowerer.lower()
 
-    saved = os.environ.get("TRITON_METAL_MEPT")
-    os.environ["TRITON_METAL_MEPT"] = "1"
+    saved = os.environ.get("TRITON_MSL_MEPT")
+    os.environ["TRITON_MSL_MEPT"] = "1"
     try:
         msl = lower_with_mept()
     finally:
         if saved is None:
-            os.environ.pop("TRITON_METAL_MEPT", None)
+            os.environ.pop("TRITON_MSL_MEPT", None)
         else:
-            os.environ["TRITON_METAL_MEPT"] = saved
+            os.environ["TRITON_MSL_MEPT"] = saved
 
     # MEPT must be active (sizePerThread=4 -> array form present).
     assert "[4]" in msl, f"expected MEPT array form, got:\n{msl}"
@@ -3301,8 +3301,8 @@ def test_track_n_elems_against_real_kernel_layouts():
         vector_add, sig, constexprs={"BLOCK_SIZE": 256}
     )
 
-    from triton_metal.codegen.mlir_walker import walk_ttgir
-    from triton_metal.codegen.generic_lowerer import (
+    from triton_msl.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.generic_lowerer import (
         GenericLowerer, _extract_shape,
     )
 
@@ -3324,7 +3324,7 @@ def test_track_n_elems_against_real_kernel_layouts():
 
 def test_find_op_type_str_recurses_nested_regions():
     from types import SimpleNamespace
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
 
     def _op(id, type_str="", region_ops=None, else_ops=None):
         return SimpleNamespace(id=id, type_str=type_str,

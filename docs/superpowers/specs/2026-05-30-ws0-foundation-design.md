@@ -1,6 +1,6 @@
 # WS0 — Foundation & truth (design) — 2026-05-30
 
-> First workstream of the umbrella roadmap (`2026-05-30-triton-metal-roadmap.md`).
+> First workstream of the umbrella roadmap (`2026-05-30-triton-msl-roadmap.md`).
 > Establishes the documentation truth, citation infrastructure, test hygiene,
 > a hardened C++ build, a single integrity source of truth, and — most
 > importantly — the **hardware profiling + disassembly harness** that defines
@@ -25,7 +25,7 @@
    Python-3.14 / `torch.compile` 37) become honest skips on 3.14 *and* are
    covered by a parallel Python ≤3.13 CI lane that auto-lifts when PyTorch
    ships 3.14 support.
-4. **C++ build is buildable.** The C++ path (`triton_metal/csrc/`) configures
+4. **C++ build is buildable.** The C++ path (`triton_msl/csrc/`) configures
    and builds against a pinned Triton commit, without hardcoded
    developer-machine paths. CI runs the C++ tests. Without this, the hybrid
    substrate cannot become the perf spine.
@@ -130,7 +130,7 @@ convention used in the docs.
   template is described; the FlashAttention paper where FA support is
   claimed; the Asahi/`applegpu` references where the disassembly harness or
   the AGX research track is described).
-- `CITING.md`: short note on how to cite *triton-metal itself* (suggested
+- `CITING.md`: short note on how to cite *triton-msl itself* (suggested
   BibTeX), since other projects may want to reference it.
 
 **What it depends on.** Nothing — purely additive. Lands in one commit
@@ -156,7 +156,7 @@ skip is self-justifying.
   Outcome on the current dev/CI machine (Python 3.14): honest skips, not
   red failures.
 - **Bucket B coverage preservation:** stand up a CI job on Python 3.13 with
-  `triton` + `triton_metal` installed (the same stack the dev venv carries
+  `triton` + `triton_msl` installed (the same stack the dev venv carries
   on 3.14), so `test_torch_compile.py` and `test_models.py` actually *run*
   in CI. When PyTorch adds 3.14 Dynamo support, the `skipif` lifts
   automatically and the 3.13 lane can be retired or kept as a coverage
@@ -185,7 +185,7 @@ skip is self-justifying.
 
 ### C4. C++ build hardening
 
-**What it is.** Making `triton_metal/csrc/` build on any machine with the
+**What it is.** Making `triton_msl/csrc/` build on any machine with the
 declared toolchain — not just the developer's.
 
 **How to use it.** The path the build takes today:
@@ -225,7 +225,7 @@ that the C++ path can also consume.
 
 **How to use it.**
 
-- Define a single Python module — `triton_metal/codegen/refusal_catalog.py`
+- Define a single Python module — `triton_msl/codegen/refusal_catalog.py`
   — that lists every refusal case as a structured record:
   ```python
   REFUSAL_CASES = [
@@ -355,7 +355,7 @@ the MLX install in the same env (already present in the project venv).
 
 **Sub-AIR AGX experimental track stub.** Within this component, leave a
 hook for the WS3 experimental path: a flag-gated kernel-emit path that, when
-`TRITON_METAL_AGX_BACKEND=1`, routes through the Asahi/`applegpu` toolchain
+`TRITON_MSL_AGX_BACKEND=1`, routes through the Asahi/`applegpu` toolchain
 to produce a native AGX `metallib`. WS0 only stubs this (the harness can
 *receive* an AGX-path metallib and disasm it); the actual emission lands in
 WS3.
@@ -402,7 +402,7 @@ harness's limiting-bound report.
   pass count to be recorded once the lane is up).
 - **C4 (C++ build):** the `cpp-build` CI job — `cmake` + `make` + run the
   C++ unit tests for existing conversion passes (`DotOpToLLVM`, etc.). Plus
-  a smoke `python -c "import triton_metal._triton_metal_cpp"` from a fresh
+  a smoke `python -c "import triton_msl._triton_msl_cpp"` from a fresh
   install.
 - **C5 (refusal catalog):** `tests/test_refusal_catalog.py` — round-trip
   each known example kernel, assert correct case fires, assert doc

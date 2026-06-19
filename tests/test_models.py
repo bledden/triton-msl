@@ -1,4 +1,4 @@
-"""Real model validation tests for triton-metal.
+"""Real model validation tests for triton-msl.
 
 Tests HuggingFace models end-to-end via torch.compile with the Metal backend.
 Validates correctness against eager execution and measures performance.
@@ -45,8 +45,8 @@ def setup_backend():
     Registration also pins inductor to single-process compilation (Metal/PyObjC
     is not fork-safe); the backend owns that requirement, so tests don't set it.
     """
-    import triton_metal.inductor
-    triton_metal.inductor.register_metal_triton_backend()
+    import triton_msl.inductor
+    triton_msl.inductor.register_metal_triton_backend()
     torch._dynamo.reset()
     yield
     torch._dynamo.reset()

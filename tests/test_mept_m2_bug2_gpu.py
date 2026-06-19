@@ -1,6 +1,6 @@
 """MEPT M2 GPU correctness: the tridec Bug-2 reduction-in-loop kernel computes
 correctly at BLOCK>=256 under flag-ON (previously refused with
-MetalNonRecoverableError). Run with TRITON_METAL_MEPT=1. Serial only.
+MetalNonRecoverableError). Run with TRITON_MSL_MEPT=1. Serial only.
 """
 import os
 
@@ -17,8 +17,8 @@ except Exception:
 
 requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
 requires_mept = pytest.mark.skipif(
-    os.environ.get("TRITON_METAL_MEPT") != "1",
-    reason="requires TRITON_METAL_MEPT=1 (M2 register-array form)")
+    os.environ.get("TRITON_MSL_MEPT") != "1",
+    reason="requires TRITON_MSL_MEPT=1 (M2 register-array form)")
 
 if HAS:
     @triton.jit

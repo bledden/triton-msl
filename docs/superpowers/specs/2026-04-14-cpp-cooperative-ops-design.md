@@ -6,7 +6,7 @@
 
 ## Summary
 
-Extend the triton-metal C++ MLIR pass layer to handle all cooperative Triton ops — TTG shared memory operations, `tt.dot` with simdgroup MMA, shared memory aliasing, and vectorized access via `#shared` encoding. After this work, the C++ path handles every Triton kernel that doesn't require M5-specific hardware features, eliminating MSL fallback for the project test suite.
+Extend the triton-msl C++ MLIR pass layer to handle all cooperative Triton ops — TTG shared memory operations, `tt.dot` with simdgroup MMA, shared memory aliasing, and vectorized access via `#shared` encoding. After this work, the C++ path handles every Triton kernel that doesn't require M5-specific hardware features, eliminating MSL fallback for the project test suite.
 
 ## Goal
 
@@ -271,7 +271,7 @@ This plan requires linking against the TritonGPU dialect (reversing the current 
 - Pattern matching via `OpConversionPattern<ttg::LocalAllocOp>` gives compile-time safety over string matching
 - Shared memory aliasing pass needs to walk TTG ops by C++ type
 
-**Build change:** Add `libTritonGPUIR.a` (or the TTG objects) to the `_triton_metal_cpp` and `triton_metal_plugin` CMake targets. If TTG symbols aren't exported from `libtriton.so` on macOS, link the static archive directly from `$TRITON_BUILDPATH/lib/Dialect/TritonGPU/IR/CMakeFiles/TritonGPUIR.dir/*.o`.
+**Build change:** Add `libTritonGPUIR.a` (or the TTG objects) to the `_triton_msl_cpp` and `triton_msl_plugin` CMake targets. If TTG symbols aren't exported from `libtriton.so` on macOS, link the static archive directly from `$TRITON_BUILDPATH/lib/Dialect/TritonGPU/IR/CMakeFiles/TritonGPUIR.dir/*.o`.
 
 **Risk:** Duplicate MLIR dialect registration if `libtriton.so` also contains TTG. Mitigation: verify TTG is not in `libtriton.so`'s exported symbols before linking; if it is, use link-time symbol visibility controls.
 
@@ -354,7 +354,7 @@ The scalar-matmul fallback bypass becomes unnecessary for kernels using `tt.dot`
 
 Final task of implementation plan:
 1. Clear all caches
-2. Run upstream suite with `TRITON_METAL_USE_CPP=1`
+2. Run upstream suite with `TRITON_MSL_USE_CPP=1`
 3. Count `make_metallib_from_llir` invocations vs `make_metallib(` invocations in debug output
 4. Compare pass counts: baseline 4,312 — verify ≥ 4,312 and ideally higher (TTG ops previously forcing MSL fallback now compile correctly through C++)
 5. Update `project_status.md`

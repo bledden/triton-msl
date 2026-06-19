@@ -76,7 +76,7 @@ refused pointwise-epilogue case now matches the new detector.
 - Integrity: an unsupported epilogue (e.g. a row-reduce that isn't softmax)
   still REFUSES (no silent-wrong); oversized N refuses cleanly.
 - Regression: pure matmul still simple_dot; matmul→softmax still softmax.
-- Full `test_core` sweep 4326/0 (fresh `~/.cache/triton_metal`).
+- Full `test_core` sweep 4326/0 (fresh `~/.cache/triton_msl`).
 
 ## Implementation outcome (2026-06-07)
 

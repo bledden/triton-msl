@@ -1,7 +1,7 @@
 """MEPT M3a GPU correctness: a multi-element value carried as an scf.for
 iter-arg (per-element accumulator) computes the column-sum correctly under
 flag-ON. Previously the array iter-arg was emitted as a scalar -> invalid
-MSL / refusal. Run with TRITON_METAL_MEPT=1. Serial only.
+MSL / refusal. Run with TRITON_MSL_MEPT=1. Serial only.
 """
 import os
 import pytest
@@ -17,8 +17,8 @@ except Exception:
 
 requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
 requires_mept = pytest.mark.skipif(
-    os.environ.get("TRITON_METAL_MEPT") != "1",
-    reason="requires TRITON_METAL_MEPT=1 (M3 register-array iter-arg)")
+    os.environ.get("TRITON_MSL_MEPT") != "1",
+    reason="requires TRITON_MSL_MEPT=1 (M3 register-array iter-arg)")
 
 if HAS:
     @triton.jit

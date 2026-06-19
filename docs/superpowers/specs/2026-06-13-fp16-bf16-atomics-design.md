@@ -43,7 +43,7 @@ result = as_type<HALF>(cur_bits)   # the OLD value (Triton atomic returns prior)
   still uses the CAS loop rather than a bare `atomic_exchange` on the word).
 
 ## Components (files)
-- `triton_metal/codegen/_lowerer_control.py` — `_lower_atomic_rmw`: replace the
+- `triton_msl/codegen/_lowerer_control.py` — `_lower_atomic_rmw`: replace the
   16-bit refusal (586–600) with a `_emit_word_cas_16bit(...)` branch wired into the
   op dispatch; result type becomes the element type (fp16/bf16). The fp32/int paths
   are unchanged.
@@ -59,7 +59,7 @@ result = as_type<HALF>(cur_bits)   # the OLD value (Triton atomic returns prior)
   preservation (the `& ~(0xFFFF<<shift)` mask) — covered by a test that writes
   *adjacent* fp16 elements from different threads and checks neither corrupts the
   other.
-- `TRITON_METAL_MEPT=0` is unaffected (this is in the atomic path, not MEPT-gated).
+- `TRITON_MSL_MEPT=0` is unaffected (this is in the atomic path, not MEPT-gated).
 
 ## Testing / ratchet
 - **Unit/correctness (GPU, serial):** fp16 and bf16 `atomic_add` accumulating many

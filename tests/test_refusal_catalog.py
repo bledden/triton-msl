@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from triton_metal.codegen import refusal_catalog as rc
+from triton_msl.codegen import refusal_catalog as rc
 
 
 # ── Lightweight fake op + context ───────────────────────────────────────────

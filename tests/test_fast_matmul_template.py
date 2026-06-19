@@ -2,7 +2,7 @@
 The fp32-out path must stay BYTE-IDENTICAL to the pre-change golden (no regression);
 the fp16-out path must declare half* C + the cast epilogue. No GPU needed."""
 import os
-from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
+from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
 
 GOLD = os.path.join(os.path.dirname(__file__), "golden")
 

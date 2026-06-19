@@ -1,4 +1,4 @@
-# Contributing to triton-metal
+# Contributing to triton-msl
 
 ## Development Setup
 
@@ -11,8 +11,8 @@
 ### Install
 
 ```bash
-git clone https://github.com/bledden/triton-metal.git
-cd triton-metal
+git clone https://github.com/bledden/triton-msl.git
+cd triton-msl
 pip install -e ".[dev]"
 
 # Install Triton (required for @triton.jit)
@@ -61,8 +61,8 @@ python benchmarks/mlx_vs_pyobjc.py         # MLX vs PyObjC comparison
 We use [ruff](https://docs.astral.sh/ruff/) for linting:
 
 ```bash
-ruff check triton_metal/ tests/
-ruff format triton_metal/ tests/
+ruff check triton_msl/ tests/
+ruff format triton_msl/ tests/
 ```
 
 ## Architecture
@@ -70,10 +70,10 @@ ruff format triton_metal/ tests/
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the compilation pipeline and design decisions.
 
 Key directories:
-- `triton_metal/codegen/` — TTGIR → MSL compilation (generic_lowerer.py is the primary path)
-- `triton_metal/backend/` — Triton backend integration (compiler.py, driver.py)
-- `triton_metal/inductor/` — torch.compile integration
-- `triton_metal/mlx/` — MLX zero-copy backend
+- `triton_msl/codegen/` — TTGIR → MSL compilation (generic_lowerer.py is the primary path)
+- `triton_msl/backend/` — Triton backend integration (compiler.py, driver.py)
+- `triton_msl/inductor/` — torch.compile integration
+- `triton_msl/mlx/` — MLX zero-copy backend
 
 ## Pull Requests
 

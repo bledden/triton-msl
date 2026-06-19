@@ -1,7 +1,7 @@
 # Zero-copy MPS execution via `torch.mps.compile_shader` — design (2026-06-14)
 
 > Eliminate the per-launch host round-trip for torch MPS tensors by routing
-> triton-metal's emitted MSL through PyTorch's own `torch.mps.compile_shader`,
+> triton-msl's emitted MSL through PyTorch's own `torch.mps.compile_shader`,
 > which dispatches against MPS tensors zero-copy. **Confirmed 10.2× on
 > vector_add@16M (28 → 281 GB/s, 5% → 52% of the 546 GB/s peak).** Pure Python,
 > no native shim; the existing driver remains the fallback. Phase 4 (perf), the
@@ -23,7 +23,7 @@ wrapped, and PyTorch's underlying `MTLBuffer` is not reachable from pure Python.
 
 `torch.mps.compile_shader(msl_source)` compiles a Metal compute library; its
 functions dispatch against MPS tensors **zero-copy** (PyTorch owns the buffers
-and the MPS stream). Verified it supports the full triton-metal execution model:
+and the MPS stream). Verified it supports the full triton-msl execution model:
 
 - **Buffers** — MPS tensors bound positionally in `[[buffer(i)]]` order, zero-copy.
 - **Scalars** — `constant T&` args (int, float) passed positionally.
@@ -48,7 +48,7 @@ host-round-trip driver runs unchanged (purely additive — never a regression).
 
 Components (small, single-responsibility):
 
-1. **`CompileShaderRuntime`** (new, e.g. `triton_metal/backend/compile_shader_runtime.py`):
+1. **`CompileShaderRuntime`** (new, e.g. `triton_msl/backend/compile_shader_runtime.py`):
    - `available()` — `hasattr(torch.mps, "compile_shader")` (newer torch only).
    - `get_library(msl_source)` — `torch.mps.compile_shader(msl)`, **cached** keyed
      on the MSL string (compile once per kernel, reuse across launches).
@@ -89,8 +89,8 @@ existing driver (copy path).
   run below before the path is enabled by default.
 - Any exception (compile/dispatch/availability) falls back to the existing driver
   — correct, just slower. Never wrong output.
-- A flag `TRITON_METAL_COMPILE_SHADER` (default-on once verified; `=0` escape
-  hatch) toggles the path, mirroring `TRITON_METAL_MEPT` — so a regression can be
+- A flag `TRITON_MSL_COMPILE_SHADER` (default-on once verified; `=0` escape
+  hatch) toggles the path, mirroring `TRITON_MSL_MEPT` — so a regression can be
   bisected/disabled without a code change.
 - Mixed args (some MPS, some CPU): only route through `compile_shader` when ALL
   tensor args are MPS; otherwise fall back (the copy path already handles mixed).

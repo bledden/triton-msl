@@ -12,7 +12,7 @@ import re
 # importing _msl_templates before msl_emitter triggers a pre-existing
 # circular/star-import fragility that breaks `make_matmul_kernel` (tracked
 # follow-up). msl_emitter re-exports make_simdgroup_matmul_kernel.
-from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
 
 def test_fp16_matmul_uses_half_input_fragments():
@@ -51,8 +51,8 @@ def _emit_jit_matmul_msl(dtype_sig):
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
     from triton._C.libtriton import ir
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.msl_emitter import emit_msl
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.msl_emitter import emit_msl
 
     @triton.jit
     def mm(A, B, C, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
@@ -108,8 +108,8 @@ def test_import_order_msl_templates_first_reexports_matmul(tmp_path):
     import subprocess
     import sys
     code = (
-        "import triton_metal.codegen._msl_templates\n"
-        "import triton_metal.codegen.msl_emitter as e\n"
+        "import triton_msl.codegen._msl_templates\n"
+        "import triton_msl.codegen.msl_emitter as e\n"
         "assert hasattr(e, 'make_matmul_kernel'), 'make_matmul_kernel missing'\n"
         "assert 'kernel' in e.make_matmul_kernel().lower()\n"
         "print('OK')\n"

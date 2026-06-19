@@ -46,9 +46,9 @@ def mm_f16(a_ptr, b_ptr, c_ptr, M, N, K, sam, sak, sbk, sbn, scm, scn,
 @requires
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_fast_matmul_throughput(dtype, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     M = N = K = 2048
     A = torch.randn(M, K, device="mps", dtype=dtype)
     B = torch.randn(K, N, device="mps", dtype=dtype)
@@ -76,9 +76,9 @@ def test_fast_matmul_throughput(dtype, monkeypatch):
 
 @requires
 def test_fast_matmul_fp16out_throughput(monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     M = N = K = 2048
     A = torch.randn(M, K, device="mps", dtype=torch.float16)
     B = torch.randn(K, N, device="mps", dtype=torch.float16)

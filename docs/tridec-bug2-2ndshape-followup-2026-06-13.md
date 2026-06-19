@@ -28,7 +28,7 @@ ineligible path.
   result is **eligible** and routes to the correct register-array fold. This is
   what unblocks your shape **at full width under the default flag**.
 - **A — body-local multipass coverage.** Even on the non-array path (e.g. the
-  `TRITON_METAL_MEPT=0` escape hatch), an in-loop reduce over threads now folds
+  `TRITON_MSL_MEPT=0` escape hatch), an in-loop reduce over threads now folds
   each thread's strided share before the cross-thread reduce, so it computes
   correctly there too. A safety gate keeps the loud refusal for anything it
   can't prove it covers (hoisted loads, etc.) — never silent-wrong.
@@ -51,7 +51,7 @@ sporadic test flakiness.
 
 ## What you do
 
-Pull `main` once it's merged, `rm -rf ~/.cache/triton_metal ~/.triton/cache`,
+Pull `main` once it's merged, `rm -rf ~/.cache/triton_msl ~/.triton/cache`,
 drop the C2 restructure if you prefer the original structure (it's no longer
 needed — the `where`-on-reduce shape compiles correctly), and lift relay's
 `BLOCK` to 256/512/1024. Run your full `tests/test_megakernel_metal.py` gate and
@@ -62,4 +62,4 @@ chase it — but the shapes that match your `:431`/`:447` reductions are covered
 No urgency (relay is correct at 128 today), but this should give you the full
 SIMD width with no workaround.
 
-— triton-metal dev session, 2026-06-13
+— triton-msl dev session, 2026-06-13

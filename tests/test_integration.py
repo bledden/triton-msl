@@ -44,13 +44,13 @@ class IntegrationRunner:
         self.device = Metal.MTLCreateSystemDefaultDevice()
         self.queue = self.device.newCommandQueue()
         self.cache_dir = os.path.join(
-            tempfile.gettempdir(), "triton_metal_integration_test"
+            tempfile.gettempdir(), "triton_msl_integration_test"
         )
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def compile_ttgir_to_msl(self, ttgir_text):
         """Parse TTGIR and emit MSL source."""
-        from triton_metal.codegen.ttgir_parser import parse_ttgir
+        from triton_msl.codegen.ttgir_parser import parse_ttgir
 
         class FakeOpts:
             num_warps = 4
@@ -294,7 +294,7 @@ def test_integration_softmax_pipeline(runner):
 @requires_metal
 def test_integration_direct_kernel_roundtrip(runner):
     """Direct kernel (not TTGIR): generate MSL → compile → execute → verify."""
-    from triton_metal.codegen.msl_emitter import make_silu_kernel
+    from triton_msl.codegen.msl_emitter import make_silu_kernel
 
     msl = make_silu_kernel(block_size=256)
     pipeline = runner.compile_msl_to_metallib(msl, "silu_kernel")
@@ -322,7 +322,7 @@ def test_integration_direct_kernel_roundtrip(runner):
 @requires_metal
 def test_integration_reduction_roundtrip(runner):
     """Direct kernel reduction: generate → compile → execute → verify."""
-    from triton_metal.codegen.msl_emitter import make_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_kernel
 
     msl = make_reduce_kernel("reduce_sum", "sum", block_size=256)
     pipeline = runner.compile_msl_to_metallib(msl, "reduce_sum")
@@ -345,7 +345,7 @@ def test_integration_reduction_roundtrip(runner):
 @requires_metal
 def test_integration_matmul_roundtrip(runner):
     """Direct kernel matmul: generate → compile → execute → verify."""
-    from triton_metal.codegen.msl_emitter import make_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_kernel
 
     M, N, K = 32, 32, 32
     msl = make_matmul_kernel(block_m=32, block_n=32, block_k=32)
@@ -380,7 +380,7 @@ def test_integration_matmul_roundtrip(runner):
 @requires_metal
 def test_integration_flash_attention_roundtrip(runner):
     """Direct kernel flash attention: generate → compile → execute → verify."""
-    from triton_metal.codegen.msl_emitter import make_flash_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_flash_attention_kernel
 
     seq_len = 16
     head_dim = 64
@@ -413,7 +413,7 @@ def test_integration_flash_attention_roundtrip(runner):
 @requires_metal
 def test_integration_backend_driver():
     """Test MetalDriver can detect the device and create targets."""
-    from triton_metal.backend.driver import MetalDriver
+    from triton_msl.backend.driver import MetalDriver
 
     driver = MetalDriver()
     assert driver.is_active(), "Metal should be active on macOS"
@@ -429,7 +429,7 @@ def test_integration_backend_driver():
 @requires_metal
 def test_integration_backend_compiler():
     """Test MetalBackend compilation stages work."""
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
 
     # Test options parsing
     opts = MetalOptions()
@@ -442,7 +442,7 @@ def test_integration_backend_compiler():
     assert h1 == h2
 
     # Test make_metallib stage directly
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
     msl_src = make_vector_add_kernel()
     metallib_bytes = MetalBackend.make_metallib(
         msl_src, {"name": "test_va"}, opts

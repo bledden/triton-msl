@@ -39,15 +39,15 @@ N-D `tt.cat` with a compute op in the value path (which the direct-copy template
 can't handle) — so no silent-wrong slips through.
 
 ## Components (files)
-- `triton_metal/codegen/_lowerer_detection.py` — `_detect_nd_cat` (mirror
+- `triton_msl/codegen/_lowerer_detection.py` — `_detect_nd_cat` (mirror
   `_detect_nd_trans`: one `tt.cat` rank≥2, ≥2 loads feeding it, store, no
   reduce/dot/control-flow; data-flow guard load→cat→store via value-preserving
   ops; extract x_arg/y_arg/out_arg, src_shape, dim, elem_type).
-- `triton_metal/codegen/_lowerer_templates.py` — `_lower_nd_cat_template` (the
+- `triton_msl/codegen/_lowerer_templates.py` — `_lower_nd_cat_template` (the
   closed-form strided copy above).
-- `triton_metal/codegen/generic_lowerer.py` `lower()` — call `_detect_nd_cat` with
+- `triton_msl/codegen/generic_lowerer.py` `lower()` — call `_detect_nd_cat` with
   the other detectors.
-- `triton_metal/codegen/refusal_catalog.py` — `_check_nd_cat_join`: defer the clean
+- `triton_msl/codegen/refusal_catalog.py` — `_check_nd_cat_join`: defer the clean
   N-D `tt.cat` pattern (return None) so the detector handles it; keep refusing
   non-clean cat + all rank≥2 join.
 

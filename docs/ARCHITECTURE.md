@@ -1,4 +1,4 @@
-# triton-metal Architecture
+# triton-msl Architecture
 
 Metal backend for OpenAI Triton [\[1\]](../REFERENCES.md). Compiles `@triton.jit`
 kernels to MSL [\[8\]](../REFERENCES.md) (Metal Shading Language) and
@@ -12,7 +12,7 @@ dispatches on Apple GPUs.
 > entries there.
 >
 > **Active roadmap:** see
-> [`docs/superpowers/specs/2026-05-30-triton-metal-roadmap.md`](superpowers/specs/2026-05-30-triton-metal-roadmap.md).
+> [`docs/superpowers/specs/2026-05-30-triton-msl-roadmap.md`](superpowers/specs/2026-05-30-triton-msl-roadmap.md).
 
 ## Pipeline
 
@@ -106,7 +106,7 @@ generic path provably matches them (tracked as "4g").
    generic op-by-op lowering. The vast majority of kernels (~99.95%; the
    legacy fallback was last measured to be load-bearing for 2 kernels —
    see `reports/upstream_test_core.txt` and the per-path log under
-   `TRITON_METAL_PATH_LOG=1`) take this path.
+   `TRITON_MSL_PATH_LOG=1`) take this path.
 2. **Legacy fallback** — a text-based TTGIR parser (`ttgir_parser.py`), used
    only when the primary path emits an `UNSUPPORTED` marker or raises a
    recoverable error. Exercised by 2 kernels in the suite (last
@@ -130,10 +130,10 @@ for.** Two distinct "I can't lower this" signals make that precise:
   `emit_msl` **re-raises** this; it never reaches the user as silent output.
 
   > **Single source of truth:** the refusal catalog lives in
-  > [`triton_metal/codegen/refusal_catalog.py`](../triton_metal/codegen/refusal_catalog.py).
+  > [`triton_msl/codegen/refusal_catalog.py`](../triton_msl/codegen/refusal_catalog.py).
   > `GenericLowerer._refuse_unsafe_unsupported_ops` walks it (Python path), the
   > C++ MLIR→LLVM path consumes the same catalog via
-  > `python -m triton_metal.codegen.refusal_catalog --json` (so the two paths
+  > `python -m triton_msl.codegen.refusal_catalog --json` (so the two paths
   > cannot drift), and the list below is the curated form of
   > `refusal_catalog.doc_markdown()`. Add a new refusal *there*, not here.
 
@@ -222,7 +222,7 @@ The generic lowerer assumes each thread processes one scalar element:
 
 **Limitation:** 2D tensor operations (`tt.expand_dims`, `tt.broadcast`, `ttg.convert_layout`) are no-ops in the generic lowerer. Kernels that rely on 2D tensor semantics (matmul, 2D convolution, multi-head attention with 2D tiling) must use the matmul template path or a dedicated prebuilt kernel.
 
-### Multi-element-per-thread (experimental, `TRITON_METAL_MEPT=1`)
+### Multi-element-per-thread (experimental, `TRITON_MSL_MEPT=1`)
 
 There is an **opt-in, off-by-default** experimental path that lets a thread
 hold *N* tensor elements as a register array (`T v[N]`) instead of one

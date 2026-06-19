@@ -1,9 +1,9 @@
-"""Stress tests for triton-metal.
+"""Stress tests for triton-msl.
 
 Tests large tensors, repeated dispatches, and edge cases to verify
 no crashes, memory leaks, or data corruption under sustained load.
 
-Requires: TRITON_METAL_DEBUG=0 (or unset) for clean output.
+Requires: TRITON_MSL_DEBUG=0 (or unset) for clean output.
 """
 
 import pytest

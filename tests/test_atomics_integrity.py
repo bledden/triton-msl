@@ -25,7 +25,7 @@ try:
     import triton
     import triton.language as tl
     import Metal
-    from triton_metal.backend.compiler import MetalBackend
+    from triton_msl.backend.compiler import MetalBackend
     HAS = Metal.MTLCreateSystemDefaultDevice() is not None
     HAS_CPP = MetalBackend._has_cpp_passes()
 except Exception:
@@ -76,7 +76,7 @@ print("OK", got)
 def test_fp16_atomic_correct_under_default_route():
     """Correctness parity on the DEFAULT route (Phase 3 feature 1).
 
-    The in-process test above may inherit TRITON_METAL_FORCE_PYTHON from the
+    The in-process test above may inherit TRITON_MSL_FORCE_PYTHON from the
     surrounding session. This pins the word-CAS correctness in a fresh
     subprocess with the C++ passes built and no FORCE_PYTHON: default routing
     must produce the right result ([4, 4]), never silently-corrupt output.
@@ -84,9 +84,9 @@ def test_fp16_atomic_correct_under_default_route():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env = dict(os.environ,
                PYTHONPATH=root,
-               TRITON_METAL_CACHE_DIR=tempfile.mkdtemp(),
+               TRITON_MSL_CACHE_DIR=tempfile.mkdtemp(),
                TRITON_CACHE_DIR=tempfile.mkdtemp())
-    env.pop("TRITON_METAL_FORCE_PYTHON", None)
+    env.pop("TRITON_MSL_FORCE_PYTHON", None)
     r = subprocess.run([sys.executable, "-c", _FP16_ATOMIC_SCRIPT],
                        env=env, capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, (

@@ -7,7 +7,7 @@
 
 ## Source
 tridec feedback `Bug2 remaining: tl.sum inside a runtime-bound loop` (2026-06-13),
-verified against `triton_metal @ 0a1eafb` (CODEGEN_VERSION 2026.06.13). tridec's
+verified against `triton_msl @ 0a1eafb` (CODEGEN_VERSION 2026.06.13). tridec's
 relay caps at BLOCK=128 (loud refusal — never silent-wrong); BP is fully unblocked
 (no `tl.sum`, runs 256–1024). The ask is **coverage**, not a behavior change.
 
@@ -60,7 +60,7 @@ per BP iteration (can't be hoisted out).
    M2/M3 reduce-in-loop path already works once the kernel is eligible).
 
 ## Components (files)
-- `triton_metal/codegen/generic_lowerer.py` — add `arith.select` to `_MEPT_SAFE_OPS`
+- `triton_msl/codegen/generic_lowerer.py` — add `arith.select` to `_MEPT_SAFE_OPS`
   (+ update the line-60 comment); array-wire `_lower_select`.
 - (Possibly) the array-wired-op dispatch site that routes binaries — wire select
   through it if that's where array emission is centralized.

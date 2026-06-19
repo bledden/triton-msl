@@ -1,6 +1,6 @@
 """emit_msl refuses on unresolved UNKNOWN_<id> instead of emitting invalid MSL.
 
-This pins the TRITON_METAL_MEPT=0 ESCAPE-HATCH behavior. As of M5 the
+This pins the TRITON_MSL_MEPT=0 ESCAPE-HATCH behavior. As of M5 the
 register-array model is default-ON and computes this kernel at BLOCK>=256 (see
 tests/test_mept_m5_default_gpu.py). With the escape hatch (MEPT=0, pinned by the
 autouse fixture below), BLOCK<=128 still runs correctly on the scalar path.
@@ -29,11 +29,11 @@ requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
 
 @pytest.fixture(autouse=True)
 def _force_mept_off(monkeypatch):
-    # These tests assert the TRITON_METAL_MEPT=0 ESCAPE-HATCH behavior (the
+    # These tests assert the TRITON_MSL_MEPT=0 ESCAPE-HATCH behavior (the
     # legacy scalar/wrap-loop path). Pin the flag to "0" explicitly — NOT
     # delenv: as of M5 the default is ON, so removing the var would let the
     # kernel compute and break the refusal assertion. setenv auto-restores.
-    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    monkeypatch.setenv("TRITON_MSL_MEPT", "0")
 
 
 if HAS:
@@ -50,7 +50,7 @@ if HAS:
 
 @requires_metal
 def test_sum_in_loop_block128_runs():
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
     N = 1024; X = torch.randn(N); OUT = torch.zeros(1)
     _sum_in_loop[(1,)](X, OUT, N, (N + 127) // 128, BLOCK=128)
     assert abs(float(OUT[0]) - X.sum().item()) < 1e-2

@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 @requires_metal
 def test_vector_add(runner):
     """output = a + b"""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     n = 4096
     msl = make_vector_add_kernel(block_size=256)
@@ -58,7 +58,7 @@ def test_vector_add(runner):
 @requires_metal
 def test_elementwise_sub(runner):
     """output = a - b"""
-    from triton_metal.codegen.msl_emitter import make_elementwise_kernel
+    from triton_msl.codegen.msl_emitter import make_elementwise_kernel
 
     n = 2048
     msl = make_elementwise_kernel("sub_kernel", 2, "sub")
@@ -86,7 +86,7 @@ def test_elementwise_sub(runner):
 @requires_metal
 def test_elementwise_mul(runner):
     """output = a * b"""
-    from triton_metal.codegen.msl_emitter import make_elementwise_kernel
+    from triton_msl.codegen.msl_emitter import make_elementwise_kernel
 
     n = 2048
     msl = make_elementwise_kernel("mul_kernel", 2, "mul")
@@ -114,7 +114,7 @@ def test_elementwise_mul(runner):
 @requires_metal
 def test_scalar_mul(runner):
     """output = input * scalar"""
-    from triton_metal.codegen.msl_emitter import make_scalar_mul_kernel
+    from triton_msl.codegen.msl_emitter import make_scalar_mul_kernel
 
     n = 1024
     scalar = 3.14
@@ -141,7 +141,7 @@ def test_scalar_mul(runner):
 @requires_metal
 def test_silu(runner):
     """output = x * sigmoid(x) = x / (1 + exp(-x))"""
-    from triton_metal.codegen.msl_emitter import make_silu_kernel
+    from triton_msl.codegen.msl_emitter import make_silu_kernel
 
     n = 1024
     msl = make_silu_kernel()
@@ -168,7 +168,7 @@ def test_silu(runner):
 @requires_metal
 def test_gelu(runner):
     """output = 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))"""
-    from triton_metal.codegen.msl_emitter import make_gelu_kernel
+    from triton_msl.codegen.msl_emitter import make_gelu_kernel
 
     n = 1024
     msl = make_gelu_kernel()
@@ -197,7 +197,7 @@ def test_gelu(runner):
 @requires_metal
 def test_exp(runner):
     """output = exp(x)"""
-    from triton_metal.codegen.msl_emitter import make_elementwise_kernel
+    from triton_msl.codegen.msl_emitter import make_elementwise_kernel
 
     n = 512
     msl = make_elementwise_kernel("exp_kernel", 1, "exp")
@@ -226,7 +226,7 @@ def test_exp(runner):
 @requires_metal
 def test_non_power_of_2_size(runner):
     """Test with n not divisible by block_size (tests masking)."""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     n = 1000  # Not divisible by 256
     msl = make_vector_add_kernel(block_size=256)
@@ -255,7 +255,7 @@ def test_non_power_of_2_size(runner):
 @requires_metal
 def test_large_buffer(runner):
     """Test with a large buffer (1M elements)."""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     n = 1_000_000
     msl = make_vector_add_kernel(block_size=256)
@@ -286,7 +286,7 @@ def test_large_buffer(runner):
 @requires_metal
 def test_reduce_sum(runner):
     """output[0] = sum(input)"""
-    from triton_metal.codegen.msl_emitter import make_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_kernel
 
     n = 256  # One threadgroup
     msl = make_reduce_kernel("reduce_sum", "sum", block_size=256)
@@ -310,7 +310,7 @@ def test_reduce_sum(runner):
 @requires_metal
 def test_reduce_max(runner):
     """output[0] = max(input)"""
-    from triton_metal.codegen.msl_emitter import make_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_kernel
 
     n = 256
     msl = make_reduce_kernel("reduce_max", "max", block_size=256)
@@ -335,7 +335,7 @@ def test_reduce_max(runner):
 @requires_metal
 def test_reduce_min(runner):
     """output[0] = min(input)"""
-    from triton_metal.codegen.msl_emitter import make_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_kernel
 
     n = 256
     msl = make_reduce_kernel("reduce_min", "min", block_size=256)
@@ -364,7 +364,7 @@ def test_reduce_min(runner):
 @requires_metal
 def test_softmax(runner):
     """Row-wise softmax: output[i] = exp(x[i] - max) / sum(exp(x - max))"""
-    from triton_metal.codegen.msl_emitter import make_softmax_kernel
+    from triton_msl.codegen.msl_emitter import make_softmax_kernel
 
     n_rows = 4
     n_cols = 64
@@ -429,7 +429,7 @@ def test_softmax(runner):
 @requires_metal
 def test_softmax_large_row(runner):
     """Softmax with row larger than block_size (tests strided access)."""
-    from triton_metal.codegen.msl_emitter import make_softmax_kernel
+    from triton_msl.codegen.msl_emitter import make_softmax_kernel
 
     n_cols = 512  # Larger than block_size=256
     msl = make_softmax_kernel(block_size=256)
@@ -480,7 +480,7 @@ def test_softmax_large_row(runner):
 @requires_metal
 def test_matmul_small(runner):
     """C = A @ B for small matrices (fits in one tile)."""
-    from triton_metal.codegen.msl_emitter import make_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_kernel
 
     M, N, K = 16, 16, 16
     block_m, block_n, block_k = 32, 32, 32
@@ -537,7 +537,7 @@ def test_matmul_small(runner):
 @requires_metal
 def test_matmul_rectangular(runner):
     """C = A @ B for non-square matrices."""
-    from triton_metal.codegen.msl_emitter import make_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_kernel
 
     M, N, K = 24, 16, 32
     block_m, block_n, block_k = 32, 32, 32
@@ -591,7 +591,7 @@ def test_matmul_rectangular(runner):
 @requires_metal
 def test_matmul_multi_tile(runner):
     """C = A @ B with multiple tiles (matrix larger than tile size)."""
-    from triton_metal.codegen.msl_emitter import make_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_kernel
 
     M, N, K = 64, 64, 64
     block_m, block_n, block_k = 32, 32, 32
@@ -650,7 +650,7 @@ def test_matmul_multi_tile(runner):
 @requires_metal
 def test_matmul_2d_small(runner):
     """2D dispatch matmul: 16x16 * 16x16."""
-    from triton_metal.codegen.msl_emitter import make_matmul_2d_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_2d_kernel
 
     M, N, K = 16, 16, 16
     block_m, block_n, block_k = 32, 32, 32
@@ -704,7 +704,7 @@ def test_matmul_2d_small(runner):
 @requires_metal
 def test_matmul_2d_multi_tile(runner):
     """2D dispatch matmul: 64x64 with 2x2 tile grid."""
-    from triton_metal.codegen.msl_emitter import make_matmul_2d_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_2d_kernel
 
     M, N, K = 64, 64, 64
     block_m, block_n, block_k = 32, 32, 32
@@ -757,7 +757,7 @@ def test_matmul_2d_multi_tile(runner):
 @requires_metal
 def test_matmul_2d_rectangular(runner):
     """2D dispatch matmul: non-square 48x32 * 32x64."""
-    from triton_metal.codegen.msl_emitter import make_matmul_2d_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_2d_kernel
 
     M, N, K = 48, 64, 32
     block_m, block_n, block_k = 32, 32, 32
@@ -814,7 +814,7 @@ def test_matmul_2d_rectangular(runner):
 @requires_metal
 def test_matmul_swizzled_small(runner):
     """Swizzled matmul: 16x16 * 16x16."""
-    from triton_metal.codegen.msl_emitter import make_matmul_swizzled_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_swizzled_kernel
 
     M, N, K = 16, 16, 16
     block_m, block_n, block_k = 32, 32, 32
@@ -868,7 +868,7 @@ def test_matmul_swizzled_small(runner):
 @requires_metal
 def test_matmul_swizzled_large(runner):
     """Swizzled matmul: 128x128 with group_size=4."""
-    from triton_metal.codegen.msl_emitter import make_matmul_swizzled_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_swizzled_kernel
 
     M, N, K = 128, 128, 64
     block_m, block_n, block_k = 32, 32, 32
@@ -927,7 +927,7 @@ def test_matmul_swizzled_large(runner):
 @requires_metal
 def test_activation_tanh(runner):
     """Tanh activation kernel."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 1024
     msl = make_activation_kernel("tanh")
@@ -950,7 +950,7 @@ def test_activation_tanh(runner):
 @requires_metal
 def test_activation_sigmoid(runner):
     """Sigmoid activation kernel."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 1024
     msl = make_activation_kernel("sigmoid")
@@ -974,7 +974,7 @@ def test_activation_sigmoid(runner):
 @requires_metal
 def test_activation_elu(runner):
     """ELU activation kernel."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 1024
     msl = make_activation_kernel("elu")
@@ -998,7 +998,7 @@ def test_activation_elu(runner):
 @requires_metal
 def test_activation_leaky_relu(runner):
     """Leaky ReLU activation kernel."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 1024
     msl = make_activation_kernel("leaky_relu")
@@ -1022,7 +1022,7 @@ def test_activation_leaky_relu(runner):
 @requires_metal
 def test_activation_hardswish(runner):
     """HardSwish activation kernel."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 1024
     msl = make_activation_kernel("hardswish")
@@ -1050,7 +1050,7 @@ def test_activation_hardswish(runner):
 @requires_metal
 def test_vector_add_fp16(runner):
     """output = a + b in half precision"""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     n = 1024
     msl = make_vector_add_kernel(block_size=256, dtype="fp16")
@@ -1080,7 +1080,7 @@ def test_vector_add_fp16(runner):
 @requires_metal
 def test_silu_fp16(runner):
     """output = x * sigmoid(x) in half precision"""
-    from triton_metal.codegen.msl_emitter import make_silu_kernel
+    from triton_msl.codegen.msl_emitter import make_silu_kernel
 
     n = 512
     msl = make_silu_kernel(block_size=256, dtype="fp16")
@@ -1107,7 +1107,7 @@ def test_silu_fp16(runner):
 @requires_metal
 def test_elementwise_mul_fp16(runner):
     """output = a * b in half precision"""
-    from triton_metal.codegen.msl_emitter import make_elementwise_kernel
+    from triton_msl.codegen.msl_emitter import make_elementwise_kernel
 
     n = 1024
     msl = make_elementwise_kernel("mul_fp16", 2, "mul", dtype="fp16")
@@ -1140,7 +1140,7 @@ def test_elementwise_mul_fp16(runner):
 @requires_metal
 def test_activation_tanh_fp16(runner):
     """Tanh activation in FP16."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 1024
     msl = make_activation_kernel("tanh", dtype="fp16")
@@ -1163,7 +1163,7 @@ def test_activation_tanh_fp16(runner):
 @requires_metal
 def test_activation_sigmoid_fp16(runner):
     """Sigmoid activation in FP16."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 1024
     msl = make_activation_kernel("sigmoid", dtype="fp16")
@@ -1187,7 +1187,7 @@ def test_activation_sigmoid_fp16(runner):
 @requires_metal
 def test_activation_elu_fp16(runner):
     """ELU activation in FP16."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 1024
     msl = make_activation_kernel("elu", dtype="fp16")
@@ -1250,7 +1250,7 @@ def _ref_matmul(A, B, M, N, K):
 @requires_metal
 def test_simdgroup_matmul_32x32(runner):
     """simdgroup_matrix matmul: 32x32 @ 32x32 (single tile)."""
-    from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
     M, N, K = 32, 32, 32
     msl = make_simdgroup_matmul_kernel()
@@ -1285,7 +1285,7 @@ def test_simdgroup_matmul_32x32(runner):
 @requires_metal
 def test_simdgroup_matmul_64x64(runner):
     """simdgroup_matrix matmul: 64x64 @ 64x64 (2x2 tiles)."""
-    from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
     M, N, K = 64, 64, 64
     msl = make_simdgroup_matmul_kernel()
@@ -1321,7 +1321,7 @@ def test_simdgroup_matmul_64x64(runner):
 @requires_metal
 def test_simdgroup_matmul_rectangular(runner):
     """simdgroup_matrix matmul: 64x32 @ 32x64 (rectangular)."""
-    from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
     M, N, K = 64, 64, 32
     msl = make_simdgroup_matmul_kernel()
@@ -1360,7 +1360,7 @@ def test_simdgroup_matmul_rectangular(runner):
 @requires_metal
 def test_simdgroup_matmul_fp16_compiles(runner):
     """FP16 simdgroup matmul MSL compiles."""
-    from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
     msl = make_simdgroup_matmul_kernel(dtype="fp16")
     runner.compile(msl, "simdgroup_matmul")
@@ -1369,7 +1369,7 @@ def test_simdgroup_matmul_fp16_compiles(runner):
 @requires_metal
 def test_simdgroup_matmul_fp16_32x32(runner):
     """FP16 simdgroup matmul: half inputs, float accumulation, 32x32."""
-    from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
     M, N, K = 32, 32, 32
     msl = make_simdgroup_matmul_kernel(dtype="fp16")
@@ -1407,7 +1407,7 @@ def test_simdgroup_matmul_fp16_32x32(runner):
 @requires_metal
 def test_simdgroup_matmul_fp16_64x64(runner):
     """FP16 simdgroup matmul: 64x64 multi-tile."""
-    from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
     M, N, K = 64, 64, 64
     msl = make_simdgroup_matmul_kernel(dtype="fp16")
@@ -1447,7 +1447,7 @@ def test_simdgroup_matmul_fp16_64x64(runner):
 @requires_metal
 def test_rms_norm(runner):
     """RMS norm: output = x * rsqrt(mean(x^2) + eps) * weight"""
-    from triton_metal.codegen.msl_emitter import make_rms_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_rms_norm_kernel
 
     n_cols = 64
     n_rows = 4
@@ -1501,7 +1501,7 @@ def test_rms_norm(runner):
 @requires_metal
 def test_rms_norm_large_row(runner):
     """RMS norm with row larger than block_size (tests strided access)."""
-    from triton_metal.codegen.msl_emitter import make_rms_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_rms_norm_kernel
 
     n_cols = 512
     eps = 1e-6
@@ -1552,7 +1552,7 @@ def test_rms_norm_large_row(runner):
 @requires_metal
 def test_rope(runner):
     """RoPE: apply rotary position embeddings."""
-    from triton_metal.codegen.msl_emitter import make_rope_kernel
+    from triton_msl.codegen.msl_emitter import make_rope_kernel
 
     dim = 64
     seq_len = 4
@@ -1617,7 +1617,7 @@ def test_rope(runner):
 @requires_metal
 def test_layer_norm(runner):
     """Layer norm: output = (x - mean) / sqrt(var + eps) * gamma + beta"""
-    from triton_metal.codegen.msl_emitter import make_layer_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_layer_norm_kernel
 
     n_cols = 64
     n_rows = 4
@@ -1673,7 +1673,7 @@ def test_layer_norm(runner):
 @requires_metal
 def test_layer_norm_large_row(runner):
     """Layer norm with row larger than block_size."""
-    from triton_metal.codegen.msl_emitter import make_layer_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_layer_norm_kernel
 
     n_cols = 512
     eps = 1e-6
@@ -1732,7 +1732,7 @@ def test_layer_norm_large_row(runner):
 @requires_metal
 def test_cross_entropy(runner):
     """Cross-entropy loss: loss = log_sum_exp(logits) - logits[target]"""
-    from triton_metal.codegen.msl_emitter import make_cross_entropy_kernel
+    from triton_msl.codegen.msl_emitter import make_cross_entropy_kernel
 
     n_rows = 4
     vocab_size = 32
@@ -1793,7 +1793,7 @@ def test_cross_entropy(runner):
 @requires_metal
 def test_cross_entropy_large_vocab(runner):
     """Cross-entropy with vocab larger than block_size."""
-    from triton_metal.codegen.msl_emitter import make_cross_entropy_kernel
+    from triton_msl.codegen.msl_emitter import make_cross_entropy_kernel
 
     vocab_size = 1024  # > block_size of 256
     msl = make_cross_entropy_kernel(block_size=256)
@@ -1848,7 +1848,7 @@ def test_cross_entropy_large_vocab(runner):
 @requires_metal
 def test_flash_attention_single_head(runner):
     """Flash Attention: single head, short sequence."""
-    from triton_metal.codegen.msl_emitter import make_flash_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_flash_attention_kernel
 
     seq_len = 16
     head_dim = 64
@@ -1925,7 +1925,7 @@ def test_flash_attention_single_head(runner):
 @requires_metal
 def test_flash_attention_multi_block(runner):
     """Flash Attention: sequence longer than one block."""
-    from triton_metal.codegen.msl_emitter import make_flash_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_flash_attention_kernel
 
     seq_len = 48  # 3 blocks of 16
     head_dim = 64
@@ -2000,7 +2000,7 @@ def test_flash_attention_multi_block(runner):
 @requires_metal
 def test_vector_add_bf16(runner):
     """output = a + b in bfloat16 precision"""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     n = 1024
     msl = make_vector_add_kernel(block_size=256, dtype="bf16")
@@ -2030,7 +2030,7 @@ def test_vector_add_bf16(runner):
 @requires_metal
 def test_silu_bf16(runner):
     """output = x * sigmoid(x) in bfloat16 precision"""
-    from triton_metal.codegen.msl_emitter import make_silu_kernel
+    from triton_msl.codegen.msl_emitter import make_silu_kernel
 
     n = 512
     msl = make_silu_kernel(block_size=256, dtype="bf16")
@@ -2061,7 +2061,7 @@ def test_silu_bf16(runner):
 @requires_metal
 def test_residual_add_with_bias(runner):
     """output = input + residual + bias"""
-    from triton_metal.codegen.msl_emitter import make_residual_add_kernel
+    from triton_msl.codegen.msl_emitter import make_residual_add_kernel
 
     n = 1024
     msl = make_residual_add_kernel(block_size=256, has_bias=True)
@@ -2091,7 +2091,7 @@ def test_residual_add_with_bias(runner):
 @requires_metal
 def test_residual_add_no_bias(runner):
     """output = input + residual (no bias)"""
-    from triton_metal.codegen.msl_emitter import make_residual_add_kernel
+    from triton_msl.codegen.msl_emitter import make_residual_add_kernel
 
     n = 1024
     msl = make_residual_add_kernel(block_size=256, has_bias=False)
@@ -2123,7 +2123,7 @@ def test_residual_add_no_bias(runner):
 @requires_metal
 def test_kv_cache_attention(runner):
     """KV-cache attention: single query token attending to cached KV."""
-    from triton_metal.codegen.msl_emitter import make_kv_cache_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_kv_cache_attention_kernel
 
     head_dim = 64
     seq_len = 8
@@ -2193,7 +2193,7 @@ def test_kv_cache_attention(runner):
 @requires_metal
 def test_swiglu(runner):
     """SwiGLU: output = SiLU(gate) * x"""
-    from triton_metal.codegen.msl_emitter import make_swiglu_kernel
+    from triton_msl.codegen.msl_emitter import make_swiglu_kernel
 
     n = 1024
     msl = make_swiglu_kernel(block_size=256)
@@ -2229,7 +2229,7 @@ def test_swiglu(runner):
 @requires_metal
 def test_embedding_lookup(runner):
     """Embedding lookup: output[i] = table[indices[i]]"""
-    from triton_metal.codegen.msl_emitter import make_embedding_kernel
+    from triton_msl.codegen.msl_emitter import make_embedding_kernel
 
     vocab_size = 32
     embed_dim = 64
@@ -2290,7 +2290,7 @@ def test_embedding_lookup(runner):
 @requires_metal
 def test_flash_attention_causal(runner):
     """Causal Flash Attention: future tokens should be masked."""
-    from triton_metal.codegen.msl_emitter import make_flash_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_flash_attention_kernel
 
     seq_len = 16
     head_dim = 64
@@ -2401,7 +2401,7 @@ def _dispatch_fused_linear(runner, pipeline, buffers, M, N):
 @requires_metal
 def test_fused_linear_no_bias(runner):
     """Fused linear: output = input @ weight^T (no bias)."""
-    from triton_metal.codegen.msl_emitter import make_fused_linear_kernel
+    from triton_msl.codegen.msl_emitter import make_fused_linear_kernel
 
     M, N, K = 32, 32, 32
     msl = make_fused_linear_kernel(has_bias=False)
@@ -2438,7 +2438,7 @@ def test_fused_linear_no_bias(runner):
 @requires_metal
 def test_fused_linear_with_bias(runner):
     """Fused linear: output = input @ weight^T + bias."""
-    from triton_metal.codegen.msl_emitter import make_fused_linear_kernel
+    from triton_msl.codegen.msl_emitter import make_fused_linear_kernel
 
     M, N, K = 32, 32, 32
     msl = make_fused_linear_kernel(has_bias=True)
@@ -2481,7 +2481,7 @@ def test_fused_linear_with_bias(runner):
 @requires_metal
 def test_gqa_attention(runner):
     """GQA: 4 query heads share 1 KV head, verify attention output."""
-    from triton_metal.codegen.msl_emitter import make_gqa_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_gqa_attention_kernel
 
     n_q_heads = 4
     n_kv_heads = 1
@@ -2575,7 +2575,7 @@ def test_gqa_attention(runner):
 @requires_metal
 def test_int8_matmul(runner):
     """INT8 weight-only quantized matmul with per-row scale/zero_point."""
-    from triton_metal.codegen.msl_emitter import make_int8_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_int8_matmul_kernel
     import struct as struct_mod
 
     M, N, K = 16, 16, 32
@@ -2657,7 +2657,7 @@ def test_int8_matmul(runner):
 @requires_metal
 def test_concat_two_tensors(runner):
     """Concatenate two 1D tensors into one."""
-    from triton_metal.codegen.msl_emitter import make_concat_kernel
+    from triton_msl.codegen.msl_emitter import make_concat_kernel
 
     n0 = 128
     n1 = 256
@@ -2696,7 +2696,7 @@ def test_concat_two_tensors(runner):
 @requires_metal
 def test_split_two_chunks(runner):
     """Split a tensor into two equal chunks."""
-    from triton_metal.codegen.msl_emitter import make_split_kernel
+    from triton_msl.codegen.msl_emitter import make_split_kernel
 
     chunk_size = 128
     total = chunk_size * 2
@@ -2729,7 +2729,7 @@ def test_split_two_chunks(runner):
 @requires_metal
 def test_top_k_basic(runner):
     """Top-k: find top 5 values from 1024-element vocabulary."""
-    from triton_metal.codegen.msl_emitter import make_top_k_kernel
+    from triton_msl.codegen.msl_emitter import make_top_k_kernel
     import struct as struct_mod
 
     vocab_size = 1024
@@ -2782,7 +2782,7 @@ def test_top_k_basic(runner):
 @requires_metal
 def test_top_k_large_vocab(runner):
     """Top-k with a larger vocabulary (32K) and k=10."""
-    from triton_metal.codegen.msl_emitter import make_top_k_kernel
+    from triton_msl.codegen.msl_emitter import make_top_k_kernel
     import struct as struct_mod
 
     vocab_size = 32768
@@ -2834,7 +2834,7 @@ def test_top_k_large_vocab(runner):
 @requires_metal
 def test_top_p_sampling(runner):
     """Top-p: nucleus sampling with p=0.9 and temperature=1.0."""
-    from triton_metal.codegen.msl_emitter import make_top_p_kernel
+    from triton_msl.codegen.msl_emitter import make_top_p_kernel
     import struct as struct_mod
 
     vocab_size = 512
@@ -2907,7 +2907,7 @@ def test_top_p_sampling(runner):
 @requires_metal
 def test_batched_kv_decode(runner):
     """Batched multi-head KV-cache decode with 2 batch items, 2 heads."""
-    from triton_metal.codegen.msl_emitter import make_batched_kv_decode_kernel
+    from triton_msl.codegen.msl_emitter import make_batched_kv_decode_kernel
 
     batch_size = 2
     n_heads = 2
@@ -3008,7 +3008,7 @@ def test_batched_kv_decode(runner):
 @requires_metal
 def test_int4_matmul(runner):
     """INT4 weight-only quantized matmul with per-group scale/zero_point."""
-    from triton_metal.codegen.msl_emitter import make_int4_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_int4_matmul_kernel
     import struct as struct_mod
 
     M, N, K = 8, 8, 16  # K must be even for int4 packing
@@ -3088,7 +3088,7 @@ def test_int4_matmul(runner):
 def test_rope_attention(runner):
     """Fused RoPE + single-query attention: applies rotary embeddings to Q and K
     on-the-fly during attention, validating against a Python reference."""
-    from triton_metal.codegen.msl_emitter import make_rope_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_rope_attention_kernel
 
     head_dim = 64
     seq_len = 16
@@ -3187,7 +3187,7 @@ def test_rope_attention(runner):
 @requires_metal
 def test_paged_attention(runner):
     """Paged attention: KV-cache stored in non-contiguous pages with page table."""
-    from triton_metal.codegen.msl_emitter import make_paged_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_paged_attention_kernel
     import struct as struct_mod
 
     head_dim = 64
@@ -3282,7 +3282,7 @@ def test_paged_attention(runner):
 @requires_metal
 def test_paged_attention_partial_page(runner):
     """Paged attention with a partially filled last page (seq_len not page-aligned)."""
-    from triton_metal.codegen.msl_emitter import make_paged_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_paged_attention_kernel
     import struct as struct_mod
 
     head_dim = 32
@@ -3373,7 +3373,7 @@ def test_paged_attention_partial_page(runner):
 @requires_metal
 def test_speculative_decode_partial_accept(runner):
     """Speculative decoding: draft 4 tokens, target rejects at position 2."""
-    from triton_metal.codegen.msl_emitter import make_speculative_decode_kernel
+    from triton_msl.codegen.msl_emitter import make_speculative_decode_kernel
     import struct as struct_mod
 
     n_tokens = 4
@@ -3471,7 +3471,7 @@ def test_speculative_decode_partial_accept(runner):
 @requires_metal
 def test_speculative_decode_all_accepted(runner):
     """Speculative decoding: all 3 draft tokens accepted."""
-    from triton_metal.codegen.msl_emitter import make_speculative_decode_kernel
+    from triton_msl.codegen.msl_emitter import make_speculative_decode_kernel
     import struct as struct_mod
 
     n_tokens = 3
@@ -3548,7 +3548,7 @@ def test_speculative_decode_all_accepted(runner):
 @requires_metal
 def test_fused_residual_norm(runner):
     """Fused residual add + layer norm: output = LN(input + residual, gamma, beta)."""
-    from triton_metal.codegen.msl_emitter import make_fused_residual_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_fused_residual_norm_kernel
 
     n_rows = 4
     n_cols = 64
@@ -3623,7 +3623,7 @@ def test_fused_residual_norm(runner):
 @requires_metal
 def test_beam_search(runner):
     """Beam search: selects top beam_width candidates across beams * vocab."""
-    from triton_metal.codegen.msl_emitter import make_beam_search_kernel
+    from triton_msl.codegen.msl_emitter import make_beam_search_kernel
     import struct as struct_mod
 
     beam_width = 4
@@ -3709,7 +3709,7 @@ def test_beam_search(runner):
 @requires_metal
 def test_multi_head_paged_attention(runner):
     """Multi-head paged attention: 2 heads, 3 pages, shuffled physical order."""
-    from triton_metal.codegen.msl_emitter import make_multi_head_paged_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_multi_head_paged_attention_kernel
     import struct as struct_mod
 
     n_heads = 2
@@ -3808,7 +3808,7 @@ def test_multi_head_paged_attention(runner):
 @requires_metal
 def test_fp16_kv_attention(runner):
     """FP16 KV-cache attention: Q in float32, K/V in float16, compute in float32."""
-    from triton_metal.codegen.msl_emitter import make_fp16_kv_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_fp16_kv_attention_kernel
     import struct as struct_mod
 
     head_dim = 32
@@ -3893,7 +3893,7 @@ def test_fp16_kv_attention(runner):
 @requires_metal
 def test_fused_mlp(runner):
     """Fused MLP: output = silu(gate) * up."""
-    from triton_metal.codegen.msl_emitter import make_fused_mlp_kernel
+    from triton_msl.codegen.msl_emitter import make_fused_mlp_kernel
 
     n = 512
 
@@ -3932,7 +3932,7 @@ def test_fused_mlp(runner):
 @requires_metal
 def test_sliding_window_attention(runner):
     """Sliding window attention: only attend to last window_size tokens."""
-    from triton_metal.codegen.msl_emitter import make_sliding_window_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_sliding_window_attention_kernel
 
     head_dim = 32
     window_size = 8
@@ -4005,7 +4005,7 @@ def test_sliding_window_attention(runner):
 @requires_metal
 def test_repeat_kv(runner):
     """Repeat KV: expand n_kv_heads to n_q_heads by repeating."""
-    from triton_metal.codegen.msl_emitter import make_repeat_kv_kernel
+    from triton_msl.codegen.msl_emitter import make_repeat_kv_kernel
     import struct as struct_mod
 
     n_kv_heads = 2
@@ -4072,7 +4072,7 @@ def test_repeat_kv(runner):
 @requires_metal
 def test_vector_add_single_element(runner):
     """Vector add with n=1 (single element, partial threadgroup)."""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     msl = make_vector_add_kernel(block_size=256)
     path = runner.compile(msl, "vector_add")
@@ -4091,7 +4091,7 @@ def test_vector_add_single_element(runner):
 @requires_metal
 def test_vector_add_non_power_of_2(runner):
     """Vector add with n=137 (non-power-of-2, tests masking)."""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     n = 137
     msl = make_vector_add_kernel(block_size=256)
@@ -4116,7 +4116,7 @@ def test_vector_add_non_power_of_2(runner):
 @requires_metal
 def test_silu_large_input(runner):
     """SiLU with 100K elements (multi-threadgroup)."""
-    from triton_metal.codegen.msl_emitter import make_silu_kernel
+    from triton_msl.codegen.msl_emitter import make_silu_kernel
 
     n = 100_000
     msl = make_silu_kernel(block_size=256)
@@ -4142,7 +4142,7 @@ def test_silu_large_input(runner):
 @requires_metal
 def test_reduce_sum_non_power_of_2(runner):
     """Sum reduction with n=1000 (not a power of 2)."""
-    from triton_metal.codegen.msl_emitter import make_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_kernel
 
     n = 1000
     msl = make_reduce_kernel("reduce_sum", "sum", block_size=256)
@@ -4163,7 +4163,7 @@ def test_reduce_sum_non_power_of_2(runner):
 @requires_metal
 def test_softmax_single_row(runner):
     """Softmax with a single row (n_rows=1)."""
-    from triton_metal.codegen.msl_emitter import make_softmax_kernel
+    from triton_msl.codegen.msl_emitter import make_softmax_kernel
 
     n_cols = 32
     msl = make_softmax_kernel(block_size=256)
@@ -4188,7 +4188,7 @@ def test_softmax_single_row(runner):
 @requires_metal
 def test_softmax_uniform_input(runner):
     """Softmax with uniform input → all outputs should be equal (1/n)."""
-    from triton_metal.codegen.msl_emitter import make_softmax_kernel
+    from triton_msl.codegen.msl_emitter import make_softmax_kernel
 
     n_cols = 64
     msl = make_softmax_kernel(block_size=256)
@@ -4211,7 +4211,7 @@ def test_softmax_uniform_input(runner):
 @requires_metal
 def test_layer_norm_zero_variance(runner):
     """Layer norm with zero variance → output should be beta (all same input)."""
-    from triton_metal.codegen.msl_emitter import make_layer_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_layer_norm_kernel
 
     n_cols = 64
     msl = make_layer_norm_kernel(block_size=256)
@@ -4241,7 +4241,7 @@ def test_layer_norm_zero_variance(runner):
 @requires_metal
 def test_variance_kernel(runner):
     """Variance kernel computes row-wise variance."""
-    from triton_metal.codegen.msl_emitter import make_variance_kernel
+    from triton_msl.codegen.msl_emitter import make_variance_kernel
 
     n_rows, n_cols = 4, 64
     msl = make_variance_kernel(block_size=256)
@@ -4294,7 +4294,7 @@ def test_variance_kernel(runner):
 @requires_metal
 def test_fp64_downcast():
     """FP64 types should be mapped to fp64 (downcast to float in MSL)."""
-    from triton_metal.codegen.ttgir_parser import _mlir_type_to_triton_dtype
+    from triton_msl.codegen.ttgir_parser import _mlir_type_to_triton_dtype
 
     result = _mlir_type_to_triton_dtype("f64")
     assert result == "fp64", f"Expected 'fp64', got '{result}'"
@@ -4303,7 +4303,7 @@ def test_fp64_downcast():
 @requires_metal
 def test_kernel_builder_empty():
     """KernelBuilder with no ops produces valid (empty) kernel."""
-    from triton_metal.codegen.msl_emitter import KernelBuilder
+    from triton_msl.codegen.msl_emitter import KernelBuilder
 
     kb = KernelBuilder("empty_test", block_size=256)
     kb.add_ptr_arg("input", dtype="fp32", const=True)
@@ -4323,7 +4323,7 @@ def test_kernel_builder_empty():
 @requires_metal
 def test_batch_norm_kernel(runner):
     """Batch norm (eval mode) with pre-computed running stats."""
-    from triton_metal.codegen.msl_emitter import make_batch_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_batch_norm_kernel
 
     C = 4  # channels
     HW = 16  # spatial size
@@ -4366,7 +4366,7 @@ def test_batch_norm_kernel(runner):
 @requires_metal
 def test_batch_norm_with_affine(runner):
     """Batch norm with non-trivial gamma/beta."""
-    from triton_metal.codegen.msl_emitter import make_batch_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_batch_norm_kernel
 
     C = 2
     HW = 8
@@ -4410,7 +4410,7 @@ def test_batch_norm_with_affine(runner):
 @requires_metal
 def test_online_softmax(runner):
     """Online (single-pass) softmax produces correct results."""
-    from triton_metal.codegen.msl_emitter import make_online_softmax_kernel
+    from triton_msl.codegen.msl_emitter import make_online_softmax_kernel
 
     n_cols = 64
     msl = make_online_softmax_kernel(block_size=256)
@@ -4454,7 +4454,7 @@ def test_online_softmax(runner):
 @requires_metal
 def test_online_softmax_uniform(runner):
     """Online softmax with uniform input → all equal (1/n)."""
-    from triton_metal.codegen.msl_emitter import make_online_softmax_kernel
+    from triton_msl.codegen.msl_emitter import make_online_softmax_kernel
 
     n_cols = 128
     msl = make_online_softmax_kernel(block_size=256)
@@ -4495,7 +4495,7 @@ def test_online_softmax_uniform(runner):
 @requires_metal
 def test_causal_attention_compiles(runner):
     """Causal attention kernel compiles successfully."""
-    from triton_metal.codegen.msl_emitter import make_causal_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_causal_attention_kernel
 
     msl = make_causal_attention_kernel(n_heads=4, head_dim=32, block_size=128)
     runner.compile(msl, "causal_attention")
@@ -4508,7 +4508,7 @@ def test_causal_attention_compiles(runner):
 @requires_metal
 def test_group_norm_kernel(runner):
     """Group norm produces correct results for uniform input."""
-    from triton_metal.codegen.msl_emitter import make_group_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_group_norm_kernel
     import Metal
 
     n_groups = 2
@@ -4559,7 +4559,7 @@ def test_group_norm_kernel(runner):
 @requires_metal
 def test_group_norm_varying_input(runner):
     """Group norm normalizes varying input correctly."""
-    from triton_metal.codegen.msl_emitter import make_group_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_group_norm_kernel
     import Metal
 
     n_groups = 1
@@ -4619,7 +4619,7 @@ def test_group_norm_varying_input(runner):
 @requires_metal
 def test_instance_norm_uniform(runner):
     """Instance norm produces correct results for uniform input."""
-    from triton_metal.codegen.msl_emitter import make_instance_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_instance_norm_kernel
     import Metal
 
     spatial = 8
@@ -4668,7 +4668,7 @@ def test_instance_norm_uniform(runner):
 @requires_metal
 def test_instance_norm_varying(runner):
     """Instance norm normalizes varying input per channel."""
-    from triton_metal.codegen.msl_emitter import make_instance_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_instance_norm_kernel
     import Metal
     import math
 
@@ -4725,7 +4725,7 @@ def test_instance_norm_varying(runner):
 @requires_metal
 def test_fused_dropout_compiles(runner):
     """Fused dropout kernel compiles successfully."""
-    from triton_metal.codegen.msl_emitter import make_fused_dropout_kernel
+    from triton_msl.codegen.msl_emitter import make_fused_dropout_kernel
 
     msl = make_fused_dropout_kernel(block_size=256, p=0.5)
     runner.compile(msl, "fused_dropout_kernel")
@@ -4734,7 +4734,7 @@ def test_fused_dropout_compiles(runner):
 @requires_metal
 def test_fused_dropout_output(runner):
     """Fused dropout zeros ~50% of elements and scales the rest."""
-    from triton_metal.codegen.msl_emitter import make_fused_dropout_kernel
+    from triton_msl.codegen.msl_emitter import make_fused_dropout_kernel
     import Metal
 
     n = 4096
@@ -4791,7 +4791,7 @@ def test_fused_dropout_output(runner):
 @requires_metal
 def test_softmax_fp16(runner):
     """FP16 softmax produces valid probability distributions."""
-    from triton_metal.codegen.msl_emitter import make_softmax_kernel
+    from triton_msl.codegen.msl_emitter import make_softmax_kernel
     import Metal
 
     n_rows = 2
@@ -4848,7 +4848,7 @@ def test_softmax_fp16(runner):
 @requires_metal
 def test_matmul_fp16_identity(runner):
     """FP16 matmul with identity matrix produces correct result."""
-    from triton_metal.codegen.msl_emitter import make_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_kernel
     import Metal
 
     M, N, K = 16, 16, 16
@@ -4911,7 +4911,7 @@ def test_matmul_fp16_identity(runner):
 @requires_metal
 def test_vector_add_bf16(runner):
     """BF16 vector add produces correct results."""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     n = 256
     msl = make_vector_add_kernel(block_size=256, dtype="bf16")
@@ -4939,7 +4939,7 @@ def test_vector_add_bf16(runner):
 @requires_metal
 def test_activation_tanh_bf16(runner):
     """BF16 tanh activation compiles and runs."""
-    from triton_metal.codegen.msl_emitter import make_activation_kernel
+    from triton_msl.codegen.msl_emitter import make_activation_kernel
 
     n = 256
     msl = make_activation_kernel(activation="tanh", block_size=256, dtype="bf16")
@@ -4968,7 +4968,7 @@ def test_activation_tanh_bf16(runner):
 @requires_metal
 def test_gather_kernel(runner):
     """Gather kernel reads from indexed positions."""
-    from triton_metal.codegen.msl_emitter import make_gather_kernel
+    from triton_msl.codegen.msl_emitter import make_gather_kernel
     import Metal
     import struct
 
@@ -5022,7 +5022,7 @@ def test_gather_kernel(runner):
 @requires_metal
 def test_scatter_kernel(runner):
     """Scatter kernel writes to indexed positions."""
-    from triton_metal.codegen.msl_emitter import make_scatter_kernel
+    from triton_msl.codegen.msl_emitter import make_scatter_kernel
     import Metal
     import struct
 
@@ -5078,7 +5078,7 @@ def test_scatter_kernel(runner):
 @requires_metal
 def test_transpose_kernel(runner):
     """Transpose kernel correctly transposes a small matrix."""
-    from triton_metal.codegen.msl_emitter import make_transpose_kernel
+    from triton_msl.codegen.msl_emitter import make_transpose_kernel
     import Metal
 
     rows, cols = 4, 8
@@ -5135,7 +5135,7 @@ def test_transpose_kernel(runner):
 @requires_metal
 def test_reduce_scatter_kernel(runner):
     """Reduce-scatter sums 2 input buffers and writes to output."""
-    from triton_metal.codegen.msl_emitter import make_reduce_scatter_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_scatter_kernel
 
     n = 1024
     msl = make_reduce_scatter_kernel(n_buffers=2, block_size=256)
@@ -5162,7 +5162,7 @@ def test_reduce_scatter_kernel(runner):
 @requires_metal
 def test_reduce_scatter_3_buffers(runner):
     """Reduce-scatter with 3 input buffers."""
-    from triton_metal.codegen.msl_emitter import make_reduce_scatter_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_scatter_kernel
 
     n = 512
     msl = make_reduce_scatter_kernel(n_buffers=3, block_size=256)
@@ -5195,7 +5195,7 @@ def test_reduce_scatter_3_buffers(runner):
 @requires_metal
 def test_all_reduce_sum(runner):
     """All-reduce (sum) of 2 input buffers."""
-    from triton_metal.codegen.msl_emitter import make_all_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_all_reduce_kernel
 
     n = 1024
     msl = make_all_reduce_kernel(n_buffers=2, op="sum")
@@ -5222,7 +5222,7 @@ def test_all_reduce_sum(runner):
 @requires_metal
 def test_all_reduce_max(runner):
     """All-reduce (max) of 2 input buffers."""
-    from triton_metal.codegen.msl_emitter import make_all_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_all_reduce_kernel
 
     n = 512
     msl = make_all_reduce_kernel(n_buffers=2, op="max")
@@ -5255,7 +5255,7 @@ def test_all_reduce_max(runner):
 def test_layer_norm_fp16(runner):
     """Layer normalization in half precision."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_layer_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_layer_norm_kernel
 
     n_cols = 128
     n_rows = 4
@@ -5303,7 +5303,7 @@ def test_layer_norm_fp16(runner):
 def test_rms_norm_fp16(runner):
     """RMS normalization in half precision."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_rms_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_rms_norm_kernel
 
     n_cols = 64
     n_rows = 4
@@ -5348,7 +5348,7 @@ def test_rms_norm_fp16(runner):
 @requires_metal
 def test_reduce_sum_fp16(runner):
     """Sum reduction in half precision."""
-    from triton_metal.codegen.msl_emitter import make_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_kernel
 
     n = 256
     msl = make_reduce_kernel("reduce_sum", op="sum", block_size=256, dtype="fp16")
@@ -5377,7 +5377,7 @@ def test_reduce_sum_fp16(runner):
 @requires_metal
 def test_rope_fp16(runner):
     """RoPE (rotary position embedding) in half precision."""
-    from triton_metal.codegen.msl_emitter import make_rope_kernel
+    from triton_msl.codegen.msl_emitter import make_rope_kernel
 
     dim = 32
     msl = make_rope_kernel(block_size=256, dtype="fp16")
@@ -5414,7 +5414,7 @@ def test_rope_fp16(runner):
 @requires_metal
 def test_reduce_sum_bf16(runner):
     """Sum reduction in BF16 precision."""
-    from triton_metal.codegen.msl_emitter import make_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_reduce_kernel
 
     n = 64  # Small to avoid precision issues
     msl = make_reduce_kernel("reduce_sum", op="sum", block_size=256, dtype="bf16")
@@ -5443,7 +5443,7 @@ def test_reduce_sum_bf16(runner):
 def test_layer_norm_bf16(runner):
     """Layer normalization in BF16 precision."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_layer_norm_kernel
+    from triton_msl.codegen.msl_emitter import make_layer_norm_kernel
 
     n_cols = 64
     n_rows = 2
@@ -5505,7 +5505,7 @@ def _ref_dot(a, b):
 def test_causal_attention_gpu(runner):
     """Causal attention kernel: validate softmax(Q@K^T * mask) @ V."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_causal_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_causal_attention_kernel
 
     n_heads = 1
     head_dim = 8
@@ -5579,7 +5579,7 @@ def test_causal_attention_gpu(runner):
 def test_flash_attention_gpu(runner):
     """Flash attention kernel: validate FlashAttention-2 with online softmax."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_flash_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_flash_attention_kernel
 
     head_dim = 8
     seq_len = 8
@@ -5652,7 +5652,7 @@ def test_flash_attention_gpu(runner):
 def test_kv_cache_attention_gpu(runner):
     """KV-cache attention: single query token attending to cached K,V."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_kv_cache_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_kv_cache_attention_kernel
 
     head_dim = 8
     seq_len = 4
@@ -5717,7 +5717,7 @@ def test_kv_cache_attention_gpu(runner):
 def test_gqa_attention_gpu(runner):
     """Grouped query attention: multiple Q heads share fewer KV heads."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_gqa_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_gqa_attention_kernel
 
     head_dim = 8
     seq_len = 4
@@ -5786,7 +5786,7 @@ def test_gqa_attention_gpu(runner):
 def test_paged_attention_gpu(runner):
     """Paged attention: KV-cache stored in fixed-size pages with page table."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_paged_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_paged_attention_kernel
 
     head_dim = 8
     page_size = 4
@@ -5866,7 +5866,7 @@ def test_paged_attention_gpu(runner):
 def test_sliding_window_attention_gpu(runner):
     """Sliding window attention: attend only to last window_size tokens."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_sliding_window_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_sliding_window_attention_kernel
 
     head_dim = 8
     window_size = 4
@@ -5950,7 +5950,7 @@ def _ref_matmul(A, B, M, N, K):
 def test_matmul_gpu(runner):
     """Tiled matmul kernel: C = A @ B validated against reference."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_kernel
 
     M, N, K = 8, 8, 8
     block_m, block_n, block_k = 8, 8, 8
@@ -6000,7 +6000,7 @@ def test_matmul_gpu(runner):
 def test_matmul_non_square_gpu(runner):
     """Matmul with non-square dimensions: M=4, N=8, K=16."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_matmul_kernel
 
     M, N, K = 4, 8, 16
     block_m, block_n, block_k = 8, 8, 8
@@ -6050,7 +6050,7 @@ def test_matmul_non_square_gpu(runner):
 def test_simdgroup_matmul_gpu(runner):
     """simdgroup_matrix matmul: hardware-accelerated 8x8 MMA tiles."""
     import Metal
-    from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
     # simdgroup matmul requires M,N multiples of 32
     M, N, K = 32, 32, 32
@@ -6102,7 +6102,7 @@ def test_int8_matmul_gpu(runner):
     """INT8 quantized matmul: float input @ dequant(int8 weight)."""
     import Metal
     import struct as _struct
-    from triton_metal.codegen.msl_emitter import make_int8_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_int8_matmul_kernel
 
     M, N, K = 2, 4, 8
 
@@ -6158,7 +6158,7 @@ def test_int4_matmul_gpu(runner):
     """INT4 quantized matmul: float input @ dequant(int4 weight)."""
     import Metal
     import struct as _struct
-    from triton_metal.codegen.msl_emitter import make_int4_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_int4_matmul_kernel
 
     M, N, K = 2, 4, 8
     group_size = 8  # all K elements in one group for simplicity
@@ -6226,7 +6226,7 @@ def test_int4_matmul_gpu(runner):
 @requires_metal
 def test_row_reduce_sum_gpu(runner):
     """Row-wise sum: output[row] = sum(input[row, :])"""
-    from triton_metal.codegen.msl_emitter import make_row_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_row_reduce_kernel
     import Metal
 
     n_rows, n_cols = 8, 64
@@ -6265,7 +6265,7 @@ def test_row_reduce_sum_gpu(runner):
 @requires_metal
 def test_row_reduce_max_gpu(runner):
     """Row-wise max: output[row] = max(input[row, :])"""
-    from triton_metal.codegen.msl_emitter import make_row_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_row_reduce_kernel
     import Metal
 
     n_rows, n_cols = 4, 128
@@ -6303,7 +6303,7 @@ def test_row_reduce_max_gpu(runner):
 @requires_metal
 def test_col_reduce_sum_gpu(runner):
     """Column-wise sum: output[col] = sum(input[:, col])"""
-    from triton_metal.codegen.msl_emitter import make_col_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_col_reduce_kernel
     import Metal
 
     n_rows, n_cols = 32, 16
@@ -6341,7 +6341,7 @@ def test_col_reduce_sum_gpu(runner):
 @requires_metal
 def test_col_reduce_min_gpu(runner):
     """Column-wise min: output[col] = min(input[:, col])"""
-    from triton_metal.codegen.msl_emitter import make_col_reduce_kernel
+    from triton_msl.codegen.msl_emitter import make_col_reduce_kernel
     import Metal
 
     n_rows, n_cols = 16, 8
@@ -6383,7 +6383,7 @@ def test_col_reduce_min_gpu(runner):
 @requires_metal
 def test_cumsum_gpu(runner):
     """Inclusive prefix sum: output[i] = sum(input[0:i+1])"""
-    from triton_metal.codegen.msl_emitter import make_cumsum_kernel
+    from triton_msl.codegen.msl_emitter import make_cumsum_kernel
     import Metal
 
     n_rows, n_cols = 4, 64
@@ -6427,7 +6427,7 @@ def test_cumsum_gpu(runner):
 @requires_metal
 def test_bitonic_sort_gpu(runner):
     """Bitonic sort: verify sorted values and indices"""
-    from triton_metal.codegen.msl_emitter import make_bitonic_sort_kernel
+    from triton_msl.codegen.msl_emitter import make_bitonic_sort_kernel
     import struct
 
     n = 256
@@ -6468,7 +6468,7 @@ def test_bitonic_sort_gpu(runner):
 @requires_metal
 def test_atomic_add_gpu(runner):
     """Atomic add: scatter-add input values to output by indices"""
-    from triton_metal.codegen.msl_emitter import make_atomic_add_kernel
+    from triton_msl.codegen.msl_emitter import make_atomic_add_kernel
     import struct
 
     n = 256
@@ -6506,7 +6506,7 @@ def test_atomic_add_gpu(runner):
 @requires_metal
 def test_conv2d_gpu(runner):
     """Conv2D: 1x1x4x4 input, 1 output channel, 3x3 filter, pad=1"""
-    from triton_metal.codegen.msl_emitter import make_conv2d_kernel
+    from triton_msl.codegen.msl_emitter import make_conv2d_kernel
 
     in_c, out_c = 1, 1
     kh, kw = 3, 3
@@ -6570,7 +6570,7 @@ def test_conv2d_gpu(runner):
 @requires_metal
 def test_max_pool2d_gpu(runner):
     """Max pool 2x2 stride 2: 1x1x4x4 → 1x1x2x2"""
-    from triton_metal.codegen.msl_emitter import make_max_pool2d_kernel
+    from triton_msl.codegen.msl_emitter import make_max_pool2d_kernel
 
     batch, channels = 1, 1
     in_h, in_w = 4, 4
@@ -6608,7 +6608,7 @@ def test_max_pool2d_gpu(runner):
 @requires_metal
 def test_avg_pool2d_gpu(runner):
     """Avg pool 2x2 stride 2: 1x1x4x4 → 1x1x2x2"""
-    from triton_metal.codegen.msl_emitter import make_avg_pool2d_kernel
+    from triton_msl.codegen.msl_emitter import make_avg_pool2d_kernel
 
     batch, channels = 1, 1
     in_h, in_w = 4, 4
@@ -6647,7 +6647,7 @@ def test_avg_pool2d_gpu(runner):
 @requires_metal
 def test_index_select_gpu(runner):
     """index_select: gather elements by index"""
-    from triton_metal.codegen.msl_emitter import make_index_select_kernel
+    from triton_msl.codegen.msl_emitter import make_index_select_kernel
     import struct
 
     n = 64
@@ -6680,7 +6680,7 @@ def test_index_select_gpu(runner):
 @requires_metal
 def test_where_gpu(runner):
     """where: conditional select between two tensors"""
-    from triton_metal.codegen.msl_emitter import make_where_kernel
+    from triton_msl.codegen.msl_emitter import make_where_kernel
     import struct
 
     n = 256
@@ -6718,7 +6718,7 @@ def test_where_gpu(runner):
 @requires_metal
 def test_clamp_gpu(runner):
     """clamp: clip values to [min, max] range"""
-    from triton_metal.codegen.msl_emitter import make_clamp_kernel
+    from triton_msl.codegen.msl_emitter import make_clamp_kernel
 
     n = 256
     msl = make_clamp_kernel(block_size=256)
@@ -6744,7 +6744,7 @@ def test_clamp_gpu(runner):
 @requires_metal
 def test_compare_lt_gpu(runner):
     """compare_lt: element-wise less-than comparison"""
-    from triton_metal.codegen.msl_emitter import make_compare_kernel
+    from triton_msl.codegen.msl_emitter import make_compare_kernel
     import struct
 
     n = 256

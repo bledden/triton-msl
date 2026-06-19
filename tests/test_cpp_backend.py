@@ -1,6 +1,6 @@
 """Test the C++ MLIR backend infrastructure.
 
-Verifies that the C++ MLIR pass module (triton_metal._triton_metal_cpp) can
+Verifies that the C++ MLIR pass module (triton_msl._triton_msl_cpp) can
 be imported and its passes registered alongside Triton's libtriton.so in the
 same process. The pybind11 module links against libtriton.so for shared MLIR
 symbols, eliminating the previous duplicate-dialect-registration crash.
@@ -8,7 +8,7 @@ symbols, eliminating the previous duplicate-dialect-registration crash.
 import pytest
 
 try:
-    import triton_metal._triton_metal_cpp as cpp
+    import triton_msl._triton_msl_cpp as cpp
     _HAS_CPP = True
 except ImportError:
     _HAS_CPP = False
@@ -33,7 +33,7 @@ requires_metal = pytest.mark.skipif(not _HAS_METAL, reason="Metal not available"
 @requires_cpp
 def test_cpp_module_importable():
     """C++ MLIR module can be imported."""
-    import triton_metal._triton_metal_cpp as mod
+    import triton_msl._triton_msl_cpp as mod
     assert hasattr(mod, "register_metal_passes")
 
 
@@ -137,7 +137,7 @@ def test_scf_for_accumulation():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def accum_kernel(x_ptr, out_ptr, K: tl.constexpr, BLOCK: tl.constexpr):
@@ -161,7 +161,7 @@ def test_scf_for_accumulation():
         max_err = (out - expected).abs().max().item()
         assert max_err < 1e-4, f"scf.for accumulation: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -177,7 +177,7 @@ def test_scf_if_conditional():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def clamp_kernel(x_ptr, out_ptr, lo, hi, n, BLOCK: tl.constexpr):
@@ -199,7 +199,7 @@ def test_scf_if_conditional():
         max_err = (out - expected).abs().max().item()
         assert max_err < 1e-5, f"clamp: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -209,7 +209,7 @@ def test_wrapping_loop_large_block():
     import os, torch, triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def scale_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
@@ -228,7 +228,7 @@ def test_wrapping_loop_large_block():
         max_err = (out - x * 2.0).abs().max().item()
         assert max_err < 1e-5, f"wrapping loop: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -246,7 +246,7 @@ def test_local_alloc_basic():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def shmem_kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
@@ -264,7 +264,7 @@ def test_local_alloc_basic():
         max_err = (out - expected).abs().max().item()
         assert max_err < 1e-3, f"shmem roundtrip: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -281,7 +281,7 @@ def test_async_copy_sync_loop():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def pipelined_kernel(x_ptr, out_ptr, K: tl.constexpr,
@@ -302,7 +302,7 @@ def test_async_copy_sync_loop():
         max_err = (out - expected).abs().max().item()
         assert max_err < 1e-3, f"async_copy: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -317,7 +317,7 @@ def test_32kb_threadgroup_budget():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         # 8192 float32 elements = 32 KB. Use > 8192 to force budget failure.
         # Triton generates shared memory proportional to block size for reductions.
@@ -338,7 +338,7 @@ def test_32kb_threadgroup_budget():
         # Relaxed tolerance — large reduction
         assert max_err < 1e-1, f"32kb fallback: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -350,7 +350,7 @@ def test_cpp_tiled_reduction():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def sum_kernel(x_ptr, out_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
@@ -368,7 +368,7 @@ def test_cpp_tiled_reduction():
         max_err = abs(out.item() - x.sum().item())
         assert max_err < 1e-2, f"tiled reduction: error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -380,7 +380,7 @@ def test_cpp_cumsum():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def cumsum_kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
@@ -398,7 +398,7 @@ def test_cpp_cumsum():
         max_err = (out - expected).abs().max().item()
         assert max_err < 1e-3, f"cumsum: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -410,7 +410,7 @@ def test_cpp_dot_32x32():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def matmul_kernel(a_ptr, b_ptr, c_ptr,
@@ -438,7 +438,7 @@ def test_cpp_dot_32x32():
         # f16 tolerance (relaxed)
         assert max_err < 0.5, f"32x32 matmul: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -450,7 +450,7 @@ def test_cpp_layer_norm():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def layer_norm_kernel(x_ptr, out_ptr, N: tl.constexpr,
@@ -474,7 +474,7 @@ def test_cpp_layer_norm():
         max_err = (out - expected).abs().max().item()
         assert max_err < 1e-3, f"layer_norm: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -491,7 +491,7 @@ def test_cpp_dot_k_loop():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def matmul_k_loop(a_ptr, b_ptr, c_ptr,
@@ -520,7 +520,7 @@ def test_cpp_dot_k_loop():
         max_err = (c - expected).abs().max().item()
         assert max_err < 0.5, f"k-loop matmul: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 @requires_cpp
@@ -538,7 +538,7 @@ def test_aliasing_non_overlapping_allocs():
     import triton
     import triton.language as tl
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         @triton.jit
         def two_phase_kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
@@ -561,7 +561,7 @@ def test_aliasing_non_overlapping_allocs():
         max_err = (out - expected).abs().max().item()
         assert max_err < 1e-3, f"aliasing: max error {max_err}"
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
 
 if _HAS_TRITON:
@@ -620,7 +620,7 @@ if _HAS_TRITON:
 
 
 def _run_fa_cpp(N_CTX, HEAD_DIM):
-    """Run the strided FA kernel with TRITON_METAL_USE_CPP=1 and return max err."""
+    """Run the strided FA kernel with TRITON_MSL_USE_CPP=1 and return max err."""
     import os
     import torch
     import triton
@@ -634,7 +634,7 @@ def _run_fa_cpp(N_CTX, HEAD_DIM):
     v = torch.randn(N_CTX, HEAD_DIM)
     out = torch.zeros(N_CTX, HEAD_DIM)
 
-    os.environ["TRITON_METAL_USE_CPP"] = "1"
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
     try:
         grid = (triton.cdiv(N_CTX, BLOCK_M),)
         _fa_fwd_strided_kernel[grid](
@@ -647,7 +647,7 @@ def _run_fa_cpp(N_CTX, HEAD_DIM):
             N_CTX, HEAD_DIM, BLOCK_M, BLOCK_N,
         )
     finally:
-        os.environ.pop("TRITON_METAL_USE_CPP", None)
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
 
     expected = torch.nn.functional.scaled_dot_product_attention(
         q.unsqueeze(0).unsqueeze(0),
@@ -675,7 +675,7 @@ def test_cpp_flash_attention_head32():
 @requires_cpp
 @requires_metal
 def test_cpp_flash_attention_head64():
-    """FlashAttention HEAD_DIM=64 with TRITON_METAL_USE_CPP=1 set.
+    """FlashAttention HEAD_DIM=64 with TRITON_MSL_USE_CPP=1 set.
 
     Tile = BLOCK_M*HEAD_DIM = 32*64 = 2048 > 1024, so make_llir would
     inject a wrapping loop over the kernel body. The wrap loop is

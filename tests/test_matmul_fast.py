@@ -20,7 +20,7 @@ except Exception:
 
 requires_metal = pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 
-from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel_fast
+from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel_fast
 
 _RR = _RC = 4  # the productionized config
 

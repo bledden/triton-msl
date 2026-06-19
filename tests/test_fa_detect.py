@@ -40,9 +40,9 @@ def _build_fa_lowerer(causal=False, head_dim=128, block=32):
     """
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.mlir_walker import walk_ttgir
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
 
     target = GPUTarget("metal", "apple-m4", 32)
     backend = MetalBackend(target)
@@ -141,7 +141,7 @@ def test_fa_pattern_with_unresolvable_stride_refuses():
     The FA gate still fires (dots/exp/max are untouched), so the detector
     must raise ``MetalNonRecoverableError`` rather than return a partial dict.
     """
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
 
     lo = _build_fa_lowerer(causal=False, head_dim=128, block=32)
 
@@ -181,7 +181,7 @@ def test_fa_near_miss_refuses_through_lower():
     than returning a partially-guessed dict — and that error propagates out through
     ``lower()`` to the caller.
     """
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
 
     lo = _build_fa_lowerer(causal=False, head_dim=128, block=32)
 
@@ -208,9 +208,9 @@ def test_non_fa_kernel_returns_none():
     """A plain vector-add kernel (no dots) is not an FA pattern → None."""
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.mlir_walker import walk_ttgir
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.mlir_walker import walk_ttgir
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
 
     @triton.jit
     def vector_add(a_ptr, b_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):

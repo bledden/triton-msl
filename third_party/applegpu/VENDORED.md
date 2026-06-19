@@ -8,7 +8,7 @@ Apple GPU ISA disassembler by Dougall Johnson — REFERENCES.md [11].
 - Files:    applegpu.py, disassemble.py (the decoder only; hwtest/assemble/
             compiler_explorer etc. omitted)
 
-Used by triton_metal/profiling/disasm.py for BEST-EFFORT native-AGX
+Used by triton_msl/profiling/disasm.py for BEST-EFFORT native-AGX
 disassembly. applegpu targets the M1-era AGX ISA; the M4 is AGX2, so decode
 coverage on M4 is partial (reported explicitly by the harness). See
 docs/INSTRUMENTS.md for the full-fidelity Xcode/Instruments path.

@@ -7,7 +7,7 @@ landed; remaining coverage items are safely refused, not blocking).
 ## Where things stand
 - Worktree: `.claude/worktrees/multi-element-per-thread` (branch
   `worktree-multi-element-per-thread`). Run all commands from the worktree; merge to main via
-  `git -C ~/Documents/triton-metal merge --ff-only worktree-multi-element-per-thread`.
+  `git -C ~/Documents/triton-msl merge --ff-only worktree-multi-element-per-thread`.
 - `origin/main` @ **2ce413b** (#1 + #3 incl. autotune root-fix + #4 gather-refusal all
   merged/pushed). Branch is **ahead** with **2D-gather implementation `1e904e8`** (#4) —
   **NOT pushed/merged.** Push needs explicit user confirmation.
@@ -30,7 +30,7 @@ landed; remaining coverage items are safely refused, not blocking).
 - Health: project suite **799/0** (was 754; +38 torch.compile + model tests, +7 training tests,
   all un-gated); upstream `test_core` **5,559/0/~3,783** (skip-aware, via
   `scripts/run_upstream_tests.py`). FlashAttention causal + non-causal at head_dim 32/64/128.
-  **`torch.compile` routes through triton-metal** — inference + training, static + `dynamic=True`.
+  **`torch.compile` routes through triton-msl** — inference + training, static + `dynamic=True`.
 - Prime directive ALWAYS: never silent-wrong — refuse loudly or fall back, never emit a guessed
   kernel. Every push needs explicit user confirmation (local commits/merges are fine).
 
@@ -50,7 +50,7 @@ Verified 32/32 + 6/6 (cold & warm), dynamic=True single-graph, full suite 792/0.
 
 ## #3 — training / backward — DONE (2026-06-18, commits cb4fac8 + 77bd87d)
 Falls out of the inductor port: AOTAutograd's backward graph is just more Triton kernels that
-lower through triton-metal. MLP/CNN/transformer (w/ embedding) train + converge + match eager
+lower through triton-msl. MLP/CNN/transformer (w/ embedding) train + converge + match eager
 (`tests/test_training.py`). Two backward bugs fixed: (1) `embedding_dense_backward`'s grad
 zero-init (masked MEPT store of a constant) emitted a malformed `ptr[off][lid]` — MEPT scatter
 now broadcasts splat/constant values; (2) **a nondeterministic wrong `head.weight` gradient
@@ -80,6 +80,6 @@ wheel, test-install in a clean venv, then TestPyPI before PyPI. Pin torch 2.12 o
 ## Gotchas
 - `compile_threads=1` for torch.compile is now enforced by the backend (Metal not fork-safe) —
   tests no longer set the env var.
-- Bump `CODEGEN_VERSION` (`triton_metal/__init__.py`) on any codegen change + clear caches:
-  `find ~/.cache/triton_metal ~/.triton/cache -type f -delete` AND the inductor cache at
+- Bump `CODEGEN_VERSION` (`triton_msl/__init__.py`) on any codegen change + clear caches:
+  `find ~/.cache/triton_msl ~/.triton/cache -type f -delete` AND the inductor cache at
   `$TMPDIR/torchinductor_$USER` when testing torch.compile cold paths.

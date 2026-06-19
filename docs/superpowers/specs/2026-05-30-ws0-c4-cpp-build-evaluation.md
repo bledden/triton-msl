@@ -8,7 +8,7 @@
 
 ## The constraint (verified empirically, 2026-05-30)
 
-The C++ extension (`triton_metal/csrc/`) needs Triton's TritonGPU / Triton IR
+The C++ extension (`triton_msl/csrc/`) needs Triton's TritonGPU / Triton IR
 dialect symbols — non-inline op methods (`LocalAllocOp`, `LoadOp`, …), TypeID
 symbols, and layout helpers (`LinearLayout`, `LayoutUtils`, `inferDstEncoding`,
 `supportMMA`). The current `CMakeLists.txt` gets them by linking **object
@@ -36,7 +36,7 @@ This is the root constraint every option below is evaluated against.
 
 In-tree backends (`triton/third_party/{amd,intel,nvidia}`) don't hit this:
 they're built *inside* Triton's own CMake, so the dialect objects are right
-there. `triton-metal` is **out-of-tree** (a separate pip-installable repo), so
+there. `triton-msl` is **out-of-tree** (a separate pip-installable repo), so
 it has to reach into Triton's build products from outside — the unusual
 position that creates the coupling.
 

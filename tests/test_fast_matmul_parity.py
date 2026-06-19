@@ -26,9 +26,9 @@ def mm(a_ptr, b_ptr, c_ptr, M, N, K, sam, sak, sbk, sbn, scm, scn,
 
 
 def _run(M, N, K, dtype, flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", flag)
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     torch.manual_seed(0)
     A = torch.randn(M, K, device="mps", dtype=dtype)
     B = torch.randn(K, N, device="mps", dtype=dtype)
@@ -69,9 +69,9 @@ def mm_f16(a_ptr, b_ptr, c_ptr, M, N, K, sam, sak, sbk, sbn, scm, scn,
 
 
 def _run_f16out(M, N, K, flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", flag)
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     torch.manual_seed(0)
     A = torch.randn(M, K, device="mps", dtype=torch.float16)
     B = torch.randn(K, N, device="mps", dtype=torch.float16)

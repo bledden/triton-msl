@@ -357,7 +357,7 @@ module {
 
 def test_parse_vecadd_name():
     """Parser extracts kernel name correctly."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_TTGIR, FakeOptions())
     assert kb.name == "add_kernel"
@@ -365,7 +365,7 @@ def test_parse_vecadd_name():
 
 def test_parse_vecadd_args():
     """Parser identifies 3 pointer args and 1 scalar arg."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_TTGIR, FakeOptions())
     ptr_args = [a for a in kb.args if a.is_ptr]
@@ -377,7 +377,7 @@ def test_parse_vecadd_args():
 
 def test_parse_vecadd_output_detection():
     """Parser detects which pointer args are outputs (have stores)."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_TTGIR, FakeOptions())
     # arg2 is the output (has tt.store)
@@ -392,7 +392,7 @@ def test_parse_vecadd_output_detection():
 @requires_metal
 def test_parse_vecadd_compiles(runner):
     """MSL generated from parsed vector add TTGIR compiles."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_TTGIR, FakeOptions())
     msl = kb.build()
@@ -402,7 +402,7 @@ def test_parse_vecadd_compiles(runner):
 @requires_metal
 def test_parse_vecmul_compiles(runner):
     """MSL generated from parsed multiply TTGIR compiles."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECMUL_TTGIR, FakeOptions())
     msl = kb.build()
@@ -412,7 +412,7 @@ def test_parse_vecmul_compiles(runner):
 @requires_metal
 def test_parse_exp_compiles(runner):
     """MSL generated from parsed exp TTGIR compiles."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(EXP_TTGIR, FakeOptions())
     msl = kb.build()
@@ -421,7 +421,7 @@ def test_parse_exp_compiles(runner):
 
 def test_parse_block_size():
     """Parser extracts block size from tt.make_range."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_TTGIR, FakeOptions())
     assert kb.block_size >= 256
@@ -429,7 +429,7 @@ def test_parse_block_size():
 
 def test_parse_vecadd_generates_add_op():
     """Parsed vector add MSL contains an addition operation."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_TTGIR, FakeOptions())
     msl = kb.build()
@@ -438,7 +438,7 @@ def test_parse_vecadd_generates_add_op():
 
 def test_parse_vecmul_generates_mul_op():
     """Parsed multiply MSL contains a multiply operation."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECMUL_TTGIR, FakeOptions())
     msl = kb.build()
@@ -447,7 +447,7 @@ def test_parse_vecmul_generates_mul_op():
 
 def test_parse_exp_generates_exp_op():
     """Parsed exp MSL contains an exp() call."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(EXP_TTGIR, FakeOptions())
     msl = kb.build()
@@ -461,7 +461,7 @@ def test_parse_exp_generates_exp_op():
 @requires_metal
 def test_ttgir_vecadd_gpu(runner):
     """TTGIR vector add: C = A + B, verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_TTGIR, FakeOptions())
     msl = kb.build()
@@ -490,7 +490,7 @@ def test_ttgir_vecadd_gpu(runner):
 @requires_metal
 def test_ttgir_vecmul_gpu(runner):
     """TTGIR vector multiply: C = A * B, verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECMUL_TTGIR, FakeOptions())
     msl = kb.build()
@@ -520,7 +520,7 @@ def test_ttgir_vecmul_gpu(runner):
 @requires_metal
 def test_ttgir_exp_gpu(runner):
     """TTGIR exp: B = exp(A), verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(EXP_TTGIR, FakeOptions())
     msl = kb.build()
@@ -548,7 +548,7 @@ def test_ttgir_exp_gpu(runner):
 @requires_metal
 def test_ttgir_vecadd_non_aligned(runner):
     """TTGIR vector add with non-block-aligned size (tests masking)."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_TTGIR, FakeOptions())
     msl = kb.build()
@@ -581,7 +581,7 @@ def test_ttgir_vecadd_non_aligned(runner):
 
 def test_parse_sum_reduce_detects_reduction():
     """Parser detects tt.reduce with arith.addf as a sum reduction."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SUM_REDUCE_TTGIR, FakeOptions())
     assert kb.name == "sum_kernel"
@@ -590,7 +590,7 @@ def test_parse_sum_reduce_detects_reduction():
 
 def test_parse_max_reduce_detects_reduction():
     """Parser detects tt.reduce with arith.maxf as a max reduction."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(MAX_REDUCE_TTGIR, FakeOptions())
     assert kb.name == "max_kernel"
@@ -600,7 +600,7 @@ def test_parse_max_reduce_detects_reduction():
 @requires_metal
 def test_ttgir_sum_reduce_compiles(runner):
     """TTGIR sum reduction compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SUM_REDUCE_TTGIR, FakeOptions())
     msl = kb.build()
@@ -610,7 +610,7 @@ def test_ttgir_sum_reduce_compiles(runner):
 @requires_metal
 def test_ttgir_max_reduce_compiles(runner):
     """TTGIR max reduction compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(MAX_REDUCE_TTGIR, FakeOptions())
     msl = kb.build()
@@ -620,7 +620,7 @@ def test_ttgir_max_reduce_compiles(runner):
 @requires_metal
 def test_ttgir_sum_reduce_gpu(runner):
     """TTGIR sum reduction: output = sum(input), verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SUM_REDUCE_TTGIR, FakeOptions())
     msl = kb.build()
@@ -646,7 +646,7 @@ def test_ttgir_sum_reduce_gpu(runner):
 @requires_metal
 def test_ttgir_max_reduce_gpu(runner):
     """TTGIR max reduction: output = max(input), verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
     import random
 
     kb = parse_ttgir(MAX_REDUCE_TTGIR, FakeOptions())
@@ -677,7 +677,7 @@ def test_ttgir_max_reduce_gpu(runner):
 
 def test_parse_fp16_args():
     """Parser detects fp16 pointer types correctly."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_FP16_TTGIR, FakeOptions())
     assert kb.name == "add_f16_kernel"
@@ -688,7 +688,7 @@ def test_parse_fp16_args():
 @requires_metal
 def test_ttgir_fp16_vecadd_compiles(runner):
     """TTGIR FP16 vector add compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_FP16_TTGIR, FakeOptions())
     msl = kb.build()
@@ -698,7 +698,7 @@ def test_ttgir_fp16_vecadd_compiles(runner):
 @requires_metal
 def test_ttgir_fp16_vecadd_gpu(runner):
     """TTGIR FP16 vector add: C = A + B in half precision, verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VECADD_FP16_TTGIR, FakeOptions())
     msl = kb.build()
@@ -728,7 +728,7 @@ def test_ttgir_fp16_vecadd_gpu(runner):
 @requires_metal
 def test_ttgir_negf_compiles(runner):
     """TTGIR with arith.negf compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SELECT_TTGIR, FakeOptions())
     msl = kb.build()
@@ -738,7 +738,7 @@ def test_ttgir_negf_compiles(runner):
 @requires_metal
 def test_ttgir_negf_gpu(runner):
     """TTGIR negate + add: output = x + (-x) = 0, verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SELECT_TTGIR, FakeOptions())
     msl = kb.build()
@@ -768,7 +768,7 @@ def test_ttgir_negf_gpu(runner):
 
 def test_parse_softmax_detects_multi_reduce():
     """Parser detects softmax pattern: max reduce + sum reduce."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(SOFTMAX_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -781,7 +781,7 @@ def test_parse_softmax_detects_multi_reduce():
 
 def test_parse_softmax_routes_to_softmax_kernel():
     """Parser routes multi-reduce (max+sum) to softmax kernel builder."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SOFTMAX_TTGIR, FakeOptions())
     assert kb.name == "softmax_kernel"
@@ -796,7 +796,7 @@ def test_parse_softmax_routes_to_softmax_kernel():
 @requires_metal
 def test_ttgir_softmax_compiles(runner):
     """TTGIR softmax compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SOFTMAX_TTGIR, FakeOptions())
     msl = kb.build()
@@ -806,7 +806,7 @@ def test_ttgir_softmax_compiles(runner):
 @requires_metal
 def test_ttgir_softmax_gpu(runner):
     """TTGIR softmax: output = softmax(input), verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SOFTMAX_TTGIR, FakeOptions())
     msl = kb.build()
@@ -845,7 +845,7 @@ def test_ttgir_softmax_gpu(runner):
 @requires_metal
 def test_ttgir_softmax_multi_row_gpu(runner):
     """TTGIR softmax with multiple rows (one threadgroup per row)."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
     import random
 
     kb = parse_ttgir(SOFTMAX_TTGIR, FakeOptions())
@@ -910,7 +910,7 @@ def test_ttgir_softmax_multi_row_gpu(runner):
 
 def test_parse_scf_for_detects_loop():
     """Parser detects scf.for loop structures in TTGIR."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(SCF_FOR_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -930,7 +930,7 @@ def test_parse_scf_for_detects_loop():
 
 def test_parse_scf_for_with_reduce():
     """Parser detects both scf.for and tt.reduce in looped reduction."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(SCF_FOR_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -945,7 +945,7 @@ def test_parse_scf_for_with_reduce():
 
 def test_parse_scf_for_loop_iv_in_ssa():
     """Loop induction variable is tracked in SSA values."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(SCF_FOR_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1029,7 +1029,7 @@ module {
 
 def test_fp64_handled_in_parser():
     """Parser handles FP64 types by mapping to fp64 (downcast to float in MSL)."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     # Should not raise — f64 is now handled via float downcast
     kb = parse_ttgir(FP64_TTGIR, FakeOptions())
@@ -1041,7 +1041,7 @@ def test_fp64_handled_in_parser():
 def test_fp64_downcast_in_msl_types():
     """MSL type mapper downcasts FP64 to float and emits a warning."""
     import warnings
-    from triton_metal.codegen.msl_types import triton_type_to_msl
+    from triton_msl.codegen.msl_types import triton_type_to_msl
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
@@ -1065,7 +1065,7 @@ def test_fp64_downcast_in_msl_types():
 
 def test_fp64_downcast_in_emitter():
     """MSL emitter handles FP64 via downcast to float."""
-    from triton_metal.codegen.msl_emitter import make_elementwise_kernel
+    from triton_msl.codegen.msl_emitter import make_elementwise_kernel
 
     # Should not raise — fp64 is now mapped to float in MSL
     msl = make_elementwise_kernel("fp64_kernel", 2, "add", dtype="fp64")
@@ -1080,7 +1080,7 @@ def test_fp64_downcast_in_emitter():
 @requires_metal
 def test_ttgir_fma_compiles(runner):
     """TTGIR math.fma compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(FMA_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1091,7 +1091,7 @@ def test_ttgir_fma_compiles(runner):
 @requires_metal
 def test_ttgir_fma_gpu(runner):
     """TTGIR fma: output = a*b + c, verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(FMA_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1123,7 +1123,7 @@ def test_ttgir_fma_gpu(runner):
 @requires_metal
 def test_ttgir_rsqrt_compiles(runner):
     """TTGIR math.rsqrt compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(RSQRT_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1134,7 +1134,7 @@ def test_ttgir_rsqrt_compiles(runner):
 @requires_metal
 def test_ttgir_rsqrt_gpu(runner):
     """TTGIR rsqrt: output = 1/sqrt(input), verified on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(RSQRT_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1166,7 +1166,7 @@ def test_ttgir_rsqrt_gpu(runner):
 
 def test_ttgir_layer_norm_detected():
     """Parser detects layer norm pattern (two sum reductions with sub)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(LAYER_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1180,7 +1180,7 @@ def test_ttgir_layer_norm_detected():
 
 def test_ttgir_layer_norm_is_not_softmax():
     """Layer norm should not be detected as softmax."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(LAYER_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1193,7 +1193,7 @@ def test_ttgir_layer_norm_is_not_softmax():
 @requires_metal
 def test_ttgir_layer_norm_compiles(runner):
     """TTGIR layer norm pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(LAYER_NORM_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1233,7 +1233,7 @@ module {
 
 def test_ttgir_matmul_detected():
     """tt.dot operation should be detected as matmul pattern."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(MATMUL_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1246,7 +1246,7 @@ def test_ttgir_matmul_detected():
 
 def test_ttgir_matmul_not_reduction():
     """Matmul should not be detected as reduction or softmax."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(MATMUL_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1259,7 +1259,7 @@ def test_ttgir_matmul_not_reduction():
 @requires_metal
 def test_ttgir_matmul_compiles(runner):
     """TTGIR matmul pattern compiles to valid MSL (simdgroup_matmul)."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(MATMUL_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1271,7 +1271,7 @@ def test_ttgir_matmul_compiles(runner):
 @requires_metal
 def test_ttgir_matmul_gpu(runner):
     """TTGIR-parsed matmul produces correct results on GPU."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
     import random
 
     kb = parse_ttgir(MATMUL_TTGIR, FakeOptions())
@@ -1383,7 +1383,7 @@ module {
 
 def test_ttgir_flash_attention_detected():
     """Flash attention: 2 dot ops + exp + max reduction detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(FLASH_ATTENTION_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1395,7 +1395,7 @@ def test_ttgir_flash_attention_detected():
 
 def test_ttgir_flash_attention_not_matmul():
     """Flash attention should not be treated as simple matmul."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(FLASH_ATTENTION_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1409,7 +1409,7 @@ def test_ttgir_flash_attention_not_matmul():
 @requires_metal
 def test_ttgir_flash_attention_compiles(runner):
     """Flash attention TTGIR compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(FLASH_ATTENTION_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1481,7 +1481,7 @@ module {
 
 def test_ttgir_cross_entropy_detected():
     """Cross-entropy: max + sum + log + sum pattern detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(CROSS_ENTROPY_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1493,7 +1493,7 @@ def test_ttgir_cross_entropy_detected():
 
 def test_ttgir_cross_entropy_not_softmax():
     """Cross-entropy should not be treated as plain softmax."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(CROSS_ENTROPY_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1507,7 +1507,7 @@ def test_ttgir_cross_entropy_not_softmax():
 @requires_metal
 def test_ttgir_cross_entropy_compiles(runner):
     """TTGIR cross-entropy pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(CROSS_ENTROPY_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1595,7 +1595,7 @@ module {
 
 def test_ttgir_fused_residual_norm_detected():
     """Fused residual+norm: 2 sum reduces + add + rsqrt detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(FUSED_RESIDUAL_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1607,7 +1607,7 @@ def test_ttgir_fused_residual_norm_detected():
 
 def test_ttgir_fused_residual_norm_not_softmax():
     """Fused residual+norm should not match softmax pattern."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(FUSED_RESIDUAL_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1620,7 +1620,7 @@ def test_ttgir_fused_residual_norm_not_softmax():
 @requires_metal
 def test_ttgir_fused_residual_norm_compiles(runner):
     """TTGIR fused residual+norm compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(FUSED_RESIDUAL_NORM_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1672,7 +1672,7 @@ module {
 
 def test_ttgir_rope_detected():
     """RoPE: sin + cos + mul pattern detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(ROPE_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1684,7 +1684,7 @@ def test_ttgir_rope_detected():
 
 def test_ttgir_rope_not_mlp():
     """RoPE should not be detected as fused MLP (has sin/cos, not silu)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(ROPE_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1697,7 +1697,7 @@ def test_ttgir_rope_not_mlp():
 @requires_metal
 def test_ttgir_rope_compiles(runner):
     """TTGIR RoPE pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(ROPE_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1749,7 +1749,7 @@ module {
 
 def test_ttgir_quantized_matmul_detected():
     """Quantized matmul: dot + extsi/int_cast pattern detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(QUANTIZED_MATMUL_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1761,7 +1761,7 @@ def test_ttgir_quantized_matmul_detected():
 
 def test_ttgir_quantized_matmul_not_regular():
     """Quantized matmul should be detected before regular matmul."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(QUANTIZED_MATMUL_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1774,7 +1774,7 @@ def test_ttgir_quantized_matmul_not_regular():
 @requires_metal
 def test_ttgir_quantized_matmul_compiles(runner):
     """TTGIR quantized matmul pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(QUANTIZED_MATMUL_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1832,7 +1832,7 @@ module {
 
 def test_ttgir_fused_mlp_detected():
     """Fused MLP: exp + neg + mul + div pattern detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(FUSED_MLP_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1844,7 +1844,7 @@ def test_ttgir_fused_mlp_detected():
 
 def test_ttgir_fused_mlp_not_softmax():
     """Fused MLP should not be detected as softmax (no reductions)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
 
     parser = TTGIRParser(FUSED_MLP_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -1858,7 +1858,7 @@ def test_ttgir_fused_mlp_not_softmax():
 @requires_metal
 def test_ttgir_fused_mlp_compiles(runner):
     """TTGIR fused MLP pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(FUSED_MLP_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1907,7 +1907,7 @@ module {
 
 def test_ttgir_paged_attention_detected():
     """TTGIR paged attention pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(PAGED_ATTENTION_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -1917,7 +1917,7 @@ def test_ttgir_paged_attention_detected():
 
 def test_ttgir_paged_attention_not_confused_with_softmax():
     """Paged attention isn't confused with softmax (3+ input ptrs distinguishes it)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(PAGED_ATTENTION_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -1928,7 +1928,7 @@ def test_ttgir_paged_attention_not_confused_with_softmax():
 @requires_metal
 def test_ttgir_paged_attention_compiles(runner):
     """TTGIR paged attention pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(PAGED_ATTENTION_TTGIR, FakeOptions())
     msl = kb.build()
@@ -1966,7 +1966,7 @@ module {
 
 def test_ttgir_top_k_detected():
     """TTGIR top-k sampling pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(TOP_K_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -1976,7 +1976,7 @@ def test_ttgir_top_k_detected():
 
 def test_ttgir_top_k_not_confused_with_elementwise():
     """Top-k isn't confused with elementwise (2+ output ptrs distinguishes it)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(TOP_K_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -1988,7 +1988,7 @@ def test_ttgir_top_k_not_confused_with_elementwise():
 @requires_metal
 def test_ttgir_top_k_compiles(runner):
     """TTGIR top-k pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(TOP_K_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2033,7 +2033,7 @@ module {
 
 def test_ttgir_speculative_decode_detected():
     """TTGIR speculative decoding pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(SPECULATIVE_DECODE_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2043,7 +2043,7 @@ def test_ttgir_speculative_decode_detected():
 
 def test_ttgir_speculative_decode_not_confused():
     """Speculative decode isn't confused with other patterns."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(SPECULATIVE_DECODE_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2056,7 +2056,7 @@ def test_ttgir_speculative_decode_not_confused():
 @requires_metal
 def test_ttgir_speculative_decode_compiles(runner):
     """TTGIR speculative decoding pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SPECULATIVE_DECODE_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2102,7 +2102,7 @@ module {
 
 def test_ttgir_beam_search_detected():
     """TTGIR beam search pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(BEAM_SEARCH_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2112,7 +2112,7 @@ def test_ttgir_beam_search_detected():
 
 def test_ttgir_beam_search_not_confused():
     """Beam search isn't confused with plain reduction."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(BEAM_SEARCH_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2124,7 +2124,7 @@ def test_ttgir_beam_search_not_confused():
 @requires_metal
 def test_ttgir_beam_search_compiles(runner):
     """TTGIR beam search pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(BEAM_SEARCH_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2169,7 +2169,7 @@ module {
 
 def test_ttgir_variance_detected():
     """TTGIR variance pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(VARIANCE_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2178,7 +2178,7 @@ def test_ttgir_variance_detected():
 
 def test_ttgir_variance_routed_before_layer_norm():
     """Variance is detected and routed before layer norm (no rsqrt)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(VARIANCE_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2190,7 +2190,7 @@ def test_ttgir_variance_routed_before_layer_norm():
 @requires_metal
 def test_ttgir_variance_compiles(runner):
     """TTGIR variance pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(VARIANCE_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2355,7 +2355,7 @@ module {
 
 def test_ttgir_tanh_detected():
     """TTGIR tanh activation pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(TANH_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2365,7 +2365,7 @@ def test_ttgir_tanh_detected():
 
 def test_ttgir_sigmoid_detected():
     """TTGIR sigmoid activation pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(SIGMOID_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2375,7 +2375,7 @@ def test_ttgir_sigmoid_detected():
 
 def test_ttgir_elu_detected():
     """TTGIR ELU activation pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(ELU_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2385,7 +2385,7 @@ def test_ttgir_elu_detected():
 
 def test_ttgir_leaky_relu_detected():
     """TTGIR leaky ReLU activation pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(LEAKY_RELU_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2395,7 +2395,7 @@ def test_ttgir_leaky_relu_detected():
 
 def test_ttgir_hardswish_detected():
     """TTGIR hardswish activation pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(HARDSWISH_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2405,7 +2405,7 @@ def test_ttgir_hardswish_detected():
 
 def test_ttgir_activation_not_confused_with_fused_mlp():
     """Activation (sigmoid) is NOT confused with fused MLP (needs 2+ inputs)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(SIGMOID_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2417,7 +2417,7 @@ def test_ttgir_activation_not_confused_with_fused_mlp():
 @requires_metal
 def test_ttgir_tanh_compiles(runner):
     """TTGIR tanh activation compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(TANH_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2428,7 +2428,7 @@ def test_ttgir_tanh_compiles(runner):
 @requires_metal
 def test_ttgir_sigmoid_compiles(runner):
     """TTGIR sigmoid activation compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SIGMOID_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2439,7 +2439,7 @@ def test_ttgir_sigmoid_compiles(runner):
 @requires_metal
 def test_ttgir_elu_compiles(runner):
     """TTGIR ELU activation compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(ELU_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2450,7 +2450,7 @@ def test_ttgir_elu_compiles(runner):
 @requires_metal
 def test_ttgir_leaky_relu_compiles(runner):
     """TTGIR leaky ReLU activation compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(LEAKY_RELU_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2461,7 +2461,7 @@ def test_ttgir_leaky_relu_compiles(runner):
 @requires_metal
 def test_ttgir_hardswish_compiles(runner):
     """TTGIR hardswish activation compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(HARDSWISH_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2514,7 +2514,7 @@ module {
 
 def test_ttgir_batch_norm_detected():
     """TTGIR batch norm pattern is detected."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(BATCH_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2524,7 +2524,7 @@ def test_ttgir_batch_norm_detected():
 
 def test_ttgir_batch_norm_not_confused_with_layer_norm():
     """Batch norm (4+ input ptrs) is not confused with layer norm (1 input ptr + reductions)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(BATCH_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2537,7 +2537,7 @@ def test_ttgir_batch_norm_not_confused_with_layer_norm():
 @requires_metal
 def test_ttgir_batch_norm_compiles(runner):
     """TTGIR batch norm pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(BATCH_NORM_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2590,7 +2590,7 @@ module {
 
 def test_ttgir_online_softmax_detected():
     """TTGIR online softmax pattern is detected (scf.for + exp + reduce)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(ONLINE_SOFTMAX_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2600,7 +2600,7 @@ def test_ttgir_online_softmax_detected():
 
 def test_ttgir_online_softmax_not_confused_with_regular_softmax():
     """Online softmax (has scf.for) is not confused with regular softmax."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     # Regular softmax has no scf.for loop
     parser = TTGIRParser(ONLINE_SOFTMAX_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -2613,7 +2613,7 @@ def test_ttgir_online_softmax_not_confused_with_regular_softmax():
 @requires_metal
 def test_ttgir_online_softmax_compiles(runner):
     """TTGIR online softmax pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(ONLINE_SOFTMAX_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2661,7 +2661,7 @@ module {
 
 def test_ttgir_rms_norm_detected():
     """TTGIR RMS norm pattern is detected (sum + rsqrt + mul, no sub)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(RMS_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2671,7 +2671,7 @@ def test_ttgir_rms_norm_detected():
 
 def test_ttgir_rms_norm_not_confused_with_layer_norm():
     """RMS norm (no sub) is distinct from layer norm (has sub)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(RMS_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2683,7 +2683,7 @@ def test_ttgir_rms_norm_not_confused_with_layer_norm():
 @requires_metal
 def test_ttgir_rms_norm_compiles(runner):
     """TTGIR RMS norm pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(RMS_NORM_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2743,7 +2743,7 @@ module {
 
 def test_ttgir_group_norm_detected():
     """TTGIR group norm pattern is detected (reductions + 3 input ptrs + 2 scalar args)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(GROUP_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2753,7 +2753,7 @@ def test_ttgir_group_norm_detected():
 
 def test_ttgir_group_norm_not_confused_with_layer_norm():
     """Group norm (3 input ptrs) is distinct from layer norm (1-2 input ptrs)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(GROUP_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2764,7 +2764,7 @@ def test_ttgir_group_norm_not_confused_with_layer_norm():
 @requires_metal
 def test_ttgir_group_norm_compiles(runner):
     """TTGIR group norm pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(GROUP_NORM_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2813,7 +2813,7 @@ module {
 
 def test_ttgir_dropout_detected():
     """TTGIR dropout pattern is detected (2 inputs + cmp + select + mul)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(DROPOUT_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2823,7 +2823,7 @@ def test_ttgir_dropout_detected():
 
 def test_ttgir_dropout_not_confused_with_activation():
     """Dropout (2 input ptrs) is not confused with activation (1 input ptr)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(DROPOUT_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2835,7 +2835,7 @@ def test_ttgir_dropout_not_confused_with_activation():
 @requires_metal
 def test_ttgir_dropout_compiles(runner):
     """TTGIR dropout pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(DROPOUT_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2875,7 +2875,7 @@ module {
 
 def test_ttgir_gather_detected():
     """TTGIR gather pattern is detected (2 inputs with int index + 1 output)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(GATHER_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2885,7 +2885,7 @@ def test_ttgir_gather_detected():
 
 def test_ttgir_gather_not_confused_with_dropout():
     """Gather (int index input) is not confused with dropout (float random input)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(GATHER_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2897,7 +2897,7 @@ def test_ttgir_gather_not_confused_with_dropout():
 @requires_metal
 def test_ttgir_gather_compiles(runner):
     """TTGIR gather pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(GATHER_TTGIR, FakeOptions())
     msl = kb.build()
@@ -2937,7 +2937,7 @@ module {
 
 def test_ttgir_scatter_detected():
     """TTGIR scatter pattern is detected (store ptr uses loaded index)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(SCATTER_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -2947,7 +2947,7 @@ def test_ttgir_scatter_detected():
 
 def test_ttgir_scatter_not_confused_with_gather():
     """Scatter (store at loaded index) is not confused with gather (load at loaded index)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     # Scatter IR should match scatter, not gather
     parser = TTGIRParser(SCATTER_TTGIR, FakeOptions())
     parser._parse_function_signature()
@@ -2965,7 +2965,7 @@ def test_ttgir_scatter_not_confused_with_gather():
 @requires_metal
 def test_ttgir_scatter_compiles(runner):
     """TTGIR scatter pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SCATTER_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3009,7 +3009,7 @@ module {
 
 def test_ttgir_transpose_detected():
     """TTGIR transpose pattern is detected (2D grid, 1 input, 1 output)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(TRANSPOSE_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3019,7 +3019,7 @@ def test_ttgir_transpose_detected():
 
 def test_ttgir_transpose_not_confused_with_elementwise():
     """Transpose (2D grid) is not confused with 1D elementwise."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     # Elementwise (1D, single program_id) should not be transpose
     parser = TTGIRParser(GATHER_TTGIR, FakeOptions())  # gather uses 1D
     parser._parse_function_signature()
@@ -3031,7 +3031,7 @@ def test_ttgir_transpose_not_confused_with_elementwise():
 @requires_metal
 def test_ttgir_transpose_compiles(runner):
     """TTGIR transpose pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(TRANSPOSE_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3084,7 +3084,7 @@ module {
 
 def test_ttgir_instance_norm_detected():
     """TTGIR instance norm pattern is detected (1 input, reduce + rsqrt)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(INSTANCE_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3094,7 +3094,7 @@ def test_ttgir_instance_norm_detected():
 
 def test_ttgir_instance_norm_not_confused_with_layer_norm():
     """Instance norm (1 input, no weight/bias) is not confused with layer norm."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(INSTANCE_NORM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3106,7 +3106,7 @@ def test_ttgir_instance_norm_not_confused_with_layer_norm():
 @requires_metal
 def test_ttgir_instance_norm_compiles(runner):
     """TTGIR instance norm pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(INSTANCE_NORM_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3151,7 +3151,7 @@ module {
 
 def test_ttgir_residual_add_detected():
     """TTGIR residual add pattern is detected (2 inputs, only add)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(RESIDUAL_ADD_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3161,7 +3161,7 @@ def test_ttgir_residual_add_detected():
 
 def test_ttgir_residual_add_not_confused_with_dropout():
     """Residual add (just add) is not confused with dropout (cmp + select + mul)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(RESIDUAL_ADD_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3173,7 +3173,7 @@ def test_ttgir_residual_add_not_confused_with_dropout():
 @requires_metal
 def test_ttgir_residual_add_compiles(runner):
     """TTGIR residual add pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(RESIDUAL_ADD_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3213,7 +3213,7 @@ module {
 
 def test_ttgir_embedding_detected():
     """TTGIR embedding pattern is detected (float table + int indices)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(EMBEDDING_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3223,7 +3223,7 @@ def test_ttgir_embedding_detected():
 
 def test_ttgir_embedding_not_confused_with_gather():
     """Embedding (2+ scalar args) routes differently from plain gather."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(EMBEDDING_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3234,7 +3234,7 @@ def test_ttgir_embedding_not_confused_with_gather():
 @requires_metal
 def test_ttgir_embedding_compiles(runner):
     """TTGIR embedding pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(EMBEDDING_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3272,7 +3272,7 @@ module {
 
 def test_ttgir_concat_detected():
     """TTGIR concat pattern is detected (2+ inputs, 1 output, no math)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(CONCAT_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3283,7 +3283,7 @@ def test_ttgir_concat_detected():
 @requires_metal
 def test_ttgir_concat_compiles(runner):
     """TTGIR concat pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(CONCAT_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3323,7 +3323,7 @@ module {
 
 def test_ttgir_split_detected():
     """TTGIR split pattern is detected (1 input, 2+ outputs)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(SPLIT_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3334,7 +3334,7 @@ def test_ttgir_split_detected():
 @requires_metal
 def test_ttgir_split_compiles(runner):
     """TTGIR split pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(SPLIT_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3371,7 +3371,7 @@ module {
 
 def test_ttgir_repeat_kv_detected():
     """TTGIR repeat_kv pattern is detected (1 in, 1 out, 4+ scalars)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(REPEAT_KV_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3382,7 +3382,7 @@ def test_ttgir_repeat_kv_detected():
 @requires_metal
 def test_ttgir_repeat_kv_compiles(runner):
     """TTGIR repeat_kv pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(REPEAT_KV_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3424,7 +3424,7 @@ module {
 
 def test_ttgir_where_detected():
     """TTGIR where pattern is detected (3 inputs, 1 output, select op)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(WHERE_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3435,7 +3435,7 @@ def test_ttgir_where_detected():
 @requires_metal
 def test_ttgir_where_compiles(runner):
     """TTGIR where pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(WHERE_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3474,7 +3474,7 @@ module {
 
 def test_ttgir_clamp_detected():
     """TTGIR clamp pattern is detected (1 in, 1 out, max+min ops)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(CLAMP_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3485,7 +3485,7 @@ def test_ttgir_clamp_detected():
 @requires_metal
 def test_ttgir_clamp_compiles(runner):
     """TTGIR clamp pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(CLAMP_TTGIR, FakeOptions())
     msl = kb.build()
@@ -3525,7 +3525,7 @@ module {
 
 def test_ttgir_cumsum_detected():
     """TTGIR cumsum pattern is detected (scf.for with addf, 1 in, 1 out)."""
-    from triton_metal.codegen.ttgir_parser import TTGIRParser
+    from triton_msl.codegen.ttgir_parser import TTGIRParser
     parser = TTGIRParser(CUMSUM_TTGIR, FakeOptions())
     parser._parse_function_signature()
     parser._parse_body()
@@ -3536,7 +3536,7 @@ def test_ttgir_cumsum_detected():
 @requires_metal
 def test_ttgir_cumsum_compiles(runner):
     """TTGIR cumsum pattern compiles to valid MSL."""
-    from triton_metal.codegen.ttgir_parser import parse_ttgir
+    from triton_msl.codegen.ttgir_parser import parse_ttgir
 
     kb = parse_ttgir(CUMSUM_TTGIR, FakeOptions())
     msl = kb.build()

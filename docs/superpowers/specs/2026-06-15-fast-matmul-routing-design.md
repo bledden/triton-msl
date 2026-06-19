@@ -13,7 +13,7 @@
 
 A standard `@triton.jit` matmul (tutorial-style: own `BM×BN` tiling, K-loop
 `tl.dot`-accumulate, masked store) lowers through the **generic dot lowering** in
-`triton_metal/codegen/_lowerer_templates.py`. Dumping its MSL (fp16 2048³, BM=BN=64,
+`triton_msl/codegen/_lowerer_templates.py`. Dumping its MSL (fp16 2048³, BM=BN=64,
 BK=32) confirms the inefficiency directly:
 
 - The kernel stages A/B through `threadgroup half tg_A[512]` / `tg_B` with a barrier
@@ -34,7 +34,7 @@ at buffers 3/4/5 (A/B/C at 0/1/2).
 
 The proven asset: `make_simdgroup_matmul_kernel_fast` (`_msl_templates.py:3547`) — direct
 device load/store, register blocking (rr=rc=4 → 32×128 tile), zero staging, zero epilogue
-barriers — but **unwired** (no caller in `triton_metal/`). It assumes the **same** row-major
+barriers — but **unwired** (no caller in `triton_msl/`). It assumes the **same** row-major
 layout and the **same** A/B/C@0-2, M/N/K@3-5 arg positions as `make_matmul_kernel`, so it is
 correct on exactly the inputs the generic kernel is correct on — *provided* the runtime dims
 are aligned (it has **no** boundary handling; see contract).
@@ -149,15 +149,15 @@ ragged, or fp16-output → generic, unchanged.
 - **relerr is not sufficient to validate** the fast path (an OOB write can read as relerr
   0.0). The gate logic (does it fall back on M%32≠0 / N%32≠0 / K%8≠0 / fp16-output /
   non-MPS?) is tested directly, separately from numeric parity.
-- Flag `TRITON_METAL_FAST_MATMUL` (default-on once the gate is green; `=0` escape hatch),
-  mirroring `TRITON_METAL_COMPILE_SHADER`. Disables both halves (no descriptor emitted /
+- Flag `TRITON_MSL_FAST_MATMUL` (default-on once the gate is green; `=0` escape hatch),
+  mirroring `TRITON_MSL_COMPILE_SHADER`. Disables both halves (no descriptor emitted /
   runtime branch skipped) so a regression bisects without a code change.
 - `CODEGEN_VERSION` bumped (`2026.06.13.2` → next) since metadata/emitted descriptors change.
 
 ## Testing / validation (correctness FIRST, then perf)
 
 1. **Full-suite parity (the gate):** upstream `test_core` dot/matmul families + the full
-   ratchet, **both MEPT flags**, with `TRITON_METAL_FAST_MATMUL` on == off. 0 failed,
+   ratchet, **both MEPT flags**, with `TRITON_MSL_FAST_MATMUL` on == off. 0 failed,
    identical to tolerance. No perf claim before this is green.
 2. **Numeric parity harness:** eligible matmuls (fp32→fp32 and fp16→fp32; aligned square
    2048³/1024²/512² and non-square incl. N%32-but-not-128, K a non-128 multiple of 8) run

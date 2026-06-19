@@ -33,7 +33,7 @@ tile exceeds threadgroup budget or the 2D thread mapping can't be resolved.
 **axis=1**. `index` and `out` share shape; `src` may differ along the gather axis.
 
 ## Current state to build on
-- `triton_metal/codegen/generic_lowerer.py:5433` `_lower_tt_gather` handles **1D**: stage
+- `triton_msl/codegen/generic_lowerer.py:5433` `_lower_tt_gather` handles **1D**: stage
   `src` (size S) to a `threadgroup` array (`if (lid < S) shared[lid] = src_var;` + barrier),
   then each thread reads `shared[(uint)idx_var]`. One-element-per-thread.
 - 2D is refused via `scripts/conftest_metal.py` (`test_gather` skip when

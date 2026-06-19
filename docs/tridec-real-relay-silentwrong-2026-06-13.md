@@ -28,7 +28,7 @@ What would make the repro maximally useful to me:
    reproduced the *same* hazard, not a lookalike.
 2. **Narrow to one pass** if you can — GF2 convergence gather vs per-leg
    gamma+relay-memory vs capture. Which single pass, dropped, makes 256 deterministic?
-3. **High-value diagnostic — run relay@256 under `TRITON_METAL_MEPT=0`.** If it is
+3. **High-value diagnostic — run relay@256 under `TRITON_MSL_MEPT=0`.** If it is
    correct-or-refuses under `MEPT=0` but wrong under the default (`MEPT=1`), that pins
    the **register-array (MEPT) regime** as the culprit. My leading hypothesis: the
    single-pass array regime mis-handles a **threadgroup_barrier placement or a
@@ -51,4 +51,4 @@ What would make the repro maximally useful to me:
 Send the bisected repro (and the `MEPT=0` data point) whenever it's ready. No urgency on
 the calendar — relay is correct at 128 today, and the safe state is intact.
 
-— triton-metal dev session, 2026-06-13
+— triton-msl dev session, 2026-06-13

@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make hoisted multi-element values (a `tl.arange`, a masked-load `other=`) resolve inside a data-dependent `scf.for` loop, flipping tridec Bug 2 (`BLOCK≥256` reduction-in-loop) from a clean refusal to a correct computation — behind `TRITON_METAL_MEPT`, with the scalar parity gate held green.
+**Goal:** Make hoisted multi-element values (a `tl.arange`, a masked-load `other=`) resolve inside a data-dependent `scf.for` loop, flipping tridec Bug 2 (`BLOCK≥256` reduction-in-loop) from a clean refusal to a correct computation — behind `TRITON_MSL_MEPT`, with the scalar parity gate held green.
 
 **Architecture:** Milestone 1 already built the register-array machinery: `RegVal`/`region_needs_arrays` (`regval.py`), `_lookup_regval`, the array-aware `make_range`/`addptr`/`load`/`reduce` handlers, threadgroup-array hoisting, and the in-loop-reduce leading barrier. The ONLY reason Bug 2 still refuses is the eligibility gate: `_mept_single_pass` (the flag that makes `make_range` emit a register array) is set only when every op passes `_op_mept_ok`, and control-flow ops (`scf.for`/`scf.while`/`scf.if`) are not in `_MEPT_SAFE_OPS`. So a kernel with a runtime loop never enters the array form; the hoisted `arange` stays scalar, the re-execution wrap-loop can't carry it into the loop body, and `_lookup` falls back to `UNKNOWN_<addr>` → the integrity backstop refuses. **M2 extends eligibility:** a kernel whose data-dependent control flow carries multi-element values, and whose every op is array-wired (or control-flow / reduce / yield / condition), becomes single-pass MEPT-eligible. Register arrays declared once before the loop then persist into the body naturally (`env_array` is instance state, not loop-scoped), so the existing body-op handlers resolve them. No change to `_lower_scf_for` is required for Bug 2 — its iter-args here are scalar (`i`, `total`); the multi-element values (`offs`, `idx`, `v`) are loop-invariant or body-local and resolve through `env_array`.
 
-**Tech Stack:** Python lowerer (`triton_metal/codegen/`), MSL source emission, pytest (CPU emission tests + serial GPU correctness tests), Apple Metal.
+**Tech Stack:** Python lowerer (`triton_msl/codegen/`), MSL source emission, pytest (CPU emission tests + serial GPU correctness tests), Apple Metal.
 
 ---
 
@@ -20,8 +20,8 @@
 
 ## File Structure
 
-- `triton_metal/codegen/regval.py` (modify): add `tensor_value_ids(ops, is_multi_fn)` — a pure tree-walk that collects the SSA ids of multi-element values, recursing into control-flow regions. Pairs with the existing `region_needs_arrays`. No GPU, no lowerer dependency — unit-testable with mock ops.
-- `triton_metal/codegen/generic_lowerer.py` (modify, two edits in `_decide_block_size`-region, ~lines 859-994): (1) compute `mept_arrayform_eligible` after the existing `mept_reduce_eligible`; (2) add the eligible branch inside `elif size_per_thread > 1 and block_size > num_threads:` that sets `_mept_single_pass`.
+- `triton_msl/codegen/regval.py` (modify): add `tensor_value_ids(ops, is_multi_fn)` — a pure tree-walk that collects the SSA ids of multi-element values, recursing into control-flow regions. Pairs with the existing `region_needs_arrays`. No GPU, no lowerer dependency — unit-testable with mock ops.
+- `triton_msl/codegen/generic_lowerer.py` (modify, two edits in `_decide_block_size`-region, ~lines 859-994): (1) compute `mept_arrayform_eligible` after the existing `mept_reduce_eligible`; (2) add the eligible branch inside `elif size_per_thread > 1 and block_size > num_threads:` that sets `_mept_single_pass`.
 - `tests/test_regval.py` (modify): unit tests for `tensor_value_ids`.
 - `tests/test_mept_m2_arrayform.py` (create): CPU emission test — flag-ON `_sum_in_loop` at `BLOCK=256` emits array-form MSL with no `UNKNOWN_` (fast signal; RED before the wiring).
 - `tests/test_unknown_value_backstop.py` (modify): keep the flag-OFF refusal test; the existing test already runs flag-OFF (default) and must continue to refuse.
@@ -32,7 +32,7 @@
 ### Task 1: `tensor_value_ids` pure helper
 
 **Files:**
-- Modify: `triton_metal/codegen/regval.py`
+- Modify: `triton_msl/codegen/regval.py`
 - Test: `tests/test_regval.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -40,7 +40,7 @@
 Add to `tests/test_regval.py` (use the same mock-op style already in that file — a tiny object with `.op`, `.id`, `.operand_ids`, `.result_ids`, `.region_ops`):
 
 ```python
-from triton_metal.codegen.regval import tensor_value_ids
+from triton_msl.codegen.regval import tensor_value_ids
 
 
 class _Op:
@@ -86,7 +86,7 @@ Expected: FAIL with `ImportError: cannot import name 'tensor_value_ids'`
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add to `triton_metal/codegen/regval.py` (after `region_needs_arrays`):
+Add to `triton_msl/codegen/regval.py` (after `region_needs_arrays`):
 
 ```python
 def tensor_value_ids(ops, is_multi_fn) -> set:
@@ -124,7 +124,7 @@ Expected: PASS (3 passed)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add triton_metal/codegen/regval.py tests/test_regval.py
+git add triton_msl/codegen/regval.py tests/test_regval.py
 git commit -m "feat(mept-m2): tensor_value_ids — pure multi-element id collector
 
 Pairs with region_needs_arrays to decide when a control-flow region
@@ -138,7 +138,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 2: Eligibility wiring + CPU emission test
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py` (after the `mept_reduce_eligible` block, ~line 878; and the `elif size_per_thread > 1 and block_size > num_threads:` cascade, ~line 951)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (after the `mept_reduce_eligible` block, ~line 878; and the `elif size_per_thread > 1 and block_size > num_threads:` cascade, ~line 951)
 - Test: `tests/test_mept_m2_arrayform.py` (create)
 
 - [ ] **Step 1: Write the failing test**
@@ -174,13 +174,13 @@ def _sum_in_loop(X, OUT, N, n_tiles, BLOCK: tl.constexpr):
 
 
 def _emit(fn, sig, cst, mept):
-    os.environ["TRITON_METAL_FORCE_PYTHON"] = "1"
-    os.environ["TRITON_METAL_MEPT"] = "1" if mept else "0"
-    import triton_metal.codegen.generic_lowerer as G
-    import triton_metal.codegen.msl_emitter as M
+    os.environ["TRITON_MSL_FORCE_PYTHON"] = "1"
+    os.environ["TRITON_MSL_MEPT"] = "1" if mept else "0"
+    import triton_msl.codegen.generic_lowerer as G
+    import triton_msl.codegen.msl_emitter as M
     importlib.reload(G)
     importlib.reload(M)
-    from triton_metal.backend.compiler import MetalBackend
+    from triton_msl.backend.compiler import MetalBackend
     t = GPUTarget("metal", "apple-m4", 32)
     be = MetalBackend(t)
     o = be.parse_options({"num_warps": 4})
@@ -205,8 +205,8 @@ def test_sum_in_loop_block256_emits_array_no_unknown():
 
 
 def teardown_module(module):
-    os.environ.pop("TRITON_METAL_MEPT", None)
-    os.environ.pop("TRITON_METAL_FORCE_PYTHON", None)
+    os.environ.pop("TRITON_MSL_MEPT", None)
+    os.environ.pop("TRITON_MSL_FORCE_PYTHON", None)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -218,7 +218,7 @@ Expected: FAIL — `emit_msl` raises `MetalNonRecoverableError` (the `UNKNOWN_` 
 
 - [ ] **Step 3: Write the eligibility predicate**
 
-In `triton_metal/codegen/generic_lowerer.py`, immediately after the `mept_reduce_eligible = (...)` assignment (ends ~line 878), insert:
+In `triton_msl/codegen/generic_lowerer.py`, immediately after the `mept_reduce_eligible = (...)` assignment (ends ~line 878), insert:
 
 ```python
         # Phase 4f (MEPT M2): control-flow kernels that carry a multi-element
@@ -235,7 +235,7 @@ In `triton_metal/codegen/generic_lowerer.py`, immediately after the `mept_reduce
         # condition); every reduce is a 1-D full reduce; the tile cover is
         # exact; no fp8. See
         # docs/superpowers/specs/2026-06-11-mept-register-array-spine-design.md
-        from triton_metal.codegen.regval import (
+        from triton_msl.codegen.regval import (
             region_needs_arrays as _region_needs_arrays,
             tensor_value_ids as _tensor_value_ids,
             _CONTROL_OPS as _CF_OPS,
@@ -312,7 +312,7 @@ Expected: PASS — scalar corpus byte-identical flag-ON vs flag-OFF (the new bra
 - [ ] **Step 7: Commit**
 
 ```bash
-git add triton_metal/codegen/generic_lowerer.py tests/test_mept_m2_arrayform.py
+git add triton_msl/codegen/generic_lowerer.py tests/test_mept_m2_arrayform.py
 git commit -m "feat(mept-m2): single-pass array form for control-flow kernels
 
 Extend MEPT eligibility so a kernel whose data-dependent scf.for/while/if
@@ -342,7 +342,7 @@ Create `tests/test_mept_m2_bug2_gpu.py`:
 ```python
 """MEPT M2 GPU correctness: the tridec Bug-2 reduction-in-loop kernel computes
 correctly at BLOCK>=256 under flag-ON (previously refused with
-MetalNonRecoverableError). Run with TRITON_METAL_MEPT=1. Serial only.
+MetalNonRecoverableError). Run with TRITON_MSL_MEPT=1. Serial only.
 """
 import pytest
 
@@ -384,8 +384,8 @@ def test_sum_in_loop_computes_flag_on(BLOCK):
 - [ ] **Step 2: Run to verify it fails (flag-ON, fresh cache)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_MEPT=1 python -m pytest tests/test_mept_m2_bug2_gpu.py -v
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_MEPT=1 python -m pytest tests/test_mept_m2_bug2_gpu.py -v
 ```
 Expected: BEFORE Task 2's wiring this would refuse; AFTER Task 2 it should already PASS (the fix is the eligibility extension from Task 2). If it FAILS here with a numerical mismatch or a fresh `UNKNOWN_`/compile error, that is a real M2 gap — diagnose before proceeding (likely: the masked-load `other=` constant, or the contiguous `idx[i]=lid*N+i` mapping vs the tile layout). Do NOT mark GREEN until all three BLOCK sizes compute within tolerance.
 
@@ -394,8 +394,8 @@ Expected: BEFORE Task 2's wiring this would refuse; AFTER Task 2 it should alrea
 If Step 2 mismatches, dump the emitted MSL to see what is wrong:
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_MEPT=1 TRITON_METAL_DEBUG=1 python -c "
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_MEPT=1 TRITON_MSL_DEBUG=1 python -c "
 import torch, triton, triton.language as tl
 @triton.jit
 def k(X, OUT, N, n_tiles, BLOCK: tl.constexpr):
@@ -415,21 +415,21 @@ Per the "no shortcuts" rule: fully resolve any mismatch (it is a real correctnes
 - [ ] **Step 4: Run to verify it passes**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_MEPT=1 python -m pytest tests/test_mept_m2_bug2_gpu.py -v
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_MEPT=1 python -m pytest tests/test_mept_m2_bug2_gpu.py -v
 ```
 Expected: PASS (3 passed) — BLOCK 256/512/1024 all within tolerance.
 
 - [ ] **Step 5: Confirm flag-OFF still refuses (unchanged backstop)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 python -m pytest tests/test_unknown_value_backstop.py -v
 ```
 Expected: PASS — `test_sum_in_loop_block256_refuses_not_compile_error` still raises `MetalNonRecoverableError` with MEPT off (default). Add this one-line comment above that test so the flag dependency is explicit:
 
 ```python
-# NOTE: refuses only with MEPT OFF (default). Under TRITON_METAL_MEPT=1 this
+# NOTE: refuses only with MEPT OFF (default). Under TRITON_MSL_MEPT=1 this
 # kernel computes correctly — see tests/test_mept_m2_bug2_gpu.py (M2).
 ```
 
@@ -441,7 +441,7 @@ git commit -m "test(mept-m2): tridec Bug 2 computes at BLOCK 256/512/1024 (flag-
 
 The reduction-in-loop kernel that previously refused (UNKNOWN_ on the
 hoisted arange/other inside a runtime scf.for) now computes X.sum()
-correctly under TRITON_METAL_MEPT=1. Flag-off still refuses cleanly.
+correctly under TRITON_MSL_MEPT=1. Flag-off still refuses cleanly.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -457,7 +457,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: Flag-OFF full regression (the 5,335/0 invariant)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 python -m pytest tests/test_core.py -q 2>&1 | tail -5
 ```
 Expected: 5,335 passed, 0 failed (flag-OFF is the integrity reference; M2 must not perturb it). If any regression: STOP, the eligibility branch leaked into a flag-OFF path — re-check that `mept_arrayform_eligible` short-circuits on `self.mept_enabled`.
@@ -467,7 +467,7 @@ Expected: 5,335 passed, 0 failed (flag-OFF is the integrity reference; M2 must n
 ```bash
 python -m pytest tests/ -q -k "not gpu" 2>&1 | tail -8
 ```
-Expected: project suite green (the 625/0 project tests + the new CPU tests). Note: `test_mept_m2_bug2_gpu.py` is skipped here unless `TRITON_METAL_MEPT=1` and Metal are present; that is fine — it ran in Task 3.
+Expected: project suite green (the 625/0 project tests + the new CPU tests). Note: `test_mept_m2_bug2_gpu.py` is skipped here unless `TRITON_MSL_MEPT=1` and Metal are present; that is fine — it ran in Task 3.
 
 - [ ] **Step 3: Flag-ON parity gate (final confirmation)**
 

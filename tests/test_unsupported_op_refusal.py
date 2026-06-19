@@ -8,9 +8,9 @@ if dead), so it stays a comment.
 """
 import pytest
 
-from triton_metal.codegen.generic_lowerer import GenericLowerer
-from triton_metal.codegen.mlir_walker import SSAValue
-from triton_metal.errors import MetalNonRecoverableError
+from triton_msl.codegen.generic_lowerer import GenericLowerer
+from triton_msl.codegen.mlir_walker import SSAValue
+from triton_msl.errors import MetalNonRecoverableError
 
 
 def _mk(op, ssa_id):
@@ -37,7 +37,7 @@ def test_result_producing_unknown_op_does_not_refuse():
     # A positive id == has a result; tolerated as a comment (fails loud only if
     # consumed). Must NOT raise MetalNonRecoverableError.
     lo = _bare_lowerer()
-    import triton_metal.codegen.msl_emitter as _m
+    import triton_msl.codegen.msl_emitter as _m
     lo.kb = _m.KernelBuilder("k")
     try:
         lo._lower_op_dispatch(_mk("tt.some_unknown_valued", 123))

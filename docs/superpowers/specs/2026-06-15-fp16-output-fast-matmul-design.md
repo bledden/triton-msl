@@ -8,7 +8,7 @@
 > (store float fragment → threadgroup scratch → cast→half → write `half* C`) is correct
 > (relerr 0.0 at 512³/2048³/non-square) and FAST (11.9 TFLOP/s fp16 2048³).** Float
 > accumulation is preserved for precision. Phase 4 follow-up; flag-gated under the same
-> `TRITON_METAL_FAST_MATMUL`; never silent-wrong.
+> `TRITON_MSL_FAST_MATMUL`; never silent-wrong.
 
 ## Problem
 
@@ -82,7 +82,7 @@ Misaligned / non-MPS / bf16-out / flag-off → generic kernel, unchanged.
 - Same runtime alignment gate (the epilogue writes whole 8×8 blocks with no per-element
   bounds check beyond the `col0 >= N` simdgroup guard, so `M%32 / N%32 / K%8` remain
   mandatory — identical to the fp32-out variant).
-- Flag-gated under the existing `TRITON_METAL_FAST_MATMUL` (one flag, both layers).
+- Flag-gated under the existing `TRITON_MSL_FAST_MATMUL` (one flag, both layers).
 - `CODEGEN_VERSION` bump (emitted MSL changes for fp16-output matmuls).
 
 ## Testing / validation (correctness FIRST, then perf)
@@ -101,7 +101,7 @@ Misaligned / non-MPS / bf16-out / flag-off → generic kernel, unchanged.
    DISPATCHES `simdgroup_matmul_fast` (previously fell back); misaligned fp16-out still
    falls back. Via the dispatch spy.
 5. **Full ratchet (the gate):** real `--device cpu` test_core dot/matmul subset,
-   `TRITON_METAL_FAST_MATMUL` on == off, identical pass/fail — fp16-output matmuls in the
+   `TRITON_MSL_FAST_MATMUL` on == off, identical pass/fail — fp16-output matmuls in the
    suite must not regress. (Run via `scripts/run_upstream_tests.py` semantics; see
    [[reference_upstream_ratchet]] — raw pytest hits CUDA asserts.)
 6. **Perf (after correctness):** fp16-in→fp16-out 2048³ ≥ ~7 TFLOP/s (≥2× generic ~2.8;

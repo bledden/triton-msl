@@ -1,4 +1,4 @@
-# triton-metal
+# triton-msl
 
 Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang/triton) [\[1\]](REFERENCES.md)[\[2\]](REFERENCES.md). Write `@triton.jit` kernels and run them on your Mac's GPU.
 
@@ -41,7 +41,7 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
   integrity model" for the lowering paths.
 
 See [`REFERENCES.md`](REFERENCES.md) for citations and
-[`docs/superpowers/specs/2026-05-30-triton-metal-roadmap.md`](docs/superpowers/specs/2026-05-30-triton-metal-roadmap.md)
+[`docs/superpowers/specs/2026-05-30-triton-msl-roadmap.md`](docs/superpowers/specs/2026-05-30-triton-msl-roadmap.md)
 for the active pre-1.0 roadmap.
 
 ## Requirements
@@ -54,7 +54,7 @@ for the active pre-1.0 roadmap.
 ## Install
 
 ```bash
-pip install triton-metal
+pip install triton-msl
 
 # Triton is required but installed separately (macOS wheels may not be available)
 pip install triton>=3.6.0
@@ -93,8 +93,8 @@ print(f"Max error: {(out - (x + y)).abs().max():.2e}")
 
 ```python
 import torch
-import triton_metal.inductor
-triton_metal.inductor.register_metal_triton_backend()
+import triton_msl.inductor
+triton_msl.inductor.register_metal_triton_backend()
 
 model = torch.nn.Sequential(
     torch.nn.Linear(256, 512),
@@ -113,7 +113,7 @@ out = compiled(x)
 import mlx.core as mx
 import triton
 import triton.language as tl
-from triton_metal.mlx import triton_call
+from triton_msl.mlx import triton_call
 
 @triton.jit
 def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
@@ -178,12 +178,12 @@ matmul_kernel[(M // 64, N // 64)](
 
 ### Integrity contract — refused, never silently wrong
 
-A kernel triton-metal **cannot lower correctly raises `MetalNonRecoverableError`**
+A kernel triton-msl **cannot lower correctly raises `MetalNonRecoverableError`**
 rather than returning garbage. For example, a pid-tiled matmul that bakes its M/N
 dims as `constexpr` (so the true output strides can't be recovered) is refused:
 
 ```python
-from triton_metal.errors import MetalNonRecoverableError
+from triton_msl.errors import MetalNonRecoverableError
 
 @triton.jit
 def matmul_baked_dims(a_ptr, b_ptr, c_ptr, K,
@@ -227,10 +227,10 @@ All default-on; set to `0` to disable (an escape hatch for bisecting a regressio
 
 | Flag | Effect when disabled |
 |------|----------------------|
-| `TRITON_METAL_COMPILE_SHADER=0` | Use the host-copy driver instead of the zero-copy `compile_shader` dispatch |
-| `TRITON_METAL_FAST_MATMUL=0` | Use the generic matmul instead of the fast simdgroup-matrix path |
-| `TRITON_METAL_MEPT=0` | Disable the multi-element-per-thread register-array model |
-| `TRITON_METAL_LEGACY=1` | Opt **in** to the heuristic legacy text parser (off by default — it can be silent-wrong) |
+| `TRITON_MSL_COMPILE_SHADER=0` | Use the host-copy driver instead of the zero-copy `compile_shader` dispatch |
+| `TRITON_MSL_FAST_MATMUL=0` | Use the generic matmul instead of the fast simdgroup-matrix path |
+| `TRITON_MSL_MEPT=0` | Disable the multi-element-per-thread register-array model |
+| `TRITON_MSL_LEGACY=1` | Opt **in** to the heuristic legacy text parser (off by default — it can be silent-wrong) |
 
 ## What Works
 
@@ -306,7 +306,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Citing
 
-If you use `triton-metal` in research or technical work, see
+If you use `triton-msl` in research or technical work, see
 [`CITING.md`](CITING.md) for a suggested BibTeX entry. For citations of
 the papers and projects this backend builds on (Triton, FlashAttention,
 online softmax, MLX, Asahi/`applegpu`, the MSL specification, PyTorch

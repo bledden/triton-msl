@@ -13,7 +13,7 @@
 
 Repro (`tests/test_reduceresult_select_DIAG.py`): an in-loop `tl.sum` whose
 **scalar result** feeds `tl.where(s < best, s, best)`. At BLOCK 256/512 the
-result is **wrong**, on both the default flag and `TRITON_METAL_MEPT=0`; BLOCK
+result is **wrong**, on both the default flag and `TRITON_MSL_MEPT=0`; BLOCK
 64/128 are correct.
 
 Mechanism, confirmed by dumping `compiled.asm["msl"]`:
@@ -60,7 +60,7 @@ empirically and is mandatory before B is declared done.
   work, every in-loop-reduce-over-threads case must be either correct or a loud
   `MetalNonRecoverableError`.
 - **Ratchet:** flag-default upstream `test_core` must hold/rise (no regression),
-  0 failed, both default and `TRITON_METAL_MEPT=0`; project suite 0 failed.
+  0 failed, both default and `TRITON_MSL_MEPT=0`; project suite 0 failed.
 - **Scalar-path parity:** `MEPT=0` codegen for kernels not exercising this path
   must be byte-identical.
 - Python/MSL only. No C++.
@@ -191,7 +191,7 @@ cover); the contract holds either way.
 - **C parity:** `MEPT=0` codegen byte-identical on a corpus slice; cmpf-heavy
   kernels (`test_where`, masked ops) unaffected.
 - **Full ratchet:** upstream `test_core` ≥ baseline, 0 failed, default **and**
-  `MEPT=0`; project suite 0 failed. Clear `~/.cache/triton_metal ~/.triton/cache`
+  `MEPT=0`; project suite 0 failed. Clear `~/.cache/triton_msl ~/.triton/cache`
   before each verifying run (cache is keyed on the effective MEPT flag).
 - **A residual measurement** logged and reported regardless of A's outcome.
 

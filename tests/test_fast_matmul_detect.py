@@ -1,5 +1,5 @@
 """Compile-time detector: eligible matmuls emit a fast_matmul descriptor in
-cached metadata; ineligible ones do not. Inspects ~/.cache/triton_metal/*.meta.json
+cached metadata; ineligible ones do not. Inspects ~/.cache/triton_msl/*.meta.json
 (the descriptor round-trips through the JSON cache as a list of str+ints).
 Serial GPU.
 
@@ -16,7 +16,7 @@ except Exception:
     HAS = False
 requires = pytest.mark.skipif(not HAS, reason="MPS needed")
 
-CACHE = os.path.expanduser("~/.cache/triton_metal")
+CACHE = os.path.expanduser("~/.cache/triton_msl")
 
 
 @triton.jit
@@ -95,7 +95,7 @@ def _run(kernel, A, B, C, M, N, K):
 @requires
 def test_eligible_fp32_emits_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps"); B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
     _run(_mm_fp32, A, B, C, M, N, K)            # fp32 in, fp32 out (no cast)
@@ -109,7 +109,7 @@ def test_eligible_fp32_emits_descriptor(monkeypatch):
 @requires
 def test_fp16_output_emits_half_variant_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps", dtype=torch.float16)
     B = torch.randn(K, N, device="mps", dtype=torch.float16)
@@ -126,7 +126,7 @@ def test_fp16_output_emits_half_variant_descriptor(monkeypatch):
 @requires
 def test_bf16_output_no_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps", dtype=torch.bfloat16)
     B = torch.randn(K, N, device="mps", dtype=torch.bfloat16)
@@ -143,7 +143,7 @@ def test_bf16_output_no_descriptor(monkeypatch):
 @requires
 def test_flag_off_no_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "0")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "0")
     M = N = K = 256
     A = torch.randn(M, K, device="mps"); B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
     _run(_mm_fp32, A, B, C, M, N, K)
@@ -183,7 +183,7 @@ def test_abbreviated_name_emits_descriptor(monkeypatch):
     stride_* path through _lower_dot_simple_template.
     """
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps"); B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
     _run(_mm_abbrev, A, B, C, M, N, K)

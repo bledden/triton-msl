@@ -59,7 +59,7 @@ def _fma_chain_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
 def bench_copy_time(n, dtype=torch.float32, n_iter=20):
     """Measure time to copy a tensor to/from a Metal buffer."""
     import ctypes
-    from triton_metal.backend.driver import _get_utils
+    from triton_msl.backend.driver import _get_utils
 
     utils = _get_utils()
     t = torch.randn(n, dtype=dtype)
@@ -229,7 +229,7 @@ def main():
 
     if is_aligned:
         import ctypes
-        from triton_metal.backend.driver import _get_utils
+        from triton_msl.backend.driver import _get_utils
         utils = _get_utils()
 
         times_nocopy = []

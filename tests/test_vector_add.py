@@ -42,7 +42,7 @@ def _has_metal_compiler():
 
 def _compile_msl(msl_src, kernel_name):
     """Compile MSL source to a metallib file and return its path."""
-    cache_dir = os.path.join(tempfile.gettempdir(), "triton_metal_test_cache")
+    cache_dir = os.path.join(tempfile.gettempdir(), "triton_msl_test_cache")
     os.makedirs(cache_dir, exist_ok=True)
 
     src_hash = hashlib.sha256(msl_src.encode()).hexdigest()[:16]

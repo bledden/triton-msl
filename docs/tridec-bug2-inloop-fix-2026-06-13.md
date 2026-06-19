@@ -43,7 +43,7 @@ Array-wire `arith.select`: add it to the register-array op set and emit the per-
 form (`r[e] = cond[e] ? t[e] : f[e]`, with scalar operands broadcast). A masked
 reduction-in-loop now enters the single-pass regime, the offsets rematerialize in-loop,
 and the in-loop `tl.sum` folds correctly. Contained change; gated on the array regime, so
-scalar / `TRITON_METAL_MEPT=0` codegen is byte-identical (verified).
+scalar / `TRITON_MSL_MEPT=0` codegen is byte-identical (verified).
 
 ## Verified (the P3/P4 shapes)
 
@@ -62,13 +62,13 @@ That lifts relay off the `BLOCK=128` cap to full SIMD width (256–1024), same a
 
 - **Merged into `main`** (the in-loop-reduction fix is `arith.select` array-wiring, commits
   `84c7ce3` + `aaac486`, fast-forwarded onto `main` along with the rest of this cycle's
-  work). A `triton_metal` at the new `main` HEAD computes the P3/P4 shapes; the old
+  work). A `triton_msl` at the new `main` HEAD computes the P3/P4 shapes; the old
   `0a1eafb` still refuses.
 - **Full regression gate is green, both flag directions:** upstream `test_core`
   **5531 passed / 0 failed** with the default flag (the `select` eligibility change
-  regressed nothing) *and* with `TRITON_METAL_MEPT=0`; project suite 646/0. The
+  regressed nothing) *and* with `TRITON_MSL_MEPT=0`; project suite 646/0. The
   loud-refusal contract is unchanged.
-- **To pick it up:** pull `main` to HEAD, `rm -rf ~/.cache/triton_metal ~/.triton/cache`
+- **To pick it up:** pull `main` to HEAD, `rm -rf ~/.cache/triton_msl ~/.triton/cache`
   once, and lift relay's `BLOCK` to 256+ (verified through 1024 on the P3/P4 shapes).
   No env var needed — the register-array model is the default, so relay's two in-loop
   `tl.sum` (`megakernel.py:427`/`:439`) now compute by default.
@@ -89,4 +89,4 @@ store gap, a faithful repro would pin it. Worth re-checking `D` once you have th
 No urgency on your end — relay is correct at 128 today (loud refusal = never wrong). This
 is purely about giving relay the full SIMD width.
 
-— triton-metal dev session, 2026-06-13
+— triton-msl dev session, 2026-06-13

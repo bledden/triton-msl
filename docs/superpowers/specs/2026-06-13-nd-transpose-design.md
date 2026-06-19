@@ -37,15 +37,15 @@ SRC_FLAT(k): O[d] = (k / dst_stride[d]) % dst_shape[d]   for each output axis d
 - dtype-agnostic: int32/int8 only change the typed pointer declarations.
 
 ## Components (files)
-- `triton_metal/codegen/_lowerer_detection.py` — `_detect_nd_trans(self) -> dict|None`:
+- `triton_msl/codegen/_lowerer_detection.py` — `_detect_nd_trans(self) -> dict|None`:
   match the pattern; extract the input base pointer (from the load's ptr operand),
   output base pointer (from the store), `src_shape`, `order` (via the existing
   `_parse_trans_order`), and the element dtype. Return None unless it's a clean
   rank≥3 `load→trans→[reshape]→store` with no reduce/control-flow.
-- `triton_metal/codegen/_lowerer_templates.py` — `_lower_nd_trans_template(self, info)
+- `triton_msl/codegen/_lowerer_templates.py` — `_lower_nd_trans_template(self, info)
   -> str`: emit the full kernel MSL (strided direct-copy loop), modeling
   `_lower_transpose_via_reshape_template`.
-- `triton_metal/codegen/generic_lowerer.py` `lower()` — call `_detect_nd_trans`
+- `triton_msl/codegen/generic_lowerer.py` `lower()` — call `_detect_nd_trans`
   alongside the other detectors (before the generic op-by-op path), returning its
   template MSL when it fires. Order it AFTER `_detect_transpose_via_reshape` and
   `_detect_permute_chained_reduce` (those are more specific) — though they already

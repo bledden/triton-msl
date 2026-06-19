@@ -1,11 +1,11 @@
-# triton-metal Implementation Roadmap
+# triton-msl Implementation Roadmap
 
 > Last updated: 2026-06-18 (torch.compile / inductor backend port landed). The dated phase tables further
 > below were authored **2026-04-09** and are kept as a detailed reference — but much of
 > Phase 0–1 + 2A + 6A has since landed. **Read "Current status" first for what's actually
 > done vs. remaining.**
 
-This document tracks remaining work for triton-metal, organized into phased delivery with
+This document tracks remaining work for triton-msl, organized into phased delivery with
 dependencies, scope estimates, and file-level change lists.
 
 ---
@@ -18,7 +18,7 @@ the `conftest_metal` skip plugin). The skips are hardware-impossible (fp64, fp8/
 64-bit atomics, TMA, device printf) or unimplemented features — **each refused loudly, never
 silent-wrong**. Project suite **799 / 0** (incl. 38 `torch.compile` + real-model tests + 7
 training tests, all un-gated); FlashAttention causal + non-causal at head_dim 32 / 64 / 128.
-**`torch.compile` routes through triton-metal on Metal** — inference *and* training (forward +
+**`torch.compile` routes through triton-msl on Metal** — inference *and* training (forward +
 backward), static + dynamic shapes; see below.
 
 ### Landed since this roadmap was written (2026-04-09)
@@ -26,7 +26,7 @@ backward), static + dynamic shapes; see below.
 - **Phase 1A–1D** — 2D tensor semantics, `ttg.local_alloc` shared memory, generic `tt.dot` via
   simdgroup MMA, K-loop. Matmul + attention now lower generically.
 - **MEPT register-array spine** (not in the old plan) — multi-element-per-thread is the DEFAULT
-  lowering path (`TRITON_METAL_MEPT=0` escape hatch), retiring the 1-elem-per-thread model.
+  lowering path (`TRITON_MSL_MEPT=0` escape hatch), retiring the 1-elem-per-thread model.
 - **2A** buffer-copy elimination — done via **zero-copy `torch.mps.compile_shader`** (~10× on
   memory-bound; vector_add 28 → 347 GB/s ≈ 64% of the M4 Max 546 GB/s roof).
 - **Fast simdgroup matmul** — zero-copy, fp32/fp16/fp16-out, ~55–62% of fp32 peak.
@@ -38,7 +38,7 @@ backward), static + dynamic shapes; see below.
 - **2E** (shared-mem aliasing) — partially realized ad hoc (the FA head-dim tiling); a general
   pass remains open.
 - **torch.compile / inductor backend port (2026-06-18)** — `torch.compile(model,
-  backend="inductor")` on `"mps"` routes through our `TritonScheduling` → triton-metal → MSL.
+  backend="inductor")` on `"mps"` routes through our `TritonScheduling` → triton-msl → MSL.
   **32/32 torch.compile + 6/6 real-model tests (cold & warm); dynamic shapes (`dynamic=True`)
   flow through with a single compiled graph (was roadmap 1H).** torch 2.10+ now ships a *native*
   MPS inductor; the port restores routing through OUR kernels and **closes 4 latent silent-wrong
@@ -48,7 +48,7 @@ backward), static + dynamic shapes; see below.
   "torch.compile produces wrong values for unsupported patterns" honesty concern (old 1A/0h).
 - **Training / backward pass (2026-06-18)** — falls out of the inductor port: AOTAutograd's
   backward graph is just more Triton kernels (matmul→matmul, the embedding scatter-add,
-  softmax/layernorm/attention backwards) that lower through triton-metal. `torch.compile`d
+  softmax/layernorm/attention backwards) that lower through triton-msl. `torch.compile`d
   **MLP, CNN, and transformer (w/ embedding) train + converge, matching eager** (grads + an
   8-step Adam loop, `tests/test_training.py`). Fixed one backward-only codegen gap:
   `embedding_dense_backward`'s grad zero-init (a masked MEPT store of a constant to a 1D buffer)
@@ -90,7 +90,7 @@ backward), static + dynamic shapes; see below.
 
 1. **Framework compatibility > kernel performance.** Getting more models working at 0.5x native speed is more valuable than peak GFLOP/s. Prioritize by "models unlocked" not "upstream tests passed."
 2. **Never silently produce wrong results.** Graceful CPU fallback for unsupported patterns (Phase 0h). TorchTPU falls back for every unlowered op.
-3. **MMA intrinsics are our competitive advantage.** `mx.fast.metal_kernel()` cannot access `simdgroup_matrix_multiply_accumulate` or MPP tensor ops. triton-metal CAN. This makes Phase 1C/3A the primary differentiator.
+3. **MMA intrinsics are our competitive advantage.** `mx.fast.metal_kernel()` cannot access `simdgroup_matrix_multiply_accumulate` or MPP tensor ops. triton-msl CAN. This makes Phase 1C/3A the primary differentiator.
 4. **Profile before optimizing kernels.** TurboQuant's biggest win (14x) was architectural, not codegen.
 5. **Correctness-first validation.** Tolerance-based testing (cosine similarity > 0.99, or abs/rel error < 0.01 on 100 random inputs).
 
@@ -116,16 +116,16 @@ Items actively being implemented. These should land before any Phase 1 work begi
 
 | # | Item | What / Why | Scope | Files | Depends On |
 |---|------|-----------|-------|-------|------------|
-| 0a | **2D tensor shape tracking** | Foundation for 2D semantics. `_prescan_2d_info()` maps `tt.make_range` ops to dimension indices, tracks `_effective_2d_shape`, and propagates through `expand_dims`/`broadcast` chains. Required before any generic 2D codegen. | ~200 LOC (incremental to existing ~70 LOC in `_prescan_2d_info`) | `triton_metal/codegen/generic_lowerer.py` | -- |
-| 0b | **Metal 4 device detection** | `device_detect.py` module that probes chip family (M1-M5), infers Metal SDK version (3.0-4.1), and exposes `DeviceInfo` with `supports_metal4`, `supports_tensor_ops`, `has_bfloat16`. Enables conditional codegen for M4+/M5+ features. | ~240 LOC (file being created) | `triton_metal/backend/device_detect.py` | -- |
-| 0c | **Missing math ops (log1p, expm1)** | Map `math.log1p` and `math.expm1` to MSL `log(1+x)` / `exp(x)-1` (or precise equivalents). Needed for numerical stability in loss functions. | ~20 LOC | `triton_metal/codegen/generic_lowerer.py` (`_lower_math`) | -- |
-| 0d | **tt.extern_elementwise** | Handle `tt.extern_elementwise` by dispatching to a user-provided MSL function name or a built-in libdevice shim. Unblocks upstream tests that use `tl.extra.cuda.libdevice.*`. | ~60 LOC | `triton_metal/codegen/generic_lowerer.py` (`_lower_op_dispatch`), `triton_metal/inductor/metal_libdevice.py` | -- |
-| 0e | **scf.for in device functions** | Currently emits `// UNSUPPORTED: scf.for in device func`. Port `_lower_scf_for` logic from `GenericLowerer` into `_DeviceFuncLowerer` so noinline callees can contain loops. | ~80 LOC | `triton_metal/codegen/generic_lowerer.py` (`_DeviceFuncLowerer._lower_op`) | -- |
+| 0a | **2D tensor shape tracking** | Foundation for 2D semantics. `_prescan_2d_info()` maps `tt.make_range` ops to dimension indices, tracks `_effective_2d_shape`, and propagates through `expand_dims`/`broadcast` chains. Required before any generic 2D codegen. | ~200 LOC (incremental to existing ~70 LOC in `_prescan_2d_info`) | `triton_msl/codegen/generic_lowerer.py` | -- |
+| 0b | **Metal 4 device detection** | `device_detect.py` module that probes chip family (M1-M5), infers Metal SDK version (3.0-4.1), and exposes `DeviceInfo` with `supports_metal4`, `supports_tensor_ops`, `has_bfloat16`. Enables conditional codegen for M4+/M5+ features. | ~240 LOC (file being created) | `triton_msl/backend/device_detect.py` | -- |
+| 0c | **Missing math ops (log1p, expm1)** | Map `math.log1p` and `math.expm1` to MSL `log(1+x)` / `exp(x)-1` (or precise equivalents). Needed for numerical stability in loss functions. | ~20 LOC | `triton_msl/codegen/generic_lowerer.py` (`_lower_math`) | -- |
+| 0d | **tt.extern_elementwise** | Handle `tt.extern_elementwise` by dispatching to a user-provided MSL function name or a built-in libdevice shim. Unblocks upstream tests that use `tl.extra.cuda.libdevice.*`. | ~60 LOC | `triton_msl/codegen/generic_lowerer.py` (`_lower_op_dispatch`), `triton_msl/inductor/metal_libdevice.py` | -- |
+| 0e | **scf.for in device functions** | Currently emits `// UNSUPPORTED: scf.for in device func`. Port `_lower_scf_for` logic from `GenericLowerer` into `_DeviceFuncLowerer` so noinline callees can contain loops. | ~80 LOC | `triton_msl/codegen/generic_lowerer.py` (`_DeviceFuncLowerer._lower_op`) | -- |
 | 0f | **conftest skip list update** | Update `scripts/conftest_metal.py` skip predicates to reflect newly-passing test categories (atomics, while loops, 2D reduce, etc.). Reduces noise in upstream test runs. | ~30 LOC | `scripts/conftest_metal.py` | -- |
-| 0g | **macOS 26 (Tahoe) compatibility** | Verify `device_detect.py` handles macOS 26+ version strings correctly. PyTorch MPS broke on Tahoe due to version parsing ("26.0" not parsed as >= "14.0"). Ensure our Metal version probing, deployment target flags, and `xcrun` invocations work on macOS 26.x. | ~40 LOC | `triton_metal/backend/device_detect.py`, `triton_metal/backend/compiler.py` | 0b |
-| 0h | **Graceful fallback for unsupported kernels** | When a Triton kernel fails to compile to MSL (e.g., unsupported 2D patterns from PyTorch 2.11 inductor), fall back to CPU execution with a logged warning instead of silently producing wrong results. Lesson from TorchTPU: every unlowered op falls back to CPU. Currently our torch.compile path produces *wrong values* for unsupported patterns — the worst failure mode. | ~80 LOC | `triton_metal/backend/compiler.py`, `triton_metal/inductor/__init__.py` | -- |
-| 0i | **Persistent compilation cache** | Move metallib cache from `/tmp/` to `~/.cache/triton_metal/` so compiled kernels survive reboots. Cache `emit_msl()` output too (TTGIR hash → MSL string). Lesson from TorchTPU (shared compilation cache) and TurboQuant (kernel caching pattern). | ~60 LOC | `triton_metal/backend/compiler.py`, `triton_metal/debug.py` | -- |
-| 0j | **sizePerThread handling** | **DONE.** Extract `sizePerThread` from TTGIR blocked layout, multi-pass reduction for reduction kernels. Softmax 18% faster (0.98ms → 0.78ms). | Commits: 47e1810..615b638 | `triton_metal/codegen/mlir_walker.py`, `triton_metal/codegen/generic_lowerer.py` | -- |
+| 0g | **macOS 26 (Tahoe) compatibility** | Verify `device_detect.py` handles macOS 26+ version strings correctly. PyTorch MPS broke on Tahoe due to version parsing ("26.0" not parsed as >= "14.0"). Ensure our Metal version probing, deployment target flags, and `xcrun` invocations work on macOS 26.x. | ~40 LOC | `triton_msl/backend/device_detect.py`, `triton_msl/backend/compiler.py` | 0b |
+| 0h | **Graceful fallback for unsupported kernels** | When a Triton kernel fails to compile to MSL (e.g., unsupported 2D patterns from PyTorch 2.11 inductor), fall back to CPU execution with a logged warning instead of silently producing wrong results. Lesson from TorchTPU: every unlowered op falls back to CPU. Currently our torch.compile path produces *wrong values* for unsupported patterns — the worst failure mode. | ~80 LOC | `triton_msl/backend/compiler.py`, `triton_msl/inductor/__init__.py` | -- |
+| 0i | **Persistent compilation cache** | Move metallib cache from `/tmp/` to `~/.cache/triton_msl/` so compiled kernels survive reboots. Cache `emit_msl()` output too (TTGIR hash → MSL string). Lesson from TorchTPU (shared compilation cache) and TurboQuant (kernel caching pattern). | ~60 LOC | `triton_msl/backend/compiler.py`, `triton_msl/debug.py` | -- |
+| 0j | **sizePerThread handling** | **DONE.** Extract `sizePerThread` from TTGIR blocked layout, multi-pass reduction for reduction kernels. Softmax 18% faster (0.98ms → 0.78ms). | Commits: 47e1810..615b638 | `triton_msl/codegen/mlir_walker.py`, `triton_msl/codegen/generic_lowerer.py` | -- |
 
 **Exit criterion for Phase 0:** All items merged to main, CI green, upstream test count unchanged or increased.
 
@@ -145,7 +145,7 @@ The critical path. These items transform the lowerer from a 1D-per-thread model 
 | **Why** | Without this, any kernel that uses 2D indexing (matmul, 2D convolution, multi-head attention with 2D tiling, `test_bin_op` scalar broadcast) produces incorrect results. The ~780 "numerical mismatch" upstream failures are primarily caused by this. |
 | **Scope** | ~400 LOC. Touches `_lower_make_range`, `_lower_expand_dims`, `_lower_broadcast`, `_lower_load`, `_lower_store` (2D pointer arithmetic), and thread launch logic in `KernelBuilder`. |
 | **Dependencies** | Phase 0a (2D shape tracking) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (core changes), `triton_metal/codegen/msl_emitter.py` (2D threadgroup dispatch in `KernelBuilder`) |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (core changes), `triton_msl/codegen/msl_emitter.py` (2D threadgroup dispatch in `KernelBuilder`) |
 
 ### 1B. ttg.local_alloc -- Threadgroup Shared Memory
 
@@ -155,7 +155,7 @@ The critical path. These items transform the lowerer from a 1D-per-thread model 
 | **Why** | Required for generic `tt.dot` lowering (tiles of A and B must be staged in threadgroup memory for cooperative loading). Also needed for reductions on tensors larger than one threadgroup. |
 | **Scope** | ~250 LOC. New shared memory allocation tracking in `GenericLowerer.__init__`, emitters for alloc/load/store, MSL declaration in kernel prologue. |
 | **Dependencies** | Phase 1A (2D semantics for indexing into shared memory) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (`_lower_ttg`), `triton_metal/codegen/msl_emitter.py` (shared memory declarations) |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (`_lower_ttg`), `triton_msl/codegen/msl_emitter.py` (shared memory declarations) |
 
 ### 1C. Generic tt.dot via simdgroup_matrix_multiply_accumulate
 
@@ -165,7 +165,7 @@ The critical path. These items transform the lowerer from a 1D-per-thread model 
 | **Why** | The prebuilt templates are fragile, hard to extend (every new epilogue needs a new template variant), and limited to specific pointer layouts. A generic path lets Triton's optimizer handle fusion and layout -- the lowerer just translates ops. |
 | **Scope** | ~500 LOC new generic path, ~-580 LOC removed templates (net ~-80 LOC). High complexity: must handle SIMD group coordination, 8x8 tile decomposition, accumulator initialization. |
 | **Dependencies** | Phase 1A (2D semantics), Phase 1B (threadgroup memory) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (new `_lower_dot` implementation, delete `_lower_dot_via_prebuilt_template`, `_lower_dot_simple_template`, `_lower_dot_constant_template`) |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (new `_lower_dot` implementation, delete `_lower_dot_via_prebuilt_template`, `_lower_dot_simple_template`, `_lower_dot_constant_template`) |
 
 ### 1D. K-Loop Handling (scf.for Wrapping tt.dot)
 
@@ -175,7 +175,7 @@ The critical path. These items transform the lowerer from a 1D-per-thread model 
 | **Why** | All real matmul kernels (including Triton tutorial 03) tile the K dimension. Without this, only tiny matmuls that fit in a single tile work. |
 | **Scope** | ~150 LOC. Mostly ensuring `_lower_scf_for` correctly handles iter_args that are matrix accumulators, and inserting `threadgroup_barrier(mem_flags::mem_threadgroup)` between the cooperative load and the MMA. |
 | **Dependencies** | Phase 1C (generic tt.dot) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (`_lower_scf_for`, barrier insertion logic) |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (`_lower_scf_for`, barrier insertion logic) |
 
 ### 1E. 2D Matmul in Device Functions
 
@@ -185,7 +185,7 @@ The critical path. These items transform the lowerer from a 1D-per-thread model 
 | **Why** | Upstream Triton tests use noinline functions containing matmul. Also needed for modular kernel design where matmul is a sub-routine. |
 | **Scope** | ~200 LOC. Port 2D indexing and shared memory logic from `GenericLowerer` into `_DeviceFuncLowerer`. |
 | **Dependencies** | Phase 0e (scf.for in device funcs), Phase 1C (generic tt.dot) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (`_DeviceFuncLowerer`) |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (`_DeviceFuncLowerer`) |
 
 ### 1F. Loop Fusion (tl.range Optimization)
 
@@ -193,9 +193,9 @@ The critical path. These items transform the lowerer from a 1D-per-thread model 
 |--------|--------|
 | **What** | When Triton emits multiple sequential `scf.for` loops that iterate over the same range and access the same data, fuse them into a single loop. This is a post-walk optimization pass on the IRGraph. `tl.range` in user code often results in separate loops for load, compute, and store phases that could be a single loop. |
 | **Why** | Reduces kernel launch overhead and improves cache/register utilization. Important for achieving competitive performance on memory-bound kernels. |
-| **Scope** | ~200 LOC. New optimization pass in `mlir_walker.py` or a new file `triton_metal/codegen/optimizations.py`. |
+| **Scope** | ~200 LOC. New optimization pass in `mlir_walker.py` or a new file `triton_msl/codegen/optimizations.py`. |
 | **Dependencies** | Phase 1D (K-loop handling, so we understand the loop IR patterns) |
-| **Files** | `triton_metal/codegen/mlir_walker.py` or new `triton_metal/codegen/optimizations.py`, `triton_metal/codegen/generic_lowerer.py` (invoke pass before lowering) |
+| **Files** | `triton_msl/codegen/mlir_walker.py` or new `triton_msl/codegen/optimizations.py`, `triton_msl/codegen/generic_lowerer.py` (invoke pass before lowering) |
 
 ### 1G. Cooperative Grid Sync
 
@@ -205,7 +205,7 @@ The critical path. These items transform the lowerer from a 1D-per-thread model 
 | **Why** | Required for persistent kernel patterns used in advanced Triton kernels (FlashAttention, fused optimizers). Also needed for `tt.debug_barrier` and cross-threadgroup reductions. |
 | **Scope** | ~150 LOC. Changes to driver dispatch logic, kernel argument additions (global sync counter buffer), MSL fence intrinsics. |
 | **Dependencies** | Phase 1B (threadgroup memory, as cooperative sync patterns often use shared memory) |
-| **Files** | `triton_metal/backend/driver.py` (cooperative dispatch path), `triton_metal/codegen/generic_lowerer.py` (emit sync primitives), `triton_metal/backend/compiler.py` (propagate option) |
+| **Files** | `triton_msl/backend/driver.py` (cooperative dispatch path), `triton_msl/codegen/generic_lowerer.py` (emit sync primitives), `triton_msl/backend/compiler.py` (propagate option) |
 
 ### 1H. Dynamic Shape Support (Full Symbolic Dispatch)
 
@@ -215,7 +215,7 @@ The critical path. These items transform the lowerer from a 1D-per-thread model 
 | **Why** | Eliminates recompilation when input shapes change (common in inference with variable sequence lengths). Required for `torch.compile` with dynamic shapes. |
 | **Scope** | ~300 LOC. Changes span the full pipeline: walker must track which values are symbolic, lowerer must emit runtime expressions instead of constant-folded values, driver must compute grids dynamically. |
 | **Dependencies** | Phase 1A (2D semantics, since dynamic shapes affect 2D indexing) |
-| **Files** | `triton_metal/codegen/mlir_walker.py` (symbolic value tracking), `triton_metal/codegen/generic_lowerer.py` (symbolic codegen), `triton_metal/backend/driver.py` (dynamic grid calculation), `triton_metal/backend/compiler.py` (metadata for dynamic args) |
+| **Files** | `triton_msl/codegen/mlir_walker.py` (symbolic value tracking), `triton_msl/codegen/generic_lowerer.py` (symbolic codegen), `triton_msl/backend/driver.py` (dynamic grid calculation), `triton_msl/backend/compiler.py` (metadata for dynamic args) |
 
 **Phase 1 summary:**
 
@@ -240,7 +240,7 @@ These items improve runtime performance without changing correctness. Can be wor
 | **Why** | The ~0.15ms per-launch copy overhead dominates small kernel latency. Removing it would give 55x improvement for aligned cases (per ARCHITECTURE.md measurements). |
 | **Scope** | ~200 LOC. Primarily driver changes, plus alignment detection utilities. |
 | **Dependencies** | None (independent of Phase 1) |
-| **Files** | `triton_metal/backend/driver.py` (buffer creation/copy-back logic), `triton_metal/buffer_pool.py` (alignment-aware allocation) |
+| **Files** | `triton_msl/backend/driver.py` (buffer creation/copy-back logic), `triton_msl/buffer_pool.py` (alignment-aware allocation) |
 
 ### 2B. Kernel Fusion Opportunities
 
@@ -250,7 +250,7 @@ These items improve runtime performance without changing correctness. Can be wor
 | **Why** | Reduces command buffer overhead and allows Metal's GPU scheduler to overlap execution. Important for torch.compile where the inductor may emit many small kernels. |
 | **Scope** | ~250 LOC. Extend batched dispatch to detect fusable sequences, add buffer lifetime tracking. |
 | **Dependencies** | None |
-| **Files** | `triton_metal/backend/driver.py` (fusion detection in launch path), `triton_metal/inductor/metal_libdevice.py` (hint annotations for fusable sequences) |
+| **Files** | `triton_msl/backend/driver.py` (fusion detection in launch path), `triton_msl/inductor/metal_libdevice.py` (hint annotations for fusable sequences) |
 
 ### 2C. Autotuning Improvements (Search Space Expansion)
 
@@ -260,7 +260,7 @@ These items improve runtime performance without changing correctness. Can be wor
 | **Why** | Current autotuning only explores 1D block sizes. 2D kernels (matmul, attention) have a much richer configuration space where the optimal tile size depends on problem dimensions and hardware. |
 | **Scope** | ~300 LOC. Autotuner configuration expansion, SQLite cache. |
 | **Dependencies** | Phase 1A (2D semantics, for 2D tile size tuning to be meaningful) |
-| **Files** | `triton_metal/autotuning/autotuner.py`, `triton_metal/autotuning/__init__.py`, new `triton_metal/autotuning/cache.py` |
+| **Files** | `triton_msl/autotuning/autotuner.py`, `triton_msl/autotuning/__init__.py`, new `triton_msl/autotuning/cache.py` |
 
 ### 2D. Benchmark Suite Expansion
 
@@ -280,7 +280,7 @@ These items improve runtime performance without changing correctness. Can be wor
 | **Why** | Metal caps threadgroup memory at 32KB. FlashAttention with HEAD_DIM=64 needs Q(8KB) + K(8KB) + V(8KB) + S(4KB) + dot_result(8KB) = 36KB+. K can be freed before V is loaded, so K and V can alias. This optimization would unlock HEAD_DIM=64 flash attention and larger matmul tiles. |
 | **Scope** | ~200 LOC. Lifetime analysis pass after the lowerer's op scan, shared memory allocation planner, alias assignment. |
 | **Dependencies** | Phase 1B (ttg.local_alloc as real ops — DONE) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (lifetime analysis + alias assignment) |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (lifetime analysis + alias assignment) |
 
 **Phase 2 summary:**
 
@@ -304,7 +304,7 @@ These items target Apple's next-generation GPU architecture and Metal 4 API. The
 | **Why** | M5's tensor ops are expected to deliver 2-4x higher matmul throughput vs simdgroup MMA on M4. This is the single biggest performance opportunity for compute-bound workloads. |
 | **Scope** | ~350 LOC. New MMA emission path in the generic lowerer, conditional on device detection. Metal 4.1 API surface is speculative (based on WWDC 2026 expectations), so scope may shift. |
 | **Dependencies** | Phase 0b (device detection), Phase 1C (generic tt.dot -- the tensor op path replaces the MMA emission, not the surrounding tile/loop logic) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (new MMA emission path in `_lower_dot`), `triton_metal/backend/compiler.py` (Metal 4.1 compilation flags), `triton_metal/backend/device_detect.py` (already has `supports_tensor_ops`) |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (new MMA emission path in `_lower_dot`), `triton_msl/backend/compiler.py` (Metal 4.1 compilation flags), `triton_msl/backend/device_detect.py` (already has `supports_tensor_ops`) |
 
 ### 3B. Metal 4 Command Model (MTL4ArgumentTable, Explicit Barriers)
 
@@ -314,7 +314,7 @@ These items target Apple's next-generation GPU architecture and Metal 4 API. The
 | **Why** | Reduces per-kernel CPU overhead from ~50us to potentially ~10us. Also enables advanced patterns like indirect dispatch and persistent kernels that require explicit barrier control. |
 | **Scope** | ~400 LOC. New Metal 4 dispatch path in the driver, parallel to the existing Metal 3.x path. Must maintain backward compatibility. |
 | **Dependencies** | Phase 0b (device detection, to gate on `supports_metal4`) |
-| **Files** | `triton_metal/backend/driver.py` (new `_dispatch_metal4` method alongside existing `_dispatch`), `triton_metal/buffer_pool.py` (argument table allocation) |
+| **Files** | `triton_msl/backend/driver.py` (new `_dispatch_metal4` method alongside existing `_dispatch`), `triton_msl/buffer_pool.py` (argument table allocation) |
 
 ### 3C. nvfp4/mxfp8 Quantization Format Support
 
@@ -324,17 +324,17 @@ These items target Apple's next-generation GPU architecture and Metal 4 API. The
 | **Why** | MXFP8 and FP4 are the dominant quantization formats for LLM inference (used by GPTQ, AWQ, GGUF). Supporting them is table-stakes for vLLM and llama.cpp integration. |
 | **Scope** | ~500 LOC (high if software emulation needed). Type system additions, dequantization kernels, mixed-precision dot product support. |
 | **Dependencies** | Phase 3A (tensor op matmul -- FP8 dot products are most useful with tensor ops), Phase 4A (FP8 software emulation as fallback) |
-| **Files** | `triton_metal/codegen/msl_types.py` (new types), `triton_metal/codegen/generic_lowerer.py` (mixed-precision load/dot), `triton_metal/codegen/msl_emitter.py` (dequantization helpers) |
+| **Files** | `triton_msl/codegen/msl_types.py` (new types), `triton_msl/codegen/generic_lowerer.py` (mixed-precision load/dot), `triton_msl/codegen/msl_emitter.py` (dequantization helpers) |
 
 ### 3D. Backward Compatibility Testing (M1-M4 Fallback Paths)
 
 | Aspect | Detail |
 |--------|--------|
 | **What** | Systematic testing and fallback codegen for all conditional features: (1) M1/M2: no BF16 in shaders -- auto-promote to FP32. (2) M1-M3: no Metal 4 -- use Metal 3.x command model. (3) M1-M4: no tensor ops -- use simdgroup MMA. Build a CI matrix that tests on M1, M2, M3, M4 (via macOS VMs or physical hardware). |
-| **Why** | triton-metal claims "M1 or later" support. Without regression testing on older hardware, Metal 4 codegen changes could silently break M1-M3 users. |
+| **Why** | triton-msl claims "M1 or later" support. Without regression testing on older hardware, Metal 4 codegen changes could silently break M1-M3 users. |
 | **Scope** | ~200 LOC (codegen fallback guards) + CI configuration. |
 | **Dependencies** | Phase 0b (device detection), Phase 3A/3B (features that need fallbacks) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (conditional emission), `triton_metal/backend/compiler.py` (MSL version flag selection), `.github/workflows/` (CI matrix), new `tests/test_device_compat.py` |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (conditional emission), `triton_msl/backend/compiler.py` (MSL version flag selection), `.github/workflows/` (CI matrix), new `tests/test_device_compat.py` |
 
 **Phase 3 summary:**
 
@@ -357,7 +357,7 @@ These items target Apple's next-generation GPU architecture and Metal 4 API. The
 | **Why** | FP8 is used by transformer inference libraries (vLLM, TRT-LLM, FlashInfer). Even without hardware FP8, software emulation enables running FP8-quantized models on Apple Silicon. The ~500 upstream tests skipped for FP8 could partially pass. |
 | **Scope** | ~300 LOC. MSL helper functions, type system additions, load/store modifications. |
 | **Dependencies** | None (independent, but benefits from Phase 1A for 2D FP8 tensors) |
-| **Files** | `triton_metal/codegen/msl_types.py` (FP8 type definitions), `triton_metal/codegen/msl_builtins.py` (conversion functions), `triton_metal/codegen/generic_lowerer.py` (FP8-aware load/store/cast), `scripts/conftest_metal.py` (un-skip FP8 tests) |
+| **Files** | `triton_msl/codegen/msl_types.py` (FP8 type definitions), `triton_msl/codegen/msl_builtins.py` (conversion functions), `triton_msl/codegen/generic_lowerer.py` (FP8-aware load/store/cast), `scripts/conftest_metal.py` (un-skip FP8 tests) |
 
 ### 4B. INT4 Weight-Only Quantization
 
@@ -367,7 +367,7 @@ These items target Apple's next-generation GPU architecture and Metal 4 API. The
 | **Why** | INT4 quantization (GPTQ, AWQ) halves model memory, critical on Apple Silicon's unified memory. The existing `make_int4_matmul_kernel` in `msl_emitter.py` is a prebuilt template; this makes it generic. |
 | **Scope** | ~250 LOC. MSL unpack helpers, modified load path for packed types, scale application. |
 | **Dependencies** | Phase 1C (generic tt.dot, so INT4 matmul can use the generic path) |
-| **Files** | `triton_metal/codegen/msl_builtins.py` (INT4 unpack), `triton_metal/codegen/generic_lowerer.py` (packed load), `triton_metal/codegen/msl_types.py` (INT4 type) |
+| **Files** | `triton_msl/codegen/msl_builtins.py` (INT4 unpack), `triton_msl/codegen/generic_lowerer.py` (packed load), `triton_msl/codegen/msl_types.py` (INT4 type) |
 
 ### 4C. Mixed Precision Support Improvements
 
@@ -377,7 +377,7 @@ These items target Apple's next-generation GPU architecture and Metal 4 API. The
 | **Why** | Real models use many precision combinations. Current type handling is ad-hoc; a systematic approach prevents subtle numerical bugs. |
 | **Scope** | ~200 LOC. Audit and fix cast emission for all type pairs. |
 | **Dependencies** | Phase 4A (FP8 adds more type pairs to handle) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (`_lower_arith` cast handlers), `triton_metal/codegen/msl_types.py` |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (`_lower_arith` cast handlers), `triton_msl/codegen/msl_types.py` |
 
 **Phase 4 summary:**
 
@@ -398,10 +398,10 @@ Training requires backward pass generation and memory management for gradients. 
 | Aspect | Detail |
 |--------|--------|
 | **What** | Generate backward kernels for forward kernels. Two approaches: (1) **Triton-level**: rely on Triton's `@triton.jit` to define both forward and backward kernels manually (user writes both, we just compile both). (2) **Autograd-level**: integrate with PyTorch's autograd to register custom backward functions for Triton-compiled forward ops. Start with approach 1 (lower barrier), then add approach 2. |
-| **Why** | Training on Apple Silicon is the most-requested feature. Without backward pass support, triton-metal is inference-only. |
+| **Why** | Training on Apple Silicon is the most-requested feature. Without backward pass support, triton-msl is inference-only. |
 | **Scope** | ~500 LOC for approach 1 (register manual backward kernels with autograd), ~800 LOC additionally for approach 2 (automatic backward generation). |
 | **Dependencies** | Phase 1 (2D semantics -- backward matmul needs 2D), Phase 2A (buffer copy elimination -- training is memory-intensive) |
-| **Files** | New `triton_metal/training/__init__.py`, new `triton_metal/training/autograd.py`, `triton_metal/backend/driver.py` (gradient buffer management), `triton_metal/inductor/metal_libdevice.py` (backward op registration) |
+| **Files** | New `triton_msl/training/__init__.py`, new `triton_msl/training/autograd.py`, `triton_msl/backend/driver.py` (gradient buffer management), `triton_msl/inductor/metal_libdevice.py` (backward op registration) |
 
 ### 5B. Autograd Integration
 
@@ -411,7 +411,7 @@ Training requires backward pass generation and memory management for gradients. 
 | **Why** | Enables `model.train()` with torch.compile on Metal. Without this, users must manually manage gradient computation. |
 | **Scope** | ~400 LOC. Autograd function wrappers, context management, inductor integration. |
 | **Dependencies** | Phase 5A (backward kernel compilation) |
-| **Files** | `triton_metal/training/autograd.py`, `triton_metal/inductor/metal_libdevice.py` (register backward patterns), new `tests/test_training.py` |
+| **Files** | `triton_msl/training/autograd.py`, `triton_msl/inductor/metal_libdevice.py` (register backward patterns), new `tests/test_training.py` |
 
 ### 5C. Memory Management for Training
 
@@ -421,7 +421,7 @@ Training requires backward pass generation and memory management for gradients. 
 | **Why** | Apple Silicon's unified memory is typically 16-128 GB. Training a 7B model requires ~28 GB for weights + gradients + optimizer state in FP16. Without careful memory management, OOM on 32 GB machines. |
 | **Scope** | ~600 LOC. Buffer pool extensions, gradient accumulation kernels, optimizer state management. |
 | **Dependencies** | Phase 5B (autograd integration, to know buffer lifetimes) |
-| **Files** | `triton_metal/buffer_pool.py` (generation-based cleanup), `triton_metal/backend/driver.py` (gradient buffer APIs), new `triton_metal/training/memory.py`, new `triton_metal/training/optimizers.py` |
+| **Files** | `triton_msl/buffer_pool.py` (generation-based cleanup), `triton_msl/backend/driver.py` (gradient buffer APIs), new `triton_msl/training/memory.py`, new `triton_msl/training/optimizers.py` |
 
 **Phase 5 summary:**
 
@@ -446,27 +446,27 @@ External integrations that depend on core features being stable.
 | **Why** | FlashAttention is the most important kernel for transformer inference and training. It exercises every major subsystem: 2D tiling, K-loop, shared memory, reductions, masking, and epilogue fusion. Getting it right validates the entire stack. |
 | **Scope** | ~200 LOC (codegen fixes/additions, not a new kernel). The kernel itself is already written in Triton; the work is making the lowerer handle its patterns. |
 | **Dependencies** | Phase 1A-1D (2D semantics, shared memory, generic tt.dot, K-loop), Phase 1G (cooperative grid sync for persistent FlashAttention variant) |
-| **Files** | `triton_metal/codegen/generic_lowerer.py` (pattern fixes discovered during FlashAttention bring-up), new `tests/test_flash_attention.py`, `benchmarks/bench_attention.py` |
+| **Files** | `triton_msl/codegen/generic_lowerer.py` (pattern fixes discovered during FlashAttention bring-up), new `tests/test_flash_attention.py`, `benchmarks/bench_attention.py` |
 
 ### 6B. vLLM-Metal Integration
 
 | Aspect | Detail |
 |--------|--------|
-| **What** | Create a vLLM executor backend for Apple Silicon that uses triton-metal for kernel dispatch. Key requirements: (1) PagedAttention kernel running on Metal, (2) KV cache management using Metal buffers, (3) Sampler kernels (top-k, top-p) on Metal, (4) Model runner that detects Apple Silicon and routes through triton-metal. |
+| **What** | Create a vLLM executor backend for Apple Silicon that uses triton-msl for kernel dispatch. Key requirements: (1) PagedAttention kernel running on Metal, (2) KV cache management using Metal buffers, (3) Sampler kernels (top-k, top-p) on Metal, (4) Model runner that detects Apple Silicon and routes through triton-msl. |
 | **Why** | vLLM is the dominant LLM serving framework. Metal support would make Apple Silicon viable for local LLM serving with state-of-the-art batching and scheduling. |
-| **Scope** | ~1,000 LOC (in a separate repo/fork, plus ~200 LOC adapter in triton-metal). High complexity due to vLLM's internal architecture. |
+| **Scope** | ~1,000 LOC (in a separate repo/fork, plus ~200 LOC adapter in triton-msl). High complexity due to vLLM's internal architecture. |
 | **Dependencies** | Phase 6A (FlashAttention -- vLLM's core kernel), Phase 4A/4B (FP8/INT4 for quantized models), Phase 1H (dynamic shapes for variable sequence lengths) |
-| **Files** | New `triton_metal/integrations/vllm.py` (adapter), external vLLM fork (executor backend), `triton_metal/backend/driver.py` (KV cache buffer management) |
+| **Files** | New `triton_msl/integrations/vllm.py` (adapter), external vLLM fork (executor backend), `triton_msl/backend/driver.py` (KV cache buffer management) |
 
 ### 6C. Upstream Triton Contribution (Issue #4824)
 
 | Aspect | Detail |
 |--------|--------|
-| **What** | Contribute triton-metal as an official third-party backend to the Triton project. Per Triton's backend plugin architecture, this means: (1) Register via `[project.entry-points."triton.backends"]` (already done). (2) Pass the upstream backend conformance tests. (3) Submit a PR to triton-lang/triton adding Metal to the backend registry and CI. (4) Address review feedback on API compatibility. |
-| **Why** | Official upstream status means triton-metal gets tested in Triton CI, discovered by `pip install triton`, and maintained alongside Triton core changes. |
-| **Scope** | ~100 LOC in triton-metal (conformance fixes), ~200 LOC in upstream Triton (registry, CI config, docs). Majority of effort is review and iteration. |
+| **What** | Contribute triton-msl as an official third-party backend to the Triton project. Per Triton's backend plugin architecture, this means: (1) Register via `[project.entry-points."triton.backends"]` (already done). (2) Pass the upstream backend conformance tests. (3) Submit a PR to triton-lang/triton adding Metal to the backend registry and CI. (4) Address review feedback on API compatibility. |
+| **Why** | Official upstream status means triton-msl gets tested in Triton CI, discovered by `pip install triton`, and maintained alongside Triton core changes. |
+| **Scope** | ~100 LOC in triton-msl (conformance fixes), ~200 LOC in upstream Triton (registry, CI config, docs). Majority of effort is review and iteration. |
 | **Dependencies** | Phase 1 (core architecture must be solid), target: >6,000 upstream tests passing |
-| **Files** | `triton_metal/backend/compiler.py` (API conformance), `triton_metal/backend/driver.py` (API conformance), `pyproject.toml` (metadata for registry) |
+| **Files** | `triton_msl/backend/compiler.py` (API conformance), `triton_msl/backend/driver.py` (API conformance), `pyproject.toml` (metadata for registry) |
 
 ### 6D. triton-ext C++ Pass Contribution
 
@@ -476,13 +476,13 @@ External integrations that depend on core features being stable.
 | **Why** | C++ passes are faster and more robust than Python-level pattern matching. Other backends (AMD, Intel) contribute backend-specific passes to triton-ext. |
 | **Scope** | ~1,500 LOC C++ (MLIR pass infrastructure + Metal-specific transforms). Very high complexity: requires MLIR C++ development experience and Triton's internal pass pipeline knowledge. |
 | **Dependencies** | Phase 6C (upstream relationship established), Phase 1 (architecture stable enough to know what transforms are needed) |
-| **Files** | New C++ project in triton-ext (separate repo). `triton_metal/backend/compiler.py` (invoke C++ pass if available) |
+| **Files** | New C++ project in triton-ext (separate repo). `triton_msl/backend/compiler.py` (invoke C++ pass if available) |
 
 ### 6E. PyPI Publishing Workflow Testing
 
 | Aspect | Detail |
 |--------|--------|
-| **What** | Set up and test the `pip install triton-metal` publishing pipeline: (1) GitHub Actions workflow for building sdist and wheel. (2) macOS-only wheel with platform tag `macosx_14_0_arm64`. (3) Test installation on clean macOS VM. (4) Automated version bumping and changelog generation. (5) TestPyPI dry-run before real publish. |
+| **What** | Set up and test the `pip install triton-msl` publishing pipeline: (1) GitHub Actions workflow for building sdist and wheel. (2) macOS-only wheel with platform tag `macosx_14_0_arm64`. (3) Test installation on clean macOS VM. (4) Automated version bumping and changelog generation. (5) TestPyPI dry-run before real publish. |
 | **Why** | Currently installable via `pip install -e .` only. A published package is required for user adoption and upstream Triton integration. |
 | **Scope** | ~150 LOC (CI workflow YAML + publish script). |
 | **Dependencies** | None (can be done anytime, but should wait until Phase 1 is stable for a meaningful release) |

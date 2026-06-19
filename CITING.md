@@ -1,16 +1,16 @@
-# Citing triton-metal
+# Citing triton-msl
 
-If you use `triton-metal` in research or technical work, please cite the
+If you use `triton-msl` in research or technical work, please cite the
 project alongside the underlying Triton compiler ([REFERENCES.md][1]).
 
 ## BibTeX
 
 ```bibtex
-@software{triton_metal,
-  title   = {triton-metal: Apple Silicon Metal backend for OpenAI Triton},
+@software{triton_msl,
+  title   = {triton-msl: Apple Silicon Metal backend for OpenAI Triton},
   author  = {Ledden, Blake},
   year    = {2026},
-  url     = {https://github.com/bledden/triton-metal},
+  url     = {https://github.com/bledden/triton-msl},
   version = {0.1.0-alpha},
   note    = {Apple Silicon Metal backend for the OpenAI Triton compiler;
              alpha release. See CHANGELOG.md for current status.}

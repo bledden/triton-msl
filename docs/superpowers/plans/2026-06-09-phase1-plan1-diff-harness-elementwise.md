@@ -4,25 +4,25 @@
 
 **Goal:** Data-driven C++ family allowlist + differential C++/Python harness; flip elementwise/cast default-on through C++.
 
-**Architecture:** Extract `_has_complex_ops`'s op set into `cpp_families.py` (family→ops + ENABLED set). Routing: kernel ops ⊆ enabled-union → C++ by default (`TRITON_METAL_FORCE_PYTHON=1` escape). Differential = subprocess per path, byte-compare buffers.
+**Architecture:** Extract `_has_complex_ops`'s op set into `cpp_families.py` (family→ops + ENABLED set). Routing: kernel ops ⊆ enabled-union → C++ by default (`TRITON_MSL_FORCE_PYTHON=1` escape). Differential = subprocess per path, byte-compare buffers.
 
-**Tech Stack:** `/Users/bledden/Documents/triton-metal/.venv/bin/python`, pytest; caches `~/.cache/triton_metal` + `~/.triton/cache` cleared, serial GPU. C++ must be built; tests skip if `MetalBackend._has_cpp_passes()` false.
+**Tech Stack:** `/Users/bledden/Documents/triton-msl/.venv/bin/python`, pytest; caches `~/.cache/triton_msl` + `~/.triton/cache` cleared, serial GPU. C++ must be built; tests skip if `MetalBackend._has_cpp_passes()` false.
 
 ---
 
 ### Task 1: data-driven family table
 
-**Files:** Create `triton_metal/backend/cpp_families.py`; Modify `compiler.py:268-330`; Test `tests/test_cpp_families.py`
+**Files:** Create `triton_msl/backend/cpp_families.py`; Modify `compiler.py:268-330`; Test `tests/test_cpp_families.py`
 
 - [ ] Step 1 failing test:
 ```python
 import triton  # noqa
 def test_families_cover_legacy_allowlist():
-    from triton_metal.backend.cpp_families import FAMILIES, enabled_ops
+    from triton_msl.backend.cpp_families import FAMILIES, enabled_ops
     assert {"elementwise"} <= set(FAMILIES)
     assert "tt.load" in enabled_ops()
 def test_router_uses_table():
-    from triton_metal.backend.compiler import MetalBackend
+    from triton_msl.backend.compiler import MetalBackend
     assert MetalBackend._has_complex_ops("  %0 = tt.fancy_unknown %a") is True
     assert MetalBackend._has_complex_ops("  %0 = tt.splat %a") is False
 ```
@@ -37,7 +37,7 @@ def test_router_uses_table():
 ```python
 import os, subprocess, sys, tempfile, pytest
 import triton  # noqa
-from triton_metal.backend.compiler import MetalBackend
+from triton_msl.backend.compiler import MetalBackend
 pytestmark = pytest.mark.skipif(not MetalBackend._has_cpp_passes(), reason="cpp not built")
 KERNEL = '''import os,sys,torch,triton,triton.language as tl,numpy as np
 os.environ.setdefault("TRITON_DEFAULT_BACKEND","metal")
@@ -47,8 +47,8 @@ def k(X,O,N: tl.constexpr):
 x=torch.randn(256); o=torch.zeros(256,dtype=torch.float16)
 k[(1,)](x,o,N=256); np.save(sys.argv[1],o.numpy())'''
 def run(path, force):
-    env=dict(os.environ,PYTHONPATH=os.getcwd(),TRITON_METAL_CACHE_DIR=tempfile.mkdtemp())
-    env["TRITON_METAL_FORCE_PYTHON"]="1" if force else "0"
+    env=dict(os.environ,PYTHONPATH=os.getcwd(),TRITON_MSL_CACHE_DIR=tempfile.mkdtemp())
+    env["TRITON_MSL_FORCE_PYTHON"]="1" if force else "0"
     subprocess.run([sys.executable,"-c",KERNEL,path],check=True,env=env,timeout=120)
 def test_elementwise_matches():
     import numpy as np
@@ -62,7 +62,7 @@ def test_elementwise_matches():
 ### Task 3: routing flip
 
 **Files:** Modify `compiler.py:203-214`
-- [ ] Step 1: replace env gate with: `use_cpp = (os.environ.get("TRITON_METAL_FORCE_PYTHON") != "1" and self._has_cpp_passes())` (drop USE_CPP requirement; allowlist + ops⊆enabled still routes).
+- [ ] Step 1: replace env gate with: `use_cpp = (os.environ.get("TRITON_MSL_FORCE_PYTHON") != "1" and self._has_cpp_passes())` (drop USE_CPP requirement; allowlist + ops⊆enabled still routes).
 - [ ] Step 2: remove xfail; differential passes. Project suite 0 failed.
 - [ ] Step 3 commit `feat: elementwise family default-on through C++`.
 

@@ -14,7 +14,7 @@ The softmax scale (1/sqrt(head_dim)) is BAKED into the template as a constant â€
 the real kernel has no scale arg â€” so the launch passes no scale.
 
 Launch uses the REAL torch.mps.compile_shader binding API (see
-triton_metal/backend/compile_shader_runtime.py):
+triton_msl/backend/compile_shader_runtime.py):
     lib.<kernel_name>(*args, threads=TOTAL_THREADS, group_size=THREADS_PER_GROUP)
 where `threads` is the TOTAL number of threads (n_groups * group_size), NOT the
 number of threadgroups.
@@ -23,7 +23,7 @@ import math
 import pytest
 import torch
 
-from triton_metal.codegen._msl_templates import make_flash_attention_kernel_tiled
+from triton_msl.codegen._msl_templates import make_flash_attention_kernel_tiled
 
 requires_mps = pytest.mark.skipif(
     not (torch.backends.mps.is_available() and hasattr(torch.mps, "compile_shader")),
@@ -155,7 +155,7 @@ def test_lower_passes_detected_scale():
         f"canonical scale {canonical!r} must NOT appear when scale=0.5 is given"
 
     # Part 2: the lowerer call site passes info["scale"].
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
     src_lower = inspect.getsource(
         GenericLowerer._lower_flash_attention_template  # type: ignore[attr-defined]
     )

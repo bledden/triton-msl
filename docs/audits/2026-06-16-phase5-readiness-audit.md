@@ -1,6 +1,6 @@
 # Phase-5 readiness audit — dual lens (2026-06-16)
 
-> Adversarial pre-1.0 audit of `triton-metal` from two expert perspectives: the team that
+> Adversarial pre-1.0 audit of `triton-msl` from two expert perspectives: the team that
 > owns OpenAI Triton (NVIDIA/Triton-core) and Apple's GPU/MLX team. Grounded in current
 > (2026-06) published reality + the project's own claims + the codebase at the merged tip.
 > Severity: **[BLOCKER]** (fix before a credible public 1.0) / **[MAJOR]** / **[MINOR]**.
@@ -9,7 +9,7 @@
 - **M4 Max (40-core) peak: 18.4 TFLOP/s fp32, 36.9 fp16, 546 GB/s.**
 - **No official OpenAI-Triton Apple/Metal backend exists in 2026.** Third-party backends are
   the precedent (Intel `intel-xpu-backend-for-triton`, AMD ROCm, `triton-cpu`); Metal is an
-  acknowledged community gap. `triton-metal` is a genuine **first-mover** on the `TRITON_EXT`
+  acknowledged community gap. `triton-msl` is a genuine **first-mover** on the `TRITON_EXT`
   plugin path (PR #9783) — no official competitor.
 - Apple GEMM tops out ~60-63% of peak in practice (MPS/MLX). On-device LLM inference is
   **bandwidth-gated, not flops-gated** — so the memory-bound zero-copy win targets the right

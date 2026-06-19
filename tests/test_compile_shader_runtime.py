@@ -18,13 +18,13 @@ kernel void vadd(device const float* A [[buffer(0)]], device const float* B [[bu
 
 @requires_cs
 def test_available():
-    from triton_metal.backend.compile_shader_runtime import CompileShaderRuntime
+    from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
     assert CompileShaderRuntime().available() is True
 
 @requires_cs
 def test_dispatch_vadd_zero_copy():
     import torch
-    from triton_metal.backend.compile_shader_runtime import CompileShaderRuntime
+    from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
     rt = CompileShaderRuntime()
     N = 4096
     A = torch.randn(N, device="mps"); B = torch.randn(N, device="mps"); OUT = torch.empty(N, device="mps")
@@ -55,7 +55,7 @@ kernel void blocksum(device const float* X [[buffer(0)]], device float* OUT [[bu
 @requires_cs
 def test_dispatch_reduction_shared_mem():
     import torch
-    from triton_metal.backend.compile_shader_runtime import CompileShaderRuntime
+    from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
     rt = CompileShaderRuntime()
     N = 256 * 64
     X = torch.randn(N, device="mps")
@@ -75,7 +75,7 @@ kernel void k2(device float* o [[buffer(0)]], uint2 gid [[thread_position_in_gri
 @requires_cs
 def test_dispatch_2d_grid():
     import torch
-    from triton_metal.backend.compile_shader_runtime import CompileShaderRuntime
+    from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
     rt = CompileShaderRuntime()
     O = torch.empty(16, device="mps")
     lib = rt.get_library(_K2D)

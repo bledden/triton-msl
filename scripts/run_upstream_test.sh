@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Run upstream Triton pytest targets against this checkout's triton_metal.
+# Run upstream Triton pytest targets against this checkout's triton_msl.
 #
 # Why this exists: pytest from upstream's ~/Documents/triton/python/test will
-# import `triton_metal` from whichever copy is registered as the editable
-# install (usually ~/Documents/triton-metal), not from a worktree you're
+# import `triton_msl` from whichever copy is registered as the editable
+# install (usually ~/Documents/triton-msl), not from a worktree you're
 # actively developing in. Setting PYTHONPATH to the current repo root pins
 # imports to this checkout so worktree changes are exercised.
 #
@@ -25,7 +25,7 @@ if [[ ! -d "$test_dir" ]]; then
 fi
 
 # Add the repo root and ``scripts/`` to PYTHONPATH so pytest can both
-# (1) import ``triton_metal`` from this checkout and (2) load
+# (1) import ``triton_msl`` from this checkout and (2) load
 # ``conftest_metal`` as a plugin via ``-p`` (the skip rules for unsupported
 # dtypes / precisions live there; upstream's own conftest doesn't know
 # about them).

@@ -54,7 +54,7 @@ class MetalKernelRunner:
         self.device = Metal.MTLCreateSystemDefaultDevice()
         self.queue = self.device.newCommandQueue()
         self._cache_dir = os.path.join(
-            tempfile.gettempdir(), "triton_metal_test_cache"
+            tempfile.gettempdir(), "triton_msl_test_cache"
         )
         os.makedirs(self._cache_dir, exist_ok=True)
 

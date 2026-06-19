@@ -18,7 +18,7 @@ except ImportError:
 
 import triton
 import triton.language as tl
-import triton_metal.mlx as tmlx
+import triton_msl.mlx as tmlx
 
 
 # ─── Triton Kernels ──────────────────────────────────────────────────────────

@@ -12,10 +12,10 @@ build/
 *.metallib
 *.air
 *.metal
-!triton_metal/**/*.metal
+!triton_msl/**/*.metal
 torch_compile_debug/
 /tmp/
-triton_metal_cache/
+triton_msl_cache/
 
 # Secrets and credentials
 .env
@@ -39,4 +39,4 @@ reports/hw_harness/
 .cache/
 .claude/
 compile_commands.json
-triton_metal/csrc/.cache/
+triton_msl/csrc/.cache/

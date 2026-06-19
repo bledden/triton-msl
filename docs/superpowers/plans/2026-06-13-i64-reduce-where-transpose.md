@@ -6,7 +6,7 @@
 
 **Architecture:** The 2-D reduce (`_lower_reduce_2d`) is already type-parameterized + sequential, so it works once given the 64-bit dtype. Only the 1-D full reduce uses `simd_sum` (no `long` overload) and needs a new shared-memory tree branch. Transpose just needs the 64-bit shared dtype. `where` is likely pure type-plumbing (verify). The 64-bit branches are gated on the 64-bit dtype, so float/i32 paths are byte-unchanged.
 
-**Tech Stack:** Python lowerer (`triton_metal/codegen/_lowerer_reduce.py`, `generic_lowerer.py`), MSL, pytest (serial GPU), `scripts/conftest_metal.py`.
+**Tech Stack:** Python lowerer (`triton_msl/codegen/_lowerer_reduce.py`, `generic_lowerer.py`), MSL, pytest (serial GPU), `scripts/conftest_metal.py`.
 
 > Run from the worktree with `/opt/homebrew/bin/python3`. GPU: SERIAL ONLY, dual-cache-clear before codegen-sensitive runs, `pkill`+recovery on hang.
 
@@ -15,9 +15,9 @@
 ### Task 1: 64-bit reduce/transpose + project test (RED→GREEN)
 
 **Files:**
-- Modify: `triton_metal/codegen/_lowerer_reduce.py` (`_lower_reduce` type detection + new `_lower_reduce_1d_i64`)
-- Modify: `triton_metal/codegen/generic_lowerer.py` (`_lower_tt_trans` 64-bit dtype)
-- Modify: `triton_metal/codegen/msl_emitter.py` (if `declare_threadgroup_array` doesn't map i64/u64)
+- Modify: `triton_msl/codegen/_lowerer_reduce.py` (`_lower_reduce` type detection + new `_lower_reduce_1d_i64`)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (`_lower_tt_trans` 64-bit dtype)
+- Modify: `triton_msl/codegen/msl_emitter.py` (if `declare_threadgroup_array` doesn't map i64/u64)
 - Test: `tests/test_i64_ops.py` (create)
 
 - [ ] **Step 1: Write the project test (RED — i64 reduce/transpose/where with values >2^40 to prove no truncation)**
@@ -93,14 +93,14 @@ def test_i64_where():
 - [ ] **Step 2: Run, observe RED**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/test_i64_ops.py -v 2>&1 | tail -15
 ```
 Expected: `test_i64_sum`/`test_i64_max` FAIL (MSL compile error — `simd_sum`/`simd_max` no `long` overload, or i32 truncation). `test_i64_where` may already pass (then it's a guard for no-regression). Record which fail.
 
 - [ ] **Step 3: 64-bit type detection in `_lower_reduce`**
 
-In `triton_metal/codegen/_lowerer_reduce.py`, in `_lower_reduce` where `is_int_reduce`/`shared_dtype`/`msl_type` are set (~lines 288-292), add 64-bit detection:
+In `triton_msl/codegen/_lowerer_reduce.py`, in `_lower_reduce` where `is_int_reduce`/`shared_dtype`/`msl_type` are set (~lines 288-292), add 64-bit detection:
 
 ```python
         input_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
@@ -192,7 +192,7 @@ In `generic_lowerer.py` `_lower_tt_trans` (~line 4187-4190), extend the dtype pi
 - [ ] **Step 7: Run the project test — GREEN; fix `where` only if it failed**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/test_i64_ops.py -v 2>&1 | tail -12
 ```
 Expected: all pass (exact integer equality, values >2^40 proving no truncation). If `test_i64_where` fails, find where `tl.where`/`arith.select` emits its temporary type and ensure it uses `long`/`ulong` for an i64 result (likely a one-line type fix in the select lowering — grep `_lower_select`/`arith.select`/`_emit_select`). Re-run.
@@ -200,7 +200,7 @@ Expected: all pass (exact integer equality, values >2^40 proving no truncation).
 - [ ] **Step 8: Commit**
 
 ```bash
-git add triton_metal/codegen/_lowerer_reduce.py triton_metal/codegen/generic_lowerer.py tests/test_i64_ops.py
+git add triton_msl/codegen/_lowerer_reduce.py triton_msl/codegen/generic_lowerer.py tests/test_i64_ops.py
 # include msl_emitter.py / the select fix if touched
 git commit -m "feat: int64/uint64 reduce, transpose (+ where) via 64-bit type-plumbing
 
@@ -221,7 +221,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: Run the i64 corpus under the gate-override first (see what passes)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 METAL_TEST_INT64=1 bash scripts/run_upstream_test.sh "unit/language/test_core.py::test_reduce1d unit/language/test_core.py::test_reduce2d unit/language/test_core.py::test_where unit/language/test_core.py::test_transpose" -q 2>&1 | tail -10
 ```
 This runs the i64 variants (the gate is overridden by METAL_TEST_INT64=1). Report pass/fail per family. If `test_reduce2d` or others FAIL (e.g. the 2-D path needs more than the dtype, or argmin/argmax i64), diagnose + fix following the same 64-bit-type pattern, OR narrow `_I64_UNIMPLEMENTED` to keep only the still-failing family skipped (be honest — only un-skip what passes).
@@ -233,7 +233,7 @@ In `scripts/conftest_metal.py` (~line 480), remove from `_I64_UNIMPLEMENTED` the
 - [ ] **Step 3: Verify the now-ungated i64 corpus passes by DEFAULT (no override)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 bash scripts/run_upstream_test.sh "unit/language/test_core.py::test_reduce1d unit/language/test_core.py::test_reduce2d unit/language/test_core.py::test_where unit/language/test_core.py::test_transpose" -q 2>&1 | tail -8
 ```
 Expected: the i64/u64 variants pass without METAL_TEST_INT64. Report the count delta.
@@ -241,7 +241,7 @@ Expected: the i64/u64 variants pass without METAL_TEST_INT64. Report the count d
 - [ ] **Step 4: Ratchet — project suite green**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/ -q -k "not test_mept_m2_bug2_gpu and not test_mept_m3a_itercarry_gpu and not test_mept_m3c_gt1024_gpu" 2>&1 | tail -4
 ```
 Expected: 0 failed (the known autotuner flake aside — re-run it alone if it appears).

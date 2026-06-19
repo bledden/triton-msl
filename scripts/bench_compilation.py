@@ -12,7 +12,7 @@ import subprocess
 
 CACHE_DIRS = [
     os.path.expanduser("~/.triton/cache"),
-    os.path.expanduser("~/.cache/triton_metal"),
+    os.path.expanduser("~/.cache/triton_msl"),
 ]
 
 PYTHON = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -79,9 +79,9 @@ def run_one(kernel_name, use_cpp):
     clear_caches()
     env = dict(os.environ)
     if use_cpp:
-        env["TRITON_METAL_USE_CPP"] = "1"
+        env["TRITON_MSL_USE_CPP"] = "1"
     else:
-        env.pop("TRITON_METAL_USE_CPP", None)
+        env.pop("TRITON_MSL_USE_CPP", None)
 
     result = subprocess.run(
         [PYTHON, "-c", KERNEL_SCRIPTS[kernel_name]],

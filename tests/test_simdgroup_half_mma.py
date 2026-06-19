@@ -178,7 +178,7 @@ def test_genuine_fp16_full_template_is_numerically_correct(tmp_path):
     boundary — must compute a correct matmul, not just the de-risk's 8x8. This
     is what proves the genuine-fp16 fix is correct end-to-end, not only that it
     compiles."""
-    from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel
+    from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel
     M = N = 64
     K = 128
     dev, pso = _compile(make_simdgroup_matmul_kernel(dtype="fp16"),

@@ -16,7 +16,7 @@
     (constant registers, re-execution) — kept exactly where it wins.
   - `n_elems>1` AND data-dependent control flow in scope -> true register arrays
     `T v[n_elems]` (the only correct form; B's contribution).
-- **Rollout:** build behind `TRITON_METAL_MEPT` (off by default). Drive flag-ON to
+- **Rollout:** build behind `TRITON_MSL_MEPT` (off by default). Drive flag-ON to
   5,335/0 + the newly-unlocked tests across the whole corpus, THEN flip default.
   The 5,335/0 scalar path is never at risk until B is proven. Reversible.
 - **Out of scope this cycle:** retiring the perf detectors (matmul MMA at MLX
@@ -38,7 +38,7 @@ multi-element values in that region are `array`; else straight-line multi-elemen
 values are `wraploop`; `n_elems==1` is always `scalar`.
 
 ## Components (files)
-- `triton_metal/codegen/regval.py` (new): `RegVal` + form-selection classifier
+- `triton_msl/codegen/regval.py` (new): `RegVal` + form-selection classifier
   (`classify_region(ops) -> form`), pure, unit-testable without a GPU.
 - `generic_lowerer.py`: unify `env`/`env_array` reads through `_lookup` ->
   `RegVal`; route every `_emit_*` through a single `emit_form(regval, body_fn)`
@@ -82,7 +82,7 @@ mismatch, no `UNKNOWN_`.
 - Ratchet: every commit, fresh-cache `test_core` flag-OFF stays 5,335/0; flag-ON
   must monotonically climb toward 5,335 + newly-unlocked, never regress.
 - Flip gate: flag-ON full `test_core` >= 5,335/0 AND the newly-unlocked tests pass
-  AND project suite green -> flip `TRITON_METAL_MEPT` default to on.
+  AND project suite green -> flip `TRITON_MSL_MEPT` default to on.
 
 ## Milestones (each its own plan)
 1. `RegVal` unification + form classifier + scalar-collapse parity (flag-ON ==
@@ -127,7 +127,7 @@ mismatch, no `UNKNOWN_`.
    remaining FA-class gap, separate from this spine.**
 5. Flip default; then (separate) retire MEPT-gap detectors. **M5 DONE (flip,
    commits 49fa3a6->f6121ec): MEPT is the DEFAULT codegen path;
-   `TRITON_METAL_MEPT=0` is the escape hatch to the legacy scalar/wrap-loop path.
+   `TRITON_MSL_MEPT=0` is the escape hatch to the legacy scalar/wrap-loop path.
    Lowerer default + cache-key default + CODEGEN_VERSION (2026.06.13) flipped
    together (verified-equivalent predicates). Verified BOTH directions — no-env
    default AND MEPT=0: upstream test_core 5335/0, project suite 622/0 (default)

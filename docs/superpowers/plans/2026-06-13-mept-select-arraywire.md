@@ -6,7 +6,7 @@
 
 **Architecture:** `arith.select` is currently excluded from `_MEPT_SAFE_OPS`, so any kernel using `tl.where` is ineligible for the single-pass register-array regime (confirmed root cause: the controlled A/B/E experiment isolates the trigger to the select op). Add `arith.select` to the safe set and give `_lower_select` an array-form branch (per-element `r[e] = cond[e] ? a[e] : b[e]`), mirroring `_mept_binary_dispatch`. Gated on the array regime — scalar/flag-off select is byte-unchanged.
 
-**Tech Stack:** Python lowerer (`triton_metal/codegen/generic_lowerer.py`, `_lowerer_emission.py`), MSL, pytest (serial GPU), upstream `test_core` ratchet.
+**Tech Stack:** Python lowerer (`triton_msl/codegen/generic_lowerer.py`, `_lowerer_emission.py`), MSL, pytest (serial GPU), upstream `test_core` ratchet.
 
 **Key risk:** array-wiring select changes eligibility for a *class* of select-using kernels (they may now enter the arrayform regime). The full flag-default `test_core` + project-suite ratchet (Task 2) is the essential no-regression gate — not optional.
 
@@ -17,8 +17,8 @@
 ### Task 1: Array-wire arith.select + regression test (RED→GREEN)
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py` (`_MEPT_SAFE_OPS` + `_lower_select`)
-- Modify: `triton_metal/codegen/_lowerer_emission.py` (add `_mept_select_dispatch`)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (`_MEPT_SAFE_OPS` + `_lower_select`)
+- Modify: `triton_msl/codegen/_lowerer_emission.py` (add `_mept_select_dispatch`)
 - Test: `tests/test_inloop_reduce_where.py` (create)
 
 - [ ] **Step 1: Write the failing regression test**
@@ -87,7 +87,7 @@ def test_sum_where_nested():
 - [ ] **Step 2: Run, verify it FAILS (refusal today)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/test_inloop_reduce_where.py -v 2>&1 | tail -12
 ```
 Expected: FAIL — `MetalNonRecoverableError` (UNKNOWN_, the select disqualifies the kernel from the arrayform regime). The RED.
@@ -148,7 +148,7 @@ In `generic_lowerer.py`, add `"arith.select"` to the `_MEPT_SAFE_OPS` frozenset 
 - [ ] **Step 6: Run the regression test — verify GREEN**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/test_inloop_reduce_where.py -v 2>&1 | tail -8
 ```
 Expected: all pass (BLOCK 256/512/1024 + nested) — the masked in-loop reduce now computes. If still refusing, the kernel isn't reaching `mept_arrayform_eligible`: check that `arith.select` is now accepted by `_arrayform_op_ok` (it routes through `_op_mept_ok` → `_MEPT_SAFE_OPS`) and that `_mept_select_dispatch` actually fires (the cond/operands are env_array inside the loop). Dump MSL if needed.
@@ -163,7 +163,7 @@ Expected: pass — `_mept_select_dispatch` returns False for scalar operands, so
 - [ ] **Step 8: Commit**
 
 ```bash
-git add triton_metal/codegen/generic_lowerer.py triton_metal/codegen/_lowerer_emission.py tests/test_inloop_reduce_where.py
+git add triton_msl/codegen/generic_lowerer.py triton_msl/codegen/_lowerer_emission.py tests/test_inloop_reduce_where.py
 git commit -m "feat(mept): array-wire arith.select — close tridec in-loop-reduction Bug 2
 
 tl.where (arith.select) was excluded from _MEPT_SAFE_OPS, disqualifying any
@@ -185,8 +185,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: Flag-default full upstream test_core (must not regress; should hold or rise)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-unset TRITON_METAL_MEPT
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+unset TRITON_MSL_MEPT
 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -6
 ```
 Expected: **>= 5335 passed, 0 failed** (the count may RISE if select-using reductions un-block; must NOT fall). Any new failure = a select-using kernel that the arrayform regime now mis-handles → STOP, capture the failing test, diagnose (likely `_mept_select_dispatch` shape/length edge) — do NOT proceed with a regression.
@@ -194,15 +194,15 @@ Expected: **>= 5335 passed, 0 failed** (the count may RISE if select-using reduc
 - [ ] **Step 2: Escape-hatch direction (MEPT=0) unchanged**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -6
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_MEPT=0 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -6
 ```
 Expected: 5335 passed / 0 failed (select stays scalar with MEPT=0 — byte-unchanged).
 
 - [ ] **Step 3: Project suite (flag-default)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/ -q -k "not test_mept_m2_bug2_gpu and not test_mept_m3a_itercarry_gpu and not test_mept_m3c_gt1024_gpu" 2>&1 | tail -4
 ```
 Expected: 0 failed (the known autotuner flake aside — re-run alone if it appears).

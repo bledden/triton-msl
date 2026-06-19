@@ -1,4 +1,4 @@
-from triton_metal.codegen.regval import RegVal, region_needs_arrays, tensor_value_ids
+from triton_msl.codegen.regval import RegVal, region_needs_arrays, tensor_value_ids
 
 
 class FakeOp:
@@ -36,7 +36,7 @@ def test_region_needs_arrays_for_without_multielem_false():
 
 def test_lookup_regval_scalar_and_array():
     import triton  # noqa: F401
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
     lo = GenericLowerer.__new__(GenericLowerer)
     lo.env = {5: "v5"}; lo.env_array = {6: ("a6", 4, "float")}
     lo.env_n_elems = {5: 1, 6: 4}; lo.env_types = {5: "i32", 6: "f32"}
@@ -48,8 +48,8 @@ def test_lookup_regval_scalar_and_array():
 
 def test_materialize_scalar_collapses_to_plain_var():
     import triton  # noqa: F401
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.regval import RegVal
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.regval import RegVal
 
     class _KB:
         def __init__(self): self.lines = []
@@ -66,8 +66,8 @@ def test_materialize_scalar_collapses_to_plain_var():
 
 def test_materialize_array_emits_indexed_loop():
     import triton  # noqa: F401
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.regval import RegVal
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.regval import RegVal
 
     class _KB:
         def __init__(self): self.lines = []
@@ -132,7 +132,7 @@ def test_tensor_value_ids_recurses_into_else_ops():
 
 
 def test_region_needs_arrays_detects_multi_in_else_ops():
-    from triton_metal.codegen.regval import region_needs_arrays
+    from triton_msl.codegen.regval import region_needs_arrays
     # a multi value referenced by an op in the scf.while body (else_ops)
     use = _TVOp("tt.addptr", id="idx", operand_ids=["offs"], result_ids=["idx"])
     wh = _TVOp("scf.while", id="wh", operand_ids=[],
@@ -141,7 +141,7 @@ def test_region_needs_arrays_detects_multi_in_else_ops():
 
 
 def test_region_needs_arrays_matches_result_ids_not_just_id():
-    from triton_metal.codegen.regval import region_needs_arrays
+    from triton_msl.codegen.regval import region_needs_arrays
     # A body op whose multi-element value is its result_ids[0]=200, while its
     # .id is a different number (300). tensor_value_ids would add 200 to the
     # multi set; region_needs_arrays must detect that 200 is produced here.

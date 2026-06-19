@@ -62,10 +62,10 @@ def test_make_metallib_happy_path_and_cache(tmp_path, monkeypatch):
     Guards that the retry-loop refactor did not break normal compilation or
     the content-addressed cache hit path.
     """
-    monkeypatch.setenv("TRITON_METAL_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
 
     import triton  # noqa: F401 — backend discovery must precede compiler import
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
 
     options = MetalOptions()
     metadata = {"name": "test_retry_k"}
@@ -88,11 +88,11 @@ def test_make_metallib_real_error_raises_promptly(tmp_path, monkeypatch):
     The error message must identify it as a shader compilation failure, NOT a
     library-linking failure.
     """
-    monkeypatch.setenv("TRITON_METAL_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
 
     import triton  # noqa: F401
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
-    from triton_metal.errors import MetalCompilationError
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
+    from triton_msl.errors import MetalCompilationError
 
     options = MetalOptions()
     metadata = {"name": "test_bad_msl_k"}
@@ -128,11 +128,11 @@ def test_make_metallib_retries_on_missing_air(tmp_path, monkeypatch):
     On the 3rd call the stub delegates to the real subprocess.run.  The
     compile must ultimately succeed via the retry mechanism.
     """
-    monkeypatch.setenv("TRITON_METAL_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
 
     import triton  # noqa: F401
-    import triton_metal.backend.compiler as compiler_mod
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
+    import triton_msl.backend.compiler as compiler_mod
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
 
     options = MetalOptions()
     metadata = {"name": "test_transient_k"}

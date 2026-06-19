@@ -9,14 +9,14 @@
 **Tech Stack:** Python, Metal Shading Language (`simdgroup_matrix`), PyTorch MPS (`torch.mps.compile_shader`), pytest.
 
 **Key facts (do not re-derive):**
-- The current template (`triton_metal/codegen/_msl_templates.py:3547`) accumulates in `simdgroup_float8x8` and stores via `simdgroup_store(c{r}_{c}, C /*float* */, N)`. Metal CANNOT down-convert `float8x8→half*` (both a direct store and a `simdgroup_half8x8(float8x8)` cast fail to compile — verified). The result must be read out via `simdgroup_store` to threadgroup memory, then cast per-element.
+- The current template (`triton_msl/codegen/_msl_templates.py:3547`) accumulates in `simdgroup_float8x8` and stores via `simdgroup_store(c{r}_{c}, C /*float* */, N)`. Metal CANNOT down-convert `float8x8→half*` (both a direct store and a `simdgroup_half8x8(float8x8)` cast fail to compile — verified). The result must be read out via `simdgroup_store` to threadgroup memory, then cast per-element.
 - Proven epilogue (relerr 0.0 @ 512³/2048³/non-square; 11.9 TFLOP/s @ fp16 2048³): per accumulator block `c{r}_{c}`, `simdgroup_store(c{r}_{c}, scratch + sgitg*64u, 8)` → `simdgroup_barrier(threadgroup)` → lanes write `C[(row_base+{r*8}+i/8)*N + col0 + {c*8} + i%8] = half(scratch[sgitg*64 + i])` for `i=tiisg; i<64; i+=32` → `simdgroup_barrier(threadgroup)`.
 - The detector `_maybe_fast_matmul_descriptor` (`_lowerer_templates.py`) already reads `out_dtype = _mlir_to_triton_dtype(args[2].elem_type)` and currently returns None unless it's fp32. Descriptor tuple shape `(fast_msl, 3, 4, 5, 32, 128)` stays the same — only the embedded MSL string differs by output dtype.
 - The launcher (`driver.py`) needs NO change: same `simdgroup_matmul_fast` entry name, same `n_groups`/128-threads/`M%32 N%32 K%8` contract; `compile_shader` binds the half C tensor to the `half*` buffer zero-copy. The variant is fixed at compile time from the IR's output dtype.
 
 **Operational rules (all tasks):**
-- Run every command from the worktree root `/Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread` — NEVER the main repo. Use `python3` (NOT `python`).
-- Before any GPU test RUN: `rm -rf ~/.cache/triton_metal ~/.triton/cache`. Serial GPU (no xdist).
+- Run every command from the worktree root `/Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread` — NEVER the main repo. Use `python3` (NOT `python`).
+- Before any GPU test RUN: `rm -rf ~/.cache/triton_msl ~/.triton/cache`. Serial GPU (no xdist).
 - The fp32-out path MUST stay provably untouched — Task 1's golden test + the existing fp32 tests are the proof.
 - Commit messages end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
@@ -25,7 +25,7 @@
 ### Task 1: `out_dtype` param on the fast template + golden characterization test
 
 **Files:**
-- Modify: `triton_metal/codegen/_msl_templates.py` (`make_simdgroup_matmul_kernel_fast`, ~lines 3547-3625)
+- Modify: `triton_msl/codegen/_msl_templates.py` (`make_simdgroup_matmul_kernel_fast`, ~lines 3547-3625)
 - Create: `tests/golden/simdgroup_matmul_fast_fp16in_fp32out.msl`, `tests/golden/simdgroup_matmul_fast_fp32in_fp32out.msl`
 - Test: `tests/test_fast_matmul_template.py`
 
@@ -33,10 +33,10 @@
 
 Before touching the template, run this to snapshot the CURRENT output for both input dtypes (fp32 output is the only output today):
 ```bash
-cd /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
+cd /Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
 mkdir -p tests/golden
 python3 - <<'PY'
-from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
+from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
 open("tests/golden/simdgroup_matmul_fast_fp16in_fp32out.msl","w").write(
     make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4))
 open("tests/golden/simdgroup_matmul_fast_fp32in_fp32out.msl","w").write(
@@ -54,7 +54,7 @@ Create `tests/test_fast_matmul_template.py`:
 The fp32-out path must stay BYTE-IDENTICAL to the pre-change golden (no regression);
 the fp16-out path must declare half* C + the cast epilogue. No GPU needed."""
 import os
-from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
+from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
 
 GOLD = os.path.join(os.path.dirname(__file__), "golden")
 
@@ -92,7 +92,7 @@ Expected: FAIL — `make_simdgroup_matmul_kernel_fast()` has no `out_dtype` kwar
 
 - [ ] **Step 4: Add `out_dtype` to the template (fp32 byte-identical, fp16 = cast epilogue)**
 
-In `triton_metal/codegen/_msl_templates.py`, change the signature and body of `make_simdgroup_matmul_kernel_fast`. Replace the signature line:
+In `triton_msl/codegen/_msl_templates.py`, change the signature and body of `make_simdgroup_matmul_kernel_fast`. Replace the signature line:
 ```python
 def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4):
 ```
@@ -170,7 +170,7 @@ Expected: PASS (3 tests). If `test_fp32_out_byte_identical_to_golden` fails, the
 - [ ] **Step 6: Commit**
 
 ```bash
-git add triton_metal/codegen/_msl_templates.py tests/test_fast_matmul_template.py tests/golden/
+git add triton_msl/codegen/_msl_templates.py tests/test_fast_matmul_template.py tests/golden/
 git commit -m "feat(fast-matmul): out_dtype param — fp16 output via cast epilogue
 
 out_dtype='fp16' emits half* C + per-block store->scratch->cast->write epilogue
@@ -185,8 +185,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 2: Detector accepts fp16 output + CODEGEN_VERSION bump
 
 **Files:**
-- Modify: `triton_metal/codegen/_lowerer_templates.py` (`_maybe_fast_matmul_descriptor` output-dtype gate)
-- Modify: `triton_metal/__init__.py:6` (CODEGEN_VERSION)
+- Modify: `triton_msl/codegen/_lowerer_templates.py` (`_maybe_fast_matmul_descriptor` output-dtype gate)
+- Modify: `triton_msl/__init__.py:6` (CODEGEN_VERSION)
 - Modify: `tests/test_fast_matmul_detect.py` (update the fp16-output test)
 
 - [ ] **Step 1: Update the detector test (TDD — the behavior flips)**
@@ -196,7 +196,7 @@ In `tests/test_fast_matmul_detect.py`, REPLACE the existing `test_fp16_output_no
 @requires
 def test_fp16_output_emits_half_variant_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps", dtype=torch.float16)
     B = torch.randn(K, N, device="mps", dtype=torch.float16)
@@ -216,7 +216,7 @@ Add a bf16-output fall-back guard test (bf16 out stays ineligible):
 @requires
 def test_bf16_output_no_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps", dtype=torch.bfloat16)
     B = torch.randn(K, N, device="mps", dtype=torch.bfloat16)
@@ -227,12 +227,12 @@ def test_bf16_output_no_descriptor(monkeypatch):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_detect.py::test_fp16_output_emits_half_variant_descriptor -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_detect.py::test_fp16_output_emits_half_variant_descriptor -v`
 Expected: FAIL — no descriptor emitted yet for fp16 output (the gate still returns None for non-fp32 output).
 
 - [ ] **Step 3: Extend the detector's output-dtype gate**
 
-In `triton_metal/codegen/_lowerer_templates.py`, in `_maybe_fast_matmul_descriptor`, find the output-dtype check (currently):
+In `triton_msl/codegen/_lowerer_templates.py`, in `_maybe_fast_matmul_descriptor`, find the output-dtype check (currently):
 ```python
         # Output must be fp32 (template always declares `device float* C`).
         out_dtype = _mlir_to_triton_dtype(args[2].elem_type)
@@ -264,17 +264,17 @@ and pass the output dtype:
 
 - [ ] **Step 4: Bump CODEGEN_VERSION**
 
-In `triton_metal/__init__.py:6`, change `CODEGEN_VERSION = "2026.06.15.1"` to `CODEGEN_VERSION = "2026.06.15.2"`.
+In `triton_msl/__init__.py:6`, change `CODEGEN_VERSION = "2026.06.15.1"` to `CODEGEN_VERSION = "2026.06.15.2"`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_detect.py -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_detect.py -v`
 Expected: PASS (all — fp32 + abbreviated + fp16-output-now-emits + bf16-no-descriptor + flag-off).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add triton_metal/codegen/_lowerer_templates.py triton_metal/__init__.py tests/test_fast_matmul_detect.py
+git add triton_msl/codegen/_lowerer_templates.py triton_msl/__init__.py tests/test_fast_matmul_detect.py
 git commit -m "feat(fast-matmul): detector accepts fp16 output (half variant), CODEGEN bump
 
 _maybe_fast_matmul_descriptor maps output dtype to the template variant: fp32->
@@ -296,9 +296,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 Append to `tests/test_fast_matmul_parity.py` a test that runs an fp16-in→fp16-out matmul (half C tensor) through the fast path (flag on) and the generic kernel (flag off), asserting both match torch and each other. Reuse the file's existing `mm` kernel and seeded `_run` if compatible; if the existing `_run` hardcodes a float32 C, add an `out_dtype` arg to it. Concretely add:
 ```python
 def _run_f16out(M, N, K, flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", flag)
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     torch.manual_seed(0)
     A = torch.randn(M, K, device="mps", dtype=torch.float16)
     B = torch.randn(K, N, device="mps", dtype=torch.float16)
@@ -378,9 +378,9 @@ def _launch_f16(M, N, K):
 
 @requires
 def test_fp16out_aligned_fires_fast(monkeypatch):
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
     seen = _spy(monkeypatch)
     A, B, C = _launch_f16(256, 256, 256)
     assert "simdgroup_matmul_fast" in seen
@@ -390,9 +390,9 @@ def test_fp16out_aligned_fires_fast(monkeypatch):
 @requires
 @pytest.mark.parametrize("M,N,K", [(258, 256, 256), (256, 258, 256), (256, 256, 252)])
 def test_fp16out_misaligned_falls_back(monkeypatch, M, N, K):
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
     seen = _spy(monkeypatch)
     A, B, C = _launch_f16(M, N, K)
     assert "simdgroup_matmul_fast" not in seen
@@ -402,12 +402,12 @@ def test_fp16out_misaligned_falls_back(monkeypatch, M, N, K):
 
 - [ ] **Step 2: Run the test**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_gate.py -k fp16out -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_gate.py -k fp16out -v`
 Expected: PASS (1 + 3). Aligned fp16-out dispatches `simdgroup_matmul_fast`; misaligned does not; all results match torch.
 
 - [ ] **Step 3: Run the FULL gate + parity + detect + template suite (no regression)**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_gate.py tests/test_fast_matmul_parity.py tests/test_fast_matmul_detect.py tests/test_fast_matmul_template.py tests/test_compile_shader_parity.py -q`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_gate.py tests/test_fast_matmul_parity.py tests/test_fast_matmul_detect.py tests/test_fast_matmul_template.py tests/test_compile_shader_parity.py -q`
 Expected: PASS (all — fp32 cases unchanged, fp16-out cases new).
 
 - [ ] **Step 4: Commit**
@@ -433,11 +433,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 The subset takes ~2.4h per config; run in the background. Uses the project harness semantics (raw pytest hits CUDA asserts — see the [[reference_upstream_ratchet]] memory): `--device cpu`, `TRITON_DEFAULT_BACKEND=metal`, worktree `PYTHONPATH`.
 ```bash
 cd /Users/bledden/Documents/triton/python/test
-WT=/Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
+WT=/Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
 for FAST in 1 0; do
-  rm -rf ~/.cache/triton_metal ~/.triton/cache
+  rm -rf ~/.cache/triton_msl ~/.triton/cache
   echo "=== dot/matmul subset (--device cpu, backend=metal) FAST=$FAST ==="
-  TRITON_DEFAULT_BACKEND=metal PYTHONPATH="$WT:$PYTHONPATH" TRITON_METAL_FAST_MATMUL=$FAST TRITON_METAL_MEPT=1 \
+  TRITON_DEFAULT_BACKEND=metal PYTHONPATH="$WT:$PYTHONPATH" TRITON_MSL_FAST_MATMUL=$FAST TRITON_MSL_MEPT=1 \
     python3 -m pytest unit/language/test_core.py --device cpu -k "dot or matmul" --tb=line -q -rs 2>&1 | tail -4
 done
 ```
@@ -450,9 +450,9 @@ A difference means the fp16-output fast path changed a test_core result — a re
 - [ ] **Step 3: Project suite (fp16-output feature on)**
 
 ```bash
-cd /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_FAST_MATMUL=1 python3 -m pytest tests/ -q -rs 2>&1 | tail -8
+cd /Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_FAST_MATMUL=1 python3 -m pytest tests/ -q -rs 2>&1 | tail -8
 ```
 Expected: 0 failed.
 
@@ -469,9 +469,9 @@ Append to `tests/test_fast_matmul_perf.py` a 2048³ fp16-in→fp16-out throughpu
 ```python
 @requires
 def test_fast_matmul_fp16out_throughput(monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     M = N = K = 2048
     A = torch.randn(M, K, device="mps", dtype=torch.float16)
     B = torch.randn(K, N, device="mps", dtype=torch.float16)
@@ -497,7 +497,7 @@ IMPORTANT: the `mm` kernel used here must store fp16 (`acc.to(tl.float16)` into 
 
 - [ ] **Step 2: Run the perf test**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_perf.py -k fp16out -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python3 -m pytest tests/test_fast_matmul_perf.py -k fp16out -v`
 Expected: PASS. fp16-out ≈ 11-12 TFLOP/s (probe was 11.9). If near the ~2.8 generic floor, the fast path did NOT fire — diagnose with the gate spy, do NOT lower the threshold.
 
 - [ ] **Step 3: Commit**

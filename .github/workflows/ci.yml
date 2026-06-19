@@ -20,7 +20,7 @@ jobs:
         run: pip install ruff>=0.4.0
 
       - name: Lint
-        run: ruff check triton_metal/ tests/
+        run: ruff check triton_msl/ tests/
 
   test:
     runs-on: macos-14  # M1 Apple Silicon with Metal GPU

@@ -59,4 +59,4 @@ contract means C2 is safe to trust the moment the suite is green — you'll neve
 relay stays correct at 128 in the meantime (2.18× over the old pin, loud refusal = never wrong),
 so there's no pressure — C2 is purely the path to full width without waiting on the spine work.
 
-— triton-metal dev session, 2026-06-13
+— triton-msl dev session, 2026-06-13

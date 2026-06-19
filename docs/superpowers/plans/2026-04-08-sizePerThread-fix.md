@@ -13,9 +13,9 @@
 ### Task 1: Extract sizePerThread from TTGIR layout encoding
 
 **Files:**
-- Modify: `triton_metal/codegen/mlir_walker.py:60-67` (IRGraph dataclass)
-- Modify: `triton_metal/codegen/mlir_walker.py:480-492` (TTGIRWalker.__init__)
-- Modify: `triton_metal/codegen/mlir_walker.py:575-585` (walker.walk return)
+- Modify: `triton_msl/codegen/mlir_walker.py:60-67` (IRGraph dataclass)
+- Modify: `triton_msl/codegen/mlir_walker.py:480-492` (TTGIRWalker.__init__)
+- Modify: `triton_msl/codegen/mlir_walker.py:575-585` (walker.walk return)
 - Test: `tests/test_mlir_walker.py`
 
 The TTGIR module text contains layout attributes like:
@@ -55,7 +55,7 @@ def test_walker_extracts_size_per_thread():
         pytest.skip("No cached TTGIR with sizePerThread > 1")
     
     # Parse the layout from text directly
-    from triton_metal.codegen.mlir_walker import _parse_blocked_layout
+    from triton_msl.codegen.mlir_walker import _parse_blocked_layout
     layout = _parse_blocked_layout(text)
     assert layout is not None
     assert layout["size_per_thread"] == [4]
@@ -70,7 +70,7 @@ Expected: FAIL — `_parse_blocked_layout` doesn't exist
 
 - [ ] **Step 3: Implement `_parse_blocked_layout` and add `size_per_thread` to IRGraph**
 
-In `triton_metal/codegen/mlir_walker.py`, add the parsing function near the top (after imports):
+In `triton_msl/codegen/mlir_walker.py`, add the parsing function near the top (after imports):
 
 ```python
 import re
@@ -125,7 +125,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add triton_metal/codegen/mlir_walker.py tests/test_mlir_walker.py
+git add triton_msl/codegen/mlir_walker.py tests/test_mlir_walker.py
 git commit -m "feat: extract sizePerThread from TTGIR blocked layout"
 ```
 
@@ -134,8 +134,8 @@ git commit -m "feat: extract sizePerThread from TTGIR blocked layout"
 ### Task 2: Use num_warps * warp_size for thread count and emit per-thread loop
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py:279-314` (block_size / wrapping logic)
-- Modify: `triton_metal/codegen/generic_lowerer.py:1739-1748` (_lower_make_range 1D case)
+- Modify: `triton_msl/codegen/generic_lowerer.py:279-314` (block_size / wrapping logic)
+- Modify: `triton_msl/codegen/generic_lowerer.py:1739-1748` (_lower_make_range 1D case)
 - Test: `tests/test_generic_lowerer.py`
 
 When `sizePerThread > 1`, we need to:
@@ -189,7 +189,7 @@ This test verifies correctness. We'll add a structural assertion after the imple
 
 - [ ] **Step 3: Implement sizePerThread-aware thread dispatch**
 
-In `triton_metal/codegen/generic_lowerer.py`, modify the block_size computation section (around line 279-314):
+In `triton_msl/codegen/generic_lowerer.py`, modify the block_size computation section (around line 279-314):
 
 ```python
         # Determine actual thread count vs total elements.
@@ -235,7 +235,7 @@ Expected: All previously-passing tests still pass
 - [ ] **Step 5: Commit**
 
 ```bash
-git add triton_metal/codegen/generic_lowerer.py tests/test_generic_lowerer.py
+git add triton_msl/codegen/generic_lowerer.py tests/test_generic_lowerer.py
 git commit -m "feat: use num_warps * warp_size thread count when sizePerThread > 1
 
 Triton 3.6.0 generates TTGIR with sizePerThread=4 for softmax kernels,
@@ -250,7 +250,7 @@ use a per-thread element loop."
 ### Task 3: Fix reduction shared memory sizing
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py:3593-3596` (n_simd_groups calculation)
+- Modify: `triton_msl/codegen/generic_lowerer.py:3593-3596` (n_simd_groups calculation)
 - Test: existing softmax correctness + new structural test
 
 The reduction code at line 3595 computes `n_simd_groups = (self.kb.block_size + 31) // 32`. After Task 2, `self.kb.block_size` will be 128 (not 1024), so `n_simd_groups` will correctly be 4 instead of 32. **This should fix automatically** — but we need to verify.
@@ -321,7 +321,7 @@ Expected: All tests pass (torch_compile and mps_tensor excluded — known issues
 - [ ] **Step 5: Commit**
 
 ```bash
-git add triton_metal/codegen/generic_lowerer.py tests/test_generic_lowerer.py
+git add triton_msl/codegen/generic_lowerer.py tests/test_generic_lowerer.py
 git commit -m "test: verify reduction shared memory sized by actual warp count"
 ```
 
@@ -330,7 +330,7 @@ git commit -m "test: verify reduction shared memory sized by actual warp count"
 ### Task 4: Update driver to use metadata block_size correctly
 
 **Files:**
-- Modify: `triton_metal/backend/compiler.py:88-99` (pack_metadata)
+- Modify: `triton_msl/backend/compiler.py:88-99` (pack_metadata)
 - Test: benchmark regression test
 
 The compiler's `pack_metadata` already reads `metadata.block_size` which comes from the lowerer's `effective_block_size`. After Task 2, `effective_block_size` will be `num_warps * warp_size` when `sizePerThread > 1`. The driver at line 576 does `threads_per_tg = min(block_size, 1024)`, which will now correctly be 128.

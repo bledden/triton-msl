@@ -1,7 +1,7 @@
 """Perf gate: compile_shader zero-copy fast-path must deliver ≥ 250 GB/s for
 vector_add@16M on MPS.
 
-Rationale: the host-round-trip path (TRITON_METAL_COMPILE_SHADER=0) achieves
+Rationale: the host-round-trip path (TRITON_MSL_COMPILE_SHADER=0) achieves
 ~28 GB/s. The fast-path should reach ≥ 250 GB/s (~45% of 546 GB/s peak on
 M4 Max). If this test fails, the fast-path is either not firing through the
 real Triton→driver path or measurement includes unexpected overhead.
@@ -25,11 +25,11 @@ except Exception:
     _HAS_MPS = False
     _HAS_CS = False
 
-_ELIGIBLE = _HAS_MPS and _HAS_CS and os.environ.get("TRITON_METAL_COMPILE_SHADER", "1") != "0"
+_ELIGIBLE = _HAS_MPS and _HAS_CS and os.environ.get("TRITON_MSL_COMPILE_SHADER", "1") != "0"
 
 requires_fast_path = pytest.mark.skipif(
     not _ELIGIBLE,
-    reason="MPS + torch.mps.compile_shader needed and TRITON_METAL_COMPILE_SHADER must be '1' (default)",
+    reason="MPS + torch.mps.compile_shader needed and TRITON_MSL_COMPILE_SHADER must be '1' (default)",
 )
 
 # Peak M4 Max memory bandwidth (GB/s)
@@ -92,6 +92,6 @@ def test_vector_add_fast_path_throughput():
 
     assert gbps >= MIN_GBPS, (
         f"compile_shader fast-path throughput {gbps:.1f} GB/s < {MIN_GBPS} GB/s gate. "
-        f"Fast-path may not be firing — check TRITON_METAL_COMPILE_SHADER=1 and "
+        f"Fast-path may not be firing — check TRITON_MSL_COMPILE_SHADER=1 and "
         f"that torch.mps.compile_shader is available."
     )

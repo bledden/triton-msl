@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from triton_metal.profiling.roofline import (
+from triton_msl.profiling.roofline import (
     HardwareRoofs, RooflineResult, classify, format_roofline,
 )
 

@@ -9,7 +9,7 @@ Two patterns, both validated above 1024:
     (the UNKNOWN_ backstop, BLOCK > threadgroup), so it is a genuine flag-ON
     guard, not a path that would pass either way.
 
-Run with TRITON_METAL_MEPT=1. Serial only.
+Run with TRITON_MSL_MEPT=1. Serial only.
 """
 import os
 import pytest
@@ -25,8 +25,8 @@ except Exception:
 
 requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
 requires_mept = pytest.mark.skipif(
-    os.environ.get("TRITON_METAL_MEPT") != "1",
-    reason="requires TRITON_METAL_MEPT=1 (M3 register-array form)")
+    os.environ.get("TRITON_MSL_MEPT") != "1",
+    reason="requires TRITON_MSL_MEPT=1 (M3 register-array form)")
 
 if HAS:
     @triton.jit

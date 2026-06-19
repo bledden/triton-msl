@@ -59,10 +59,10 @@ kernel void test_concurrent_k(
 def test_make_metallib_concurrent_no_race(tmp_path, monkeypatch):
     """10 threads × 10 iterations of make_metallib on the same kernel must all succeed."""
     # Redirect the cache to a fresh scratch dir so every run of this test starts cold.
-    monkeypatch.setenv("TRITON_METAL_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
 
     # Import after monkeypatching so _get_cache_dir() sees the overridden env var.
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
 
     options = MetalOptions()
     metadata = {"name": "test_concurrent_k"}

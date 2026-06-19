@@ -16,14 +16,14 @@ def emit(monkeypatch):
     # monkeypatch.setenv auto-restores at teardown — a bare os.environ[...]=...
     # here leaked FORCE_PYTHON=1 into later test files (e.g. test_cpp_backend),
     # which routes their C++ kernels to Python; harmless flag-off but turns into
-    # a MEPT-array refusal under TRITON_METAL_MEPT=1.
-    monkeypatch.setenv("TRITON_METAL_FORCE_PYTHON", "1")
+    # a MEPT-array refusal under TRITON_MSL_MEPT=1.
+    monkeypatch.setenv("TRITON_MSL_FORCE_PYTHON", "1")
     import triton, triton.language as tl
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
     from triton._C.libtriton import ir
-    from triton_metal.backend.compiler import MetalBackend
-    from triton_metal.codegen.msl_emitter import emit_msl
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.msl_emitter import emit_msl
 
     def _emit(fn, sig, cst):
         t = GPUTarget("metal", "apple-m4", 32)

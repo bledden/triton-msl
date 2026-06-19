@@ -1,5 +1,5 @@
 """Parity: kernels run identically (to tolerance) with the compile_shader
-fast-path ON (TRITON_METAL_COMPILE_SHADER=1) vs OFF (=0). Every kernel must
+fast-path ON (TRITON_MSL_COMPILE_SHADER=1) vs OFF (=0). Every kernel must
 match torch AND match itself across both flag values. The fast-path must NEVER
 change a result; the 2-D-grid kernel MUST fall back under flag=1 yet stay
 correct. Serial GPU."""
@@ -21,7 +21,7 @@ def _vadd(A, B, OUT, N, BLOCK: tl.constexpr):
 @requires
 @pytest.mark.parametrize("flag", ["1", "0"])
 def test_vadd_parity(flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", flag)
     N = 4096
     A = torch.randn(N, device="mps"); B = torch.randn(N, device="mps"); OUT = torch.empty(N, device="mps")
     _vadd[(triton.cdiv(N, 1024),)](A, B, OUT, N, BLOCK=1024); torch.mps.synchronize()
@@ -40,7 +40,7 @@ def _row_sum(X, OUT, N, BLOCK: tl.constexpr):
 @requires
 @pytest.mark.parametrize("flag", ["1", "0"])
 def test_reduction_parity(flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", flag)
     R, N = 32, 512
     X = torch.randn(R, N, device="mps"); OUT = torch.empty(R, device="mps")
     _row_sum[(R,)](X, OUT, N, BLOCK=triton.next_power_of_2(N)); torch.mps.synchronize()
@@ -62,7 +62,7 @@ def _softmax(X, OUT, N, BLOCK: tl.constexpr):
 @requires
 @pytest.mark.parametrize("flag", ["1", "0"])
 def test_softmax_parity(flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", flag)
     R, N = 16, 256
     X = torch.randn(R, N, device="mps"); OUT = torch.empty(R, N, device="mps")
     _softmax[(R,)](X, OUT, N, BLOCK=triton.next_power_of_2(N)); torch.mps.synchronize()
@@ -81,7 +81,7 @@ def _where(A, B, COND, OUT, N, BLOCK: tl.constexpr):
 @requires
 @pytest.mark.parametrize("flag", ["1", "0"])
 def test_where_parity(flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", flag)
     N = 4096
     A = torch.randn(N, device="mps"); B = torch.randn(N, device="mps")
     COND = (torch.rand(N, device="mps") > 0.5).to(torch.int32)
@@ -102,7 +102,7 @@ def _scatter_add(IDX, VAL, OUT, N, BLOCK: tl.constexpr):
 @requires
 @pytest.mark.parametrize("flag", ["1", "0"])
 def test_atomic_add_parity(flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", flag)
     N, NBUCKET = 4096, 64
     IDX = torch.randint(0, NBUCKET, (N,), device="mps", dtype=torch.int32)
     VAL = torch.randn(N, device="mps")
@@ -124,7 +124,7 @@ def _add2d(A, B, OUT, M, N, BLOCK: tl.constexpr):
 @requires
 @pytest.mark.parametrize("flag", ["1", "0"])
 def test_2d_grid_parity(flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", flag)
     M, N = 8, 4096
     A = torch.randn(M, N, device="mps"); B = torch.randn(M, N, device="mps")
     OUT = torch.empty(M, N, device="mps")

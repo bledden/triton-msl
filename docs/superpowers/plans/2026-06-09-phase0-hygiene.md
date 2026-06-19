@@ -6,24 +6,24 @@
 
 **Architecture:** Small isolated fixes to compiler cache keys, emit_msl fallback policy, scf.for i64 guard, packaging, and docs. Every change TDD'd; gate = fresh-cache `test_core` 5,335/0.
 
-**Tech Stack:** Python 3.14 project venv (`/Users/bledden/Documents/triton-metal/.venv/bin/python`), pytest, `scripts/run_upstream_test.sh`. Caches at `~/.cache/triton_metal` + `~/.triton/cache` — clear both, serial GPU only.
+**Tech Stack:** Python 3.14 project venv (`/Users/bledden/Documents/triton-msl/.venv/bin/python`), pytest, `scripts/run_upstream_test.sh`. Caches at `~/.cache/triton_msl` + `~/.triton/cache` — clear both, serial GPU only.
 
 ---
 
 ### Task 1: CODEGEN_VERSION in MSL cache key
 
-**Files:** Modify `triton_metal/__init__.py`, `triton_metal/backend/compiler.py:1806-1808`; Test `tests/test_cache_versioning.py`
+**Files:** Modify `triton_msl/__init__.py`, `triton_msl/backend/compiler.py:1806-1808`; Test `tests/test_cache_versioning.py`
 
 - [ ] Step 1: failing test:
 ```python
 import hashlib
 def test_msl_cache_key_includes_codegen_version():
-    from triton_metal import CODEGEN_VERSION
-    from triton_metal.backend.compiler import _msl_cache_key
+    from triton_msl import CODEGEN_VERSION
+    from triton_msl.backend.compiler import _msl_cache_key
     assert CODEGEN_VERSION in _msl_cache_key.__doc__ or _msl_cache_key("x", "h") != hashlib.sha256("xh".encode()).hexdigest()[:16]
 ```
 - [ ] Step 2: run; expect ImportError (no CODEGEN_VERSION/_msl_cache_key).
-- [ ] Step 3: add to `triton_metal/__init__.py`: `CODEGEN_VERSION = "2026.06.09"` (bump on lowerer change). In compiler.py replace inline sha with module func `_msl_cache_key(mod_text, opts_hash)` hashing `mod_text + opts_hash + CODEGEN_VERSION + os.environ.get("TRITON_METAL_MEPT","")`; call at 1806.
+- [ ] Step 3: add to `triton_msl/__init__.py`: `CODEGEN_VERSION = "2026.06.09"` (bump on lowerer change). In compiler.py replace inline sha with module func `_msl_cache_key(mod_text, opts_hash)` hashing `mod_text + opts_hash + CODEGEN_VERSION + os.environ.get("TRITON_MSL_MEPT","")`; call at 1806.
 - [ ] Step 4: test passes; project suite 0 failed.
 - [ ] Step 5: `git commit -m "fix: cache key includes CODEGEN_VERSION + MEPT flag"`
 
@@ -35,7 +35,7 @@ def test_msl_cache_key_includes_codegen_version():
 
 ### Task 3: i64 scf.for refuses (was hang)
 
-**Files:** Modify `triton_metal/codegen/_lowerer_control.py:_lower_scf_for`; Test `tests/test_int64_integrity.py` (append)
+**Files:** Modify `triton_msl/codegen/_lowerer_control.py:_lower_scf_for`; Test `tests/test_int64_integrity.py` (append)
 - [ ] Step 1: failing test: i64-bound `tl.range` kernel with 10s subprocess timeout → expect `MetalNonRecoverableError`, not timeout.
 - [ ] Step 2: run; expect TIMEOUT.
 - [ ] Step 3: in `_lower_scf_for`, when `self.env_types.get(start/end) == "i64"`, raise `MetalNonRecoverableError("i64 loop bounds not supported — would hang")`.
@@ -44,15 +44,15 @@ def test_msl_cache_key_includes_codegen_version():
 
 ### Task 4: retire legacy fallback
 
-**Files:** Modify `triton_metal/codegen/msl_emitter.py:528-556`; Test `tests/test_legacy_fallback_retired.py`
-- [ ] Step 1: failing test: with `TRITON_METAL_LEGACY` unset, emit_msl on UNSUPPORTED graph raises `MetalNonRecoverableError`; with =1, returns MSL.
+**Files:** Modify `triton_msl/codegen/msl_emitter.py:528-556`; Test `tests/test_legacy_fallback_retired.py`
+- [ ] Step 1: failing test: with `TRITON_MSL_LEGACY` unset, emit_msl on UNSUPPORTED graph raises `MetalNonRecoverableError`; with =1, returns MSL.
 - [ ] Step 2: run; fails (currently falls back silently).
-- [ ] Step 3: wrap legacy block in `if os.environ.get("TRITON_METAL_LEGACY") != "1": raise MetalNonRecoverableError(...)`.
+- [ ] Step 3: wrap legacy block in `if os.environ.get("TRITON_MSL_LEGACY") != "1": raise MetalNonRecoverableError(...)`.
 - [ ] Step 4-5: project suite + sweep; commit `fix: legacy parser opt-in only`.
 
 ### Task 5: packaging + tree
 
-**Files:** `pyproject.toml:36` → `triton==3.7.0`; `git rm --cached compile_commands.json triton_metal/csrc/.cache -r`; `.gitignore` add both.
+**Files:** `pyproject.toml:36` → `triton==3.7.0`; `git rm --cached compile_commands.json triton_msl/csrc/.cache -r`; `.gitignore` add both.
 - [ ] Step 1-2: `pip check`; commit `chore: pin triton 3.7.0, untrack build artifacts`.
 
 ### Task 6: evidence regeneration (after T1-5)
@@ -63,6 +63,6 @@ def test_msl_cache_key_includes_codegen_version():
 
 ### Task 7: name decision (doc only)
 
-- [ ] Step 1: `docs/superpowers/specs/2026-06-09-name-decision.md` — `pip install triton-metal-backend`; README; gated to Phase 5.
+- [ ] Step 1: `docs/superpowers/specs/2026-06-09-name-decision.md` — `pip install triton-msl-backend`; README; gated to Phase 5.
 
 ### Gate: 5,335/0; project 0 failed; all tasks committed.

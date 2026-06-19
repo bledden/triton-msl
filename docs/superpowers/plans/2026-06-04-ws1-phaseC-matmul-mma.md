@@ -11,15 +11,15 @@
 **Spec:** `docs/superpowers/specs/2026-06-04-ws1-phaseC-matmul-mma-design.md`
 
 **Reference (read before starting):**
-- `triton_metal/codegen/_msl_templates.py:3546` — `make_simdgroup_matmul_kernel` (the fp16-lie + barrier-per-8 template).
-- `triton_metal/codegen/_lowerer_templates.py:34` — `_lower_simple_dot_inline`; `:209` — `_lower_k_loop_dot_inline` (same pattern; what real `@triton.jit` matmuls use).
+- `triton_msl/codegen/_msl_templates.py:3546` — `make_simdgroup_matmul_kernel` (the fp16-lie + barrier-per-8 template).
+- `triton_msl/codegen/_lowerer_templates.py:34` — `_lower_simple_dot_inline`; `:209` — `_lower_k_loop_dot_inline` (same pattern; what real `@triton.jit` matmuls use).
 - `tests/test_emitter.py:1251` — `test_simdgroup_matmul_32x32` (the runner-fixture correctness pattern to mirror).
 - `benchmarks/hw_harness.py` — `matmul_*` specs (perf oracle; run with the `.venv` python, `TRITON_DEFAULT_BACKEND=metal`).
 
 **Conventions for every command below:**
 ```bash
-VPY=/Users/bledden/Documents/triton-metal/.venv/bin/python
-export PYTHONPATH=/Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
+VPY=/Users/bledden/Documents/triton-msl/.venv/bin/python
+export PYTHONPATH=/Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
 export TRITON_DEFAULT_BACKEND=metal
 ```
 No PRs at any point (standing instruction — local worktree commits only).
@@ -136,7 +136,7 @@ git commit -m "test(WS1-C1): de-risk simdgroup_half8x8 mixed-precision MMA"
 fragments and NOT upcast halves to float before the MMA. Asserted on the
 generated MSL so 'fp16' can never silently be fp32 again."""
 import re
-from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel
+from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel
 
 def test_fp16_matmul_uses_half_fragments():
     msl = make_simdgroup_matmul_kernel(dtype="fp16")
@@ -170,7 +170,7 @@ git commit -m "test(WS1-C1): failing genuineness test for fp16 matmul (currently
 ### Task 3: Make the standalone fp16 template genuine
 
 **Files:**
-- Modify: `triton_metal/codegen/_msl_templates.py` — the `dtype in ("fp16","f16")` branch of `make_simdgroup_matmul_kernel` (around `:3580`).
+- Modify: `triton_msl/codegen/_msl_templates.py` — the `dtype in ("fp16","f16")` branch of `make_simdgroup_matmul_kernel` (around `:3580`).
 
 - [ ] **Step 1: Replace the fp16 branch's staging + fragments**
 
@@ -208,7 +208,7 @@ Expected: PASS — fp16 numerical correctness preserved (the existing
 - [ ] **Step 4: Commit**
 
 ```bash
-git add triton_metal/codegen/_msl_templates.py
+git add triton_msl/codegen/_msl_templates.py
 git commit -m "feat(WS1-C1): genuine fp16 matmul — simdgroup_half8x8 inputs + float accumulator"
 ```
 
@@ -239,8 +239,8 @@ git commit -m "docs(WS1-C1): record genuine-fp16 harness evidence (fp16 > fp32)"
 ### Task 5: Consolidate the three emitter paths through one core
 
 **Files:**
-- Create: `triton_metal/codegen/_mma_tile.py` — `emit_simdgroup_mma_tile(dtype, ...)` returning the staging+MMA inner-loop MSL.
-- Modify: `triton_metal/codegen/_msl_templates.py` (`make_simdgroup_matmul_kernel`), `triton_metal/codegen/_lowerer_templates.py` (`_lower_simple_dot_inline:34`, `_lower_k_loop_dot_inline:209`) to call the shared core.
+- Create: `triton_msl/codegen/_mma_tile.py` — `emit_simdgroup_mma_tile(dtype, ...)` returning the staging+MMA inner-loop MSL.
+- Modify: `triton_msl/codegen/_msl_templates.py` (`make_simdgroup_matmul_kernel`), `triton_msl/codegen/_lowerer_templates.py` (`_lower_simple_dot_inline:34`, `_lower_k_loop_dot_inline:209`) to call the shared core.
 
 - [ ] **Step 1: Write a failing equivalence test**
 
@@ -248,11 +248,11 @@ git commit -m "docs(WS1-C1): record genuine-fp16 harness evidence (fp16 > fp32)"
 """All three matmul emitters must share the genuine-fp16 core: every path
 that emits a simdgroup matmul uses half fragments for fp16, none upcasts."""
 import re, pytest
-from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel
+from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel
 
 def test_jit_dot_paths_are_genuine_fp16():
     # the JIT inline paths must, for fp16, also use simdgroup_half8x8.
-    from triton_metal.codegen._mma_tile import emit_simdgroup_mma_tile
+    from triton_msl.codegen._mma_tile import emit_simdgroup_mma_tile
     msl = emit_simdgroup_mma_tile(dtype="fp16")
     assert "simdgroup_half8x8" in msl
     assert not re.search(r"float\(\s*A\[", msl)
@@ -284,7 +284,7 @@ sweep before the phase closes — must stay 4326/0.)
 - [ ] **Step 6: Commit**
 
 ```bash
-git add triton_metal/codegen/_mma_tile.py triton_metal/codegen/_msl_templates.py triton_metal/codegen/_lowerer_templates.py tests/test_matmul_fp16_genuine.py
+git add triton_msl/codegen/_mma_tile.py triton_msl/codegen/_msl_templates.py triton_msl/codegen/_lowerer_templates.py tests/test_matmul_fp16_genuine.py
 git commit -m "refactor(WS1-C1): one shared simdgroup-MMA emitter; genuine fp16 across all 3 paths"
 ```
 
@@ -299,7 +299,7 @@ measurement, not pre-invented.
 ### Task 6: Deeper K-tiling (amortize the barrier)
 
 **Files:**
-- Modify: `triton_metal/codegen/_mma_tile.py` — add a `k_depth` that stages a
+- Modify: `triton_msl/codegen/_mma_tile.py` — add a `k_depth` that stages a
   K-deep tile per barrier and inner-loops the 8×8 MMAs over it.
 
 - [ ] **Step 1: Add a correctness test at the new tiling for fp16 and fp32**
@@ -338,7 +338,7 @@ reflection `occupancy_hint`). If a variant regresses, discard it.
 - [ ] **Step 6: Commit the winning config**
 
 ```bash
-git add triton_metal/codegen/_mma_tile.py tests/test_mma_tile_tiling.py
+git add triton_msl/codegen/_mma_tile.py tests/test_mma_tile_tiling.py
 git commit -m "perf(WS1-C2): deeper K-tiling for simdgroup matmul (<best config>, <Nx> vs C.1)"
 ```
 

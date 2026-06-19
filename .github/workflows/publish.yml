@@ -47,7 +47,7 @@ jobs:
         run: pip install dist/*.whl
 
       - name: Verify import
-        run: python -c "import triton_metal; print('triton_metal imported successfully')"
+        run: python -c "import triton_msl; print('triton_msl imported successfully')"
 
   publish-testpypi:
     needs: test-install

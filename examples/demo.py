@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Triton-Metal Demo: Compile and run Metal GPU kernels on Apple Silicon.
 
-This script demonstrates the full triton-metal kernel pipeline:
+This script demonstrates the full triton-msl kernel pipeline:
   1. Generate MSL (Metal Shading Language) source from Python
   2. Compile to .metallib via xcrun
   3. Execute on Metal GPU
@@ -53,7 +53,7 @@ def get_metal_device():
 
 def compile_msl(msl_source, kernel_name="kernel"):
     """Compile MSL source to .metallib and return the file path."""
-    cache_dir = os.path.join(tempfile.gettempdir(), "triton_metal_demo")
+    cache_dir = os.path.join(tempfile.gettempdir(), "triton_msl_demo")
     os.makedirs(cache_dir, exist_ok=True)
 
     metal_path = os.path.join(cache_dir, f"{kernel_name}.metal")
@@ -226,7 +226,7 @@ def print_metrics(label, compile_info, bench, n_bytes=None, n_flops=None):
 # ---------------------------------------------------------------------------
 
 def demo_vector_add(device, queue):
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     n = 1_048_576  # 1M elements
     print(f"\n{'='*60}")
@@ -270,7 +270,7 @@ def demo_vector_add(device, queue):
 # ---------------------------------------------------------------------------
 
 def demo_softmax(device, queue):
-    from triton_metal.codegen.msl_emitter import make_softmax_kernel
+    from triton_msl.codegen.msl_emitter import make_softmax_kernel
 
     n_rows, n_cols = 256, 512
     print(f"\n{'='*60}")
@@ -325,7 +325,7 @@ def demo_softmax(device, queue):
 # ---------------------------------------------------------------------------
 
 def demo_matmul(device, queue):
-    from triton_metal.codegen.msl_emitter import make_simdgroup_matmul_kernel
+    from triton_msl.codegen.msl_emitter import make_simdgroup_matmul_kernel
 
     M, N, K = 32, 32, 32
     print(f"\n{'='*60}")
@@ -379,7 +379,7 @@ def demo_matmul(device, queue):
 # ---------------------------------------------------------------------------
 
 def demo_flash_attention(device, queue):
-    from triton_metal.codegen.msl_emitter import make_flash_attention_kernel
+    from triton_msl.codegen.msl_emitter import make_flash_attention_kernel
 
     head_dim = 64
     seq_len = 32
@@ -459,7 +459,7 @@ def demo_flash_attention(device, queue):
 # ---------------------------------------------------------------------------
 
 def demo_cumsum(device, queue):
-    from triton_metal.codegen.msl_emitter import make_cumsum_kernel
+    from triton_msl.codegen.msl_emitter import make_cumsum_kernel
 
     n_rows, n_cols = 64, 256
     print(f"\n{'='*60}")
@@ -504,7 +504,7 @@ def demo_cumsum(device, queue):
 # ---------------------------------------------------------------------------
 
 def demo_conv2d(device, queue):
-    from triton_metal.codegen.msl_emitter import make_conv2d_kernel
+    from triton_msl.codegen.msl_emitter import make_conv2d_kernel
 
     batch, in_c, out_c = 1, 3, 16
     in_h, in_w = 32, 32
@@ -593,7 +593,7 @@ def print_device_info(device):
     print(f"  Unified memory:        {has_unified}")
 
     # Count available kernels
-    from triton_metal.codegen import msl_emitter
+    from triton_msl.codegen import msl_emitter
     kernels = [name for name in dir(msl_emitter) if name.startswith("make_")]
     print(f"  Kernel generators:     {len(kernels)}")
     print()

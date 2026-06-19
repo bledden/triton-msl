@@ -1,4 +1,4 @@
-# triton-metal workplan: n>1 (BLOCK > num_threads) coverage & generality
+# triton-msl workplan: n>1 (BLOCK > num_threads) coverage & generality
 
 **Context (2026-06-14):** the in-loop-reduce / silent-wrong arc is closed and merged
 (`main @ b82136b`). tridec is **fully unblocked** — BP and relay megakernels run at
@@ -51,11 +51,11 @@ for other users (tridec sets num_warps explicitly, so no impact).
 
 ## Non-item: fp64 on Metal
 
-Metal hardware has no fp64; tridec's fp64 path is hardware-N/A, not a triton-metal gap.
+Metal hardware has no fp64; tridec's fp64 path is hardware-N/A, not a triton-msl gap.
 Nothing to do.
 
 ---
 
 *Source: tridec backlog `tridec-bug-reports/` (REPLY_RELAY_LIFTED / BISECTION /
-REAL_RELAY_SILENT_WRONG, 2026-06-14) + triton-metal audit. Prime directive unchanged:
+REAL_RELAY_SILENT_WRONG, 2026-06-14) + triton-msl audit. Prime directive unchanged:
 never silent-wrong — every uncoverable pattern refuses loudly.*

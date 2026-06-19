@@ -1,6 +1,6 @@
 # Multi-element-per-thread refactor (Phase 4 proper)
 
-> Multi-week scope. Mostly affects `triton_metal/codegen/generic_lowerer.py` and
+> Multi-week scope. Mostly affects `triton_msl/codegen/generic_lowerer.py` and
 > the C++ MLIR-to-LLVM conversion passes. Lands a per-thread *register array*
 > programming model that's the prerequisite for several deferred wins:
 > FA HEAD_DIM=64 via the C++ direct path, `test_chained_reductions`,
@@ -9,7 +9,7 @@
 
 ## Status of foundations (already landed)
 
-- `triton_metal/codegen/_linear_layout.py` — XOR-basis position math for
+- `triton_msl/codegen/_linear_layout.py` — XOR-basis position math for
   `#ttg.linear` / `#ttg.blocked` layouts.
 - `IRGraph.mod_text` is plumbed through so layout aliases can be resolved.
 - `_lower_convert_layout` raises `MetalNotImplementedError` for unhandled
@@ -25,7 +25,7 @@
   (`test_track_n_elems_*`, `test_parse_blocked_field_*`). Direct
   `env_shapes[]` writes (e.g. tt.make_range, splat) don't yet populate
   `env_n_elems` — 4b call sites must consult both.
-- **Phase 4b scaffolding (DONE)** — `TRITON_METAL_MEPT` env flag,
+- **Phase 4b scaffolding (DONE)** — `TRITON_MSL_MEPT` env flag,
   `env_array` map, `_var_array(prefix, exprs, ty)` emitter, and
   `_lookup_array(ssa_id) -> (name, n, ty)` reader. No op handler is
   wired yet; flag-on default-route preserves byte-identical MSL output
@@ -105,7 +105,7 @@ option: have consumers (e.g. `_emit_binary` MEPT branch) call
 
 ### 4b. Refactor `_var` / `_emit_passthrough` to optionally array-store (~3 days)
 
-**Scaffolding landed**: `TRITON_METAL_MEPT` flag, `env_array` map,
+**Scaffolding landed**: `TRITON_MSL_MEPT` flag, `env_array` map,
 `_var_array`, `_lookup_array`. Remaining work is integrating each op
 handler. Suggested order of integration (least → most surface):
 
@@ -300,7 +300,7 @@ Phase 4c is complete. Remaining for full Phase 4:
   for scalar; needs an array-aware variant for the per-thread fold).
 - 4f: C++ side mirror changes (`ReduceOpConversion` /
   `DotOpConversion` / `ConvertLayoutOp` — these only matter for the
-  `TRITON_METAL_USE_CPP=1` path).
+  `TRITON_MSL_USE_CPP=1` path).
 - 4g: pattern-detector deprecation (only after 4f).
 - Performance optimization: wrap-loop is redundant inside MEPT tiles;
   could be elided to avoid 4× wasted work on already-masked positions.
@@ -352,7 +352,7 @@ Confirm by re-running `test_trans_reshape` / `test_dot` softmax-epilogue /
 
 ## Risk mitigation
 
-- Land 4a behind a feature flag (`TRITON_METAL_MEPT=1`). All existing tests
+- Land 4a behind a feature flag (`TRITON_MSL_MEPT=1`). All existing tests
   must continue to pass with the flag off.
 - Add a correctness harness: a small set of kernels with known-good outputs
   (matmul, softmax, layer_norm, FA, sort) gated on each phase.

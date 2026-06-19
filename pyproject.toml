@@ -3,11 +3,11 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# PyPI distribution name. NB: `triton-metal` (hyphen) is taken on PyPI by an
-# unrelated project; `tritonmetal` (no separator) normalizes to a distinct name
-# per PEP 503. The import name stays `triton_metal` (install `tritonmetal`,
-# then `import triton_metal`).
-name = "tritonmetal"
+# PyPI distribution name. The obvious `triton-metal` (and close variants like
+# `tritonmetal`) is taken on PyPI by an unrelated project and blocked by PyPI's
+# PEP 541 confusability check, so this ships as `triton-msl` — a distinct stem
+# (MSL = Metal Shading Language, which this backend emits). Import name: triton_msl.
+name = "triton-msl"
 version = "0.1.0a1"
 description = "Metal (Apple Silicon) backend for Triton"
 readme = "README.md"
@@ -49,16 +49,16 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/bledden/triton-metal"
-Repository = "https://github.com/bledden/triton-metal"
-Issues = "https://github.com/bledden/triton-metal/issues"
-Changelog = "https://github.com/bledden/triton-metal/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/bledden/triton-msl"
+Repository = "https://github.com/bledden/triton-msl"
+Issues = "https://github.com/bledden/triton-msl/issues"
+Changelog = "https://github.com/bledden/triton-msl/blob/main/CHANGELOG.md"
 
 [project.entry-points."triton.backends"]
-metal = "triton_metal.backend"
+metal = "triton_msl.backend"
 
 [tool.setuptools.packages.find]
-include = ["triton_metal*"]
+include = ["triton_msl*"]
 
 [tool.pytest.ini_options]
 markers = [

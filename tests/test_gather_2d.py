@@ -97,7 +97,7 @@ def test_gather_2d_axis1(M, N):
 def test_gather_2d_ragged_refused():
     """A 2D gather whose source differs in shape from the index (ragged gather
     axis) is not yet lowered -- must refuse loudly, never silent-wrong."""
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
     try:
         from triton.compiler.errors import CompilationError as _CErr
     except Exception:

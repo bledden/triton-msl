@@ -10,7 +10,7 @@ Runs each measurement in a *separate subprocess* so the in-process JIT and
 Metal kernel cache are completely clean for each flag value.
 
 Usage:
-    rm -rf ~/.cache/triton_metal ~/.triton/cache
+    rm -rf ~/.cache/triton_msl ~/.triton/cache
     python benchmarks/bench_compile_shader.py
 """
 
@@ -30,7 +30,7 @@ _INNER = r'''
 import os, sys, json, torch, triton, triton.language as tl
 from triton.testing import do_bench
 
-FLAG = os.environ.get("TRITON_METAL_COMPILE_SHADER", "1")
+FLAG = os.environ.get("TRITON_MSL_COMPILE_SHADER", "1")
 
 # ── kernels ──────────────────────────────────────────────────────────────────
 
@@ -169,11 +169,11 @@ sys.stdout.flush()
 def run_one_flag(flag: str) -> dict:
     """Run the inner benchmark in a fresh process with the given flag."""
     # Clear caches before each run
-    subprocess.run(["rm", "-rf", os.path.expanduser("~/.cache/triton_metal"),
+    subprocess.run(["rm", "-rf", os.path.expanduser("~/.cache/triton_msl"),
                     os.path.expanduser("~/.triton/cache")],
                    check=False, capture_output=True)
     env = os.environ.copy()
-    env["TRITON_METAL_COMPILE_SHADER"] = flag
+    env["TRITON_MSL_COMPILE_SHADER"] = flag
     # Remove any inherited value so the child sees only our flag
     result = subprocess.run(
         [sys.executable, "-c", _INNER],
@@ -214,11 +214,11 @@ def main():
     print(f"Peak bandwidth: {PEAK_BW} GB/s (M4 Max)")
     print("=" * 100)
 
-    print("\nRunning with TRITON_METAL_COMPILE_SHADER=1 (fast-path ON) ...")
+    print("\nRunning with TRITON_MSL_COMPILE_SHADER=1 (fast-path ON) ...")
     on = run_one_flag("1")
     print("  done.")
 
-    print("Running with TRITON_METAL_COMPILE_SHADER=0 (fast-path OFF) ...")
+    print("Running with TRITON_MSL_COMPILE_SHADER=0 (fast-path OFF) ...")
     off = run_one_flag("0")
     print("  done.\n")
 

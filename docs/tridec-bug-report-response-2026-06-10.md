@@ -1,4 +1,4 @@
-# Response to tridec's three triton-metal bug reports (2026-06-10)
+# Response to tridec's three triton-msl bug reports (2026-06-10)
 
 Thanks — this is exactly the kind of real-workload burn-in the project needs. All
 three investigated against the current dev branch (`worktree-multi-element-per-thread`,
@@ -63,8 +63,8 @@ still repros, send the failing `.metal` and I'll fix the specific structure.
 ## To pick up the fixes
 
 These are on the dev branch, not yet merged to whatever `4c42e96` was. Once merged,
-clear `~/.cache/triton_metal` (the cache key now includes a codegen version, so this
+clear `~/.cache/triton_msl` (the cache key now includes a codegen version, so this
 is the last time you'll need to clear manually) and re-run your acceptance test at
 BLOCK=128 — both the barrier determinism gate and the while-loop forms should pass.
 
-— triton-metal dev session
+— triton-msl dev session

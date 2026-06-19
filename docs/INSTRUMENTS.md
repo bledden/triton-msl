@@ -8,7 +8,7 @@ that is available *programmatically* on Apple Silicon:
 - pipeline-reflection occupancy (max threads/threadgroup, execution width,
   threadgroup-memory footprint);
 - best-effort native-AGX disassembly (register/instruction signal, partial on
-  M4 — see `triton_metal/profiling/disasm.py`);
+  M4 — see `triton_msl/profiling/disasm.py`);
 - MLX comparison ratios.
 
 Two things it **cannot** give you, because Apple does not expose them through

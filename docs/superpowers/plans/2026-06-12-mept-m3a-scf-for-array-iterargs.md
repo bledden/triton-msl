@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let an `scf.for` carry a multi-element value as a per-thread register array iter-arg (declare `T v[n]` once, body reads/writes `v[e]`, yield updates `v[e]`, result is the array), so a per-element accumulator carried across loop iterations computes correctly — completing the deferred M2 work. Plus the two M2-review predicate-completeness fixes that this relies on. Behind `TRITON_METAL_MEPT`, parity gate green.
+**Goal:** Let an `scf.for` carry a multi-element value as a per-thread register array iter-arg (declare `T v[n]` once, body reads/writes `v[e]`, yield updates `v[e]`, result is the array), so a per-element accumulator carried across loop iterations computes correctly — completing the deferred M2 work. Plus the two M2-review predicate-completeness fixes that this relies on. Behind `TRITON_MSL_MEPT`, parity gate green.
 
 **Architecture:** M2 made control-flow kernels enter the single-pass register-array form, but only *loop-invariant* multi-element values (referenced inside the loop) and *scalar* iter-args (the accumulator in Bug 2) were handled. A value that is itself a multi-element loop-carried iter-arg — e.g. `acc = tl.zeros((BLOCK,)); for i: acc = acc + load(...)` — still falls into `_lower_scf_for`'s scalar iter-arg path: it declares one MSL scalar for a value that needs `T v[n]`, so the yield assigns an array name to a scalar → invalid MSL / `UNKNOWN_` → refuse. M3a adds a register-array iter-arg branch to `_lower_scf_for` (declare/init `T v[n]`, map `env_array` for the block-arg and the result, yield per-element). Two precondition fixes land first: `_find_op_type_str` must recurse into nested scf regions (it stops one level deep, so type lookups inside nested loops falsely return `""` and disqualify MEPT), and `region_needs_arrays` must match all `result_ids` not just `.id` (asymmetric with `tensor_value_ids`).
 
-**Tech Stack:** Python lowerer (`triton_metal/codegen/`), MSL source emission, pytest (CPU unit/emission + serial GPU correctness), Apple Metal.
+**Tech Stack:** Python lowerer (`triton_msl/codegen/`), MSL source emission, pytest (CPU unit/emission + serial GPU correctness), Apple Metal.
 
 ---
 
@@ -23,9 +23,9 @@ These are independent per the code-exploration map and get their own plans/tests
 
 ## File Structure
 
-- `triton_metal/codegen/generic_lowerer.py` (modify): `_find_op_type_str` (~line 4223) → recurse into nested `region_ops`/`else_ops` at any depth, preserving "found-but-empty-type" vs "not-found" semantics.
-- `triton_metal/codegen/regval.py` (modify): `region_needs_arrays` (~line 74) → also match `b.result_ids` against the multi set, symmetric with `tensor_value_ids`.
-- `triton_metal/codegen/_lowerer_control.py` (modify): `_lower_scf_for` (lines 32–263) → add a register-array iter-arg branch (declare `T v[n]`, init per-element, map `env_array` for block-arg + result, yield per-element).
+- `triton_msl/codegen/generic_lowerer.py` (modify): `_find_op_type_str` (~line 4223) → recurse into nested `region_ops`/`else_ops` at any depth, preserving "found-but-empty-type" vs "not-found" semantics.
+- `triton_msl/codegen/regval.py` (modify): `region_needs_arrays` (~line 74) → also match `b.result_ids` against the multi set, symmetric with `tensor_value_ids`.
+- `triton_msl/codegen/_lowerer_control.py` (modify): `_lower_scf_for` (lines 32–263) → add a register-array iter-arg branch (declare `T v[n]`, init per-element, map `env_array` for block-arg + result, yield per-element).
 - `tests/test_generic_lowerer.py` (modify): unit test for `_find_op_type_str` nested recursion.
 - `tests/test_regval.py` (modify): unit test for `region_needs_arrays` result_ids matching.
 - `tests/test_mept_m3a_arrayiter.py` (create): CPU emission test (flag-ON, array iter-arg MSL, no `UNKNOWN_`).
@@ -36,7 +36,7 @@ These are independent per the code-exploration map and get their own plans/tests
 ### Task 1: `_find_op_type_str` recurses nested scf regions (M3-0)
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py:4223-4240`
+- Modify: `triton_msl/codegen/generic_lowerer.py:4223-4240`
 - Test: `tests/test_generic_lowerer.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -46,7 +46,7 @@ Append to `tests/test_generic_lowerer.py` (uses `GenericLowerer.__new__` to bypa
 ```python
 def test_find_op_type_str_recurses_nested_regions():
     from types import SimpleNamespace
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
 
     def _op(id, type_str="", region_ops=None, else_ops=None):
         return SimpleNamespace(id=id, type_str=type_str,
@@ -119,7 +119,7 @@ Expected: all pass (no behavior change for already-found ids; only previously-un
 - [ ] **Step 6: Commit**
 
 ```bash
-git add triton_metal/codegen/generic_lowerer.py tests/test_generic_lowerer.py
+git add triton_msl/codegen/generic_lowerer.py tests/test_generic_lowerer.py
 git commit -m "fix(mept-m3a): _find_op_type_str recurses nested scf regions
 
 It searched only one region level deep, so type lookups for values defined
@@ -135,7 +135,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 2: `region_needs_arrays` matches all result_ids (M3-1)
 
 **Files:**
-- Modify: `triton_metal/codegen/regval.py` (the `region_needs_arrays` body, ~line 74)
+- Modify: `triton_msl/codegen/regval.py` (the `region_needs_arrays` body, ~line 74)
 - Test: `tests/test_regval.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -144,7 +144,7 @@ Append to `tests/test_regval.py` (reuse the `_TVOp` mock added in M2 — it has 
 
 ```python
 def test_region_needs_arrays_matches_result_ids_not_just_id():
-    from triton_metal.codegen.regval import region_needs_arrays
+    from triton_msl.codegen.regval import region_needs_arrays
     # A body op whose multi-element value is its result_ids[0]=200, while its
     # .id is a different number (300). tensor_value_ids would add 200 to the
     # multi set; region_needs_arrays must detect that 200 is produced here.
@@ -161,7 +161,7 @@ Expected: FAIL — `region_needs_arrays` checks only `b.id` (300), which is not 
 
 - [ ] **Step 3: Write the fix**
 
-In `triton_metal/codegen/regval.py`, find the body-op id check inside `region_needs_arrays` (the line `if getattr(b, "id", None) in multi: return True`) and extend it to also match `result_ids`, mirroring how `tensor_value_ids` collects ids:
+In `triton_msl/codegen/regval.py`, find the body-op id check inside `region_needs_arrays` (the line `if getattr(b, "id", None) in multi: return True`) and extend it to also match `result_ids`, mirroring how `tensor_value_ids` collects ids:
 
 ```python
                 if getattr(b, "id", None) in multi:
@@ -184,7 +184,7 @@ Expected: all pass (the M1/M2 tests + the new one).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add triton_metal/codegen/regval.py tests/test_regval.py
+git add triton_msl/codegen/regval.py tests/test_regval.py
 git commit -m "fix(mept-m3a): region_needs_arrays matches result_ids, not just .id
 
 tensor_value_ids adds every result_id to the multi set, but
@@ -200,20 +200,20 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 3: register-array iter-arg in `_lower_scf_for` (M3-2)
 
 **Files:**
-- Modify: `triton_metal/codegen/_lowerer_control.py:32-263` (`_lower_scf_for`)
+- Modify: `triton_msl/codegen/_lowerer_control.py:32-263` (`_lower_scf_for`)
 - Test: `tests/test_mept_m3a_arrayiter.py` (create), `tests/test_mept_m3a_itercarry_gpu.py` (create)
 
 This is the core of M3a. The change adds a third iter-arg form (register array) alongside the existing scalar and oversized-2D-smem forms.
 
 - [ ] **Step 1: Write the failing GPU correctness test**
 
-Create `tests/test_mept_m3a_itercarry_gpu.py` (run with `TRITON_METAL_MEPT=1`; serial only):
+Create `tests/test_mept_m3a_itercarry_gpu.py` (run with `TRITON_MSL_MEPT=1`; serial only):
 
 ```python
 """MEPT M3a GPU correctness: a multi-element value carried as an scf.for
 iter-arg (per-element accumulator) computes the column-sum correctly under
 flag-ON. Previously the array iter-arg was emitted as a scalar -> invalid
-MSL / refusal. Run with TRITON_METAL_MEPT=1. Serial only.
+MSL / refusal. Run with TRITON_MSL_MEPT=1. Serial only.
 """
 import os
 import pytest
@@ -229,8 +229,8 @@ except Exception:
 
 requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
 requires_mept = pytest.mark.skipif(
-    os.environ.get("TRITON_METAL_MEPT") != "1",
-    reason="requires TRITON_METAL_MEPT=1 (M3 register-array iter-arg)")
+    os.environ.get("TRITON_MSL_MEPT") != "1",
+    reason="requires TRITON_MSL_MEPT=1 (M3 register-array iter-arg)")
 
 if HAS:
     @triton.jit
@@ -258,14 +258,14 @@ def test_vec_accumulate_column_sum(BLOCK):
 - [ ] **Step 2: Run flag-ON, fresh cache — observe the RED (refuse or wrong)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_MEPT=1 /opt/homebrew/bin/python3 -m pytest tests/test_mept_m3a_itercarry_gpu.py -v 2>&1 | tail -15
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_MEPT=1 /opt/homebrew/bin/python3 -m pytest tests/test_mept_m3a_itercarry_gpu.py -v 2>&1 | tail -15
 ```
 Expected: FAIL — the array iter-arg currently takes the scalar path; the kernel either raises `MetalNonRecoverableError` (UNKNOWN_ backstop / invalid MSL) or computes wrong values. Record which. (Per project rule: do NOT loosen tolerance; a wrong result must be made correct, not masked.)
 
 - [ ] **Step 3: Write the register-array iter-arg branch**
 
-In `triton_metal/codegen/_lowerer_control.py`, inside `_lower_scf_for`:
+In `triton_msl/codegen/_lowerer_control.py`, inside `_lower_scf_for`:
 
 (3a) Near the iter-arg tracking init (right after `smem_iter_indices = set()`, ~line 72), add:
 
@@ -359,10 +359,10 @@ In `triton_metal/codegen/_lowerer_control.py`, inside `_lower_scf_for`:
 - [ ] **Step 4: Re-run flag-ON GPU correctness — fresh cache, until GREEN**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_MEPT=1 /opt/homebrew/bin/python3 -m pytest tests/test_mept_m3a_itercarry_gpu.py -v 2>&1 | tail -12
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_MEPT=1 /opt/homebrew/bin/python3 -m pytest tests/test_mept_m3a_itercarry_gpu.py -v 2>&1 | tail -12
 ```
-Expected: 3 passed (BLOCK 256/512/1024), `OUT == X.view(n_tiles,BLOCK).sum(0)` within tol. If a mismatch persists, dump the MSL (`TRITON_METAL_DEBUG=1` or the codebase's MSL-dump mechanism — grep `msl_emitter.py`/`compiler.py` for `DEBUG`/`dump`) and fix the array width / yield indexing. Do not stop until all three are correct.
+Expected: 3 passed (BLOCK 256/512/1024), `OUT == X.view(n_tiles,BLOCK).sum(0)` within tol. If a mismatch persists, dump the MSL (`TRITON_MSL_DEBUG=1` or the codebase's MSL-dump mechanism — grep `msl_emitter.py`/`compiler.py` for `DEBUG`/`dump`) and fix the array width / yield indexing. Do not stop until all three are correct.
 
 - [ ] **Step 5: Add the CPU emission smoke test**
 
@@ -391,13 +391,13 @@ def _vec_accumulate(X, OUT, n_tiles, BLOCK: tl.constexpr):
 
 
 def _emit(fn, sig, cst, mept):
-    os.environ["TRITON_METAL_FORCE_PYTHON"] = "1"
-    os.environ["TRITON_METAL_MEPT"] = "1" if mept else "0"
-    import triton_metal.codegen.generic_lowerer as G
-    import triton_metal.codegen.msl_emitter as M
+    os.environ["TRITON_MSL_FORCE_PYTHON"] = "1"
+    os.environ["TRITON_MSL_MEPT"] = "1" if mept else "0"
+    import triton_msl.codegen.generic_lowerer as G
+    import triton_msl.codegen.msl_emitter as M
     importlib.reload(G)
     importlib.reload(M)
-    from triton_metal.backend.compiler import MetalBackend
+    from triton_msl.backend.compiler import MetalBackend
     t = GPUTarget("metal", "apple-m4", 32)
     be = MetalBackend(t)
     o = be.parse_options({"num_warps": 4})
@@ -421,8 +421,8 @@ def test_vec_accumulate_no_unknown():
 
 
 def teardown_module(module):
-    os.environ.pop("TRITON_METAL_MEPT", None)
-    os.environ.pop("TRITON_METAL_FORCE_PYTHON", None)
+    os.environ.pop("TRITON_MSL_MEPT", None)
+    os.environ.pop("TRITON_MSL_FORCE_PYTHON", None)
 ```
 
 Run: `/opt/homebrew/bin/python3 -m pytest tests/test_mept_m3a_arrayiter.py -v`
@@ -436,7 +436,7 @@ Expected: all pass — the new branch is gated on `_mept_single_pass`, so scalar
 - [ ] **Step 7: Commit**
 
 ```bash
-git add triton_metal/codegen/_lowerer_control.py tests/test_mept_m3a_arrayiter.py tests/test_mept_m3a_itercarry_gpu.py
+git add triton_msl/codegen/_lowerer_control.py tests/test_mept_m3a_arrayiter.py tests/test_mept_m3a_itercarry_gpu.py
 git commit -m "feat(mept-m3a): scf.for carries per-thread register-array iter-args
 
 A multi-element value carried as an scf.for iter-arg (e.g. a per-element
@@ -462,8 +462,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: Flag-OFF upstream test_core (the 5,335/0 invariant)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-unset TRITON_METAL_MEPT
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+unset TRITON_MSL_MEPT
 bash scripts/run_upstream_test.sh unit/language/test_core.py -q 2>&1 | tail -6
 ```
 Expected: **5335 passed, 4007 skipped** (the baseline). Any failure or different pass count → STOP, do not fix blindly; capture the failing names (all M3a changes are flag-gated, so a flag-OFF regression would indicate a leak — re-check the `_mept_single_pass`/`mept_enabled` guards). This run takes ~15 min; run it FOREGROUND/background and wait.
@@ -471,7 +471,7 @@ Expected: **5335 passed, 4007 skipped** (the baseline). Any failure or different
 - [ ] **Step 2: Flag-OFF project suite**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/ -q -k "not gpu" 2>&1 | tail -8
 ```
 Expected: green (the post-M2 baseline was 616 passed / 42 skipped; M3a adds unit + emission tests, so the passed count rises). Note: the flag-ON GPU iter-carry test self-skips here (no flag) — fine. Capture any FAILED names.
@@ -480,8 +480,8 @@ Expected: green (the post-M2 baseline was 616 passed / 42 skipped; M3a adds unit
 
 ```bash
 /opt/homebrew/bin/python3 -m pytest tests/test_mept_parity.py tests/test_regval.py tests/test_mept_m3a_arrayiter.py -q 2>&1 | tail -4
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_MEPT=1 /opt/homebrew/bin/python3 -m pytest tests/test_mept_m3a_itercarry_gpu.py tests/test_mept_m2_bug2_gpu.py -q 2>&1 | tail -6
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_MEPT=1 /opt/homebrew/bin/python3 -m pytest tests/test_mept_m3a_itercarry_gpu.py tests/test_mept_m2_bug2_gpu.py -q 2>&1 | tail -6
 ```
 Expected: parity+units pass; flag-ON GPU iter-carry (3) + M2 Bug 2 (3) all pass (M3a must not regress M2).
 

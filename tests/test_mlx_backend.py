@@ -10,9 +10,9 @@ mlx = pytest.importorskip("mlx.core")
 
 import triton
 import triton.language as tl
-from triton_metal.mlx.msl_extractor import extract_msl_for_mlx, MSLExtraction
-from triton_metal.mlx.mlx_launcher import MLXLauncher
-import triton_metal.mlx as tmlx
+from triton_msl.mlx.msl_extractor import extract_msl_for_mlx, MSLExtraction
+from triton_msl.mlx.mlx_launcher import MLXLauncher
+import triton_msl.mlx as tmlx
 
 
 # ─── MSL Extractor Unit Tests ─────────────────────────────────────────────────

@@ -9,7 +9,7 @@ import struct
 
 import pytest
 
-from triton_metal.profiling import disasm
+from triton_msl.profiling import disasm
 
 try:
     from tests.conftest import requires_metal

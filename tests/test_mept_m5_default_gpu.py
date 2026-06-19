@@ -1,4 +1,4 @@
-"""MEPT M5: with NO TRITON_METAL_MEPT env var (the default), the register-array
+"""MEPT M5: with NO TRITON_MSL_MEPT env var (the default), the register-array
 model is ON, so the tridec Bug-2 reduction-in-loop kernel computes at BLOCK>=256
 instead of refusing. The inverse of test_unknown_value_backstop's escape-hatch
 (MEPT=0) refusal. Serial GPU.
@@ -21,7 +21,7 @@ requires_metal = pytest.mark.skipif(not HAS, reason="Metal/torch/triton needed")
 def _default_env(monkeypatch):
     # Exercise the DEFAULT: ensure no explicit flag is set, so mept_enabled
     # resolves to its built-in default (post-flip: ON).
-    monkeypatch.delenv("TRITON_METAL_MEPT", raising=False)
+    monkeypatch.delenv("TRITON_MSL_MEPT", raising=False)
 
 
 if HAS:

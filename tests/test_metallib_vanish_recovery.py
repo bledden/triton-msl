@@ -8,7 +8,7 @@ places that sit OUTSIDE the 3-attempt compile retry:
 2. The post-retry-loop final read: the file is os.replace'd inside the loop but
    can be deleted before the read below the loop.
 
-A concurrent cache clear (another process running `rm -rf ~/.cache/triton_metal`,
+A concurrent cache clear (another process running `rm -rf ~/.cache/triton_msl`,
 or any external deletion) hitting either window raised a bare FileNotFoundError
 that escaped — a loud CPU-fallback flake that passes on rerun (never
 silent-wrong).
@@ -78,11 +78,11 @@ def test_cache_hit_vanish_recovers(tmp_path, monkeypatch):
     The cache-hit path must swallow the FileNotFoundError, fall through to
     recompile, and return valid (non-empty) bytes.
     """
-    monkeypatch.setenv("TRITON_METAL_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
 
     import builtins
-    import triton_metal.backend.compiler as compiler_mod
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
+    import triton_msl.backend.compiler as compiler_mod
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
 
     options = MetalOptions()
     metadata = {"name": "test_vanish_k"}
@@ -128,7 +128,7 @@ def test_concurrent_compile_and_clear(tmp_path):
 
     8 worker threads compile the SAME kernel ~10x each against a fresh cache dir,
     while one clearer thread continuously deletes the cached .metallib artifacts
-    (simulating a concurrent `rm -rf ~/.cache/triton_metal`).  This races the
+    (simulating a concurrent `rm -rf ~/.cache/triton_msl`).  This races the
     clearer directly against BOTH metallib reads — the cache-hit read (TOCTOU
     after os.path.exists) and the post-replace final read.  No FileNotFoundError
     may escape make_metallib, and (because the read-hardening recompiles on a
@@ -145,9 +145,9 @@ def test_concurrent_compile_and_clear(tmp_path):
     """
     cache_dir = str(tmp_path / "stress_cache")
     os.makedirs(cache_dir, exist_ok=True)
-    os.environ["TRITON_METAL_CACHE_DIR"] = cache_dir
+    os.environ["TRITON_MSL_CACHE_DIR"] = cache_dir
     try:
-        from triton_metal.backend.compiler import MetalBackend, MetalOptions
+        from triton_msl.backend.compiler import MetalBackend, MetalOptions
 
         options = MetalOptions()
         metadata = {"name": "test_vanish_k"}
@@ -209,7 +209,7 @@ def test_concurrent_compile_and_clear(tmp_path):
                 + "\n".join(f"  {type(e).__name__}: {e}" for e in errors[:5])
             )
     finally:
-        os.environ.pop("TRITON_METAL_CACHE_DIR", None)
+        os.environ.pop("TRITON_MSL_CACHE_DIR", None)
 
 
 @requires_metal_compiler
@@ -218,10 +218,10 @@ def test_real_compile_error_still_raises(tmp_path, monkeypatch):
 
     The read-hardening must not have masked real metal -c errors.
     """
-    monkeypatch.setenv("TRITON_METAL_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
 
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
-    from triton_metal.errors import MetalCompilationError
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
+    from triton_msl.errors import MetalCompilationError
 
     options = MetalOptions()
     metadata = {"name": "test_bad_msl_vanish_k"}

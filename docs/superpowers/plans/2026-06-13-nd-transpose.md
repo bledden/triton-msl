@@ -6,7 +6,7 @@
 
 **Architecture:** A new detector `_detect_nd_trans` + template `_lower_nd_trans_template` (mirroring the existing `_detect_transpose_via_reshape` / `_lower_transpose_via_reshape_template` pair). The detector matches the pattern and extracts src_shape + permutation `order` + the input/output pointer args; the template computes row-major strides at build time and emits the closed-form output→input index map in a `for(k=lid; k<total; k+=threads)` loop. No shared memory, no barrier. The generic `_lower_tt_trans` rank≥3 refusal stays as the backstop for un-matched cases.
 
-**Tech Stack:** Python lowerer (`triton_metal/codegen/_lowerer_detection.py`, `_lowerer_templates.py`, `generic_lowerer.py`), MSL, pytest (serial GPU), `scripts/conftest_metal.py`.
+**Tech Stack:** Python lowerer (`triton_msl/codegen/_lowerer_detection.py`, `_lowerer_templates.py`, `generic_lowerer.py`), MSL, pytest (serial GPU), `scripts/conftest_metal.py`.
 
 > Run from the worktree dir with `/opt/homebrew/bin/python3`. GPU: SERIAL ONLY, dual-cache-clear before codegen-sensitive runs, `pkill`+recovery on hang.
 
@@ -15,9 +15,9 @@
 ### Task 1: Detector + template + wiring (RED→GREEN)
 
 **Files:**
-- Modify: `triton_metal/codegen/_lowerer_detection.py` (add `_detect_nd_trans`)
-- Modify: `triton_metal/codegen/_lowerer_templates.py` (add `_lower_nd_trans_template`)
-- Modify: `triton_metal/codegen/generic_lowerer.py` (`lower()` — call the detector)
+- Modify: `triton_msl/codegen/_lowerer_detection.py` (add `_detect_nd_trans`)
+- Modify: `triton_msl/codegen/_lowerer_templates.py` (add `_lower_nd_trans_template`)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (`lower()` — call the detector)
 - Test: `tests/test_nd_transpose.py` (create)
 
 - [ ] **Step 1: Write the project correctness test (RED)**
@@ -83,7 +83,7 @@ def test_nd_transpose(shape, perm, dt):
 - [ ] **Step 2: Run, verify it FAILS (refusal today)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/test_nd_transpose.py -x 2>&1 | tail -12
 ```
 Expected: FAIL — the rank-4 non-identity `tt.trans` raises `MetalNonRecoverableError` ("rank-4 tt.trans with a non-identity permutation ... not supported"). This is the RED. (If instead it errors on `make_tensor_descriptor`/allocator setup, fix the test harness first — the allocator must be set before the launch.)
@@ -231,7 +231,7 @@ In `generic_lowerer.py`, find where `_detect_transpose_via_reshape` is called (~
 - [ ] **Step 6: Run the test — verify GREEN**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/test_nd_transpose.py -v 2>&1 | tail -15
 ```
 Expected: all 8 cases pass (4 perms × 2 dtypes), INCLUDING the (2,2,8,64)=2048 cases (the strided loop). `torch.equal` exact match. If a perm is wrong, the closed-form index map has a bug — print the emitted MSL (the `in_flat` expression) and check against `In.permute(perm)`; do NOT loosen to allclose (it's an exact integer permutation).
@@ -239,7 +239,7 @@ Expected: all 8 cases pass (4 perms × 2 dtypes), INCLUDING the (2,2,8,64)=2048 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add triton_metal/codegen/_lowerer_detection.py triton_metal/codegen/_lowerer_templates.py triton_metal/codegen/generic_lowerer.py tests/test_nd_transpose.py
+git add triton_msl/codegen/_lowerer_detection.py triton_msl/codegen/_lowerer_templates.py triton_msl/codegen/generic_lowerer.py tests/test_nd_transpose.py
 git commit -m "feat: generic N-D transpose via closed-form direct-copy template
 
 Detect load(N-D)->trans->[reshape]->store and emit out[k]=in[src_flat(k)] in a
@@ -264,7 +264,7 @@ Find the `test_trans_4d` skip entry (the audit cited conftest_metal.py ~line 204
 - [ ] **Step 2: Run the upstream corpus (serial)**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 bash scripts/run_upstream_test.sh "unit/language/test_core.py::test_trans_4d" -q 2>&1 | tail -8
 ```
 Expected: 96 passed, 0 failed (all 24 perms × 2 shapes × 2 dtypes). Report the exact count. If any fail, diagnose the index map for that perm/shape; do NOT re-skip to hide a failure.
@@ -272,7 +272,7 @@ Expected: 96 passed, 0 failed (all 24 perms × 2 shapes × 2 dtypes). Report the
 - [ ] **Step 3: Ratchet — project suite green**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 /opt/homebrew/bin/python3 -m pytest tests/ -q -k "not test_mept_m2_bug2_gpu and not test_mept_m3a_itercarry_gpu and not test_mept_m3c_gt1024_gpu" 2>&1 | tail -4
 ```
 Expected: 0 failed (the new test_nd_transpose tests included). Note: the autotuner cache-pollution flake is pre-existing (passes in isolation) — if it appears, re-run it alone to confirm it's not this change.

@@ -5,13 +5,13 @@ The C++ MLIR → LLVM IR → metallib path cannot be made default-on without an
 unbounded, impractical debugging effort. It triggers **AGXMetalG16X Code=3
 "Compiler encountered an internal error"** at pipeline-state creation on real
 corpus kernels (e.g. test_bin_op[1-int32-float16-+], failing on kernel_scalar_rhs:
-int32 vector + a Python-float constexpr). C++ stays OPT-IN (TRITON_METAL_USE_CPP=1).
+int32 vector + a Python-float constexpr). C++ stays OPT-IN (TRITON_MSL_USE_CPP=1).
 
 ## Evidence (this session)
 - Default (MSL) path: int32-float16 binary ops pass 24/24.
 - USE_CPP=1: the same test fails, in isolation (1.1s, not a wedge), with AGX Code=3.
 - The crash is at load_binary (pipeline-state creation) on the produced metallib;
-  no C++ exception is logged (TRITON_METAL_CPP_TRACE=1), so the C++ path produces
+  no C++ exception is logged (TRITON_MSL_CPP_TRACE=1), so the C++ path produces
   a metallib that the AGX *compiler* rejects internally — below our code.
 - NOT REPRODUCIBLE STANDALONE: structurally identical kernels (same dtypes,
   num_warps=4, output dtype, C++ route confirmed via _has_complex_ops=False) all

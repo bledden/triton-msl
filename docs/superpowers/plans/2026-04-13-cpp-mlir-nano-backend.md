@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Create a minimal C++ MLIR backend for triton-metal that compiles a vector_add kernel from TTGIR → LLVM IR → MSL → metallib, proving the architecture for eventual triton-ext submission.
+**Goal:** Create a minimal C++ MLIR backend for triton-msl that compiles a vector_add kernel from TTGIR → LLVM IR → MSL → metallib, proving the architecture for eventual triton-ext submission.
 
 **Architecture:** The nano backend adds a `make_llir` stage to the existing Python compilation pipeline. A C++ shared library implements MLIR passes that lower TritonGPU dialect ops to LLVM IR with Metal-specific intrinsics. The existing `make_msl` and `make_metallib` stages are replaced with `make_llir` → `make_msl_from_llvm` (LLVM IR → MSL via xcrun) → `make_metallib`. The Python codegen remains as a fallback for ops not yet handled by the C++ passes.
 
@@ -14,7 +14,7 @@
 
 This plan covers ONLY the nano backend scaffold:
 - CMake build system that links against Triton's LLVM/MLIR
-- One MLIR pass: `ConvertTritonMetalToLLVM` for basic ops (get_program_id, make_range, load, store, add)
+- One MLIR pass: `ConvertTritonMSLToLLVM` for basic ops (get_program_id, make_range, load, store, add)
 - Python integration: load the shared library and register the pass
 - One test: vector_add kernel compiles and produces correct results through the C++ path
 
@@ -27,17 +27,17 @@ This is NOT the full C++ backend. It's the foundation that proves:
 ## File Structure
 
 ```
-triton_metal/
+triton_msl/
 ├── csrc/                          # NEW: C++ source directory
 │   ├── CMakeLists.txt             # Build configuration
 │   ├── include/
-│   │   └── triton_metal/
+│   │   └── triton_msl/
 │   │       └── Conversion/
-│   │           └── TritonMetalToLLVM.h    # Pass declaration
+│   │           └── TritonMSLToLLVM.h    # Pass declaration
 │   └── lib/
 │       └── Conversion/
 │           ├── CMakeLists.txt
-│           ├── TritonMetalToLLVM.cpp      # Main pass: TTGIR → LLVM IR
+│           ├── TritonMSLToLLVM.cpp      # Main pass: TTGIR → LLVM IR
 │           └── ElementwiseOpToLLVM.cpp    # Elementwise op patterns
 ├── backend/
 │   └── compiler.py                # MODIFIED: add make_llir stage
@@ -57,8 +57,8 @@ Before starting, verify:
 ### Task 1: CMake Build Scaffold
 
 **Files:**
-- Create: `triton_metal/csrc/CMakeLists.txt`
-- Create: `triton_metal/csrc/lib/Conversion/CMakeLists.txt`
+- Create: `triton_msl/csrc/CMakeLists.txt`
+- Create: `triton_msl/csrc/lib/Conversion/CMakeLists.txt`
 
 This task sets up the build system that compiles our C++ passes against Triton's MLIR/LLVM libraries.
 
@@ -90,11 +90,11 @@ Record the LLVM and MLIR cmake config paths for the CMakeLists.txt.
 
 - [ ] **Step 2: Create top-level CMakeLists.txt**
 
-Create `triton_metal/csrc/CMakeLists.txt`:
+Create `triton_msl/csrc/CMakeLists.txt`:
 
 ```cmake
 cmake_minimum_required(VERSION 3.20)
-project(triton_metal_cpp LANGUAGES CXX)
+project(triton_msl_cpp LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -139,11 +139,11 @@ add_subdirectory(lib/Conversion)
 
 - [ ] **Step 3: Create Conversion CMakeLists.txt**
 
-Create `triton_metal/csrc/lib/Conversion/CMakeLists.txt`:
+Create `triton_msl/csrc/lib/Conversion/CMakeLists.txt`:
 
 ```cmake
-add_mlir_library(TritonMetalToLLVM
-    TritonMetalToLLVM.cpp
+add_mlir_library(TritonMSLToLLVM
+    TritonMSLToLLVM.cpp
     ElementwiseOpToLLVM.cpp
 
     LINK_LIBS PUBLIC
@@ -158,38 +158,38 @@ add_mlir_library(TritonMetalToLLVM
 
 Create placeholder source files:
 ```bash
-mkdir -p triton_metal/csrc/include/triton_metal/Conversion
-mkdir -p triton_metal/csrc/lib/Conversion
+mkdir -p triton_msl/csrc/include/triton_msl/Conversion
+mkdir -p triton_msl/csrc/lib/Conversion
 
 # Placeholder header
-cat > triton_metal/csrc/include/triton_metal/Conversion/TritonMetalToLLVM.h << 'EOF'
-#ifndef TRITON_METAL_CONVERSION_TRITONMETALTOLLVM_H
-#define TRITON_METAL_CONVERSION_TRITONMETALTOLLVM_H
+cat > triton_msl/csrc/include/triton_msl/Conversion/TritonMSLToLLVM.h << 'EOF'
+#ifndef TRITON_MSL_CONVERSION_TRITONMSLTOLLVM_H
+#define TRITON_MSL_CONVERSION_TRITONMSLTOLLVM_H
 
 namespace mlir {
 class Pass;
-namespace triton_metal {
+namespace triton_msl {
 // Will be defined in Task 2
-} // namespace triton_metal
+} // namespace triton_msl
 } // namespace mlir
 
 #endif
 EOF
 
 # Placeholder source
-cat > triton_metal/csrc/lib/Conversion/TritonMetalToLLVM.cpp << 'EOF'
-#include "triton_metal/Conversion/TritonMetalToLLVM.h"
+cat > triton_msl/csrc/lib/Conversion/TritonMSLToLLVM.cpp << 'EOF'
+#include "triton_msl/Conversion/TritonMSLToLLVM.h"
 // Placeholder — will be implemented in Task 2
 EOF
 
-cat > triton_metal/csrc/lib/Conversion/ElementwiseOpToLLVM.cpp << 'EOF'
+cat > triton_msl/csrc/lib/Conversion/ElementwiseOpToLLVM.cpp << 'EOF'
 // Placeholder — will be implemented in Task 3
 EOF
 ```
 
 Try building:
 ```bash
-cd triton_metal/csrc
+cd triton_msl/csrc
 mkdir -p build && cd build
 TRITON_BUILD_DIR=/Users/bledden/Documents/triton/build/cmake.macosx-15.0-arm64-cpython-3.14 \
 cmake .. -DTRITON_BUILD_DIR=$TRITON_BUILD_DIR -DTRITON_SRC_DIR=/Users/bledden/Documents/triton
@@ -201,7 +201,7 @@ Expected: Build succeeds (may have warnings but no errors).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add triton_metal/csrc/
+git add triton_msl/csrc/
 git commit -m "feat: CMake scaffold for C++ MLIR backend (Phase 5F)
 
 Sets up build system for C++ MLIR passes that lower TritonGPU IR
@@ -214,10 +214,10 @@ Placeholder source files compile successfully."
 ### Task 2: Minimal TTGIR → LLVM IR Pass
 
 **Files:**
-- Modify: `triton_metal/csrc/include/triton_metal/Conversion/TritonMetalToLLVM.h`
-- Modify: `triton_metal/csrc/lib/Conversion/TritonMetalToLLVM.cpp`
+- Modify: `triton_msl/csrc/include/triton_msl/Conversion/TritonMSLToLLVM.h`
+- Modify: `triton_msl/csrc/lib/Conversion/TritonMSLToLLVM.cpp`
 
-Implement the `ConvertTritonMetalToLLVM` pass that handles the minimum ops for vector_add:
+Implement the `ConvertTritonMSLToLLVM` pass that handles the minimum ops for vector_add:
 - `tt.get_program_id` → LLVM call to Metal's threadgroup position
 - `tt.make_range` → LLVM integer sequence
 - `tt.addptr` → LLVM GEP
@@ -229,26 +229,26 @@ This task creates the MLIR pass structure. The actual op lowering patterns go in
 
 - [ ] **Step 1: Implement pass registration header**
 
-Update `triton_metal/csrc/include/triton_metal/Conversion/TritonMetalToLLVM.h`:
+Update `triton_msl/csrc/include/triton_msl/Conversion/TritonMSLToLLVM.h`:
 
 ```cpp
-#ifndef TRITON_METAL_CONVERSION_TRITONMETALTOLLVM_H
-#define TRITON_METAL_CONVERSION_TRITONMETALTOLLVM_H
+#ifndef TRITON_MSL_CONVERSION_TRITONMSLTOLLVM_H
+#define TRITON_MSL_CONVERSION_TRITONMSLTOLLVM_H
 
 #include "mlir/Pass/Pass.h"
 #include <memory>
 
 namespace mlir {
-namespace triton_metal {
+namespace triton_msl {
 
 /// Create a pass that converts TritonGPU operations to LLVM IR
 /// suitable for Metal GPU compilation.
-std::unique_ptr<Pass> createConvertTritonMetalToLLVMPass();
+std::unique_ptr<Pass> createConvertTritonMSLToLLVMPass();
 
 /// Register the pass with MLIR's pass infrastructure.
-void registerTritonMetalToLLVMPass();
+void registerTritonMSLToLLVMPass();
 
-} // namespace triton_metal
+} // namespace triton_msl
 } // namespace mlir
 
 #endif
@@ -256,10 +256,10 @@ void registerTritonMetalToLLVMPass();
 
 - [ ] **Step 2: Implement pass skeleton**
 
-Update `triton_metal/csrc/lib/Conversion/TritonMetalToLLVM.cpp`:
+Update `triton_msl/csrc/lib/Conversion/TritonMSLToLLVM.cpp`:
 
 ```cpp
-#include "triton_metal/Conversion/TritonMetalToLLVM.h"
+#include "triton_msl/Conversion/TritonMSLToLLVM.h"
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -270,14 +270,14 @@ Update `triton_metal/csrc/lib/Conversion/TritonMetalToLLVM.cpp`:
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 namespace mlir {
-namespace triton_metal {
+namespace triton_msl {
 
 namespace {
 
-class ConvertTritonMetalToLLVMPass
-    : public PassWrapper<ConvertTritonMetalToLLVMPass, OperationPass<ModuleOp>> {
+class ConvertTritonMSLToLLVMPass
+    : public PassWrapper<ConvertTritonMSLToLLVMPass, OperationPass<ModuleOp>> {
 public:
-  StringRef getArgument() const override { return "convert-triton-metal-to-llvm"; }
+  StringRef getArgument() const override { return "convert-triton-msl-to-llvm"; }
   StringRef getDescription() const override {
     return "Convert TritonGPU operations to LLVM IR for Apple Metal GPUs";
   }
@@ -291,32 +291,32 @@ public:
 
 } // namespace
 
-std::unique_ptr<Pass> createConvertTritonMetalToLLVMPass() {
-  return std::make_unique<ConvertTritonMetalToLLVMPass>();
+std::unique_ptr<Pass> createConvertTritonMSLToLLVMPass() {
+  return std::make_unique<ConvertTritonMSLToLLVMPass>();
 }
 
-void registerTritonMetalToLLVMPass() {
-  PassRegistration<ConvertTritonMetalToLLVMPass>();
+void registerTritonMSLToLLVMPass() {
+  PassRegistration<ConvertTritonMSLToLLVMPass>();
 }
 
-} // namespace triton_metal
+} // namespace triton_msl
 } // namespace mlir
 ```
 
 - [ ] **Step 3: Build and verify**
 
 ```bash
-cd triton_metal/csrc/build
+cd triton_msl/csrc/build
 cmake .. && make -j$(sysctl -n hw.ncpu) 2>&1 | tail -10
 ```
 
-Expected: Compiles successfully, produces `libTritonMetalToLLVM.a` or `.dylib`.
+Expected: Compiles successfully, produces `libTritonMSLToLLVM.a` or `.dylib`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add triton_metal/csrc/
-git commit -m "feat: ConvertTritonMetalToLLVM pass skeleton
+git add triton_msl/csrc/
+git commit -m "feat: ConvertTritonMSLToLLVM pass skeleton
 
 MLIR pass that will lower TritonGPU ops to LLVM IR for Metal.
 Currently a no-op skeleton — conversion patterns added next."
@@ -327,8 +327,8 @@ Currently a no-op skeleton — conversion patterns added next."
 ### Task 3: Elementwise Op Lowering Patterns
 
 **Files:**
-- Modify: `triton_metal/csrc/lib/Conversion/ElementwiseOpToLLVM.cpp`
-- Modify: `triton_metal/csrc/lib/Conversion/TritonMetalToLLVM.cpp`
+- Modify: `triton_msl/csrc/lib/Conversion/ElementwiseOpToLLVM.cpp`
+- Modify: `triton_msl/csrc/lib/Conversion/TritonMSLToLLVM.cpp`
 
 Implement MLIR conversion patterns for the ops needed by vector_add:
 - `tt.get_program_id` → Metal threadgroup position builtin
@@ -351,7 +351,7 @@ In `ElementwiseOpToLLVM.cpp`, implement:
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
 namespace mlir {
-namespace triton_metal {
+namespace triton_msl {
 
 // Pattern: tt.get_program_id → Metal threadgroup position
 // In Metal, this maps to a kernel argument [[threadgroup_position_in_grid]]
@@ -435,13 +435,13 @@ void populateElementwiseOpToLLVMPatterns(
       typeConverter, patterns.getContext());
 }
 
-} // namespace triton_metal
+} // namespace triton_msl
 } // namespace mlir
 ```
 
 - [ ] **Step 2: Wire patterns into the pass**
 
-Update `TritonMetalToLLVM.cpp` to register and apply patterns:
+Update `TritonMSLToLLVM.cpp` to register and apply patterns:
 
 ```cpp
 // Add to runOnOperation():
@@ -467,20 +467,20 @@ void runOnOperation() override {
 }
 ```
 
-Add the extern declaration at the top of `TritonMetalToLLVM.cpp`:
+Add the extern declaration at the top of `TritonMSLToLLVM.cpp`:
 ```cpp
 namespace mlir {
-namespace triton_metal {
+namespace triton_msl {
 void populateElementwiseOpToLLVMPatterns(
     RewritePatternSet &patterns, TypeConverter &typeConverter);
-} // namespace triton_metal
+} // namespace triton_msl
 } // namespace mlir
 ```
 
 - [ ] **Step 3: Build and verify compilation**
 
 ```bash
-cd triton_metal/csrc/build
+cd triton_msl/csrc/build
 cmake .. && make -j$(sysctl -n hw.ncpu) 2>&1 | tail -10
 ```
 
@@ -489,7 +489,7 @@ Expected: Compiles. (Runtime testing comes in Task 5.)
 - [ ] **Step 4: Commit**
 
 ```bash
-git add triton_metal/csrc/
+git add triton_msl/csrc/
 git commit -m "feat: elementwise TTGIR → LLVM IR patterns for Metal
 
 Implements get_program_id, make_range conversion patterns that lower
@@ -502,49 +502,49 @@ These placeholders are resolved during MSL generation."
 ### Task 4: Python Integration (Load Shared Library + Register Pass)
 
 **Files:**
-- Modify: `triton_metal/backend/compiler.py`
-- Create: `triton_metal/csrc/python_bindings.cpp`
+- Modify: `triton_msl/backend/compiler.py`
+- Create: `triton_msl/csrc/python_bindings.cpp`
 
 Wire the C++ shared library into the Python compilation pipeline. Add a `make_llir` stage that runs the MLIR pass, then converts LLVM IR to MSL.
 
 - [ ] **Step 1: Add pybind11 bindings**
 
-Create `triton_metal/csrc/python_bindings.cpp`:
+Create `triton_msl/csrc/python_bindings.cpp`:
 
 ```cpp
 #include <pybind11/pybind11.h>
-#include "triton_metal/Conversion/TritonMetalToLLVM.h"
+#include "triton_msl/Conversion/TritonMSLToLLVM.h"
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(_triton_metal_cpp, m) {
-    m.doc() = "C++ MLIR passes for triton-metal";
+PYBIND11_MODULE(_triton_msl_cpp, m) {
+    m.doc() = "C++ MLIR passes for triton-msl";
 
     m.def("register_metal_passes", []() {
-        mlir::triton_metal::registerTritonMetalToLLVMPass();
+        mlir::triton_msl::registerTritonMSLToLLVMPass();
     }, "Register Metal MLIR passes");
 }
 ```
 
-Update `triton_metal/csrc/CMakeLists.txt` to build the pybind11 module:
+Update `triton_msl/csrc/CMakeLists.txt` to build the pybind11 module:
 
 ```cmake
 # Add after existing content:
 find_package(pybind11 REQUIRED)
 
-pybind11_add_module(_triton_metal_cpp
+pybind11_add_module(_triton_msl_cpp
     python_bindings.cpp
-    lib/Conversion/TritonMetalToLLVM.cpp
+    lib/Conversion/TritonMSLToLLVM.cpp
     lib/Conversion/ElementwiseOpToLLVM.cpp
 )
-target_include_directories(_triton_metal_cpp PRIVATE
+target_include_directories(_triton_msl_cpp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${LLVM_INCLUDE_DIRS}
     ${MLIR_INCLUDE_DIRS}
     ${TRITON_SRC_DIR}/include
     ${TRITON_BUILD_DIR}/include
 )
-target_link_libraries(_triton_metal_cpp PRIVATE
+target_link_libraries(_triton_msl_cpp PRIVATE
     MLIRIR
     MLIRLLVMDialect
     MLIRPass
@@ -555,15 +555,15 @@ target_link_libraries(_triton_metal_cpp PRIVATE
 - [ ] **Step 2: Build pybind11 module**
 
 ```bash
-cd triton_metal/csrc/build
+cd triton_msl/csrc/build
 cmake .. && make -j$(sysctl -n hw.ncpu) 2>&1 | tail -10
 # Copy the .so to the package
-cp _triton_metal_cpp*.so ../../triton_metal/
+cp _triton_msl_cpp*.so ../../triton_msl/
 ```
 
 - [ ] **Step 3: Add make_llir to compiler.py**
 
-In `triton_metal/backend/compiler.py`, add a `make_llir` stage (optional, gated on whether the C++ module is available):
+In `triton_msl/backend/compiler.py`, add a `make_llir` stage (optional, gated on whether the C++ module is available):
 
 ```python
 # In add_stages, optionally insert make_llir before make_msl:
@@ -586,7 +586,7 @@ def add_stages(self, stages, options, language=None):
 @staticmethod
 def _has_cpp_passes():
     try:
-        import triton_metal._triton_metal_cpp
+        import triton_msl._triton_msl_cpp
         return True
     except ImportError:
         return False
@@ -595,7 +595,7 @@ def _has_cpp_passes():
 def make_llir(mod, metadata, options):
     """Lower TTGIR to LLVM IR using C++ MLIR passes."""
     from triton._C.libtriton import ir, passes
-    import triton_metal._triton_metal_cpp as cpp
+    import triton_msl._triton_msl_cpp as cpp
 
     cpp.register_metal_passes()
 
@@ -603,7 +603,7 @@ def make_llir(mod, metadata, options):
     # Add standard lowering passes
     passes.convert.add_scf_to_cf(pm)
     # Add our Metal-specific pass
-    pm.add_pass("convert-triton-metal-to-llvm")
+    pm.add_pass("convert-triton-msl-to-llvm")
     pm.run(mod, "make_llir")
     return mod
 ```
@@ -611,7 +611,7 @@ def make_llir(mod, metadata, options):
 - [ ] **Step 4: Commit**
 
 ```bash
-git add triton_metal/csrc/ triton_metal/backend/compiler.py
+git add triton_msl/csrc/ triton_msl/backend/compiler.py
 git commit -m "feat: Python-C++ integration for MLIR Metal passes
 
 pybind11 module exposes register_metal_passes(). compiler.py
@@ -634,7 +634,7 @@ import pytest
 import torch
 
 try:
-    import triton_metal._triton_metal_cpp
+    import triton_msl._triton_msl_cpp
     _HAS_CPP = True
 except ImportError:
     _HAS_CPP = False
@@ -697,6 +697,6 @@ These are future tasks that build on this foundation. Each will be its own plan.
 ## Success Criteria
 
 - `cmake .. && make` builds the C++ shared library without errors
-- `import triton_metal._triton_metal_cpp` works in Python
+- `import triton_msl._triton_msl_cpp` works in Python
 - `test_vector_add_cpp_path` passes (correct numerical results)
 - Existing 464 Python-path tests continue to pass (C++ path is additive, not replacement)

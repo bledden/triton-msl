@@ -12,7 +12,7 @@ try:
     import triton
     import triton.language as tl
     import Metal
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
     HAS = Metal.MTLCreateSystemDefaultDevice() is not None
 except Exception:
     HAS = False
@@ -56,7 +56,7 @@ _MODULE_KERNELS = (
 @pytest.fixture(autouse=True)
 def _clear_jit_cache():
     """Triton's in-process JIT cache is keyed on signature/constexprs, NOT on
-    TRITON_METAL_MEPT, so a compile made under one flag could be served to a
+    TRITON_MSL_MEPT, so a compile made under one flag could be served to a
     test that sets a different flag — a false negative for the pytest.raises
     refusal test.  Clear device_caches (a defaultdict keyed by device; its
     first value is the kernel_cache dict) before each test so every test
@@ -72,7 +72,7 @@ def _clear_jit_cache():
 def test_inloop_reduce_mept0_correct(BLOCK, monkeypatch):
     """Stage A: under MEPT=0 an in-loop reduce with block>num_threads computes
     correctly via body-local multipass coverage (no longer refuses)."""
-    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    monkeypatch.setenv("TRITON_MSL_MEPT", "0")
     C = 4
     torch.manual_seed(0)
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
@@ -85,7 +85,7 @@ def test_inloop_reduce_mept0_correct(BLOCK, monkeypatch):
 def test_inloop_reduce_small_block_ok(monkeypatch):
     """block_size <= num_threads is fully covered (one elem/thread) → never
     refused, correct under both flags."""
-    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    monkeypatch.setenv("TRITON_MSL_MEPT", "0")
     # BLOCK=128 with the default num_warps=4 → 128 threads, so
     # block_size (128) <= num_threads (128): the reduce is NOT refused.
     # Do not lower num_warps here — that would push block_size > num_threads
@@ -103,7 +103,7 @@ def test_inloop_reduce_small_block_ok(monkeypatch):
 def test_inloop_where_on_reduce_default_correct(BLOCK, monkeypatch):
     """Default flag: a where (cmpf+select) consuming an in-loop reduce result
     is register-array-eligible (Stage C) → correct at full SIMD width."""
-    monkeypatch.setenv("TRITON_METAL_MEPT", "1")
+    monkeypatch.setenv("TRITON_MSL_MEPT", "1")
     C = 4
     torch.manual_seed(0)
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
@@ -123,7 +123,7 @@ def test_inloop_reduce_uncoverable_refuses(monkeypatch):
     Stage B refusal fires. This ensures silent-wrong is impossible even for
     kernels that Stage A cannot safely cover.
     """
-    monkeypatch.setenv("TRITON_METAL_MEPT", "0")
+    monkeypatch.setenv("TRITON_MSL_MEPT", "0")
     BLOCK, C = 256, 4
     X = torch.randn(C * BLOCK, device="mps", dtype=torch.float32)
     OUT = torch.zeros(1, device="mps", dtype=torch.float32)

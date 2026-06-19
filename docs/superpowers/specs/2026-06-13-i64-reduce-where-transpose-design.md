@@ -40,12 +40,12 @@ for `long`/`ulong` — no `simd_sum(long)` and no `simd_shuffle(long)` dependenc
    already correct); only touch the select emission if a 64-bit case fails.
 
 ## Components (files)
-- `triton_metal/codegen/_lowerer_reduce.py` — `_lower_reduce`: add the i64/u64
+- `triton_msl/codegen/_lowerer_reduce.py` — `_lower_reduce`: add the i64/u64
   branch (64-bit shared-memory tree reduction) before the SIMD path; thread the
   64-bit `msl_type`/`shared_dtype`.
-- `triton_metal/codegen/generic_lowerer.py` — `_lower_tt_trans`: 64-bit
+- `triton_msl/codegen/generic_lowerer.py` — `_lower_tt_trans`: 64-bit
   shared_dtype/msl_type for i64/u64 elements.
-- `triton_metal/codegen/_lowerer_*` — where/select: only if a 64-bit case fails.
+- `triton_msl/codegen/_lowerer_*` — where/select: only if a 64-bit case fails.
 - `scripts/conftest_metal.py` — remove/relax the `_I64_UNIMPLEMENTED` gate for the
   now-passing tests (keep `test_for_iv` skipped — i64 loop induction HANGS, separate
   and harder; keep i64/u64 atomics skipped — hardware-impossible).

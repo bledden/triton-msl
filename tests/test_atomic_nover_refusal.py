@@ -25,7 +25,7 @@ try:
     import triton
     import triton.language as tl
     import Metal
-    from triton_metal.errors import MetalNonRecoverableError
+    from triton_msl.errors import MetalNonRecoverableError
     HAS = Metal.MTLCreateSystemDefaultDevice() is not None
 except Exception:
     HAS = False

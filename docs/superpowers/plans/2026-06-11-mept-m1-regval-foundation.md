@@ -4,22 +4,22 @@
 
 **Goal:** Introduce the unified `RegVal` register-array value abstraction + a region form-classifier + a flag-ON==flag-OFF parity differential gate, and prove scalar-collapse is byte-identical to today — WITHOUT changing any emitted MSL.
 
-**Architecture:** New pure module `regval.py` (RegVal dataclass + `region_needs_arrays`). `_lookup` returns a `RegVal` (with a `.name` shim so legacy string callers are untouched). A `materialize` helper emits the scalar form (identical to `_var`) or array form (`_var_array`). Milestone 1 wires ONE op through it to prove the pattern; the broad emit-site migration is later milestones. All behind `TRITON_METAL_MEPT` (off by default); flag-OFF path is byte-unchanged.
+**Architecture:** New pure module `regval.py` (RegVal dataclass + `region_needs_arrays`). `_lookup` returns a `RegVal` (with a `.name` shim so legacy string callers are untouched). A `materialize` helper emits the scalar form (identical to `_var`) or array form (`_var_array`). Milestone 1 wires ONE op through it to prove the pattern; the broad emit-site migration is later milestones. All behind `TRITON_MSL_MEPT` (off by default); flag-OFF path is byte-unchanged.
 
-**Tech Stack:** Python 3.14 venv `/Users/bledden/Documents/triton-metal/.venv/bin/python`; pytest. Clear `~/.cache/triton_metal ~/.triton/cache` before any codegen verification. GPU serial only.
+**Tech Stack:** Python 3.14 venv `/Users/bledden/Documents/triton-msl/.venv/bin/python`; pytest. Clear `~/.cache/triton_msl ~/.triton/cache` before any codegen verification. GPU serial only.
 
 ---
 
 ### Task 1: RegVal + region classifier (pure module)
 
 **Files:**
-- Create: `triton_metal/codegen/regval.py`
+- Create: `triton_msl/codegen/regval.py`
 - Test: `tests/test_regval.py`
 
 - [ ] **Step 1: Write failing tests**
 ```python
 # tests/test_regval.py
-from triton_metal.codegen.regval import RegVal, region_needs_arrays
+from triton_msl.codegen.regval import RegVal, region_needs_arrays
 
 class FakeOp:
     def __init__(self, op, operand_ids=(), region_ops=None):
@@ -54,7 +54,7 @@ Expected: FAIL (no module `regval`).
 
 - [ ] **Step 3: Implement**
 ```python
-# triton_metal/codegen/regval.py
+# triton_msl/codegen/regval.py
 """Unified per-thread value model for the MEPT register-array spine.
 
 Every SSA value is a RegVal(name, n_elems, ty, form). Scalars are n_elems==1,
@@ -110,7 +110,7 @@ Run: `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_regval.py -q` → 5 
 
 - [ ] **Step 5: Commit**
 ```bash
-git add triton_metal/codegen/regval.py tests/test_regval.py
+git add triton_msl/codegen/regval.py tests/test_regval.py
 git commit -m "feat(mept-m1): RegVal value model + region_needs_arrays classifier
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -121,14 +121,14 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 2: `_lookup_regval` returning RegVal (non-invasive)
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py` (add method near `_lookup`, line ~1627)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (add method near `_lookup`, line ~1627)
 - Test: `tests/test_regval.py` (append)
 
 - [ ] **Step 1: Write failing test** (append to tests/test_regval.py)
 ```python
 def test_lookup_regval_scalar_and_array():
     import triton  # noqa: F401
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
     lo = GenericLowerer.__new__(GenericLowerer)
     lo.env = {5: "v5"}; lo.env_array = {6: ("a6", 4, "float")}
     lo.env_n_elems = {5: 1, 6: 4}; lo.env_types = {5: "i32", 6: "f32"}
@@ -146,7 +146,7 @@ Run: `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_regval.py::test_look
     def _lookup_regval(self, ssa_id):
         """Unified RegVal view over env / env_array. Does not change emission;
         callers migrate to this incrementally (MEPT spine, milestone 1)."""
-        from triton_metal.codegen.regval import RegVal
+        from triton_msl.codegen.regval import RegVal
         if ssa_id in getattr(self, "env_array", {}):
             name, n, ty = self.env_array[ssa_id]
             return RegVal(name=name, n_elems=n, ty=ty, form="array")
@@ -161,7 +161,7 @@ Run: `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_regval.py -q` → 6 
 
 - [ ] **Step 5: Commit**
 ```bash
-git add triton_metal/codegen/generic_lowerer.py tests/test_regval.py
+git add triton_msl/codegen/generic_lowerer.py tests/test_regval.py
 git commit -m "feat(mept-m1): _lookup_regval unified view over env/env_array
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -189,12 +189,12 @@ from triton._C.libtriton import ir
 
 
 def _emit(fn, sig, cst, mept):
-    os.environ["TRITON_METAL_FORCE_PYTHON"] = "1"
-    os.environ["TRITON_METAL_MEPT"] = "1" if mept else "0"
-    import triton_metal.codegen.generic_lowerer as G
-    import triton_metal.codegen.msl_emitter as M
+    os.environ["TRITON_MSL_FORCE_PYTHON"] = "1"
+    os.environ["TRITON_MSL_MEPT"] = "1" if mept else "0"
+    import triton_msl.codegen.generic_lowerer as G
+    import triton_msl.codegen.msl_emitter as M
     importlib.reload(G); importlib.reload(M)
-    from triton_metal.backend.compiler import MetalBackend
+    from triton_msl.backend.compiler import MetalBackend
     t = GPUTarget("metal", "apple-m4", 32); be = MetalBackend(t); o = be.parse_options({})
     src = ASTSource(fn=fn, signature=sig, constexprs=cst)
     ctx = ir.context(); ir.load_dialects(ctx)
@@ -243,15 +243,15 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 > Scope note: Milestone 1 proves the helper as a unit and keeps the parity gate green; wiring live ops (tt.splat, elementwise) through `_materialize` is Milestone 2+, where the array form is actually exercised. Keeping it isolated here preserves "no new behavior."
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py`
+- Modify: `triton_msl/codegen/generic_lowerer.py`
 - Test: `tests/test_regval.py` (append)
 
 - [ ] **Step 1: Write failing unit test** for the helper
 ```python
 def test_materialize_scalar_collapses_to_plain_var():
     import triton  # noqa: F401
-    from triton_metal.codegen.generic_lowerer import GenericLowerer
-    from triton_metal.codegen.regval import RegVal
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.regval import RegVal
     lo = GenericLowerer.__new__(GenericLowerer)
     lo.kb = type("KB", (), {"lines": [], "raw_line": lambda self, s: self.lines.append(s)})()
     lo._var_counter = 0
@@ -276,7 +276,7 @@ def test_materialize_scalar_collapses_to_plain_var():
         wraploop is handled by callers that already emit the _loop_e loop;
         here body(0) is emitted once inside that loop (scalar-shaped).
         """
-        from triton_metal.codegen.regval import RegVal
+        from triton_msl.codegen.regval import RegVal
         name = "%s%d" % (base, self._var_counter); self._var_counter += 1
         if regval.form == "array" and regval.n_elems > 1:
             arr = self._var_array(name, [body(e) for e in range(regval.n_elems)], regval.ty)
@@ -291,7 +291,7 @@ Run: `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_regval.py -q` → 7 
 
 - [ ] **Step 5: Verify parity gate still green + project suite**
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
+rm -rf ~/.cache/triton_msl ~/.triton/cache
 PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_mept_parity.py tests/test_regval.py -q
 PYTHONPATH=$PWD TRITON_DEFAULT_BACKEND=metal .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 ```
@@ -299,7 +299,7 @@ Expected: parity 2 passed, regval 7 passed; project suite 0 failed.
 
 - [ ] **Step 6: Commit**
 ```bash
-git add triton_metal/codegen/generic_lowerer.py tests/test_regval.py
+git add triton_msl/codegen/generic_lowerer.py tests/test_regval.py
 git commit -m "feat(mept-m1): _materialize helper (scalar-collapse + array form)
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -311,5 +311,5 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - `tests/test_regval.py` + `tests/test_mept_parity.py` green.
 - Project suite 0 failed.
 - Fresh-cache flag-OFF `test_core` unchanged at 5,335/0 (the working path is byte-untouched):
-  `rm -rf ~/.cache/triton_metal ~/.triton/cache && scripts/run_upstream_test.sh unit/language/test_core.py -q -p no:cacheprovider`
+  `rm -rf ~/.cache/triton_msl ~/.triton/cache && scripts/run_upstream_test.sh unit/language/test_core.py -q -p no:cacheprovider`
 - Deliverable: the RegVal model + classifier + parity gate + `_materialize` exist and are proven on the scalar path; NO new behavior. Milestone 2 (scf.for array-carry → tridec Bug 2) builds on this.

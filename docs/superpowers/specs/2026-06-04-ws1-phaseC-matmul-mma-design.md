@@ -278,7 +278,7 @@ tl.arange forces power-of-2 block dims — but guarded defensively), and
 non-float output whose full-tile staging would exceed the 32 KiB threadgroup
 limit.
 
-Method note: a stale `~/.cache/triton_metal` (keyed by AST, not codegen
+Method note: a stale `~/.cache/triton_msl` (keyed by AST, not codegen
 version) initially masked the fix during development — every codegen-change
 verification must clear it. Each fix was gated on a FRESH-cache full test_core
 sweep at 4326 passed / 0 failed.
@@ -312,7 +312,7 @@ The path now: column-register-blocks any BLOCK_N%8 (idle simdgroups for small
 tiles, guarded only when not /4); direct-loads aligned float tiles; masked
 per-simdgroup store for partial/edge/half; refuses BLOCK_M/K%8, BLOCK_N%8, and
 >32KiB threadgroup configs. Genuine fp16 throughout. Each step gated on a
-FRESH-cache (~/.cache/triton_metal) full test_core sweep at 4326/0.
+FRESH-cache (~/.cache/triton_msl) full test_core sweep at 4326/0.
 
 ## C.2 fourth path + a fifth silent-wrong (2026-06-07, #154)
 

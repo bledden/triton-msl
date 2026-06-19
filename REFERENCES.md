@@ -1,10 +1,10 @@
 # References
 
 This document collects the papers, projects, and specifications that
-`triton-metal` builds on. The codebase and documentation cite back to entries
+`triton-msl` builds on. The codebase and documentation cite back to entries
 here using `[N]` numeric references.
 
-If you cite `triton-metal` in academic work, see
+If you cite `triton-msl` in academic work, see
 [`CITING.md`](CITING.md) for a suggested BibTeX entry.
 
 ---
@@ -19,13 +19,13 @@ DOI: `10.1145/3315508.3329973`. The original Triton paper; introduces the
 tile-based programming model and the compiler stack this backend plugs into.
 
 [2] **OpenAI/Triton repository.** <https://github.com/triton-lang/triton>.
-The actively-developed Triton compiler and language; `triton-metal` is a
+The actively-developed Triton compiler and language; `triton-msl` is a
 third-party Metal backend for it. Aligned to release tag `3.7.0` at time of
 writing.
 
 [3] **Triton third-party backend plugin architecture
 (`TRITON_EXT_ENABLED`).** Upstream design discussion and tracking PR:
-<https://github.com/triton-lang/triton/pull/9783>. `triton-metal` is
+<https://github.com/triton-lang/triton/pull/9783>. `triton-msl` is
 structured to be compatible with this plugin loading mechanism.
 
 ## FlashAttention
@@ -53,14 +53,14 @@ templates are described.
 ## Apple Silicon / MLX / MPS
 
 [7] **MLX: An array framework for Apple silicon.** Apple Machine Learning
-Research. <https://github.com/ml-explore/mlx>. Used by `triton-metal/mlx/`
+Research. <https://github.com/ml-explore/mlx>. Used by `triton-msl/mlx/`
 as a zero-copy kernel dispatch surface (`mx.fast.metal_kernel`). The MLX
 hand-tuned kernels are also the comparison baseline for this backend's
 performance harness (see WS0 component C6).
 
 [8] **Metal Shading Language Specification.** Apple, current version.
 <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>.
-The source language `triton-metal` emits. Notable intrinsics used:
+The source language `triton-msl` emits. Notable intrinsics used:
 `simdgroup_multiply_accumulate` (the hardware MMA), `simdgroup_load`/`store`,
 `threadgroup` memory address space, `simd_*` reductions.
 
@@ -75,7 +75,7 @@ by the WS0/C6 hardware-profiling harness to define "optimal bounds" as
 [10] **Asahi Linux project / Mesa AGX driver.** Alyssa Rosenzweig and
 contributors. <https://asahilinux.org>; AGX compiler in
 <https://gitlab.freedesktop.org/mesa/mesa>. Open-source reverse-engineered
-toolchain for the Apple GPU. `triton-metal` uses the disassembly capability
+toolchain for the Apple GPU. `triton-msl` uses the disassembly capability
 read-only (for the WS0/C6 harness); the WS3 experimental research track
 considers using its assembler/emission capability.
 
@@ -91,7 +91,7 @@ Dynamic Python Bytecode Transformation and Graph Compilation."**
 *Proceedings of the 29th ACM International Conference on Architectural
 Support for Programming Languages and Operating Systems (ASPLOS '24)*,
 April 2024. The TorchDynamo / TorchInductor architecture this backend
-integrates with via `triton_metal/inductor/`. Note: as of PyTorch 2.x at
+integrates with via `triton_msl/inductor/`. Note: as of PyTorch 2.x at
 time of writing, `torch.compile`/Dynamo does not support Python 3.14
 (PyTorch's own platform guard); the project's test suite gates the
 torch.compile suites accordingly. This dependency will lift when PyTorch

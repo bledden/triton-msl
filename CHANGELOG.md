@@ -29,12 +29,12 @@
 - **Zero-copy MPS execution** via `torch.mps.compile_shader`: routes emitted MSL through
   PyTorch's compiler so kernels run against MPS tensors without the per-launch host
   round-trip. ~10× on memory-bound kernels (vector_add 28 → ~347 GB/s ≈ 64% of the M4 Max
-  546 GB/s roof). Flag `TRITON_METAL_COMPILE_SHADER` (default-on, `=0` escape hatch).
+  546 GB/s roof). Flag `TRITON_MSL_COMPILE_SHADER` (default-on, `=0` escape hatch).
 - **Fast simdgroup matmul** (`make_simdgroup_matmul_kernel_fast`) dispatched zero-copy for
   aligned MPS matmuls. Measured at 2048³: fp32 ~9.6–11.5 TFLOP/s (~55–62% of the 18.4
   fp32 peak — competitive with MLX/MPS GEMM), fp16 ~7.8–12, fp16-output ~12.3 — vs the
   ~2.8 generic fallback. Float accumulation (precision); fp16 output via a cast epilogue.
-  Flag `TRITON_METAL_FAST_MATMUL`; correctness-gated (test_core dot/matmul on==off identical).
+  Flag `TRITON_MSL_FAST_MATMUL`; correctness-gated (test_core dot/matmul on==off identical).
   This is **not** MLX-parity (fp16 runs at ~fp32 rate to keep float accumulation); the
   earlier "~13.8 TFLOP/s MLX parity" docstring claim was an overstatement and is corrected.
 - **MEPT** multi-element-per-thread register-array model is the default lowering path.
@@ -101,8 +101,8 @@ Documented; not a code fix.
 
 ### Hardware profiling harness (WS0/C6)
 
-- Added `benchmarks/hw_harness.py` + `triton_metal/profiling/roofline.py` +
-  `triton_metal/profiling/disasm.py`: per-kernel GPU-timestamp timing →
+- Added `benchmarks/hw_harness.py` + `triton_msl/profiling/roofline.py` +
+  `triton_msl/profiling/disasm.py`: per-kernel GPU-timestamp timing →
   roofline classification (% of the M4 Max 546 GB/s memory roof / estimated
   compute roof, memory- vs compute-bound), pipeline-reflection occupancy,
   best-effort native-AGX disassembly, and an MLX comparison ratio. Emits
@@ -128,7 +128,7 @@ Documented; not a code fix.
 - Added `REFERENCES.md` and `CITING.md` (citations for Triton [1],
   FlashAttention v1/v2 [4,5], online softmax [6], MLX [7], Asahi/`applegpu`
   [10,11], MSL spec [8], PyTorch Inductor [12], M4 Max hardware [13]).
-- Added `docs/superpowers/specs/2026-05-30-triton-metal-roadmap.md`
+- Added `docs/superpowers/specs/2026-05-30-triton-msl-roadmap.md`
   (umbrella roadmap: WS0 foundation, WS1 the register-array spine,
   WS2 orthogonal-refusal cleanup, WS3 experimental sub-AIR AGX).
 - Added `docs/superpowers/specs/2026-05-30-ws0-foundation-design.md`
@@ -141,7 +141,7 @@ Documented; not a code fix.
 
 ## 0.1.0-alpha (2026-03-10)
 
-First public alpha release of triton-metal.
+First public alpha release of triton-msl.
 
 ### Milestone 1: First Kernel on Metal
 - `@triton.jit` vector add running on Apple GPU via Metal Shading Language
@@ -168,7 +168,7 @@ First public alpha release of triton-metal.
 ### Milestone 6: MLX Backend
 - 15/15 MLX backend tests passing
 - Zero-copy dispatch via `mx.fast.metal_kernel()`
-- API: `triton_metal.mlx.triton_call(kernel_fn, *args, grid=(...), **constexpr_kwargs)`
+- API: `triton_msl.mlx.triton_call(kernel_fn, *args, grid=(...), **constexpr_kwargs)`
 
 ### Performance (M4 Max)
 - Vector add (16M): 137.5 GB/s

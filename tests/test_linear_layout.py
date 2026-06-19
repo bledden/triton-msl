@@ -1,6 +1,6 @@
 """Tests for the LinearLayout helper used by ``ttg.convert_layout`` lowering."""
 
-from triton_metal.codegen._linear_layout import (
+from triton_msl.codegen._linear_layout import (
     LinearLayout,
     parse_linear_layout,
     blocked_to_linear,

@@ -6,7 +6,7 @@
 
 **Architecture:** A fresh head-dim-tiled FA2 MSL template (general strided addressing, fp32-accumulate, fp16 cast epilogue) lives in `_msl_templates.py`. `GenericLowerer.lower()`'s FA prescan stops refusing `head_dim>64` and instead *attempts to route*: it structurally recognizes the canonical FA kernel, extracts Q/K/V/Out pointer roles + their strides + the constexprs, and emits the template for the gated config (`BLOCK=32, HEAD_DIM=128`). Any ambiguity → `MetalNonRecoverableError` (integrity preserved). All other out-of-range configs keep their existing refusals.
 
-**Tech Stack:** Python codegen (`triton_metal/codegen/`), Metal Shading Language (MSL) templates, `torch.mps.compile_shader` for standalone kernel testing, pytest, PyTorch reference.
+**Tech Stack:** Python codegen (`triton_msl/codegen/`), Metal Shading Language (MSL) templates, `torch.mps.compile_shader` for standalone kernel testing, pytest, PyTorch reference.
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - fp32 accumulation always (softmax + PV), regardless of in/out dtype.
 - Validated range only: route `BLOCK_M==BLOCK_N==32 && HEAD_DIM==128`. `BLOCK<32`, `head_dim>128`, and any non-canonical shape keep refusing.
 - Existing behavior unchanged: head_dim ≤ 64 @ BLOCK=32 stays on the existing generic path; FA suite, full project suite, and `test_core` ratchet (5,559 / 0) must not regress.
-- Bump `CODEGEN_VERSION` (`triton_metal/__init__.py`) on any emitter/lowerer change; clear `~/.cache/triton_metal` + `~/.triton/cache` (via `find -delete`, not `rm -rf`) when verifying codegen.
+- Bump `CODEGEN_VERSION` (`triton_msl/__init__.py`) on any emitter/lowerer change; clear `~/.cache/triton_msl` + `~/.triton/cache` (via `find -delete`, not `rm -rf`) when verifying codegen.
 - Run upstream tests via `scripts/run_upstream_tests.py` (loads `-p conftest_metal`, `--device cpu`).
 - Worktree commits are fine; do NOT push without explicit user confirmation.
 - Reference layout: real kernel is `_flash_attn_fwd` in `tests/test_flash_attention.py` — Q/K/V/Out `[Z,H,N_CTX,head_dim]`, 16 strides, `Z/H/N_CTX`, constexprs `BLOCK_M/BLOCK_N/HEAD_DIM/IS_CAUSAL`, grid `(N_CTX//BLOCK_M, Z*H)`, `qk_scale = 1/sqrt(HEAD_DIM)`.
@@ -23,11 +23,11 @@
 
 ## File Structure
 
-- `triton_metal/codegen/_msl_templates.py` — **add** `make_flash_attention_kernel_tiled(head_dim, BLOCK_M, BLOCK_N, Dc, causal, out_dtype)`. New tiled FA2 template; does not touch the existing `make_flash_attention_kernel` demo.
-- `triton_metal/codegen/generic_lowerer.py` — **modify** the FA prescan in `lower()` (currently `triton_metal/codegen/generic_lowerer.py` ~line 643–675, the `_fa_maxdim/_fa_mindim` guard) to route-or-refuse; **add** `_detect_flash_attention()` and `_lower_flash_attention_template()` (mirror `_detect_matmul_softmax` / `_lower_matmul_softmax_template`; reuse `_resolve_dot_ptr_roles` for pointer roles).
+- `triton_msl/codegen/_msl_templates.py` — **add** `make_flash_attention_kernel_tiled(head_dim, BLOCK_M, BLOCK_N, Dc, causal, out_dtype)`. New tiled FA2 template; does not touch the existing `make_flash_attention_kernel` demo.
+- `triton_msl/codegen/generic_lowerer.py` — **modify** the FA prescan in `lower()` (currently `triton_msl/codegen/generic_lowerer.py` ~line 643–675, the `_fa_maxdim/_fa_mindim` guard) to route-or-refuse; **add** `_detect_flash_attention()` and `_lower_flash_attention_template()` (mirror `_detect_matmul_softmax` / `_lower_matmul_softmax_template`; reuse `_resolve_dot_ptr_roles` for pointer roles).
 - `tests/test_fa_tiled_template.py` — **create**. Standalone template parity (compile the raw MSL via `torch.mps.compile_shader`, compare to torch). Golden-structure checks.
 - `tests/test_flash_attention.py` — **modify**. Add `head_dim=128 @ BLOCK=32` parametrized correctness tests (fp32/fp16 × causal/non-causal) + a near-miss-refuses test.
-- `triton_metal/__init__.py` — **modify** `CODEGEN_VERSION`.
+- `triton_msl/__init__.py` — **modify** `CODEGEN_VERSION`.
 - `docs/SUPPORTED_OPS.md`, `README.md` — **modify** the FA row/refusal-catalog/Attention claims.
 
 Precedents to read before implementing (do not reinvent):
@@ -44,7 +44,7 @@ Precedents to read before implementing (do not reinvent):
 Develop the template test-first: a concrete parity test pins correctness; the MSL body is iterated until it passes (legitimate TDD for a GPU kernel).
 
 **Files:**
-- Create: `triton_metal/codegen/_msl_templates.py` (add `make_flash_attention_kernel_tiled`)
+- Create: `triton_msl/codegen/_msl_templates.py` (add `make_flash_attention_kernel_tiled`)
 - Test: `tests/test_fa_tiled_template.py`
 
 **Interfaces:**
@@ -55,7 +55,7 @@ Develop the template test-first: a concrete parity test pins correctness; the MS
 ```python
 # tests/test_fa_tiled_template.py
 import math, pytest, torch
-from triton_metal.codegen._msl_templates import make_flash_attention_kernel_tiled
+from triton_msl.codegen._msl_templates import make_flash_attention_kernel_tiled
 
 requires_mps = pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MPS")
 
@@ -107,14 +107,14 @@ def test_tiled_fa_emits_chunk_loop():
     assert "threadgroup float acc" in src
 ```
 
-- [ ] **Step 6: Commit** — `git add triton_metal/codegen/_msl_templates.py tests/test_fa_tiled_template.py && git commit -m "feat(flash-attn): head-dim-tiled FA2 MSL template (fp32, non-causal)"`
+- [ ] **Step 6: Commit** — `git add triton_msl/codegen/_msl_templates.py tests/test_fa_tiled_template.py && git commit -m "feat(flash-attn): head-dim-tiled FA2 MSL template (fp32, non-causal)"`
 
 ---
 
 ## Task 2: FA pattern detection + param extraction (refuse-on-ambiguity)
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py` (add `_detect_flash_attention`)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (add `_detect_flash_attention`)
 - Test: `tests/test_fa_detect.py` (create)
 
 **Interfaces:**
@@ -143,8 +143,8 @@ Write it concretely following `tests/test_fast_matmul_detect.py`'s harness (comp
 ## Task 3: Route detected FA → emit template (fp32, non-causal end-to-end)
 
 **Files:**
-- Modify: `triton_metal/codegen/generic_lowerer.py` (the FA prescan in `lower()`; add `_lower_flash_attention_template`)
-- Modify: `triton_metal/__init__.py` (`CODEGEN_VERSION`)
+- Modify: `triton_msl/codegen/generic_lowerer.py` (the FA prescan in `lower()`; add `_lower_flash_attention_template`)
+- Modify: `triton_msl/__init__.py` (`CODEGEN_VERSION`)
 - Test: `tests/test_flash_attention.py`
 
 **Interfaces:**
@@ -157,7 +157,7 @@ Write it concretely following `tests/test_fast_matmul_detect.py`'s harness (comp
 
 - [ ] **Step 3: Wire routing in `lower()`** — at the FA prescan: call `info = self._detect_flash_attention()`. If `info` and `info["block_m"]==info["block_n"]==32 and info["head_dim"]==128`, `return self._lower_flash_attention_template(info)`. Keep the `maxdim>64` refusal for head_dim>128 and any non-routed head_dim>64; keep the `mindim<32` refusal. Implement `_lower_flash_attention_template` to call `make_flash_attention_kernel_tiled(head_dim, 32, 32, Dc, causal=info["causal"], out_dtype="fp32")` and bind args in the kernel's order. Bump `CODEGEN_VERSION` to `2026.06.17.2`.
 
-- [ ] **Step 4: Run until pass** — clear caches (`find ~/.cache/triton_metal ~/.triton/cache -type f -delete`), then `pytest tests/test_flash_attention.py -k large_head -x -q`. Expected: PASS.
+- [ ] **Step 4: Run until pass** — clear caches (`find ~/.cache/triton_msl ~/.triton/cache -type f -delete`), then `pytest tests/test_flash_attention.py -k large_head -x -q`. Expected: PASS.
 
 - [ ] **Step 5: Regression check** — `pytest tests/test_flash_attention.py -q` (existing 17 still green). Expected: PASS.
 
@@ -213,7 +213,7 @@ Write it concretely following `tests/test_fast_matmul_detect.py`'s harness (comp
 
 - [ ] **Step 2: Update README** — Status + Attention section/table: head_dim 32/64 (generic) and **128** (tiled template) at BLOCK=32.
 
-- [ ] **Step 3: Full project suite** — `find ~/.cache/triton_metal ~/.triton/cache -type f -delete; PYTHONPATH=<worktree> python3 -m pytest tests/ -q`. Expected: all pass (≥724 + new FA tests, 0 failed).
+- [ ] **Step 3: Full project suite** — `find ~/.cache/triton_msl ~/.triton/cache -type f -delete; PYTHONPATH=<worktree> python3 -m pytest tests/ -q`. Expected: all pass (≥724 + new FA tests, 0 failed).
 
 - [ ] **Step 4: test_core ratchet** — `python3 scripts/run_upstream_tests.py --test-file test_core.py --timeout 3600`. Expected: **5,559 passed / 0 failed** (unchanged — FA pattern absent from test_core).
 

@@ -17,8 +17,8 @@
 - `pack_metadata` tuple today: `(num_warps, num_ctas, shared, block_size, output_arg_indices, needs_2d_grid, mm_two_kernel)` — `fast_matmul` becomes index 7.
 
 **Operational rules (all tasks):**
-- Run every command from the worktree root `/Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread` — NEVER the main repo root (a non-worktree cwd can hit the main editable install).
-- Before any correctness/perf RUN, clear both caches: `rm -rf ~/.cache/triton_metal ~/.triton/cache`. GPU tests run SERIALLY. Do NOT run concurrent ratchets (they race on the shared cache clear).
+- Run every command from the worktree root `/Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread` — NEVER the main repo root (a non-worktree cwd can hit the main editable install).
+- Before any correctness/perf RUN, clear both caches: `rm -rf ~/.cache/triton_msl ~/.triton/cache`. GPU tests run SERIALLY. Do NOT run concurrent ratchets (they race on the shared cache clear).
 - Commit messages end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
 ---
@@ -26,11 +26,11 @@
 ### Task 1: Compile-time detector + descriptor + metadata plumbing
 
 **Files:**
-- Modify: `triton_metal/__init__.py:6` (CODEGEN_VERSION bump)
-- Modify: `triton_metal/codegen/generic_lowerer.py:109` (init `self._fast_matmul = None`)
-- Modify: `triton_metal/codegen/_lowerer_templates.py:2296-2353` (`_lower_dot_simple_template` + new helper `_maybe_fast_matmul_descriptor`)
-- Modify: `triton_metal/codegen/msl_emitter.py:542` (`emit_msl` reads descriptor into metadata)
-- Modify: `triton_metal/backend/compiler.py:179-199` (`pack_metadata` appends index 7)
+- Modify: `triton_msl/__init__.py:6` (CODEGEN_VERSION bump)
+- Modify: `triton_msl/codegen/generic_lowerer.py:109` (init `self._fast_matmul = None`)
+- Modify: `triton_msl/codegen/_lowerer_templates.py:2296-2353` (`_lower_dot_simple_template` + new helper `_maybe_fast_matmul_descriptor`)
+- Modify: `triton_msl/codegen/msl_emitter.py:542` (`emit_msl` reads descriptor into metadata)
+- Modify: `triton_msl/backend/compiler.py:179-199` (`pack_metadata` appends index 7)
 - Test: `tests/test_fast_matmul_detect.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -39,7 +39,7 @@ Create `tests/test_fast_matmul_detect.py`. It compiles real matmul kernels and i
 
 ```python
 """Compile-time detector: eligible matmuls emit a fast_matmul descriptor in
-cached metadata; ineligible ones do not. Inspects ~/.cache/triton_metal/*.meta.json
+cached metadata; ineligible ones do not. Inspects ~/.cache/triton_msl/*.meta.json
 (the descriptor round-trips through the JSON cache as a list of str+ints).
 Serial GPU."""
 import os, glob, json, shutil, pytest
@@ -50,7 +50,7 @@ except Exception:
     HAS = False
 requires = pytest.mark.skipif(not HAS, reason="MPS needed")
 
-CACHE = os.path.expanduser("~/.cache/triton_metal")
+CACHE = os.path.expanduser("~/.cache/triton_msl")
 
 
 @triton.jit
@@ -116,7 +116,7 @@ def _run(kernel, A, B, C, M, N, K):
 @requires
 def test_eligible_fp32_emits_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps"); B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
     _run(_build(""), A, B, C, M, N, K)            # fp32 in, fp32 out (no cast)
@@ -130,7 +130,7 @@ def test_eligible_fp32_emits_descriptor(monkeypatch):
 @requires
 def test_fp16_output_no_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps", dtype=torch.float16)
     B = torch.randn(K, N, device="mps", dtype=torch.float16)
@@ -142,7 +142,7 @@ def test_fp16_output_no_descriptor(monkeypatch):
 @requires
 def test_flag_off_no_descriptor(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "0")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "0")
     M = N = K = 256
     A = torch.randn(M, K, device="mps"); B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
     _run(_build(""), A, B, C, M, N, K)
@@ -151,12 +151,12 @@ def test_flag_off_no_descriptor(monkeypatch):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python -m pytest tests/test_fast_matmul_detect.py -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python -m pytest tests/test_fast_matmul_detect.py -v`
 Expected: FAIL — `test_eligible_fp32_emits_descriptor` asserts a descriptor that does not exist yet (no `fast_matmul` key in any `.meta.json`).
 
 - [ ] **Step 3: Bump CODEGEN_VERSION**
 
-In `triton_metal/__init__.py:6`, change:
+In `triton_msl/__init__.py:6`, change:
 ```python
 CODEGEN_VERSION = "2026.06.13.2"
 ```
@@ -167,7 +167,7 @@ CODEGEN_VERSION = "2026.06.15.1"
 
 - [ ] **Step 4: Initialize `_fast_matmul` on the lowerer**
 
-In `triton_metal/codegen/generic_lowerer.py`, in `GenericLowerer.__init__`, immediately after `self.graph = graph` (line 109), add:
+In `triton_msl/codegen/generic_lowerer.py`, in `GenericLowerer.__init__`, immediately after `self.graph = graph` (line 109), add:
 ```python
         # Fast-matmul runtime-dispatch descriptor (Phase 4). Set by
         # _lower_dot_simple_template when an eligible matmul is detected;
@@ -197,7 +197,7 @@ Add this new method to the class in `_lowerer_templates.py` (place it directly a
         None -> generic kernel. Never silent-wrong.
         """
         import os
-        if os.environ.get("TRITON_METAL_FAST_MATMUL", "1") == "0":
+        if os.environ.get("TRITON_MSL_FAST_MATMUL", "1") == "0":
             return None
         # Exactly one tt.dot (a matmul), scanning nested regions (K-loop body).
         def _all(ops):
@@ -245,7 +245,7 @@ Add this new method to the class in `_lowerer_templates.py` (place it directly a
             msl_dtype = "fp32"
         else:
             return None
-        from triton_metal.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
+        from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
         rr = rc = 4
         fast_msl = make_simdgroup_matmul_kernel_fast(dtype=msl_dtype, rr=rr, rc=rc)
         # (msl, m_idx, n_idx, k_idx, tile_m, tile_n); tile_m=8*rr, tile_n=32*rc.
@@ -268,7 +268,7 @@ Call site B — at the TOP of `_lower_simple_dot_inline` (`_lowerer_templates.py
 
 - [ ] **Step 6: Propagate the descriptor into metadata in `emit_msl`**
 
-In `triton_metal/codegen/msl_emitter.py`, in `emit_msl`, immediately after the `mm_two_kernel` line (line 542):
+In `triton_msl/codegen/msl_emitter.py`, in `emit_msl`, immediately after the `mm_two_kernel` line (line 542):
 ```python
             metadata["mm_two_kernel"] = getattr(lowerer, "_mm_two_kernel", None)
 ```
@@ -280,7 +280,7 @@ add:
 
 - [ ] **Step 7: Pack the descriptor into the launcher metadata tuple**
 
-In `triton_metal/backend/compiler.py`, in `pack_metadata` (lines 179-199), after the `mm_two_kernel = ...` line (line 190) add:
+In `triton_msl/backend/compiler.py`, in `pack_metadata` (lines 179-199), after the `mm_two_kernel = ...` line (line 190) add:
 ```python
         # Fast-matmul runtime-dispatch descriptor (Phase 4); None for other kernels.
         fast_matmul = getattr(metadata, "fast_matmul", None)
@@ -301,13 +301,13 @@ and append it to the returned tuple (after `mm_two_kernel,` at line 198):
 
 - [ ] **Step 8: Run test to verify it passes**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python -m pytest tests/test_fast_matmul_detect.py -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python -m pytest tests/test_fast_matmul_detect.py -v`
 Expected: PASS (3 tests). If `test_eligible_fp32_emits_descriptor` fails on the index assertion `(3,4,5,32,128)`, the kernel's runtime-arg order does not match the assumed layout — STOP and report (this would mean the generic kernel's own M/N/K binding is non-standard for this kernel; do not loosen the gate).
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add triton_metal/__init__.py triton_metal/codegen/generic_lowerer.py triton_metal/codegen/_lowerer_templates.py triton_metal/codegen/msl_emitter.py triton_metal/backend/compiler.py tests/test_fast_matmul_detect.py
+git add triton_msl/__init__.py triton_msl/codegen/generic_lowerer.py triton_msl/codegen/_lowerer_templates.py triton_msl/codegen/msl_emitter.py triton_msl/backend/compiler.py tests/test_fast_matmul_detect.py
 git commit -m "feat(phase4): fast-matmul compile-time detector + descriptor plumbing
 
 Detect eligible matmuls (single dot via _lower_dot_simple_template, fp16/fp32
@@ -323,7 +323,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 2: Launcher runtime dispatch gate
 
 **Files:**
-- Modify: `triton_metal/backend/driver.py:580-620` (`MetalLauncher.__call__` — add fast-matmul branch; share kargs/all_mps)
+- Modify: `triton_msl/backend/driver.py:580-620` (`MetalLauncher.__call__` — add fast-matmul branch; share kargs/all_mps)
 - Test: `tests/test_fast_matmul_gate.py`
 
 **Design notes (from Task 1 review):**
@@ -364,7 +364,7 @@ def mm(a_ptr, b_ptr, c_ptr, M, N, K, sam, sak, sbk, sbn, scm, scn,
 
 
 def _spy(monkeypatch):
-    from triton_metal.backend.driver import _get_compile_shader_runtime
+    from triton_msl.backend.driver import _get_compile_shader_runtime
     rt = _get_compile_shader_runtime()
     seen = []
     orig = rt.dispatch
@@ -388,9 +388,9 @@ def _launch(M, N, K, dtype=torch.float32):
 
 @requires
 def test_aligned_fires_fast(monkeypatch):
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
     seen = _spy(monkeypatch)
     A, B, C = _launch(256, 256, 256)              # all %32/%8 aligned
     assert "simdgroup_matmul_fast" in seen
@@ -400,9 +400,9 @@ def test_aligned_fires_fast(monkeypatch):
 @requires
 @pytest.mark.parametrize("M,N,K", [(258, 256, 256), (256, 258, 256), (256, 256, 252)])
 def test_misaligned_falls_back(monkeypatch, M, N, K):
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
     seen = _spy(monkeypatch)
     A, B, C = _launch(M, N, K)                     # M%32!=0 OR N%32!=0 OR K%8!=0
     assert "simdgroup_matmul_fast" not in seen, "misaligned dims must NOT use the fast template"
@@ -411,18 +411,18 @@ def test_misaligned_falls_back(monkeypatch, M, N, K):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python -m pytest tests/test_fast_matmul_gate.py -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python -m pytest tests/test_fast_matmul_gate.py -v`
 Expected: FAIL — `test_aligned_fires_fast` fails because the launcher does not yet dispatch `simdgroup_matmul_fast` (the spy never sees it).
 
 - [ ] **Step 3: Restructure the launcher's compile_shader block to add the fast-matmul branch**
 
-In `triton_metal/backend/driver.py`, replace the existing block at lines 580-620 (from `import os as _os` through the end of the `except Exception:` that marks unsupported) with:
+In `triton_msl/backend/driver.py`, replace the existing block at lines 580-620 (from `import os as _os` through the end of the `except Exception:` that marks unsupported) with:
 ```python
         import os as _os
         fast_matmul = (kernel_metadata[7]
                        if (kernel_metadata and len(kernel_metadata) > 7) else None)
         if ((self._msl is not None or fast_matmul is not None)
-                and _os.environ.get("TRITON_METAL_COMPILE_SHADER", "1") != "0"):
+                and _os.environ.get("TRITON_MSL_COMPILE_SHADER", "1") != "0"):
             try:
                 _rt = _get_compile_shader_runtime()
                 if _rt.available():
@@ -492,18 +492,18 @@ In `triton_metal/backend/driver.py`, replace the existing block at lines 580-620
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python -m pytest tests/test_fast_matmul_gate.py -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python -m pytest tests/test_fast_matmul_gate.py -v`
 Expected: PASS (1 + 3 tests). `test_aligned_fires_fast` sees `simdgroup_matmul_fast`; all `test_misaligned_falls_back` cases do NOT, and every result matches torch.
 
 - [ ] **Step 5: Sanity-check the elementwise path still works (no regression)**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python -m pytest tests/test_compile_shader_parity.py -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python -m pytest tests/test_compile_shader_parity.py -v`
 Expected: PASS (unchanged — the restructure preserves the elementwise branch behavior).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add triton_metal/backend/driver.py tests/test_fast_matmul_gate.py
+git add triton_msl/backend/driver.py tests/test_fast_matmul_gate.py
 git commit -m "feat(phase4): launcher runtime gate dispatches fast matmul template
 
 Read fast_matmul descriptor (kernel_metadata[7]); when all tensor args are MPS
@@ -555,9 +555,9 @@ def mm(a_ptr, b_ptr, c_ptr, M, N, K, sam, sak, sbk, sbn, scm, scn,
 
 
 def _run(M, N, K, dtype, flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", flag)
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     A = torch.randn(M, K, device="mps", dtype=dtype)
     B = torch.randn(K, N, device="mps", dtype=dtype)
     C = torch.empty(M, N, device="mps", dtype=torch.float32)
@@ -591,9 +591,9 @@ NOTE for implementer: the `randn` inputs differ between the on/off runs (no fixe
 Edit `_run` to seed before generating inputs:
 ```python
 def _run(M, N, K, dtype, flag, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", flag)
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", flag)
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     torch.manual_seed(0)
     A = torch.randn(M, K, device="mps", dtype=dtype)
     B = torch.randn(K, N, device="mps", dtype=dtype)
@@ -645,11 +645,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: Targeted dot/matmul subset, fast-matmul ON, both MEPT flags**
 
 ```bash
-cd /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
+cd /Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
 T=/Users/bledden/Documents/triton/python/test/unit/language/test_core.py
 for MEPT in 1 0; do
-  rm -rf ~/.cache/triton_metal ~/.triton/cache
-  TRITON_METAL_FAST_MATMUL=1 TRITON_METAL_MEPT=$MEPT \
+  rm -rf ~/.cache/triton_msl ~/.triton/cache
+  TRITON_MSL_FAST_MATMUL=1 TRITON_MSL_MEPT=$MEPT \
     python -m pytest "$T" -k "dot or matmul" -q -rs 2>&1 | tail -5
 done
 ```
@@ -660,8 +660,8 @@ Expected: 0 failed for both MEPT values. Record the passed/skipped counts.
 ```bash
 T=/Users/bledden/Documents/triton/python/test/unit/language/test_core.py
 for MEPT in 1 0; do
-  rm -rf ~/.cache/triton_metal ~/.triton/cache
-  TRITON_METAL_FAST_MATMUL=0 TRITON_METAL_MEPT=$MEPT \
+  rm -rf ~/.cache/triton_msl ~/.triton/cache
+  TRITON_MSL_FAST_MATMUL=0 TRITON_MSL_MEPT=$MEPT \
     python -m pytest "$T" -k "dot or matmul" -q -rs 2>&1 | tail -5
 done
 ```
@@ -672,8 +672,8 @@ Expected: identical pass/fail counts to Step 1. ON must equal OFF (the fast path
 ```bash
 T=/Users/bledden/Documents/triton/python/test/unit/language/test_core.py
 for MEPT in 1 0; do
-  rm -rf ~/.cache/triton_metal ~/.triton/cache
-  TRITON_METAL_FAST_MATMUL=1 TRITON_METAL_MEPT=$MEPT \
+  rm -rf ~/.cache/triton_msl ~/.triton/cache
+  TRITON_MSL_FAST_MATMUL=1 TRITON_MSL_MEPT=$MEPT \
     python -m pytest "$T" -q -rs 2>&1 | tail -8
 done
 ```
@@ -682,8 +682,8 @@ Expected: 0 failed both flags; passed count matches the established baseline (55
 - [ ] **Step 4: Project suite, fast-matmul ON**
 
 ```bash
-rm -rf ~/.cache/triton_metal ~/.triton/cache
-TRITON_METAL_FAST_MATMUL=1 python -m pytest tests/ -q -rs 2>&1 | tail -10
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+TRITON_MSL_FAST_MATMUL=1 python -m pytest tests/ -q -rs 2>&1 | tail -10
 ```
 Expected: 0 failed (the new tests + the existing project suite).
 
@@ -737,9 +737,9 @@ def mm(a_ptr, b_ptr, c_ptr, M, N, K, sam, sak, sbk, sbn, scm, scn,
 @requires
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_fast_matmul_throughput(dtype, monkeypatch):
-    monkeypatch.setenv("TRITON_METAL_FAST_MATMUL", "1")
-    monkeypatch.setenv("TRITON_METAL_COMPILE_SHADER", "1")
-    os.system("rm -rf ~/.cache/triton_metal ~/.triton/cache")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    os.system("rm -rf ~/.cache/triton_msl ~/.triton/cache")
     M = N = K = 2048
     A = torch.randn(M, K, device="mps", dtype=dtype)
     B = torch.randn(K, N, device="mps", dtype=dtype)
@@ -765,7 +765,7 @@ def test_fast_matmul_throughput(dtype, monkeypatch):
 
 - [ ] **Step 2: Run the perf test**
 
-Run: `rm -rf ~/.cache/triton_metal ~/.triton/cache && python -m pytest tests/test_fast_matmul_perf.py -v`
+Run: `rm -rf ~/.cache/triton_msl ~/.triton/cache && python -m pytest tests/test_fast_matmul_perf.py -v`
 Expected: PASS (2). fp32 ≈ 11 TFLOP/s, fp16 ≈ 7.5 — both well above the floors. If a result is near the generic ~2.8 floor, the fast path did NOT fire — diagnose with the Task 2 dispatch spy before claiming perf.
 
 - [ ] **Step 3: Commit**
@@ -791,7 +791,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Runtime gate (MPS + M%32/N%32/K%8) → Task 2 launcher branch. ✓
 - Descriptor as cacheable tuple + `.meta.json` round-trip → Task 1 (test reads it from `.meta.json`). ✓
 - `fast_matmul` at `pack_metadata` index 7, `getattr` mirror of `mm_two_kernel` → Task 1 Steps 6-7. ✓
-- Flag `TRITON_METAL_FAST_MATMUL` (one place: the detector) + CODEGEN_VERSION bump → Task 1 Steps 3, 5. ✓
+- Flag `TRITON_MSL_FAST_MATMUL` (one place: the detector) + CODEGEN_VERSION bump → Task 1 Steps 3, 5. ✓
 - relerr-insufficient → gate-logic tests via dispatch spy → Task 2 test. ✓
 - Full ratchet both MEPT flags, on==off, before perf → Task 4 before Task 5. ✓
 - Perf gate both dtypes + reports → Task 5. ✓

@@ -42,4 +42,4 @@ Net of this exchange: 3 reports → 2 real silent-wrongs fixed (barrier, while-l
 1 confirmed-loud gap turned into a clean refusal + queued as Phase 2. Send the
 new receipts after you lift to 128.
 
-— triton-metal dev session, 2026-06-11
+— triton-msl dev session, 2026-06-11

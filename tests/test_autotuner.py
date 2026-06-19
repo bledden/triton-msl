@@ -18,7 +18,7 @@ requires_metal = pytest.mark.skipif(
     reason="Metal framework not available"
 )
 
-from triton_metal.autotuning.autotuner import (
+from triton_msl.autotuning.autotuner import (
     AutotuneConfig,
     AutotuneResult,
     MetalAutotuner,
@@ -124,7 +124,7 @@ def make_test_buffers(device, n):
 @requires_metal
 def test_autotune_vector_add():
     """Autotuner finds best block_size for vector_add."""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     device = Metal.MTLCreateSystemDefaultDevice()
     n = 65536
@@ -152,7 +152,7 @@ def test_autotune_vector_add():
 @requires_metal
 def test_autotune_cache_hit():
     """Second tune() call returns cached result."""
-    from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+    from triton_msl.codegen.msl_emitter import make_vector_add_kernel
 
     device = Metal.MTLCreateSystemDefaultDevice()
     n = 4096
@@ -181,7 +181,7 @@ def test_autotune_cache_hit():
 @requires_metal
 def test_autotune_silu():
     """Autotuner works with silu kernel (different signature)."""
-    from triton_metal.codegen.msl_emitter import make_silu_kernel
+    from triton_msl.codegen.msl_emitter import make_silu_kernel
 
     device = Metal.MTLCreateSystemDefaultDevice()
     n = 65536
@@ -218,7 +218,7 @@ def test_autotune_handles_compile_error():
     def bad_kernel(block_size=256):
         if block_size == 512:
             return "THIS IS NOT VALID MSL"
-        from triton_metal.codegen.msl_emitter import make_vector_add_kernel
+        from triton_msl.codegen.msl_emitter import make_vector_add_kernel
         return make_vector_add_kernel(block_size=block_size)
 
     device = Metal.MTLCreateSystemDefaultDevice()
@@ -260,13 +260,13 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-requires_triton_metal = pytest.mark.skipif(
+requires_triton_msl = pytest.mark.skipif(
     not (HAS_METAL and HAS_TRITON and HAS_TORCH),
     reason="Requires Metal + Triton + PyTorch MPS"
 )
 
 
-@requires_triton_metal
+@requires_triton_msl
 def test_triton_autotune_vector_add():
     """End-to-end: @triton.autotune selects a config for vector_add on Metal."""
     @triton.autotune(

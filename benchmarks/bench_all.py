@@ -15,13 +15,13 @@ import tempfile
 # GPU setup
 import Metal
 
-from triton_metal.profiling.metal_bench import (
+from triton_msl.profiling.metal_bench import (
     MetalBenchmark,
     compute_gflops,
     compute_throughput,
     format_benchmark_result,
 )
-from triton_metal.codegen.msl_emitter import (
+from triton_msl.codegen.msl_emitter import (
     make_vector_add_kernel,
     make_elementwise_kernel,
     make_silu_kernel,
@@ -81,7 +81,7 @@ def compile_and_load(device, msl_src, kernel_name):
     """Compile MSL and load pipeline state."""
     import Foundation
 
-    cache_dir = os.path.join(tempfile.gettempdir(), "triton_metal_bench_cache")
+    cache_dir = os.path.join(tempfile.gettempdir(), "triton_msl_bench_cache")
     os.makedirs(cache_dir, exist_ok=True)
 
     src_hash = hashlib.sha256(msl_src.encode()).hexdigest()[:16]

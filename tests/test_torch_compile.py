@@ -1,7 +1,7 @@
-"""Tests for torch.compile integration via triton-metal backend.
+"""Tests for torch.compile integration via triton-msl backend.
 
 Validates that torch.compile(model, backend='inductor') produces correct
-results on MPS device by routing through TritonScheduling -> triton-metal -> MSL -> Metal GPU.
+results on MPS device by routing through TritonScheduling -> triton-msl -> MSL -> Metal GPU.
 """
 
 import pytest
@@ -28,8 +28,8 @@ def setup_backend():
     Registration also pins inductor to single-process compilation (Metal/PyObjC
     is not fork-safe); the backend owns that requirement, so tests don't set it.
     """
-    import triton_metal.inductor
-    triton_metal.inductor.register_metal_triton_backend()
+    import triton_msl.inductor
+    triton_msl.inductor.register_metal_triton_backend()
     torch._dynamo.reset()
     yield
     torch._dynamo.reset()

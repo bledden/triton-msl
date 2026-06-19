@@ -100,7 +100,7 @@ def compile_to_ttgir(kernel_fn, sig, constexprs=None):
     """Compile a @triton.jit kernel through TTIR and TTGIR stages."""
     from triton.compiler import ASTSource
     from triton.backends.compiler import GPUTarget
-    from triton_metal.backend.compiler import MetalBackend, MetalOptions
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
 
     target = GPUTarget("metal", "apple-m4", 32)
     backend = MetalBackend(target)

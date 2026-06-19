@@ -1,9 +1,9 @@
 """Training (forward + backward) through torch.compile on the Metal backend.
 
-triton-metal was inference-only until the inductor backend port (2026-06-18).
+triton-msl was inference-only until the inductor backend port (2026-06-18).
 Once torch.compile routes through TritonScheduling, AOTAutograd's backward graph
 is just more Triton kernels (matmul->matmul, the embedding scatter-add, the
-softmax/layernorm backwards, etc.) that lower through triton-metal -> MSL. So
+softmax/layernorm backwards, etc.) that lower through triton-msl -> MSL. So
 training "just works" through the compiled path -- these tests pin that:
 
   1. gradients from the compiled model match eager (same device, same data), and
@@ -28,8 +28,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def setup_backend():
     """Register the metal triton backend and reset dynamo around each test."""
-    import triton_metal.inductor
-    triton_metal.inductor.register_metal_triton_backend()
+    import triton_msl.inductor
+    triton_msl.inductor.register_metal_triton_backend()
     torch._dynamo.reset()
     yield
     torch._dynamo.reset()

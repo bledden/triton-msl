@@ -16,7 +16,7 @@
 **Goal:** restore `torch.compile(model, backend="inductor")` coverage on Metal under the
 current torch (2.12.1) — i.e. get `tests/test_torch_compile.py` (and `tests/test_models.py`)
 from **6/32 passing to green**, by porting the existing inductor integration in
-`triton_metal/inductor/` to torch 2.12's inductor codegen API. Never silent-wrong: a model
+`triton_msl/inductor/` to torch 2.12's inductor codegen API. Never silent-wrong: a model
 that can't lower must fail loudly or fall back, never return wrong values.
 
 ## Why this is #1 (the reframe)
@@ -32,7 +32,7 @@ that can't lower must fail loudly or fall back, never return wrong values.
 - So #1 = **port the inductor backend**; dynamic shapes is a sub-task of full coverage.
 
 ## Current state to build on (do NOT rebuild)
-- `triton_metal/inductor/__init__.py` `register_metal_triton_backend()` already:
+- `triton_msl/inductor/__init__.py` `register_metal_triton_backend()` already:
   registers `TritonScheduling` + `PythonWrapperCodegen` for `"mps"` via
   `register_backend_for_device`; installs `MetalTritonDeviceOpOverrides`; patches
   `MpsInterface` (exchange/set_device/get_raw_stream); caps persistent + non-persistent

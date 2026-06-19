@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-17
 **Status:** design approved; pending implementation plan
-**Author:** triton-metal (Apple Metal backend)
+**Author:** triton-msl (Apple Metal backend)
 
 ## Summary
 

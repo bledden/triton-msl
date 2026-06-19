@@ -6,7 +6,7 @@
 
 ## Decision
 **Primary/production: Python emitter → MSL source text → `xcrun metal` → metallib.**
-Keep the C++ MLIR → LLVM-IR/AIR plugin **opt-in/experimental** (`TRITON_METAL_USE_CPP=1`),
+Keep the C++ MLIR → LLVM-IR/AIR plugin **opt-in/experimental** (`TRITON_MSL_USE_CPP=1`),
 **frozen, not deleted**. The destination is Python+MSL.
 
 ## The real variable: IR target, not language
