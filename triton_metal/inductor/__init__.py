@@ -197,14 +197,33 @@ def _patch_persistent_reduction_configs():
             _th._METAL_MAX_BLOCK_OVERRIDE = True
             orig_max = 4096  # default MAX_PERSISTENT_BLOCK_NUMEL
 
-            # Inline filter: generate configs, then remove those exceeding 1024
+            # Inline filter: generate configs, then remove invalid ones.
             configs = orig_fn(size_hints, reduction_hint, inductor_meta, triton_meta)
             rnumel = th.get_total_reduction_numel(size_hints)
             filtered = []
             for c in configs:
                 xblock = c.kwargs.get("XBLOCK", 1)
-                if xblock * rnumel <= 1024:
-                    filtered.append(c)
+                # (1) Must fit Metal's 1024 threads/threadgroup.
+                if xblock * rnumel > 1024:
+                    continue
+                # (2) Must FILL the threadgroup: the persistent reduction maps the
+                # XBLOCK*rnumel elements onto lid via (lid / rnumel, lid % rnumel).
+                # If the launch has MORE threads than elements (num_warps*32 >
+                # XBLOCK*rnumel) the surplus lanes wrap `lid % rnumel` back over
+                # the SAME columns but are NOT masked out (the validity mask only
+                # checks `lid % rnumel < rnumel`, always true), so a simd_sum
+                # over-counts the softmax/reduction denominator AND the
+                # cross-simd-group combine buffer (sized for the needed groups)
+                # is written out of bounds. Observed: __safe_softmax with XBLOCK=1,
+                # rnumel=16, num_warps=2 (64 threads) returned all-zeros, which
+                # nondeterministically reached torch.compile via autotuning and
+                # corrupted a transformer's gradients. The FILLED configs
+                # (XBLOCK*rnumel >= threads) map every lane to a distinct element
+                # and are correct. Drop the under-filling configs.
+                threads = c.num_warps * 32
+                if xblock * rnumel < threads:
+                    continue
+                filtered.append(c)
             if saved is None:
                 delattr(_th, "_METAL_MAX_BLOCK_OVERRIDE")
             return filtered if filtered else configs[:1]  # Always keep at least one config
