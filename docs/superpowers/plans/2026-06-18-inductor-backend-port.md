@@ -1,5 +1,14 @@
 # Inductor backend port → torch.compile coverage (the real roadmap #1)
 
+> **STATUS: DONE (2026-06-18).** Executed this session. The "bit-rot needs tier-by-tier port"
+> hypothesis was wrong: the breakage was a **single registration-ordering bug** (torch 2.12's
+> native MPS device-op-overrides clobbering ours), plus three latent silent-wrong bugs exposed
+> once torch.compile ran (Metal fork-unsafe compile subprocesses; `_MSL_BY_NAME` cross-graph
+> cache-key collision; the `triton_per_*` softmax template mis-mapping `xnumel`=row-count as the
+> row length → 4×-wrong reductions). All fixed + verified: **32/32 torch.compile, 6/6 real-model
+> (cold & warm), dynamic=True single-graph, full project suite 792/0.** See ROADMAP "Landed
+> 2026-06-18" and SUPPORTED_OPS "Framework integration". Tasks below are kept as the audit trail.
+
 > **Post-compaction handoff plan (2026-06-18).** Self-contained: a fresh session should
 > read this + memory `project_torchcompile_inductor_state` and execute. This supersedes the
 > "dynamic shapes (1H)" framing — see "Why this is #1" below.

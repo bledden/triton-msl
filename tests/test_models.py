@@ -6,28 +6,21 @@ Validates correctness against eager execution and measures performance.
 Requires: pip install transformers
 """
 
-import os
-import sys
 import time
 import pytest
 import torch
 import torch.nn as nn
 
-# These tests drive torch.compile, which PyTorch refuses on Python 3.14+ (its
-# own platform guard — TorchDynamo's CPython frame-eval hooks aren't ported to
-# 3.14 yet). Not a triton-metal bug or an API backfill; an upstream-PyTorch
-# capability gap. Gate so they're honest skips, not red failures; auto-lifts
-# when PyTorch ships 3.14 Dynamo support. Run on a Python <=3.13 lane (see
-# docs/superpowers/specs/2026-05-30-ws0-foundation-design.md, component C3).
+# These tests drive torch.compile (TorchDynamo's CPython frame-eval hooks are
+# Python-version-specific). Probe the actual capability instead of hardcoding a
+# Python-version gate (which went stale when torch was upgraded to a version
+# that supports the running interpreter): skip only if TorchDynamo reports it
+# can't run here. The gate auto-lifts the instant the running torch supports it.
 pytestmark = pytest.mark.skipif(
-    sys.version_info >= (3, 14),
-    reason="torch.compile is not supported on Python 3.14+ (PyTorch's own "
-    "platform guard; resolves when PyTorch ships 3.14 Dynamo support). "
-    "See REFERENCES.md [12].",
+    not torch._dynamo.is_dynamo_supported(),
+    reason="torch.compile/TorchDynamo unsupported in this interpreter "
+    "(torch._dynamo.is_dynamo_supported() is False).",
 )
-
-# Metal/PyObjC is not fork-safe; force single-thread compilation
-os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
 try:
     from transformers import GPT2LMHeadModel, GPT2Config
@@ -47,7 +40,11 @@ DEVICE = "mps"
 
 @pytest.fixture(autouse=True)
 def setup_backend():
-    """Register metal triton backend and reset dynamo before each test."""
+    """Register metal triton backend and reset dynamo before each test.
+
+    Registration also pins inductor to single-process compilation (Metal/PyObjC
+    is not fork-safe); the backend owns that requirement, so tests don't set it.
+    """
     import triton_metal.inductor
     triton_metal.inductor.register_metal_triton_backend()
     torch._dynamo.reset()

@@ -20,25 +20,32 @@ from types import ModuleType
 from triton.backends.compiler import BaseBackend, GPUTarget
 
 
-# Kernel-name -> MSL source, populated when MSL is emitted so the driver's
+# Content-key -> MSL source, populated when MSL is emitted so the driver's
 # launcher can retrieve the source for the torch.mps.compile_shader fast-path
-# (the launcher only receives the compiled metallib + name, not the source).
-_MSL_BY_NAME: dict = {}
+# (the launcher only receives the compiled metallib + metadata, not the source).
+#
+# Keyed by the per-kernel content hash (the same ``cache_key`` used for the
+# on-disk metallib), NOT the kernel name. Inductor reuses names like
+# ``triton_poi_fused_0`` across DIFFERENT compiled graphs in one process, so a
+# name key lets a later compile's MSL clobber an earlier kernel's entry and the
+# fast-path would JIT + dispatch the WRONG shader (silent-wrong, observed as a
+# roving cold-cache failure across torch.compile models). The content hash is
+# unique per distinct kernel — identical kernels share, distinct kernels never
+# collide — and the launcher resolves it via ``metadata.msl_hash``.
+_MSL_BY_KEY: dict = {}
 
 
-def _stash_msl(msl_src):
-    """Register ``msl_src`` keyed on its ``kernel void <name>(`` entry point.
+def _stash_msl(msl_src, key):
+    """Register ``msl_src`` under the content-unique ``key`` (the kernel's
+    ``cache_key``) for the launcher's compile_shader fast-path.
 
-    The launcher only receives the compiled metallib + the kernel name (the
-    same name ``emit_msl`` writes into ``metadata["name"]`` and into the MSL
-    entry point), so keying on the name parsed from the MSL guarantees the two
-    agree on both the cache-hit and freshly-emitted paths.
+    The launcher resolves this via ``metadata.msl_hash`` (set to the same
+    ``cache_key`` alongside every stash). Keying by content rather than by the
+    parsed entry-point name prevents cross-graph name collisions from serving
+    one kernel's launcher the wrong shader source.
     """
-    import re as _re
-
-    m = _re.search(r"kernel\s+void\s+(\w+)\s*\(", msl_src)
-    if m:
-        _MSL_BY_NAME[m.group(1)] = msl_src
+    if key:
+        _MSL_BY_KEY[key] = msl_src
 
 
 def _get_cache_dir():
@@ -1929,10 +1936,12 @@ class MetalBackend(BaseBackend):
                     file=sys.stderr,
                 )
 
-            # Stash MSL keyed on the entry-point name (parsed from the MSL so
-            # it matches the kernel actually launched) for the launcher's
-            # compile_shader fast-path (Phase 4).
-            _stash_msl(msl_src)
+            # Stash MSL keyed on the kernel's content hash (cache_key) and
+            # expose that key to the launcher via metadata for the launcher's
+            # compile_shader fast-path (Phase 4). Content-keyed so a later
+            # compile in the same process can't clobber this kernel's MSL.
+            metadata["msl_hash"] = cache_key
+            _stash_msl(msl_src, cache_key)
             return msl_src
 
         # Level 2: time the MSL emission
@@ -1998,10 +2007,12 @@ class MetalBackend(BaseBackend):
             with open(msl_path, "w") as f:
                 f.write(msl_src)
 
-        # Stash MSL keyed on the entry-point name (parsed from the MSL so it
-        # matches the kernel actually launched) for the launcher's
-        # compile_shader fast-path (Phase 4).
-        _stash_msl(msl_src)
+        # Stash MSL keyed on the kernel's content hash (cache_key) and expose
+        # that key to the launcher via metadata for the launcher's
+        # compile_shader fast-path (Phase 4). Content-keyed so a later compile
+        # in the same process can't clobber this kernel's MSL.
+        metadata["msl_hash"] = cache_key
+        _stash_msl(msl_src, cache_key)
         return msl_src
 
     @staticmethod

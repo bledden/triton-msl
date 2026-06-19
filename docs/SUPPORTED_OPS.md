@@ -39,6 +39,18 @@
 | `tt.dot` inside a `noinline` device function | ✗ refused | not lowered through device-function calls |
 | FlashAttention | ✓ (`BLOCK_M=BLOCK_N=32`, head_dim ∈ {32, 64, 128}) / ✗ (otherwise) | at **BLOCK_M = BLOCK_N = 32**: head_dim 32/64 (generic lowering, fp32) and **head_dim 128** (a head-dim-tiled FA2 MSL template, **fp32 + fp16**), all causal + non-causal. **Refused loudly** outside that: `head_dim > 128`, **`BLOCK_M`/`BLOCK_N` ≠ 32** (the `<32` small-block case silently mis-computed for *any* head_dim — a hole the old head_dim>64 guard missed, closed 2026-06-17), and **bf16** matmul inputs (rejected at the Triton frontend / not routed). Larger blocks and head_dim > 128 are roadmap |
 
+## Framework integration — `torch.compile`
+
+| capability | status | detail |
+|---|---|---|
+| `torch.compile(model, backend="inductor")` on `"mps"` | ✓ | routes through `triton_metal.inductor.register_metal_triton_backend()` → inductor `TritonScheduling` → triton-metal → MSL. Verified on elementwise, linear, conv, norms (layer/group/instance/batch), pooling, embedding, softmax/log-softmax, residual blocks, transformer encoders, multi-layer GPT, LSTM, and HF GPT-2 (cosine > 0.98). |
+| dynamic shapes (`torch.compile(..., dynamic=True)`) | ✓ | symbolic dims flow to the lowerer; a **single compiled graph** serves variable sequence lengths (no per-shape recompile). |
+| compile parallelism | single-process (enforced) | the backend pins inductor to `compile_threads=1` + `autotune_in_subproc=False`: Metal/PyObjC is **not fork-safe**, so a forked compile worker crashes (and a crash mid-write can corrupt the on-disk cache → silent-wrong). This is a correctness requirement, not a perf tweak. |
+| op inductor can't lower to a triton kernel | falls back loudly / to eager | inductor raises `InductorError` (loud) rather than emitting wrong values; conv/matmul may use aten extern kernels (correct, not routed through our MMA path). |
+
+> Note: torch 2.10+ ships a *native* MPS inductor backend (`MetalScheduling`); registering
+> triton-metal's backend takes priority and routes `torch.compile` through **our** kernels.
+
 ## Loud-refusal catalog (raises `MetalNonRecoverableError` — never silent-wrong)
 
 Each is a case where the compiler recognizes the kernel but cannot lower it correctly, so

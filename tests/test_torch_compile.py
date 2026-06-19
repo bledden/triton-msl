@@ -4,34 +4,30 @@ Validates that torch.compile(model, backend='inductor') produces correct
 results on MPS device by routing through TritonScheduling -> triton-metal -> MSL -> Metal GPU.
 """
 
-import os
-import sys
 import pytest
 import torch
 import torch.nn as nn
 
 # torch.compile / TorchDynamo rewrites CPython bytecode via interpreter-internal
-# frame-evaluation hooks, which are Python-version-specific. PyTorch's own
-# platform guard raises "torch.compile is not supported on Python 3.14+" until
-# it ships 3.14 Dynamo support. These tests therefore *cannot* run on 3.14 —
-# this is not a triton-metal bug or an API backfill, it's an upstream-PyTorch
-# capability gap. Gate them so they're honest skips, not red failures; the gate
-# auto-lifts when PyTorch adds 3.14 support. Run them on a Python <=3.13 lane
-# (see docs/superpowers/specs/2026-05-30-ws0-foundation-design.md, component C3).
+# frame-evaluation hooks, which are Python-version-specific. Rather than hardcode
+# a Python-version gate (PyTorch added 3.14 Dynamo support in 2.10/2.12, so a
+# `>= (3,14)` skip went stale the moment torch was upgraded), probe the actual
+# capability: skip only if TorchDynamo reports it can't run in this interpreter.
+# The gate then auto-lifts the instant the running torch supports the version.
 pytestmark = pytest.mark.skipif(
-    sys.version_info >= (3, 14),
-    reason="torch.compile is not supported on Python 3.14+ (PyTorch's own "
-    "platform guard; resolves when PyTorch ships 3.14 Dynamo support). "
-    "See REFERENCES.md [12].",
+    not torch._dynamo.is_dynamo_supported(),
+    reason="torch.compile/TorchDynamo unsupported in this interpreter "
+    "(torch._dynamo.is_dynamo_supported() is False).",
 )
-
-# Metal/PyObjC is not fork-safe; force single-thread compilation
-os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
 
 @pytest.fixture(autouse=True)
 def setup_backend():
-    """Register metal triton backend and reset dynamo before each test."""
+    """Register metal triton backend and reset dynamo before each test.
+
+    Registration also pins inductor to single-process compilation (Metal/PyObjC
+    is not fork-safe); the backend owns that requirement, so tests don't set it.
+    """
     import triton_metal.inductor
     triton_metal.inductor.register_metal_triton_backend()
     torch._dynamo.reset()

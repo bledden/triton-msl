@@ -66,6 +66,22 @@ def register_metal_triton_backend():
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.codegen.wrapper_fxir import WrapperFxCodegen
 
+    # Force single-process compilation. Metal / PyObjC is NOT fork-safe: once a
+    # Metal device/context is initialized in the parent, a forked inductor
+    # compile-worker subprocess that touches Metal crashes ("A compilation
+    # subprocess exited unexpectedly"). Worse, a worker that crashes mid-write
+    # can leave a corrupted entry in inductor's on-disk FX/triton cache, which a
+    # later compile may load and silently return WRONG values from. Pinning
+    # compilation to the main process (and disabling subprocess autotuning)
+    # removes the fork entirely -- this is a correctness requirement on Metal,
+    # not a perf tweak. Set on the config object (not the env var) so it holds
+    # regardless of import ordering. See docs/superpowers/plans/
+    # 2026-06-18-inductor-backend-port.md.
+    import torch._inductor.config as _ind_config
+    _ind_config.compile_threads = 1
+    if hasattr(_ind_config, "autotune_in_subproc"):
+        _ind_config.autotune_in_subproc = False
+
     register_backend_for_device(
         "mps",
         TritonScheduling,
@@ -74,7 +90,22 @@ def register_metal_triton_backend():
         WrapperFxCodegen,
     )
 
-    # Override device op overrides with Triton-compatible version
+    # Override device op overrides with Triton-compatible version.
+    #
+    # torch 2.10+ ships a NATIVE MPS inductor backend; its
+    # `mps_device_op_overrides` module registers torch's own
+    # `MPSDeviceOpOverrides` for "mps" at import time. That import is driven
+    # lazily by `_initialize_device_op_overrides()` on the first
+    # `get_device_op_overrides()` call -- which happens AFTER this function in
+    # the compile pipeline. If we register ours now and torch's lazy init runs
+    # later, torch's override CLOBBERS ours, and torch's native MPS override
+    # has no `import_get_raw_stream_as` (a Triton-scheduling-only method) ->
+    # `NotImplementedError` when our TritonScheduling writes the kernel header.
+    #
+    # Force the native init to run FIRST (it sets a one-shot flag so it never
+    # re-runs), THEN register ours last so it wins and is never clobbered.
+    from torch._inductor.codegen.common import _initialize_device_op_overrides
+    _initialize_device_op_overrides()
     register_device_op_overrides("mps", MetalTritonDeviceOpOverrides())
 
     # Patch MpsInterface with methods needed by TritonScheduling.

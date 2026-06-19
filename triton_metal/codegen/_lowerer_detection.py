@@ -1247,14 +1247,22 @@ class _DetectionMixin:
         if input_arg is None or output_arg is None:
             return None
 
-        # n_cols: the first non-ptr scalar arg. The kernel's row stride.
-        n_arg = None
-        for arg in self.graph.args:
-            if not arg.is_ptr:
-                n_arg = arg.name
-                break
-        if n_arg is None:
+        # Row length / stride: the kernel's single scalar arg. The template
+        # uses ONE scalar for BOTH the row stride (row_start = pid * n) and the
+        # per-row element count (the stride-loop bound), so it is correct only
+        # when those coincide in a single arg. If the kernel has more than one
+        # scalar arg we cannot tell which is the reduction-dimension length:
+        # an inductor persistent-softmax is (in_ptr, out_ptr, xnumel=row COUNT,
+        # r0_numel=row LENGTH), and blindly taking the FIRST scalar (xnumel)
+        # makes the loop cover xnumel elements instead of r0_numel -> a silently
+        # wrong 1/N-coverage reduction (observed: softmax rows summing to 4
+        # instead of 1 through torch.compile). Refuse to the generic (correct)
+        # lowering rather than guess. Hand-written softmax kernels carry exactly
+        # one scalar arg (n_cols; BLOCK_SIZE is constexpr and not in args).
+        scalar_args = [arg.name for arg in self.graph.args if not arg.is_ptr]
+        if len(scalar_args) != 1:
             return None
+        n_arg = scalar_args[0]
 
         # Block size = the tensor's dim (we look at make_range end values).
         block_size = self.graph.block_size

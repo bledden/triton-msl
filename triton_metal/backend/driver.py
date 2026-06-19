@@ -531,9 +531,15 @@ class MetalLauncher:
 
         # Kernel name for the compile_shader fast-path MSL lookup (Phase 4).
         self.kernel_name = getattr(metadata, "name", None)
+        # Resolve the MSL source by the kernel's content hash (msl_hash), NOT by
+        # name: inductor reuses kernel names across compiled graphs in one
+        # process, so a name lookup can return a DIFFERENT kernel's MSL and the
+        # fast-path would dispatch the wrong shader. msl_hash is content-unique.
+        # Missing/None -> self._msl is None -> the (always-correct) host path.
         try:
-            from triton_metal.backend.compiler import _MSL_BY_NAME
-            self._msl = _MSL_BY_NAME.get(self.kernel_name) if self.kernel_name else None
+            from triton_metal.backend.compiler import _MSL_BY_KEY
+            msl_key = getattr(metadata, "msl_hash", None)
+            self._msl = _MSL_BY_KEY.get(msl_key) if msl_key else None
         except Exception:
             self._msl = None
 

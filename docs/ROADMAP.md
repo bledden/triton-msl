@@ -1,6 +1,6 @@
 # triton-metal Implementation Roadmap
 
-> Last updated: 2026-06-17 (status section refreshed). The dated phase tables further
+> Last updated: 2026-06-18 (torch.compile / inductor backend port landed). The dated phase tables further
 > below were authored **2026-04-09** and are kept as a detailed reference — but much of
 > Phase 0–1 + 2A + 6A has since landed. **Read "Current status" first for what's actually
 > done vs. remaining.**
@@ -16,8 +16,9 @@ dependencies, scope estimates, and file-level change lists.
 0 failed / ~3,783 skipped** via `scripts/run_upstream_tests.py` (`--device cpu`, which loads
 the `conftest_metal` skip plugin). The skips are hardware-impossible (fp64, fp8/microscaling,
 64-bit atomics, TMA, device printf) or unimplemented features — **each refused loudly, never
-silent-wrong**. Project suite **754 / 0**; FlashAttention causal + non-causal at head_dim
-32 / 64 / 128.
+silent-wrong**. Project suite **792 / 0** (incl. 38 `torch.compile` + real-model tests now
+un-gated); FlashAttention causal + non-causal at head_dim 32 / 64 / 128. **`torch.compile`
+routes through triton-metal on Metal** (static + dynamic shapes; see below).
 
 ### Landed since this roadmap was written (2026-04-09)
 - **Phase 0** (foundation) — all items.
@@ -35,10 +36,21 @@ silent-wrong**. Project suite **754 / 0**; FlashAttention causal + non-causal at
 - **Phase-5 honesty audit** (dual NVIDIA/MLX lens) + first public push.
 - **2E** (shared-mem aliasing) — partially realized ad hoc (the FA head-dim tiling); a general
   pass remains open.
+- **torch.compile / inductor backend port (2026-06-18)** — `torch.compile(model,
+  backend="inductor")` on `"mps"` routes through our `TritonScheduling` → triton-metal → MSL.
+  **32/32 torch.compile + 6/6 real-model tests (cold & warm); dynamic shapes (`dynamic=True`)
+  flow through with a single compiled graph (was roadmap 1H).** torch 2.10+ now ships a *native*
+  MPS inductor; the port restores routing through OUR kernels and **closes 4 latent silent-wrong
+  bugs** the old path had (device-op-override clobber; Metal fork-unsafe compile subprocesses +
+  cache corruption; `_MSL_BY_NAME` cross-graph cache-key collision; the `triton_per_*` softmax
+  template mapping `xnumel`=row-count as the row length → 4×-wrong reductions). Closes the
+  "torch.compile produces wrong values for unsupported patterns" honesty concern (old 1A/0h).
 
 ### Remaining — re-prioritized for the current state
 1. **Training / backward pass** (old Phase 5) — biggest capability gap; **inference-only** today.
-2. **Dynamic shapes** (1H) — runtime-symbolic dispatch; needed for `torch.compile` variable shapes.
+2. ~~**Dynamic shapes** (1H)~~ — **DONE** via the inductor port (`torch.compile(dynamic=True)`
+   verified; single graph across variable seq lengths). Hand-written `@triton.jit` kernels already
+   took runtime dims. Remaining sub-item: stress dynamic shapes on larger real models.
 3. **Distribution & upstream** — PyPI wheel (6E), official Triton backend submission (6C),
    M1–M4 CI matrix, broader real-model testing beyond `test_core`.
 4. **Incremental op coverage** (all refuse loudly today, so safe to defer): noinline-dot (1E),
