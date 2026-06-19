@@ -1,15 +1,20 @@
 # CHECKPOINT — start here to resume (last updated 2026-06-18)
 
 Single "start here" pointer after a compaction / fresh session. Read this, confirm the
-env, then begin **#4 (incremental op coverage)** — #1 and #3 are DONE.
+env, then begin **#2 (PyPI publishing)** — #1, #3 DONE; #4 substantially done (2D gather
+landed; remaining coverage items are safely refused, not blocking).
 
 ## Where things stand
 - Worktree: `.claude/worktrees/multi-element-per-thread` (branch
   `worktree-multi-element-per-thread`). Run all commands from the worktree; merge to main via
   `git -C ~/Documents/triton-metal merge --ff-only worktree-multi-element-per-thread`.
-- `origin/main` @ **968dc87** (#1 + #3 merged/pushed). Branch is **ahead** with: autotune-off
-  `77bd87d` + 2D-gather refusal `97a82b3` + checkpoint `bcb3ba8` + **persistent-reduction underfill
-  filter `fac6176`** — **NOT pushed/merged.** Push needs explicit user confirmation.
+- `origin/main` @ **2ce413b** (#1 + #3 incl. autotune root-fix + #4 gather-refusal all
+  merged/pushed). Branch is **ahead** with **2D-gather implementation `1e904e8`** (#4) —
+  **NOT pushed/merged.** Push needs explicit user confirmation.
+- **#4 2D tt.gather IMPLEMENTED (`1e904e8`):** axis=0 (incl. ragged row counts) + same-shape
+  axis=1, via full-tile shared staging; upstream `test_gather[[4,4]->[8,4],0]` now PASSES
+  (+1 conformance). Refused loudly (HW/scope): tiles >1024 threads, ragged axis=1, MEPT operands.
+  Also fixed the walker to parse the gather `axis` attr. Tests: `tests/test_gather_2d.py` (10).
 - **#3 autotune silent-wrong is now ROOT-FIXED (`fac6176`), not just mitigated.** The exact
   culprit was an under-filling persistent-reduction config (`__safe_softmax` XBLOCK=1/rnumel=16/
   num_warps=2 → unmasked duplicate lanes → all-zero softmax → corrupt grads). The filter drops
@@ -54,17 +59,19 @@ tile configs on Metal; fixed by `autotune_pointwise = False` in the backend (77b
 "custom autograd.Function wrappers" framing is obsolete. Remaining sub-items (NOT blocking):
 `torch.compile`-d optimizers, grad checkpointing, larger real-dataset training runs.
 
-## #4 — incremental op coverage — IN PROGRESS
-**2D `tt.gather` silent-wrong CLOSED** (commit 97a82b3): it was silently mis-computing (~3.0 off),
-not refused — now refuses loudly (`MetalNonRecoverableError`) for effective-rank > 1; 1D unchanged.
-**Remaining: the full 2D-gather IMPLEMENTATION** (turn the 4 conftest-skipped cases green) per
-`docs/superpowers/plans/2026-06-18-2d-gather-coverage.md` — Task 1 replaces the refusal with
-correct axis-0 lowering (test-first, smallest shape, refuse-on-budget-overflow). Other gaps (all
-refuse loudly today): noinline-dot (1E),
-`tl.range` loop fusion (1F), multi-program atomics / cooperative sync (1G), rank-≥2 cat/join,
-the i64 loop-induction-var hang, unstructured control flow (`cf.cond_br`). See `docs/ROADMAP.md`
-"Remaining" #4. First action: follow the 2D-gather plan's Task 1 (test-first, axis=0 smallest
-shape) — refuse-on-budget-overflow, never silent-wrong.
+## #4 — incremental op coverage — 2D GATHER DONE
+2D `tt.gather` silent-wrong closed (97a82b3) THEN implemented (1e904e8): axis=0 (incl. ragged
+rows) + same-shape axis=1 via full-tile shared staging; upstream `[4,4]->[8,4]` passes.
+Remaining #4 coverage gaps (all refuse loudly today — safe to defer, never silent-wrong):
+2D-gather tiles >1024 threads (strided multi-pass) + ragged axis=1; noinline-dot (1E);
+`tl.range` loop fusion (1F); multi-program atomics / cooperative sync (1G); rank-≥2 cat/join;
+the i64 loop-induction-var hang; unstructured control flow (`cf.cond_br`). See `docs/ROADMAP.md`
+"Remaining" #4. None block release.
+
+## NEXT: #2 — PyPI publishing
+The agreed order's last item. Package + publish the wheel (roadmap 6E). See `docs/ROADMAP.md`
+distribution section. First action: audit `pyproject.toml` (metadata, deps, version), build the
+wheel, test-install in a clean venv, then TestPyPI before PyPI. Pin torch 2.12 once green.
 
 ## Also note
 - Refreshed `docs/ROADMAP.md` ("Current status" + "Landed 2026-06-18") + `docs/SUPPORTED_OPS.md`
