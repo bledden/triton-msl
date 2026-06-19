@@ -10,8 +10,8 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
 
 **Alpha** — actively developed, not yet production-ready.
 
-- **0 failures** across the upstream Triton `test_core.py` suite — 5,559 kernels
-  attempted and correct, ~3,783 documented feature-gap skips (each is either a
+- **0 failures** across the upstream Triton `test_core.py` suite — 5,560 kernels
+  attempted and correct, ~3,634 documented feature-gap skips (each is either a
   *refused* kernel — fails loudly, never silent-wrong — or a hardware-impossible
   case like FP64). Aligned with Triton [\[2\]](REFERENCES.md) release `3.7.0`.
   Measured by `scripts/run_upstream_tests.py` — the single source of truth for this
@@ -19,17 +19,18 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
   backend compiles and runs the kernels on the GPU, since upstream `test_core`
   otherwise assumes CUDA). Re-run it to reproduce; counts in this file and
   `CHANGELOG.md` are regenerated from it, not hand-maintained.
-- **754 / 754** project tests (codegen, GPU correctness, integration,
-  FlashAttention, MLX backend, and the fast-matmul / compile_shader zero-copy
-  suites). FlashAttention: causal + non-causal at **HEAD_DIM 32 / 64 / 128**
-  (head_dim 128 fp32 + fp16 via the head-dim-tiled template; see
-  [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend
-  tests;
-  project test-suite size grew from 434 → 603 → 716 since `0.1.0-alpha`.
-- **32 / 32** `torch.compile` model tests pass on Python ≤ 3.13 (PyTorch
-  Inductor [\[12\]](REFERENCES.md)). On Python 3.14 the suite is honestly
-  skipped because PyTorch's own platform guard refuses `torch.compile` on
-  3.14 — auto-lifts when PyTorch ships 3.14 Dynamo support.
+- **787 passed / 0 failed** in the project suite (codegen, GPU correctness,
+  integration, FlashAttention, MLX backend, fast-matmul / compile_shader
+  zero-copy, `torch.compile`, and training). FlashAttention: causal + non-causal
+  at **HEAD_DIM 32 / 64 / 128** (head_dim 128 fp32 + fp16 via the head-dim-tiled
+  template; see [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend
+  tests; the project suite grew from 434 → 603 → 716 → ~800 since `0.1.0-alpha`.
+  (A further ~20 C++-MLIR-backend tests skip unless that optional extension is
+  built.)
+- **`torch.compile` routes through triton-msl** on Python 3.10–3.14 (PyTorch
+  Inductor [\[12\]](REFERENCES.md)) — inference and training (AOTAutograd
+  backward), static and `dynamic=True`; **32 / 32** `torch.compile` model tests
+  plus the training suite pass.
 - Triton tutorials 01–03, 05 passing.
 - Built against Triton's `TRITON_EXT_ENABLED=1` plugin architecture
   (upstream PR [#9783](https://github.com/triton-lang/triton/pull/9783)).
