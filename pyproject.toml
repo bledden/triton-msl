@@ -3,11 +3,18 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "triton-metal"
+# PyPI distribution name. NB: `triton-metal` (hyphen) is taken on PyPI by an
+# unrelated project; `tritonmetal` (no separator) normalizes to a distinct name
+# per PEP 503. The import name stays `triton_metal` (install `tritonmetal`,
+# then `import triton_metal`).
+name = "tritonmetal"
 version = "0.1.0a1"
 description = "Metal (Apple Silicon) backend for Triton"
 readme = "README.md"
-license = {text = "MIT"}
+# PEP 639 SPDX expression (Metadata-Version 2.4). Do NOT also add a
+# `License :: OSI Approved :: ...` classifier — PyPI rejects the combination of
+# a license expression and a license classifier (400 Bad Request).
+license = "MIT"
 requires-python = ">=3.10"
 authors = [
     {name = "Blake Ledden", email = "bledden@users.noreply.github.com"},
@@ -16,7 +23,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
