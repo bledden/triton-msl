@@ -43,9 +43,9 @@ the shelved C++ extension. #1 inductor, #3 training, #4 2D-gather all landed BEF
   Rollback if needed: `pip install --break-system-packages torch==2.9.1`.
 - Health: project suite **787/0** post-rebrand (was 808/0; the −21 = the C++ csrc tests now
   SKIP "not built" pending the `_triton_msl_cpp` rebuild — NOT failures); upstream `test_core`
-  **5,559/0/~3,783** pre-rebrand (skip-aware, via `scripts/run_upstream_tests.py` — re-running
-  post-rebrand to reconfirm; first attempt hit the 900s thermal timeout, re-run at `--timeout 2400`;
-  rename is pure-identifier so conformance is expected unchanged). FlashAttention causal +
+  **5,560/0/3,634** post-rebrand (re-confirmed via `scripts/run_upstream_tests.py --timeout 2400`;
+  pass count == the post-2D-gather baseline exactly → rename is conformance-regression-free; the
+  first attempt hit the 900s thermal timeout, hence the longer `--timeout`). FlashAttention causal +
   non-causal at head_dim 32/64/128. **`torch.compile` routes through triton-msl** (inference +
   training, static + `dynamic=True`).
 - Prime directive ALWAYS: never silent-wrong — refuse loudly or fall back, never emit a guessed
