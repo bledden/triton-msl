@@ -3,7 +3,7 @@
 #
 # Why this exists: pytest from upstream's ~/Documents/triton/python/test will
 # import `triton_msl` from whichever copy is registered as the editable
-# install (usually ~/Documents/triton-msl), not from a worktree you're
+# install (usually ~/Documents/triton-metal), not from a worktree you're
 # actively developing in. Setting PYTHONPATH to the current repo root pins
 # imports to this checkout so worktree changes are exercised.
 #

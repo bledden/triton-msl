@@ -117,10 +117,10 @@ Remove the `mlirCtx.allowUnregisteredDialects();` line.
 - [ ] **Step 4: Build and verify**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake ..
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -20
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
 ```
 
 Expected: clean build, no duplicate symbol errors.
@@ -128,7 +128,7 @@ Expected: clean build, no duplicate symbol errors.
 - [ ] **Step 5: Smoke test — existing tests still pass**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py -v
 ```
@@ -255,9 +255,9 @@ set_source_files_properties(
 - [ ] **Step 5: Build and verify**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake .. && cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
 ```
 
 Expected: clean build.
@@ -265,7 +265,7 @@ Expected: clean build.
 - [ ] **Step 6: Run existing tests — nothing should break**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py -v
 ```
@@ -333,15 +333,15 @@ In `triton_msl/backend/compiler.py`, find the `allowed_ops` set in `_has_complex
 - [ ] **Step 4: Build**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
 ```
 
 - [ ] **Step 5: Verify existing tests still pass**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/ --timeout=120 -q 2>&1 | tail -3
 ```
@@ -410,7 +410,7 @@ def test_local_alloc_basic():
 - [ ] **Step 2: Run test to confirm baseline**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_local_alloc_basic -v -s 2>&1 | tail -20
 ```
@@ -523,15 +523,15 @@ void populateSharedMemoryOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
 - [ ] **Step 4: Build**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
 ```
 
 - [ ] **Step 5: Run test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_local_alloc_basic -v -s 2>&1 | tail -10
 ```
@@ -661,10 +661,10 @@ void populateSharedMemoryOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
 - [ ] **Step 4: Build and test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
-cd /Users/bledden/Documents/triton-msl
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_local_alloc_basic -v -s 2>&1 | tail -10
 ```
@@ -835,10 +835,10 @@ void populateSharedMemoryOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
 - [ ] **Step 6: Build and test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
-cd /Users/bledden/Documents/triton-msl
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_local_alloc_basic -v -s 2>&1 | tail -10
 ```
@@ -915,7 +915,7 @@ def test_async_copy_sync_loop():
 - [ ] **Step 2: Run test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_async_copy_sync_loop -v -s 2>&1 | tail -10
 ```
@@ -988,10 +988,10 @@ Add `AsyncCopyGlobalToLocalOpConversion` to the `patterns.add<...>` list in `pop
 - [ ] **Step 5: Build and test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
-cd /Users/bledden/Documents/triton-msl
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_async_copy_sync_loop -v -s 2>&1 | tail -10
 ```
@@ -1056,7 +1056,7 @@ def test_32kb_threadgroup_budget():
 - [ ] **Step 2: Run baseline**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_32kb_threadgroup_budget -v -s 2>&1 | tail -10
 ```
@@ -1100,10 +1100,10 @@ sharedMemoryBytes += opBytesAligned;
 - [ ] **Step 4: Build and test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
-cd /Users/bledden/Documents/triton-msl
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_32kb_threadgroup_budget -v -s 2>&1 | tail -5
 ```
@@ -1129,7 +1129,7 @@ git commit -m "feat(cpp): 32KB threadgroup memory budget with MSL fallback"
 First, disassemble a known-working MSL-compiled metallib to see the threadgroup metadata format:
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 .venv/bin/python -c "
 import torch, triton, triton.language as tl
 @triton.jit
@@ -1194,10 +1194,10 @@ The format above is a best guess. If the Metal compiler rejects it, dump a worki
 - [ ] **Step 3: Build and test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
-cd /Users/bledden/Documents/triton-msl
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_local_alloc_basic -v -s 2>&1 | tail -10
 ```
@@ -1328,7 +1328,7 @@ def test_cpp_layer_norm():
 - [ ] **Step 4: Run all integration tests**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py -v -s 2>&1 | tail -20
 ```
@@ -1539,15 +1539,15 @@ Add `lib/Conversion/DotOpToLLVM.cpp` to both `pybind11_add_module(_triton_msl_cp
 - [ ] **Step 5: Build**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake .. && cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
 ```
 
 - [ ] **Step 6: Run existing tests**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/ --timeout=120 -q 2>&1 | tail -3
 ```
@@ -1617,7 +1617,7 @@ def test_cpp_dot_32x32():
 - [ ] **Step 2: Run baseline**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_cpp_dot_32x32 -v -s 2>&1 | tail -10
 ```
@@ -1817,10 +1817,10 @@ This is complex; if debugging, dump the LLVM IR with `TRITON_MSL_DUMP_DIR=/tmp/d
 - [ ] **Step 4: Build and test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
-cd /Users/bledden/Documents/triton-msl
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_cpp_dot_32x32 -v -s 2>&1 | tail -15
 ```
@@ -1894,7 +1894,7 @@ def test_cpp_dot_k_loop():
 - [ ] **Step 2: Run test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_cpp_dot_k_loop -v -s 2>&1 | tail -10
 ```
@@ -1969,7 +1969,7 @@ def test_aliasing_non_overlapping_allocs():
 - [ ] **Step 2: Run baseline**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_aliasing_non_overlapping_allocs -v -s 2>&1 | tail -10
 ```
@@ -2154,10 +2154,10 @@ Add `lib/Conversion/SharedMemoryAliasingPass.cpp` to sources + `-fno-rtti` flag.
 - [ ] **Step 7: Build and test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake .. && cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
-cd /Users/bledden/Documents/triton-msl
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_aliasing_non_overlapping_allocs -v -s 2>&1 | tail -5
 ```
@@ -2247,7 +2247,7 @@ Reference: `tests/test_flash_attention.py` has the kernel. The integration test 
 - [ ] **Step 2: Run tests**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_cpp_flash_attention_head32 tests/test_cpp_backend.py::test_cpp_flash_attention_head64 -v -s 2>&1 | tail -20
 ```
@@ -2429,10 +2429,10 @@ Add `lib/Conversion/SharedMemoryVectorizePass.cpp` to sources + `-fno-rtti`.
 - [ ] **Step 6: Build and test**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/triton_msl/csrc/build
+cd /Users/bledden/Documents/triton-metal/triton_msl/csrc/build
 cmake .. && cmake --build . --target _triton_msl_cpp --parallel 2>&1 | tail -5
-cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-msl/triton_msl/
-cd /Users/bledden/Documents/triton-msl
+cp _triton_msl_cpp*.so /Users/bledden/Documents/triton-metal/triton_msl/
+cd /Users/bledden/Documents/triton-metal
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
 TRITON_MSL_USE_CPP=1 .venv/bin/python -m pytest tests/test_cpp_backend.py::test_vectorized_shared_load_store -v -s 2>&1 | tail -5
 ```
@@ -2467,9 +2467,9 @@ git commit -m "feat(cpp): vectorized shared memory access (#shared vec=4)"
 
 ```bash
 cd /Users/bledden/Documents/triton/python/test/unit/language
-cp /Users/bledden/Documents/triton-msl/scripts/conftest_metal.py conftest.py
+cp /Users/bledden/Documents/triton-metal/scripts/conftest_metal.py conftest.py
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
-TRITON_MSL_USE_CPP=1 /Users/bledden/Documents/triton-msl/.venv/bin/python -m pytest test_core.py --timeout=60 -q 2>&1 | tail -3
+TRITON_MSL_USE_CPP=1 /Users/bledden/Documents/triton-metal/.venv/bin/python -m pytest test_core.py --timeout=60 -q 2>&1 | tail -3
 ```
 
 Record pass/fail/skip counts.
@@ -2479,8 +2479,8 @@ Record pass/fail/skip counts.
 ```bash
 cd /Users/bledden/Documents/triton/python/test/unit/language
 rm -rf ~/.triton/cache/ ~/.cache/triton_msl/
-TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 /Users/bledden/Documents/triton-msl/.venv/bin/python -m pytest test_core.py --timeout=60 -q -s 2>&1 | grep -c "make_metallib_from_llir"
-TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 /Users/bledden/Documents/triton-msl/.venv/bin/python -m pytest test_core.py --timeout=60 -q -s 2>&1 | grep -c "make_metallib("
+TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 /Users/bledden/Documents/triton-metal/.venv/bin/python -m pytest test_core.py --timeout=60 -q -s 2>&1 | grep -c "make_metallib_from_llir"
+TRITON_MSL_USE_CPP=1 TRITON_MSL_DEBUG=3 /Users/bledden/Documents/triton-metal/.venv/bin/python -m pytest test_core.py --timeout=60 -q -s 2>&1 | grep -c "make_metallib("
 ```
 
 Record: number of C++ compilations vs MSL compilations. Compare to baseline (pre-Task 1).
@@ -2491,7 +2491,7 @@ Go through `UNIMPLEMENTED_FEATURES` in `scripts/conftest_metal.py`. For each tes
 
 ```bash
 cd /Users/bledden/Documents/triton/python/test/unit/language
-/Users/bledden/Documents/triton-msl/.venv/bin/python -m pytest test_core.py -k "TEST_NAME" --timeout=30 -v 2>&1 | tail -3
+/Users/bledden/Documents/triton-metal/.venv/bin/python -m pytest test_core.py -k "TEST_NAME" --timeout=30 -v 2>&1 | tail -3
 ```
 
 Remove any that now pass from the skip list.
@@ -2506,7 +2506,7 @@ In `/Users/bledden/.claude/projects/-Users-bledden-Documents-triton-msl/memory/p
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl
+cd /Users/bledden/Documents/triton-metal
 git add scripts/conftest_metal.py 2>/dev/null || true
 # memory file is outside repo; update separately
 git commit -m "chore: upstream audit post cooperative-ops — X passed, Y C++ compilations" || echo "no changes to commit"

@@ -17,7 +17,7 @@
 - `pack_metadata` tuple today: `(num_warps, num_ctas, shared, block_size, output_arg_indices, needs_2d_grid, mm_two_kernel)` — `fast_matmul` becomes index 7.
 
 **Operational rules (all tasks):**
-- Run every command from the worktree root `/Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread` — NEVER the main repo root (a non-worktree cwd can hit the main editable install).
+- Run every command from the worktree root `/Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread` — NEVER the main repo root (a non-worktree cwd can hit the main editable install).
 - Before any correctness/perf RUN, clear both caches: `rm -rf ~/.cache/triton_msl ~/.triton/cache`. GPU tests run SERIALLY. Do NOT run concurrent ratchets (they race on the shared cache clear).
 - Commit messages end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
@@ -645,7 +645,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: Targeted dot/matmul subset, fast-matmul ON, both MEPT flags**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
+cd /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
 T=/Users/bledden/Documents/triton/python/test/unit/language/test_core.py
 for MEPT in 1 0; do
   rm -rf ~/.cache/triton_msl ~/.triton/cache

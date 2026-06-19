@@ -6,7 +6,7 @@
 
 **Architecture:** Small isolated fixes to compiler cache keys, emit_msl fallback policy, scf.for i64 guard, packaging, and docs. Every change TDD'd; gate = fresh-cache `test_core` 5,335/0.
 
-**Tech Stack:** Python 3.14 project venv (`/Users/bledden/Documents/triton-msl/.venv/bin/python`), pytest, `scripts/run_upstream_test.sh`. Caches at `~/.cache/triton_msl` + `~/.triton/cache` — clear both, serial GPU only.
+**Tech Stack:** Python 3.14 project venv (`/Users/bledden/Documents/triton-metal/.venv/bin/python`), pytest, `scripts/run_upstream_test.sh`. Caches at `~/.cache/triton_msl` + `~/.triton/cache` — clear both, serial GPU only.
 
 ---
 

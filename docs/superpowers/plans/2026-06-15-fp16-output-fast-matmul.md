@@ -15,7 +15,7 @@
 - The launcher (`driver.py`) needs NO change: same `simdgroup_matmul_fast` entry name, same `n_groups`/128-threads/`M%32 N%32 K%8` contract; `compile_shader` binds the half C tensor to the `half*` buffer zero-copy. The variant is fixed at compile time from the IR's output dtype.
 
 **Operational rules (all tasks):**
-- Run every command from the worktree root `/Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread` — NEVER the main repo. Use `python3` (NOT `python`).
+- Run every command from the worktree root `/Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread` — NEVER the main repo. Use `python3` (NOT `python`).
 - Before any GPU test RUN: `rm -rf ~/.cache/triton_msl ~/.triton/cache`. Serial GPU (no xdist).
 - The fp32-out path MUST stay provably untouched — Task 1's golden test + the existing fp32 tests are the proof.
 - Commit messages end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
@@ -33,7 +33,7 @@
 
 Before touching the template, run this to snapshot the CURRENT output for both input dtypes (fp32 output is the only output today):
 ```bash
-cd /Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
+cd /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
 mkdir -p tests/golden
 python3 - <<'PY'
 from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
@@ -433,7 +433,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 The subset takes ~2.4h per config; run in the background. Uses the project harness semantics (raw pytest hits CUDA asserts — see the [[reference_upstream_ratchet]] memory): `--device cpu`, `TRITON_DEFAULT_BACKEND=metal`, worktree `PYTHONPATH`.
 ```bash
 cd /Users/bledden/Documents/triton/python/test
-WT=/Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
+WT=/Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
 for FAST in 1 0; do
   rm -rf ~/.cache/triton_msl ~/.triton/cache
   echo "=== dot/matmul subset (--device cpu, backend=metal) FAST=$FAST ==="
@@ -450,7 +450,7 @@ A difference means the fp16-output fast path changed a test_core result — a re
 - [ ] **Step 3: Project suite (fp16-output feature on)**
 
 ```bash
-cd /Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
+cd /Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
 rm -rf ~/.cache/triton_msl ~/.triton/cache
 TRITON_MSL_FAST_MATMUL=1 python3 -m pytest tests/ -q -rs 2>&1 | tail -8
 ```

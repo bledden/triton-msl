@@ -6,7 +6,7 @@
 
 **Architecture:** New pure module `regval.py` (RegVal dataclass + `region_needs_arrays`). `_lookup` returns a `RegVal` (with a `.name` shim so legacy string callers are untouched). A `materialize` helper emits the scalar form (identical to `_var`) or array form (`_var_array`). Milestone 1 wires ONE op through it to prove the pattern; the broad emit-site migration is later milestones. All behind `TRITON_MSL_MEPT` (off by default); flag-OFF path is byte-unchanged.
 
-**Tech Stack:** Python 3.14 venv `/Users/bledden/Documents/triton-msl/.venv/bin/python`; pytest. Clear `~/.cache/triton_msl ~/.triton/cache` before any codegen verification. GPU serial only.
+**Tech Stack:** Python 3.14 venv `/Users/bledden/Documents/triton-metal/.venv/bin/python`; pytest. Clear `~/.cache/triton_msl ~/.triton/cache` before any codegen verification. GPU serial only.
 
 ---
 

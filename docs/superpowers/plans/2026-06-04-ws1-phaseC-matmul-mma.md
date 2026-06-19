@@ -18,8 +18,8 @@
 
 **Conventions for every command below:**
 ```bash
-VPY=/Users/bledden/Documents/triton-msl/.venv/bin/python
-export PYTHONPATH=/Users/bledden/Documents/triton-msl/.claude/worktrees/multi-element-per-thread
+VPY=/Users/bledden/Documents/triton-metal/.venv/bin/python
+export PYTHONPATH=/Users/bledden/Documents/triton-metal/.claude/worktrees/multi-element-per-thread
 export TRITON_DEFAULT_BACKEND=metal
 ```
 No PRs at any point (standing instruction — local worktree commits only).

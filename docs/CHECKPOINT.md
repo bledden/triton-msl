@@ -7,7 +7,7 @@ landed; remaining coverage items are safely refused, not blocking).
 ## Where things stand
 - Worktree: `.claude/worktrees/multi-element-per-thread` (branch
   `worktree-multi-element-per-thread`). Run all commands from the worktree; merge to main via
-  `git -C ~/Documents/triton-msl merge --ff-only worktree-multi-element-per-thread`.
+  `git -C ~/Documents/triton-metal merge --ff-only worktree-multi-element-per-thread`.
 - `origin/main` @ **2ce413b** (#1 + #3 incl. autotune root-fix + #4 gather-refusal all
   merged/pushed). Branch is **ahead** with **2D-gather implementation `1e904e8`** (#4) —
   **NOT pushed/merged.** Push needs explicit user confirmation.

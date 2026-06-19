@@ -42,7 +42,7 @@ def run_tests(test_dir, test_file, timeout=900):
     env = os.environ.copy()
     env["TRITON_DEFAULT_BACKEND"] = "metal"
     # Pin imports to this checkout so worktree changes are exercised instead
-    # of the editable install at ~/Documents/triton-msl. Mirrors
+    # of the editable install at ~/Documents/triton-metal. Mirrors
     # scripts/run_upstream_test.sh.
     repo_root = str(Path(__file__).resolve().parent.parent)
     scripts_dir = str(Path(__file__).resolve().parent)

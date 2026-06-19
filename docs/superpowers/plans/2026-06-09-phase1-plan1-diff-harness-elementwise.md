@@ -6,7 +6,7 @@
 
 **Architecture:** Extract `_has_complex_ops`'s op set into `cpp_families.py` (family→ops + ENABLED set). Routing: kernel ops ⊆ enabled-union → C++ by default (`TRITON_MSL_FORCE_PYTHON=1` escape). Differential = subprocess per path, byte-compare buffers.
 
-**Tech Stack:** `/Users/bledden/Documents/triton-msl/.venv/bin/python`, pytest; caches `~/.cache/triton_msl` + `~/.triton/cache` cleared, serial GPU. C++ must be built; tests skip if `MetalBackend._has_cpp_passes()` false.
+**Tech Stack:** `/Users/bledden/Documents/triton-metal/.venv/bin/python`, pytest; caches `~/.cache/triton_msl` + `~/.triton/cache` cleared, serial GPU. C++ must be built; tests skip if `MetalBackend._has_cpp_passes()` false.
 
 ---
 
