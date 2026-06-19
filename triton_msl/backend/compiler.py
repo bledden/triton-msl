@@ -2109,10 +2109,32 @@ class MetalBackend(BaseBackend):
                             check=True,
                         )
                     except subprocess.CalledProcessError as e:
+                        import re
                         from triton_msl.errors import MetalCompilationError
                         stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                        # Distinguish a REAL deterministic MSL error from a
+                        # TRANSIENT toolchain flake. A genuine compile error
+                        # carries a source-location diagnostic
+                        # (`file:line:col: error:`) — raise it immediately
+                        # (retrying a syntax error wastes time). A nonzero exit
+                        # WITHOUT such a diagnostic (empty stderr, a spawn/signal
+                        # failure, or an SDK/temp race under heavy parallel load)
+                        # is transient: retry like the other metallib steps so a
+                        # flaky `metal -c` doesn't surface as a failed (NaN)
+                        # kernel in the torch.compile / training path.
+                        if re.search(r":\d+:\d+:\s+(error|fatal error):", stderr):
+                            raise MetalCompilationError(
+                                f"Metal shader compilation failed (exit {e.returncode})",
+                                msl_source=metal_path,
+                                stderr=stderr,
+                            ) from None
+                        _last_transient_exc = e
+                        if _attempt < _METALLIB_COMPILE_ATTEMPTS - 1:
+                            time.sleep(0.05 * (_attempt + 1))
+                            continue
                         raise MetalCompilationError(
-                            f"Metal shader compilation failed (exit {e.returncode})",
+                            f"Metal shader compilation failed (exit {e.returncode}; "
+                            f"transient, all {_METALLIB_COMPILE_ATTEMPTS} attempts failed)",
                             msl_source=metal_path,
                             stderr=stderr,
                         ) from None

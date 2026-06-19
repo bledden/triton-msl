@@ -169,3 +169,101 @@ def test_make_metallib_retries_on_missing_air(tmp_path, monkeypatch):
     assert call_count["metal_c"] == 3, (
         f"Expected 3 metal -c calls (2 transient + 1 success), got {call_count['metal_c']}"
     )
+
+
+@requires_metal_compiler
+def test_make_metallib_retries_on_transient_compile_exit(tmp_path, monkeypatch):
+    """A nonzero `metal -c` exit WITHOUT a source-location diagnostic is a
+    TRANSIENT toolchain flake (spawn failure / signal / SDK race under heavy
+    parallel load), not a real MSL error — it must be RETRIED, not raised on
+    attempt 0.
+
+    Regression for a NaN-divergence in torch.compile training: under full-suite
+    load `xcrun metal -c` occasionally exits 1 on otherwise-valid MSL. The old
+    code treated EVERY nonzero `metal -c` exit as a deterministic syntax error
+    and raised immediately (no retry); the raised compile failure then surfaced
+    as a non-converging (NaN) kernel rather than recovering.
+    """
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
+
+    import triton  # noqa: F401
+    import triton_msl.backend.compiler as compiler_mod
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
+
+    options = MetalOptions()
+    metadata = {"name": "test_transient_compile_k"}
+
+    real_run = subprocess.run
+    call_count = {"metal_c": 0}
+
+    def fake_run(cmd, **kwargs):
+        if (
+            isinstance(cmd, list)
+            and len(cmd) >= 3
+            and "metal" in cmd
+            and "-c" in cmd
+            and "metallib" not in cmd[2]
+        ):
+            call_count["metal_c"] += 1
+            if call_count["metal_c"] <= 2:
+                # Transient: nonzero exit, NO `file:line:col: error:` diagnostic
+                # (a toolchain-level failure — note " error:" present but not a
+                # source location, so it must NOT be classified as a real error).
+                raise subprocess.CalledProcessError(
+                    returncode=1, cmd=cmd, output=b"",
+                    stderr=b"clang: error: unable to execute command: Segmentation fault: 11\n",
+                )
+            # 3rd call: let the real compiler run.
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(compiler_mod.subprocess, "run", fake_run)
+
+    data = MetalBackend.make_metallib(_MINIMAL_MSL, dict(metadata), options)
+    assert data and len(data) > 0, "make_metallib returned empty bytes after transient-exit retry"
+    assert call_count["metal_c"] == 3, (
+        f"Expected 3 metal -c calls (2 transient + 1 success), got {call_count['metal_c']}"
+    )
+
+
+@requires_metal_compiler
+def test_make_metallib_real_compile_error_no_retry(tmp_path, monkeypatch):
+    """A nonzero `metal -c` exit WITH a `file:line:col: error:` diagnostic is a
+    REAL deterministic MSL error — it must raise on the FIRST attempt (retrying
+    a genuine syntax error wastes time). Locks the discriminator so the
+    transient-retry change above does not turn real errors into retry storms.
+    """
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
+
+    import triton  # noqa: F401
+    import triton_msl.backend.compiler as compiler_mod
+    from triton_msl.backend.compiler import MetalBackend, MetalOptions
+    from triton_msl.errors import MetalCompilationError
+
+    options = MetalOptions()
+    metadata = {"name": "test_real_err_k"}
+
+    real_run = subprocess.run
+    call_count = {"metal_c": 0}
+
+    def fake_run(cmd, **kwargs):
+        if (
+            isinstance(cmd, list)
+            and len(cmd) >= 3
+            and "metal" in cmd
+            and "-c" in cmd
+            and "metallib" not in cmd[2]
+        ):
+            call_count["metal_c"] += 1
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd=cmd, output=b"",
+                stderr=b"program_source.metal:3:95: error: use of undeclared identifier 'foo'\n",
+            )
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(compiler_mod.subprocess, "run", fake_run)
+
+    with pytest.raises(MetalCompilationError):
+        MetalBackend.make_metallib(_MINIMAL_MSL, dict(metadata), options)
+    assert call_count["metal_c"] == 1, (
+        f"Real compile error must raise on attempt 1 (no retry), got {call_count['metal_c']} calls"
+    )
