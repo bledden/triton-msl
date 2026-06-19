@@ -1,18 +1,19 @@
 # CHECKPOINT — start here to resume (last updated 2026-06-19)
 
 Single "start here" pointer after a compaction / fresh session. Read this, confirm the env.
-**FULL REBRAND `triton_metal`→`triton_msl` / `triton-metal`→`triton-msl` is DONE** (this session).
-Remaining = finalize the held PyPI publish, push, rename the GitHub repo, and (follow-up) rebuild
-the shelved C++ extension. #1 inductor, #3 training, #4 2D-gather all landed BEFORE the rebrand.
+**FULL REBRAND `triton_metal`→`triton_msl` / `triton-metal`→`triton-msl` is DONE, MERGED + PUSHED.**
+GitHub repo renamed to **github.com/bledden/triton-msl** (description + git remote updated). The
+ONLY remaining step is the user's `twine upload`; the shelved-C++ rebuild is a non-blocking
+follow-up. #1 inductor, #3 training, #4 2D-gather all landed BEFORE the rebrand.
 
 ## Where things stand
 - Worktree: `.claude/worktrees/multi-element-per-thread` (branch
   `worktree-multi-element-per-thread`). Run all commands from the worktree; the local clone dir
   stays `~/Documents/triton-metal` (NOT renamed — only the package/dist/GitHub repo are). Merge via
   `git -C ~/Documents/triton-metal merge --ff-only worktree-multi-element-per-thread`.
-- `origin/main` @ **95d0239** (#1 + #3 + #4 2D-gather merged/pushed pre-rebrand). Branch is
-  **4 commits ahead, NOT pushed** (push needs explicit user confirmation): `d58c1ad` PyPI prep →
-  `9414271` full rename → `e2e4f5c` case-variant fixups → `d8d4209` clone-path fixup.
+- `origin/main` — the full rebrand (PyPI-prep → rename → case/clone fixups → checkpoints →
+  README refresh) is PUSHED to the renamed remote `github.com/bledden/triton-msl`; the worktree
+  branch and `main` track origin.
 - **FULL REBRAND (`9414271` + fixups):** import pkg + dir `triton_metal`→`triton_msl` (git mv),
   dist `triton-msl`, env vars `TRITON_MSL_*` (HARD rename), cache stems, entry-point
   `metal = triton_msl.backend`, URLs → github.com/bledden/triton-msl, C++ csrc `TritonMSLToLLVM`.
@@ -22,9 +23,9 @@ the shelved C++ extension. #1 inductor, #3 training, #4 2D-gather all landed BEF
   (KEEP-corruption zero). `dist/triton_msl-0.1.0a1` wheel rebuilt + twine-checked, ready to upload.
   **C++ FOLLOW-UP:** 21 csrc tests skip "not built" — the rename invalidated the pre-built
   `_triton_metal_cpp.so`; rebuild the shelved ext as `_triton_msl_cpp` (manual cmake, AGX-gated).
-- **PENDING user actions:** (a) rename GitHub repo bledden/triton-metal→triton-msl (URLs already
-  point there; then `git remote set-url`); (b) confirm merge + push; (c) `twine upload`
-  `dist/triton_msl-0.1.0a1.*` (production upload is classifier-gated — user runs it).
+- **DONE this session:** GitHub repo renamed → triton-msl, repo description updated, `git remote
+  set-url` → triton-msl, merged + pushed to origin/main. **ONLY PENDING:** `twine upload`
+  `dist/triton_msl-0.1.0a1.*` (production upload is classifier-gated — user runs it in their shell).
 - **#4 2D tt.gather IMPLEMENTED (`1e904e8`):** axis=0 (incl. ragged row counts) + same-shape
   axis=1, via full-tile shared staging; upstream `test_gather[[4,4]->[8,4],0]` now PASSES
   (+1 conformance). Refused loudly (HW/scope): tiles >1024 threads, ragged axis=1, MEPT operands.
