@@ -4,6 +4,15 @@
 > all real features (well-maintained skip-list); 2D gather is the highest-value pick (gather/
 > embedding-style lookups are common). 1D gather already works; this adds 2D.
 
+> **UPDATE 2026-06-18:** while scoping this, found that 2D `tt.gather` was **silently wrong**
+> (the 1D shared-memory path ran on 2D input and mis-computed by ~3.0), not refused — only the
+> conftest skip hid it. A **loud refusal now guards it** (`_lower_tt_gather` raises
+> `MetalNonRecoverableError` when `src`/`index` effective-rank > 1; commit on
+> `worktree-multi-element-per-thread`). So this plan now builds the 2D implementation **on top of
+> a clean refusal** — Task 1 replaces that refusal with correct 2D lowering (and keeps refusing
+> the budget-overflow case). The silent-wrong hole is already closed; this is now purely a
+> coverage add, not a correctness fix.
+
 **Goal:** make `tt.gather` lower correctly for 2D `src`/`indices` (axis 0 and 1), turning the
 4 conftest-skipped cases green:
 `test_gather[src_shape0-indices_shape0-0]`, `[…1-0]`, `[…2-0]`, `[src_shape3-…-1]`

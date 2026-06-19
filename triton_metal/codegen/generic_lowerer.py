@@ -5463,6 +5463,27 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         # Get source size from type
         src_shape = _extract_shape(self._find_op_type_str(ssa.operand_ids[0]))
+        idx_shape = _extract_shape(self._find_op_type_str(ssa.operand_ids[1]))
+
+        # This path lowers only the 1D gather (out[i] = src[idx[i]]): it stages
+        # one src element per thread to a flat shared buffer and reads
+        # shared[idx]. A genuinely 2D gather has per-axis semantics
+        # (out[i,j] = src[idx[i,j], j] for axis=0, or src[i, idx[i,j]] for
+        # axis=1) that this flat staging does NOT implement -- running it would
+        # SILENTLY return wrong values (verified: a 2D axis-0 gather mis-computes
+        # by ~3.0). Refuse loudly instead. 2D gather is tracked work
+        # (docs/superpowers/plans/2026-06-18-2d-gather-coverage.md).
+        def _effective_rank(shape):
+            return sum(1 for d in (shape or []) if d != 1)
+        if _effective_rank(src_shape) > 1 or _effective_rank(idx_shape) > 1:
+            from triton_metal.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "tt.gather: only 1D gather is supported; a 2D gather "
+                f"(src shape {tuple(src_shape or ())}, index shape "
+                f"{tuple(idx_shape or ())}) has per-axis semantics the 1D "
+                "shared-memory path cannot lower correctly. Refusing rather than "
+                "emitting silently-wrong values. (2D gather is planned work.)")
+
         S = src_shape[0] if src_shape else self.effective_block_size
 
         # Determine types
