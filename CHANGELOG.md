@@ -1,6 +1,40 @@
 # Changelog
 
-## Unreleased
+## 0.1.0a1 — first PyPI release as `triton-msl` (2026-06-19)
+
+First public release on PyPI: `pip install triton-msl`, `import triton_msl`.
+
+### Rebrand → `triton-msl` (2026-06-19)
+
+- Renamed the project/import package `triton_metal` → `triton_msl` and the PyPI
+  distribution `triton-metal` → **`triton-msl`**. The obvious name is taken on PyPI by
+  an unrelated project and blocked by PEP 541 confusability; `triton-msl` is a distinct
+  stem (MSL = Metal Shading Language, which this backend emits). The `metal`
+  backend/device id and every Apple-Metal API term (`Metal*` classes, `metal::`,
+  `.metal`, `xcrun metal`) are unchanged. Env vars hard-renamed `TRITON_METAL_*` →
+  `TRITON_MSL_*`. Verified regression-free: project suite 787/0, `test_core`
+  5,560/0/3,634.
+
+### torch.compile + training via the inductor backend (2026-06-18)
+
+- `torch.compile(model, backend="inductor")` (and `backend="metal"`) routes through
+  triton-msl on Python 3.10–3.14, for **inference and training** — AOTAutograd's backward
+  graph lowers to ordinary Triton kernels — static and `dynamic=True`. 32/32 torch.compile
+  model tests plus the training suite pass. Fixed four latent silent-wrong bugs exposed
+  once torch.compile actually ran: a native-MPS device-op-override registration clobber,
+  Metal fork-unsafe compile subprocesses corrupting the cache, a cross-graph MSL
+  cache-key collision (re-keyed by content hash), and a softmax template arg mis-map
+  (now refuses to the generic path). The inductor autotuner is disabled on Metal (noisy
+  timing selected miscompiled tiles); an under-filling persistent-reduction config that
+  produced corrupt gradients is also structurally filtered out.
+
+### 2D `tt.gather` (2026-06-18)
+
+- 2D `tt.gather` lowers correctly — axis=0 (including ragged row counts) and same-shape
+  axis=1 — via full-tile shared staging; the upstream `test_gather[[4,4]->[8,4],0]` case
+  now passes. A previously *silent-wrong* 2D path was first closed with a loud refusal,
+  then implemented. Oversized tiles (>1024 threads), ragged axis=1, and register-array
+  operands are refused loudly, never guessed.
 
 ### FlashAttention — large head_dim + integrity hardening (2026-06-17)
 
