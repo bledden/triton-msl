@@ -217,8 +217,9 @@ A full FlashAttention v2 forward (causal + non-causal) runs through the standard
 see [`tests/test_flash_attention.py`](tests/test_flash_attention.py) for the kernel and
 launch. head_dim 32/64 use the generic lowering; **head_dim 128** is routed to an
 Apple `simdgroup_matrix` MMA kernel (fp32 + fp16, causal + non-causal, any N_CTX) that
-delivers **~7.4× (fp32) / ~8.5× (fp16) faster than the prior scalar path**, at
-**~8.2/9.6 TFLOP/s (~70–80% of the in-repo matmul-template peak)**. This is NOT
+measures **~5.2× (fp32) / ~6.4× (fp16) faster than the prior scalar path** at N=1024
+(**5.1 / 6.3 TFLOP/s**), rising to **~6.1× / ~7.9× at N=2048** (**6.8 / 8.8 TFLOP/s**) —
+**~45–55% of the in-repo matmul-template peak**. This is NOT
 competitive with Apple metal-flash-attention or MLX in absolute terms; it is the
 practical ceiling for a triton-jit-routed MSL kernel at these tile sizes. Out-of-range
 configs are **refused loudly** (`MetalNonRecoverableError`, never silent-wrong): head_dim

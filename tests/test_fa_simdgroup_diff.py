@@ -36,7 +36,9 @@ def _run(src, name, q, k, v, out, threads_pg):
 @requires_mps
 @pytest.mark.parametrize("dt", [torch.float32, torch.float16])
 @pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("N", [128, 100, 192])
+# N coverage: 128 & 192 aligned (no tail), 100 = full block + tail, 50 = n_full=0
+# (the ENTIRE sequence is the staged+masked tail — the all-tail boundary path).
+@pytest.mark.parametrize("N", [128, 100, 192, 50])
 def test_simd_matches_scalar_and_torch(dt, causal, N):
     HD, Z, H = 128, 1, 2
     od = "f16" if dt == torch.float16 else "f32"
