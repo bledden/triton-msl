@@ -53,6 +53,21 @@ def _op_is_exp(op_name: str) -> bool:
     if not op_name:
         return False
     return op_name in ("math.exp", "math.exp2", "tt.exp")
+
+
+def _simd_fa_eligible(info):
+    """True if the detected FA can use the simdgroup template: head_dim=128,
+    block 32x32, fp32/fp16, AND contiguous innermost (head-dim) stride for all of
+    Q/K/V/Out. info["strides"][role] is [z,h,m,k]; index 3 (k) == "c1" means the
+    innermost stride folded to 1 (contiguous). Non-contiguous -> scalar template
+    (handles general strides) -> never silent-wrong."""
+    if not (info.get("head_dim") == 128 and info.get("block_m") == 32
+            and info.get("block_n") == 32 and info.get("out_dtype") in ("f32", "f16")):
+        return False
+    st = info.get("strides", {})
+    return all(st.get(r, [None] * 4)[3] == "c1" for r in ("q", "k", "v", "o"))
+
+
 from triton_msl.codegen._lowerer_detection import _DetectionMixin
 from triton_msl.codegen._lowerer_emission import _EmissionMixin
 from triton_msl.codegen._lowerer_reduce import _ReduceScanMixin
@@ -4840,6 +4855,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         from triton_msl.codegen.msl_types import triton_type_to_msl
         from triton_msl.codegen._msl_templates import (
             make_flash_attention_kernel_tiled,
+            make_flash_attention_kernel_simdgroup,
         )
 
         head_dim = info["head_dim"]
@@ -4953,17 +4969,26 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # the template accepts both spellings. fp16 emits half Q/K/V/Out (the
         # arg_decls above already use the args' real elem_type, so the pointer
         # types match) and applies the promote-on-load / cast-on-store epilogue.
-        msl = make_flash_attention_kernel_tiled(
-            head_dim, block_m, block_n, Dc=64, causal=info["causal"],
-            out_dtype=info["out_dtype"],
-            arg_decls=arg_decls, bindings=bindings,
-            kernel_name=_sanitize_msl_name(self.graph.func_name),
-            scale=info["scale"],
-        )
-
-        # 1024 threads/threadgroup (BLOCK_M * BLOCK_N) — the metallib dispatch
-        # reads this as threads-per-threadgroup.
-        self.effective_block_size = block_m * block_n
+        if _simd_fa_eligible(info):
+            msl = make_flash_attention_kernel_simdgroup(
+                head_dim, 32, 64, causal=info["causal"],
+                out_dtype=info["out_dtype"],
+                arg_decls=arg_decls, bindings=bindings,
+                kernel_name=_sanitize_msl_name(self.graph.func_name),
+                scale=info["scale"],
+            )
+            # 256 threads/threadgroup (8 SIMD groups x 32 threads/group).
+            self.effective_block_size = 256
+        else:
+            msl = make_flash_attention_kernel_tiled(
+                head_dim, block_m, block_n, Dc=64, causal=info["causal"],
+                out_dtype=info["out_dtype"],
+                arg_decls=arg_decls, bindings=bindings,
+                kernel_name=_sanitize_msl_name(self.graph.func_name),
+                scale=info["scale"],
+            )
+            # scalar template: 1024 threads/threadgroup (BLOCK_M * BLOCK_N).
+            self.effective_block_size = block_m * block_n
         # The kernel uses program_id(0) (q-block) AND program_id(1) (z*h); force
         # the 2-D threadgroup grid (n_q_blocks, Z*H, 1) so the template's pid3.x /
         # pid3.y resolve correctly (emit_msl derives needs_2d_grid from this).
