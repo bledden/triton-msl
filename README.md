@@ -22,7 +22,7 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
 - **787 passed / 0 failed** in the project suite (codegen, GPU correctness,
   integration, FlashAttention, MLX backend, fast-matmul / compile_shader
   zero-copy, `torch.compile`, and training). FlashAttention: causal + non-causal
-  at **HEAD_DIM 32 / 64 / 128** (head_dim 128 fp32 + fp16 via the head-dim-tiled
+  at **HEAD_DIM 32 / 64 / 128** (head_dim 128 fp32 + fp16 via the simdgroup-MMA
   template; see [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend
   tests; the project suite grew from 434 → 603 → 716 → ~800 since `0.1.0-alpha`.
   (A further ~20 C++-MLIR-backend tests skip unless that optional extension is
@@ -244,7 +244,7 @@ All default-on; set to `0` to disable (an escape hatch for bisecting a regressio
 | **Elementwise** | add, sub, mul, div, exp, log, sqrt, abs, neg, SiLU, GELU, sigmoid, tanh, ReLU, leaky ReLU, clamp, FMA |
 | **Reductions** | sum, max, min, argmax, argmin, xor_sum |
 | **Dot product** | `tl.dot` with strided matmul template, all epilogues (add, softmax, chain-dot, transpose) |
-| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at **`BLOCK_M=BLOCK_N=32`, HEAD_DIM 32 / 64 / 128** via the Python MSL path (head_dim 128 routed to a head-dim-tiled FA2 template, fp32 + fp16). Out-of-range configs (head_dim > 128; block tiles ≠ 32; bf16) are refused (`MetalNonRecoverableError`, never silent-wrong); larger blocks/head_dim are on the roadmap. |
+| **Attention** | FlashAttention [\[4\]](REFERENCES.md) (causal + non-causal) at **`BLOCK_M=BLOCK_N=32`, HEAD_DIM 32 / 64 / 128** via the Python MSL path (head_dim 128 routed to a simdgroup-MMA template — contiguous-stride fast path, scalar fallback otherwise — fp32 + fp16). Out-of-range configs (head_dim > 128; block tiles ≠ 32; bf16) are refused (`MetalNonRecoverableError`, never silent-wrong); larger blocks/head_dim are on the roadmap. |
 | **Normalization** | Layer norm, RMS norm, batch norm |
 | **Type casts** | FP32, FP16, BF16, INT8, INT16, INT32, bool |
 | **Control flow** | `scf.for`, `scf.if`, while loops |
@@ -259,7 +259,6 @@ All default-on; set to `0` to disable (an escape hatch for bisecting a regressio
 |---------|--------|
 | FP64 | Metal has no FP64 support |
 | FP8, TF32 | Not available on Apple GPUs |
-| Backward pass / training | Not implemented |
 | Multi-GPU | Apple Silicon is single-GPU |
 | `tl.dot` with sizePerThread > 1 | Requires 2D cooperative execution model (addressed by the register-array spine — WS1) |
 | Unstructured control flow (`cf.cond_br`) | Refused with `MetalNonRecoverableError` (never silent-wrong); a `cf`-dialect lowerer is WS2 |
