@@ -35,17 +35,24 @@ from triton.backends.compiler import BaseBackend, GPUTarget
 _MSL_BY_KEY: dict = {}
 
 
-def _stash_msl(msl_src, key):
-    """Register ``msl_src`` under the content-unique ``key`` (the kernel's
-    ``cache_key``) for the launcher's compile_shader fast-path.
+def _stash_msl(msl_src, key, block_size=None):
+    """Register ``msl_src`` (and its threadgroup size) under the content-unique
+    ``key`` (the kernel's ``cache_key``) for the launcher's compile_shader
+    fast-path.
 
     The launcher resolves this via ``metadata.msl_hash`` (set to the same
     ``cache_key`` alongside every stash). Keying by content rather than by the
     parsed entry-point name prevents cross-graph name collisions from serving
     one kernel's launcher the wrong shader source.
+
+    ``block_size`` is the MSL kernel's OWN threadgroup size, captured BEFORE the
+    C++ LLVM path may clobber ``metadata["block_size"]`` with its different
+    ("one thread per element") value. compile_shader launches the stashed MSL,
+    so it must use this size — using the clobbered metadata size silently
+    mis-launches MEPT kernels (MSL sizePerThread>1 uses fewer threads).
     """
     if key:
-        _MSL_BY_KEY[key] = msl_src
+        _MSL_BY_KEY[key] = (msl_src, block_size)
 
 
 def _get_cache_dir():
@@ -1952,7 +1959,7 @@ class MetalBackend(BaseBackend):
             # compile_shader fast-path (Phase 4). Content-keyed so a later
             # compile in the same process can't clobber this kernel's MSL.
             metadata["msl_hash"] = cache_key
-            _stash_msl(msl_src, cache_key)
+            _stash_msl(msl_src, cache_key, metadata.get("block_size"))
             return msl_src
 
         # Level 2: time the MSL emission
@@ -2023,7 +2030,7 @@ class MetalBackend(BaseBackend):
         # compile_shader fast-path (Phase 4). Content-keyed so a later compile
         # in the same process can't clobber this kernel's MSL.
         metadata["msl_hash"] = cache_key
-        _stash_msl(msl_src, cache_key)
+        _stash_msl(msl_src, cache_key, metadata.get("block_size"))
         return msl_src
 
     @staticmethod

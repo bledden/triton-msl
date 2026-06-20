@@ -536,10 +536,20 @@ class MetalLauncher:
         # process, so a name lookup can return a DIFFERENT kernel's MSL and the
         # fast-path would dispatch the wrong shader. msl_hash is content-unique.
         # Missing/None -> self._msl is None -> the (always-correct) host path.
+        # _MSL_BY_KEY stores (msl_src, msl_block_size): the MSL's OWN threadgroup
+        # size, which compile_shader must use — the C++ LLVM path may have
+        # clobbered metadata["block_size"] with a different (one-thread-per-element)
+        # value meant for its host metallib launch, which would mis-launch the
+        # stashed (MEPT) MSL here.
+        self._msl_block_size = None
         try:
             from triton_msl.backend.compiler import _MSL_BY_KEY
             msl_key = getattr(metadata, "msl_hash", None)
-            self._msl = _MSL_BY_KEY.get(msl_key) if msl_key else None
+            _stashed = _MSL_BY_KEY.get(msl_key) if msl_key else None
+            if isinstance(_stashed, tuple):
+                self._msl, self._msl_block_size = _stashed
+            else:
+                self._msl = _stashed
         except Exception:
             self._msl = None
 
@@ -646,7 +656,11 @@ class MetalLauncher:
                         # falls back to the existing path (correct, just slower).
                         if (all_mps and scalars_ok and not needs_2d_grid
                                 and gridY == 1 and gridZ == 1):
-                            tg = min(block_size, 1024)
+                            # The stashed MSL's OWN threadgroup size — NOT the
+                            # metadata block_size, which the C++ LLVM path may have
+                            # clobbered with a value meant for its host metallib
+                            # (mis-launches MEPT MSL kernels here -> wrong results).
+                            tg = min(self._msl_block_size or block_size, 1024)
                             threads, group_size = gridX * tg, tg
                             lib = _rt.get_library(self._msl)
                             _rt.dispatch(lib, self.kernel_name, kargs,

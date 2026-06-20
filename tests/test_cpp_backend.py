@@ -686,3 +686,51 @@ def test_cpp_flash_attention_head64():
     """
     max_err = _run_fa_cpp(N_CTX=64, HEAD_DIM=64)
     assert max_err < 5e-2, f"FA HEAD_DIM=64: max error {max_err}"
+
+
+@requires_cpp
+@requires_metal
+def test_cpp_compile_shader_mept_block_size():
+    """Regression: C++ path + compile_shader must use the MSL's threadgroup size.
+
+    The C++ LLVM path commits a "one thread per element" block_size (e.g. 256)
+    to metadata for ITS host metallib. But on MPS tensors the launcher uses the
+    compile_shader zero-copy fast-path, which dispatches the STASHED MSL — a MEPT
+    kernel (sizePerThread>1, fewer threads, e.g. 128). Launching that MSL with
+    the clobbered 256 mis-maps threads -> wrong results (it corrupted a
+    transformer's layernorm-backward grad -> NaN). The MSL block size is now
+    stashed alongside the MSL and used by compile_shader. Needs MPS tensors so
+    the compile_shader path (not the host metallib path) is exercised.
+    """
+    import os
+    import torch
+    import triton
+    import triton.language as tl
+
+    if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        import pytest
+        pytest.skip("MPS not available")
+
+    os.environ["TRITON_MSL_USE_CPP"] = "1"
+    try:
+        @triton.jit
+        def gather_k(a_ptr, o_ptr, n, BLOCK: tl.constexpr):
+            i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+            m = i < n
+            idx = (i % 16) + (i // 16) * 256  # a transpose-style gather
+            tl.store(o_ptr + i, tl.load(a_ptr + idx, mask=m), mask=m)
+
+        n = 256
+        a = torch.randn(16 * 256, device="mps")
+        o = torch.empty(n, device="mps")
+        # num_warps=4 -> 128 threads -> sizePerThread=2 (MEPT), so the MSL's
+        # block size (128) differs from the C++ path's (256). BLOCK on MPS routes
+        # through compile_shader.
+        gather_k[(1,)](a, o, n, BLOCK=256, num_warps=4)
+
+        ii = torch.arange(n)
+        ref = a.cpu()[(ii % 16) + (ii // 16) * 256]
+        max_err = (o.cpu() - ref).abs().max().item()
+        assert max_err < 1e-4, f"C++ + compile_shader MEPT gather: max error {max_err}"
+    finally:
+        os.environ.pop("TRITON_MSL_USE_CPP", None)
