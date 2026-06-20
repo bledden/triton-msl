@@ -1282,6 +1282,13 @@ class MetalBackend(BaseBackend):
         level = _debug_level()
         kernel_name = metadata.get("name", "kernel")
 
+        # DEBUG: force named kernels off the C++ path (raise -> MSL fallback) to
+        # bisect which C++-path kernel produces a wrong result. Comma-separated
+        # substrings in TRITON_MSL_CPP_SKIP.
+        _skip = os.environ.get("TRITON_MSL_CPP_SKIP", "")
+        if _skip and any(s and s in kernel_name for s in _skip.split(",")):
+            raise RuntimeError(f"C++ path skipped for {kernel_name} (TRITON_MSL_CPP_SKIP)")
+
         # Get TTGIR text (accept either MLIR module or pre-saved text)
         ttgir_text = mod if isinstance(mod, str) else str(mod)
 
