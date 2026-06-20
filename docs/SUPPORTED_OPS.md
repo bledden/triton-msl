@@ -38,7 +38,7 @@
 | `tt.cat` / `tt.join` | ✓ (rank ≤ 1) / ✗ (rank ≥ 2) | rank-≥2 cat/join refused; `tt.join` result feeding `tt.dot` refused |
 | `tt.gather` | ✓ (1D; 2D axis 0 + same-shape axis 1) / ✗ (otherwise) | 1D `out[i]=src[idx[i]]`; **2D** via full-tile shared staging: axis=0 `out[i,j]=src[idx[i,j],j]` (incl. ragged row counts) and same-shape axis=1 `out[i,j]=src[i,idx[i,j]]`, for tiles fitting a 1024-thread threadgroup. **Refused loudly**: tiles > 1024 elems (one-thread-per-element staging), ragged axis=1, register-array operands. (Triton's own frontend also asserts `isWarpLocal()` on larger gather layouts.) |
 | `tt.dot` inside a `noinline` device function | ✗ refused | not lowered through device-function calls |
-| FlashAttention | ✓ (`BLOCK_M=BLOCK_N=32`, head_dim ∈ {32, 64, 128}) / ✗ (otherwise) | at **BLOCK_M = BLOCK_N = 32**: head_dim 32/64 (generic lowering, fp32) and **head_dim 128** (a head-dim-tiled FA2 MSL template, **fp32 + fp16**), all causal + non-causal. **Refused loudly** outside that: `head_dim > 128`, **`BLOCK_M`/`BLOCK_N` ≠ 32** (the `<32` small-block case silently mis-computed for *any* head_dim — a hole the old head_dim>64 guard missed, closed 2026-06-17), and **bf16** matmul inputs (rejected at the Triton frontend / not routed). Larger blocks and head_dim > 128 are roadmap |
+| FlashAttention | ✓ (`BLOCK_M=BLOCK_N=32`, head_dim ∈ {32, 64, 128}) / ✗ (otherwise) | at **BLOCK_M = BLOCK_N = 32**: head_dim 32/64 (generic lowering, fp32) and **head_dim 128** routed to an Apple **`simdgroup_matrix` MMA kernel** (fp32 + fp16, causal + non-causal, any N_CTX) — **~7.4× (fp32) / ~8.5× (fp16) faster than the prior scalar path, ~8.2/9.6 TFLOP/s (~70–80% of the in-repo matmul-template peak). NOT competitive with Apple metal-flash-attention / MLX in absolute terms.** Contiguity gate: non-contiguous innermost stride falls back to the scalar template. **Refused loudly** outside supported configs: `head_dim > 128`, **`BLOCK_M`/`BLOCK_N` ≠ 32** (the `<32` small-block case silently mis-computed for *any* head_dim — a hole the old head_dim>64 guard missed, closed 2026-06-17), and **bf16** matmul inputs (rejected at the Triton frontend / not routed). Larger blocks and head_dim > 128 are roadmap |
 
 ## Framework integration — `torch.compile`
 
@@ -82,15 +82,14 @@ silent-wrong producers, closed by the integrity prescan — see `CHANGELOG.md`.)
 18. **Unstructured kernel-level control flow** (`cf.cond_br`, early-return inside a conditional).
 19. **FlashAttention outside the supported tiles** — the attention lowering (≥2 `tt.dot` +
     `exp` + `max`) supports `BLOCK_M = BLOCK_N = 32` at head_dim 32/64 (generic) and head_dim
-    128 (a head-dim-tiled FA2 template, fp32 + fp16, causal + non-causal; head_dim=128 is
-    *routed* to that template, otherwise it would exceed the 32 KB threadgroup budget). The
-    prescan still refuses, loudly: **(a)** head_dim > 128 (max dot tile dim > 128), **(b)**
-    `BLOCK_M`/`BLOCK_N` < 32 (min dot tile dim < 32) — which silently mis-computed (rows past
-    the first → garbage) for *any* head_dim incl. 32/64, a hole the old head_dim>64-only guard
-    missed (closed 2026-06-17), and **(c)** any FA-shaped kernel whose pointer/stride/scale
-    params can't be resolved unambiguously (refuse-on-ambiguity — never a guessed kernel).
-    bf16 matmul inputs are rejected at the Triton frontend. Larger blocks / head_dim > 128 are
-    future work.
+    128 (routed to the `simdgroup_matrix` MMA kernel for contiguous strides, or the scalar
+    tiled template otherwise; both fp32 + fp16, causal + non-causal). The prescan still
+    refuses loudly: **(a)** head_dim > 128 (max dot tile dim > 128), **(b)** `BLOCK_M`/`BLOCK_N`
+    < 32 (min dot tile dim < 32) — which silently mis-computed (rows past the first → garbage)
+    for *any* head_dim incl. 32/64, a hole the old head_dim>64-only guard missed (closed
+    2026-06-17), and **(c)** any FA-shaped kernel whose pointer/stride/scale params can't be
+    resolved unambiguously (refuse-on-ambiguity — never a guessed kernel). bf16 matmul inputs
+    are rejected at the Triton frontend. Larger blocks / head_dim > 128 are future work.
 
 (Plus `tt.dot_scaled`, rank-≥2 `tt.cat`/`tt.join`, `tt.dot` in a noinline callee, and
 `tt.join`→`tt.dot`, listed by category above.)

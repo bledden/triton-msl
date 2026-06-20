@@ -215,12 +215,16 @@ matrix and the loud-refusal catalog.
 A full FlashAttention v2 forward (causal + non-causal) runs through the standard
 `@triton.jit` path at **`BLOCK_M = BLOCK_N = 32`** for **head_dim 32, 64, and 128** —
 see [`tests/test_flash_attention.py`](tests/test_flash_attention.py) for the kernel and
-launch. head_dim 32/64 use the generic lowering; **head_dim 128** is routed to a
-head-dim-tiled FA2 MSL template (**fp32 + fp16**) that chunks the head dimension to fit
-Metal's 32 KB threadgroup budget. Out-of-range configs are **refused loudly**
-(`MetalNonRecoverableError`, never silent-wrong): head_dim > 128, block tiles ≠ 32, bf16
-inputs, and any FA-shaped kernel whose strides/scale can't be resolved unambiguously.
-Larger blocks and head_dim > 128 are on the roadmap.
+launch. head_dim 32/64 use the generic lowering; **head_dim 128** is routed to an
+Apple `simdgroup_matrix` MMA kernel (fp32 + fp16, causal + non-causal, any N_CTX) that
+delivers **~7.4× (fp32) / ~8.5× (fp16) faster than the prior scalar path**, at
+**~8.2/9.6 TFLOP/s (~70–80% of the in-repo matmul-template peak)**. This is NOT
+competitive with Apple metal-flash-attention or MLX in absolute terms; it is the
+practical ceiling for a triton-jit-routed MSL kernel at these tile sizes. Out-of-range
+configs are **refused loudly** (`MetalNonRecoverableError`, never silent-wrong): head_dim
+> 128, block tiles ≠ 32, bf16 inputs, non-contiguous innermost stride, and any FA-shaped
+kernel whose strides/scale can't be resolved unambiguously. Larger blocks and head_dim >
+128 are on the roadmap.
 
 ### Tuning flags
 
@@ -275,6 +279,8 @@ fp32 / fp16.
 | Reduction | 16M | 235 GB/s | 43% | 8.2× |
 | Matmul (fp32) | 2048³ | 11.4 TFLOP/s | 62% of fp32 peak | ~4× generic |
 | Matmul (fp16) | 2048³ | 12.4 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
+| FlashAttention (fp32, head_dim=128) | Z=1,H=8,N=1024 | ~8.2 TFLOP/s | ~45% of fp32 peak | **~7.4× scalar FA** |
+| FlashAttention (fp16, head_dim=128) | Z=1,H=8,N=1024 | ~9.6 TFLOP/s | ~26% of fp16 peak† | **~8.5× scalar FA** |
 
 \* fp16 matmul runs at roughly the fp32 matrix-unit rate (float accumulation for
 precision); Apple's simdgroup-matrix unit isn't faster for half accumulation, so the
@@ -282,6 +288,11 @@ precision); Apple's simdgroup-matrix unit isn't faster for half accumulation, so
 and ~60% fp32-matmul numbers are **near the practical ceilings** for these kernel
 classes on this hardware (the raw 546 / 18.4 / 36.9 spec peaks are not reachable by
 compute) — see the Phase-5 readiness audit (`docs/audits/`).
+
+† FA fp16 accumulates in fp32 (correct); the ~26% of fp16 vector-ALU peak is not a
+useful comparison — the practical reference is the in-repo matmul peak (~70–80% of which
+FA achieves). The FA numbers are **not competitive with Apple metal-flash-attention or
+MLX in absolute terms**.
 
 **MPS tensors run zero-copy** via `torch.mps.compile_shader` (default-on) — the prior
 host-round-trip copy bottleneck is gone. CPU tensors and the MLX backend
