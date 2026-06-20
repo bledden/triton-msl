@@ -329,6 +329,13 @@ class MetalBackend(BaseBackend):
         from triton_msl.backend.cpp_families import cpp_safe_text
         if not cpp_safe_text(ttgir_text):
             return True  # unsafe dtype for C++ AIR path -> Python route
+        # The C++ run_to_llvm pass aborts (assertion) on a SCALAR (0-D) load —
+        # a `tt.load %p : !tt.ptr<T>` whose result is a scalar, not a tensor of
+        # pointers `tensor<Nx!tt.ptr<T>>` (e.g. batchnorm's i64
+        # num_batches_tracked increment: `tt.load %in : !tt.ptr<i64>`). The MSL
+        # path handles these; route them there rather than crash the process.
+        if re.search(r'tt\.load\b[^\n]*:\s*!tt\.ptr<', ttgir_text):
+            return True
         # Extract actual MLIR operations from the TTGIR text.
         # Operations appear as either:
         #   %result = tt.load %ptr   (result-producing op)
