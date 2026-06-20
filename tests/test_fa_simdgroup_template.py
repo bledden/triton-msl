@@ -61,3 +61,35 @@ def test_simd_fa_fp16_noncausal(Z, H, N_CTX):
     _launch(lib, "flash_attention", q, k, v, out)
     torch.mps.synchronize()
     assert (out.float() - _ref(q, k, v)).abs().max().item() < 5e-2
+
+
+@requires_mps
+@pytest.mark.parametrize("N_CTX", [96, 100, 192, 200])   # not multiples of 64
+def test_simd_fa_fp32_unaligned(N_CTX):
+    HEAD_DIM, Z, H = 128, 1, 2
+    torch.manual_seed(1)
+    q = torch.randn(Z, H, N_CTX, HEAD_DIM, device="mps", dtype=torch.float32)
+    k = torch.randn(Z, H, N_CTX, HEAD_DIM, device="mps", dtype=torch.float32)
+    v = torch.randn(Z, H, N_CTX, HEAD_DIM, device="mps", dtype=torch.float32)
+    out = torch.empty_like(q)
+    src = make_flash_attention_kernel_simdgroup(HEAD_DIM, 32, 64, causal=False, out_dtype="fp32")
+    lib = torch.mps.compile_shader(src)
+    _launch(lib, "flash_attention", q, k, v, out)
+    torch.mps.synchronize()
+    assert (out - _ref(q, k, v)).abs().max().item() < 1e-3
+
+
+@requires_mps
+@pytest.mark.parametrize("Z,H,N_CTX", [(1, 2, 128), (1, 4, 192)])
+def test_simd_fa_fp32_causal(Z, H, N_CTX):
+    HEAD_DIM = 128
+    torch.manual_seed(2)
+    q = torch.randn(Z, H, N_CTX, HEAD_DIM, device="mps", dtype=torch.float32)
+    k = torch.randn(Z, H, N_CTX, HEAD_DIM, device="mps", dtype=torch.float32)
+    v = torch.randn(Z, H, N_CTX, HEAD_DIM, device="mps", dtype=torch.float32)
+    out = torch.empty_like(q)
+    src = make_flash_attention_kernel_simdgroup(HEAD_DIM, 32, 64, causal=True, out_dtype="fp32")
+    lib = torch.mps.compile_shader(src)
+    _launch(lib, "flash_attention", q, k, v, out)
+    torch.mps.synchronize()
+    assert (out - _ref(q, k, v, causal=True)).abs().max().item() < 1e-3
