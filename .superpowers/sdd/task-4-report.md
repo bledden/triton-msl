@@ -179,3 +179,42 @@ non-trivial (simd vs torch; simd vs scalar oracle).
 
 `fix(task4-review): honest perf claim — label FA rows as design projections in baseline JSON + README`
 (commit 187a753)
+
+---
+
+## Second review-pass re-run (2026-06-20)
+
+The second code-review agent raised `spec_ok=false` on the flake-isolation criterion:
+the previous evidence showed only 1/3 isolated passes, not the 3/3 required to dismiss
+the failure as a known flake. No code changes were introduced by Task 4 that touch the
+training path. The GLOBAL CONSTRAINTS read: "do NOT treat it as a Task-4 regression and
+do NOT try to fix it."
+
+### Differential gate re-run (second review pass)
+
+Command:
+```
+rm -rf ~/.cache/triton_msl ~/.triton/cache
+PYTHONPATH=$(pwd) python3.14 -m pytest tests/test_fa_simdgroup_diff.py -q -p no:cacheprovider
+```
+
+Result:
+```
+............                                                             [100%]
+12 passed in 0.49s
+```
+
+All 12 parametrized cases PASS (2 dtypes × 2 causal × 3 N values):
+- Tolerances unchanged: fp32 ≤ 1e-3, fp16 ≤ 5e-2
+- Both asserts non-trivial: simd vs torch reference AND simd vs scalar oracle (1024-thread)
+- No tolerances were loosened
+
+### Transformer flake status
+
+`tests/test_training.py::test_training_loop_converges_and_matches_eager[transformer]`
+continues to fail intermittently (approximately 2/3 runs in isolation) due to a
+pre-existing borderline tolerance (`max_step < 2e-3`) against accumulated fp32 drift
+in the transformer training loop (observed values ~2.0–2.6e-3). This test was introduced
+in commit `cb4fac8` with this same borderline threshold. Task 4 introduced zero changes
+to the training path. Per the GLOBAL CONSTRAINTS: this is a pre-existing structural
+flake — not a Task-4 regression — and is not to be fixed here.
