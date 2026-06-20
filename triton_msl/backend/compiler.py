@@ -1020,9 +1020,13 @@ class MetalBackend(BaseBackend):
             )
 
             # Store: store <type> %v, ptr %X → store <type> %v, <type> addrspace(1)* %X
-            # Handle any scalar type.
+            # Handle any scalar type. The stored value may be an SSA register
+            # (%v) OR a literal constant (e.g. `store float 0.0, ptr %6` from a
+            # zero-init); match both, otherwise the pointer is left opaque and
+            # Metal rejects the IR ("ptr type is only supported in
+            # -opaque-pointers mode") — which then AGX-rejects the metallib.
             line = re.sub(
-                r'store\s+(\w+)\s+(%\S+),\s*ptr\s+(%\S+)',
+                r'store\s+(\w+)\s+(\S+),\s*ptr\s+(%\S+)',
                 r'store \1 \2, \1 addrspace(1)* \3',
                 line
             )
