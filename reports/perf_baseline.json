@@ -23,7 +23,7 @@
     "n_dispatches": 100
   },
   "compile_shader_zero_copy": {
-    "_note": "Phase 4 compile_shader fast-path: ON=TRITON_METAL_COMPILE_SHADER=1 (default), OFF=0. Measured 2026-06-14 on M4 Max (peak 546 GB/s). Reduction is pass-1 scatter-sum (each block\u2192OUT[pid]), not global atomic.",
+    "_note": "Phase 4 compile_shader fast-path: ON=TRITON_MSL_COMPILE_SHADER=1 (default), OFF=0. Measured 2026-06-14 on M4 Max (peak 546 GB/s). Reduction is pass-1 scatter-sum (each block\u2192OUT[pid]), not global atomic.",
     "peak_bw_gbps": 546.0,
     "platform": "M4 Max",
     "vector_add_16M": {
@@ -65,17 +65,37 @@
   },
   "matmul_2048_fp32": {
     "name": "matmul_2048_fp32",
-    "min_ms": 1.4906,
-    "tflops": 11.53
+    "min_ms": 1.498,
+    "tflops": 11.47
   },
   "matmul_2048_fp16": {
     "name": "matmul_2048_fp16",
-    "min_ms": 1.3912,
-    "tflops": 12.35
+    "min_ms": 1.3801,
+    "tflops": 12.45
   },
   "matmul_2048_fp16out": {
     "name": "matmul_2048_fp16out",
-    "min_ms": 1.4053,
-    "tflops": 12.22
+    "min_ms": 1.4045,
+    "tflops": 12.23
+  },
+  "flash_attention_simdgroup_fp32": {
+    "name": "flash_attention_simdgroup_fp32",
+    "_note": "DESIGN PROJECTION from 2026-06-20-simdgroup-flash-attention.md plan spec — NOT a live benchmark measurement. Numbers are plan-target projections based on simdgroup-matrix FLOPs and in-repo matmul-template peak (~11.4 TFLOP/s fp32). No hw_harness FA benchmark file exists yet. Correctness is verified (differential gate + torch parity, 12 cases all pass). Hardware: M4 Max.",
+    "config": "Z=1,H=8,N_CTX=1024,head_dim=128,causal=False",
+    "kernel": "simdgroup_matrix MMA (make_flash_attention_kernel_simdgroup)",
+    "tflops_projected": 8.2,
+    "speedup_vs_scalar_projected": 7.4,
+    "pct_of_matmul_peak_projected": 70,
+    "NOT_competitive_with": ["Apple metal-flash-attention", "MLX"]
+  },
+  "flash_attention_simdgroup_fp16": {
+    "name": "flash_attention_simdgroup_fp16",
+    "_note": "DESIGN PROJECTION from 2026-06-20-simdgroup-flash-attention.md plan spec — NOT a live benchmark measurement. Numbers are plan-target projections based on simdgroup-matrix FLOPs and in-repo matmul-template peak (~12.4 TFLOP/s fp16). No hw_harness FA benchmark file exists yet. Correctness is verified (differential gate + torch parity, 12 cases all pass). Hardware: M4 Max.",
+    "config": "Z=1,H=8,N_CTX=1024,head_dim=128,causal=False",
+    "kernel": "simdgroup_matrix MMA (make_flash_attention_kernel_simdgroup)",
+    "tflops_projected": 9.6,
+    "speedup_vs_scalar_projected": 8.5,
+    "pct_of_matmul_peak_projected": 77,
+    "NOT_competitive_with": ["Apple metal-flash-attention", "MLX"]
   }
 }
