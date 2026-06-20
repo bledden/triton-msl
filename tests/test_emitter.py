@@ -6767,3 +6767,30 @@ def test_compare_lt_gpu(runner):
         expected = 1 if a_data[i] < b_data[i] else 0
         assert val == expected, \
             f"idx {i}: got {val}, expected {expected}"
+
+
+def test_threadgroup_reduce_refuses_partial_simd_group():
+    """Regression: threadgroup_reduce must REFUSE a block_size that is >32 and not
+    a multiple of 32 — the step-1 `simd_op(val)` reduces over the full 32-wide SIMD
+    group, and the partial trailing group's inactive lanes are undefined on Apple,
+    so the result would be silently wrong. (Latent today: tl.arange is pow2, so
+    block_size is normally pow2; the guard protects against an out-of-contract tile,
+    e.g. an inductor-fused odd shape, reaching here.)"""
+    from triton_msl.codegen.msl_emitter import KernelBuilder
+    from triton_msl.errors import MetalNonRecoverableError
+
+    # >32 and not a multiple of 32 -> must refuse loudly.
+    for bad in (48, 80, 100):
+        with pytest.raises(MetalNonRecoverableError):
+            KernelBuilder("k", block_size=bad).threadgroup_reduce(
+                "sum", "acc", "shared", "total")
+
+    # Multiples of 32 (and <=32) must NOT trip the guard.
+    for ok in (32, 64, 128, 256):
+        kb = KernelBuilder("k", block_size=ok)
+        try:
+            kb.threadgroup_reduce("sum", "acc", "shared", "total")
+        except MetalNonRecoverableError:  # pragma: no cover
+            pytest.fail(f"block_size={ok} (multiple of 32) wrongly refused")
+        except Exception:
+            pass  # any other emission detail is fine; we only assert the guard

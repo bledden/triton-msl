@@ -1517,6 +1517,22 @@ class _ReduceScanMixin:
         M, N = input_shape[0], input_shape[1]
         total = M * N
 
+        # The scan stages every element through threadgroup memory with one thread
+        # per element (`if (lid < total) shared[lid] = ...` below) and then reads it
+        # back in the prefix sweep. Metal caps a threadgroup at 1024 threads, so for
+        # total > 1024 the elements at index >= 1024 are NEVER written — the sweep
+        # then reads uninitialized shared memory and returns silently-wrong values
+        # (the store/atomic paths already guard this one-thread-per-element regime).
+        # The MSL scan has no multi-element-per-thread path, so refuse loudly.
+        if total > 1024:
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing a {total}-element scan (tl.cumsum / associative_scan): "
+                f"Metal allows at most 1024 threads per threadgroup and the scan maps "
+                f"one element per thread, so elements past 1024 would be left "
+                f"uninitialized and the result silently wrong. Reduce the scan tile to "
+                f"<= 1024 elements.")
+
         # Determine element type and MSL type
         input_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
         is_int = not (input_dtype.startswith("fp") or input_dtype.startswith("bf"))

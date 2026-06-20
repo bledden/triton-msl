@@ -2050,7 +2050,15 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         elif op == "tt.fp_to_fp":
             self._lower_fp_to_fp(ssa)
         elif op == "tt.assert":
-            pass  # Runtime bounds check — skip in MSL
+            # tl.device_assert: an output-NEUTRAL diagnostic side effect — it aborts
+            # the kernel ONLY when its condition is false; on the correct-program
+            # path (assertion holds) it changes nothing in the result buffers. Apple
+            # GPUs have no device-side trap/abort channel, so we elide it, matching
+            # CUDA's RELEASE behavior (Triton compiles device asserts out unless
+            # TRITON_DEBUG). This is NOT a silent-wrong: it never alters a computed
+            # value, it only forgoes a debug trap on already-out-of-contract inputs.
+            # (A store/atomic — an output-AFFECTING side effect — is refused below.)
+            pass  # intentional, documented elision (see test_device_assert skip note)
         elif op in ("tt.print", "tt.device_print"):
             # Device-side print: Apple GPUs have no device printf channel. This
             # is an output-NEUTRAL diagnostic side effect, so dropping it is
@@ -6106,6 +6114,28 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         M, K = a_shape[0], a_shape[1]
         K2, N = b_shape[0], b_shape[1]
+
+        # PRIMITIVE-LEVEL large-tile guard (independent of the surrounding idiom).
+        # The validated dot paths — matmul templates, the head_dim<=128 FA2 template,
+        # _detect_simple_dot — all `return` early in lower(); a dot reaching this
+        # generic per-thread fallback escaped every one of them. That fallback is
+        # only correct for small tiles and silently mis-computes larger ones (the
+        # per-thread mapping is wrong at 16/32/64+). The FlashAttention head_dim>64
+        # refusal lives inside a max-substring heuristic, so a max-less head_dim-128
+        # attention variant slips past it and lands here — refuse on the ACTUAL
+        # unsupported primitive (the oversized dot tile), not the idiom, so no shape
+        # of attention/fused-matmul can reach the wrong per-thread path silently.
+        _dot_max = max(M, K, N)
+        if _dot_max > 64:
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing a tt.dot with tile dim {_dot_max} (> 64) on the generic "
+                f"per-thread path: this fallback is validated only for tile dims <= 64 "
+                f"and silently mis-computes larger matmuls. Large matmuls go through "
+                f"the validated simdgroup templates and FlashAttention (head_dim <= "
+                f"128) through the FA2 template; a dot reaching here escaped them "
+                f"(e.g. a max-less head_dim-128 attention). Refusing rather than emit "
+                f"silently-wrong output.")
 
         # Get shared memory names for A and B
         # Trace through local_load to find the shared memory arrays

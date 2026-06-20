@@ -278,3 +278,35 @@ class TestModels:
             def forward(self, x):
                 return self.fc(self.emb(x).mean(dim=1))
         _check(EmbBag(), torch.randint(0, 10000, (8, 32)).to(DEVICE))
+
+
+def test_persistent_reduction_filter_refuses_underfilling():
+    """Regression: the Metal persistent-reduction config filter must NEVER return
+    an under-filling config — surplus lanes wrap `lid % rnumel` unmasked and
+    over-count the reduction denominator (the documented transformer-gradient
+    corruption). When no config fills the threadgroup it must refuse loudly, not
+    fall back to a rejected config (the old `configs[:1]` re-admitted exactly the
+    config the filter exists to remove)."""
+    from triton_msl.inductor import _filter_metal_persistent_configs
+    from triton_msl.errors import MetalNonRecoverableError
+
+    class FakeConfig:
+        def __init__(self, xblock, num_warps):
+            self.kwargs = {"XBLOCK": xblock}
+            self.num_warps = num_warps
+
+    rnumel = 16
+    filled = FakeConfig(xblock=2, num_warps=1)     # 32 elems >= 32 threads -> keep
+    underfill = FakeConfig(xblock=1, num_warps=2)  # 16 elems < 64 threads  -> drop
+
+    # Mixed input: keep only the thread-filling config, drop the under-filling one.
+    assert _filter_metal_persistent_configs([underfill, filled], rnumel) == [filled]
+
+    # Every config under-fills -> refuse loudly (never re-admit a rejected config).
+    with pytest.raises(MetalNonRecoverableError):
+        _filter_metal_persistent_configs(
+            [underfill, FakeConfig(xblock=1, num_warps=4)], rnumel)
+
+    # Every config exceeds 1024 threads -> refuse loudly too.
+    with pytest.raises(MetalNonRecoverableError):
+        _filter_metal_persistent_configs([FakeConfig(xblock=128, num_warps=1)], rnumel)

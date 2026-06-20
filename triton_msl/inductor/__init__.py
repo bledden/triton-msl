@@ -171,6 +171,46 @@ def _patch_mps_device_interface():
         MpsInterface.get_raw_stream = staticmethod(lambda device_idx: 0)
 
 
+def _filter_metal_persistent_configs(configs, rnumel):
+    """Keep only persistent-reduction configs the MSL lowering maps correctly.
+
+    The persistent reduction maps the XBLOCK*rnumel elements onto lid via
+    (lid / rnumel, lid % rnumel). Two ways a config goes wrong on Metal:
+      (1) XBLOCK*rnumel > 1024 — exceeds Metal's max threads/threadgroup.
+      (2) XBLOCK*rnumel < num_warps*32 — the launch has MORE threads than
+          elements, so surplus lanes wrap `lid % rnumel` back over the same
+          columns UNMASKED (the validity mask only checks `lid % rnumel <
+          rnumel`, always true). A simd_sum then over-counts the reduction
+          denominator and the cross-simd-group combine buffer is written out of
+          bounds. Observed: __safe_softmax XBLOCK=1/rnumel=16/num_warps=2 (64
+          threads) returned all-zeros, which reached torch.compile via
+          autotuning and corrupted a transformer's gradients.
+
+    Drop both. If NOTHING fills the threadgroup, REFUSE loudly — never return a
+    rejected config (the old `configs[:1]` fallback re-admitted exactly the
+    gradient-corrupting config this filter exists to remove). The MSL lowering
+    can't mask surplus lanes, so a reduction with no thread-filling config is
+    genuinely unsupported.
+    """
+    filtered = []
+    for c in configs:
+        xblock = c.kwargs.get("XBLOCK", 1)
+        if xblock * rnumel > 1024:            # (1) too many threads
+            continue
+        if xblock * rnumel < c.num_warps * 32:  # (2) under-filling -> surplus-lane over-count
+            continue
+        filtered.append(c)
+    if filtered:
+        return filtered
+    from triton_msl.errors import MetalNonRecoverableError
+    raise MetalNonRecoverableError(
+        f"No Metal-safe persistent-reduction config for rnumel={rnumel}: every "
+        f"candidate is under-filling (XBLOCK*rnumel < num_warps*32, causing "
+        f"surplus-lane over-count) or exceeds 1024 threads. The MSL lowering "
+        f"cannot mask surplus lanes; refusing rather than emit a silently-wrong "
+        f"reduction.")
+
+
 def _patch_persistent_reduction_configs():
     """Limit persistent reduction tile sizes to Metal's 1024 max threads/threadgroup.
 
@@ -197,36 +237,12 @@ def _patch_persistent_reduction_configs():
             _th._METAL_MAX_BLOCK_OVERRIDE = True
             orig_max = 4096  # default MAX_PERSISTENT_BLOCK_NUMEL
 
-            # Inline filter: generate configs, then remove invalid ones.
+            # Generate configs, then keep only the Metal-safe ones (or refuse).
             configs = orig_fn(size_hints, reduction_hint, inductor_meta, triton_meta)
             rnumel = th.get_total_reduction_numel(size_hints)
-            filtered = []
-            for c in configs:
-                xblock = c.kwargs.get("XBLOCK", 1)
-                # (1) Must fit Metal's 1024 threads/threadgroup.
-                if xblock * rnumel > 1024:
-                    continue
-                # (2) Must FILL the threadgroup: the persistent reduction maps the
-                # XBLOCK*rnumel elements onto lid via (lid / rnumel, lid % rnumel).
-                # If the launch has MORE threads than elements (num_warps*32 >
-                # XBLOCK*rnumel) the surplus lanes wrap `lid % rnumel` back over
-                # the SAME columns but are NOT masked out (the validity mask only
-                # checks `lid % rnumel < rnumel`, always true), so a simd_sum
-                # over-counts the softmax/reduction denominator AND the
-                # cross-simd-group combine buffer (sized for the needed groups)
-                # is written out of bounds. Observed: __safe_softmax with XBLOCK=1,
-                # rnumel=16, num_warps=2 (64 threads) returned all-zeros, which
-                # nondeterministically reached torch.compile via autotuning and
-                # corrupted a transformer's gradients. The FILLED configs
-                # (XBLOCK*rnumel >= threads) map every lane to a distinct element
-                # and are correct. Drop the under-filling configs.
-                threads = c.num_warps * 32
-                if xblock * rnumel < threads:
-                    continue
-                filtered.append(c)
             if saved is None:
                 delattr(_th, "_METAL_MAX_BLOCK_OVERRIDE")
-            return filtered if filtered else configs[:1]  # Always keep at least one config
+            return _filter_metal_persistent_configs(configs, rnumel)
         else:
             return orig_fn(size_hints, reduction_hint, inductor_meta, triton_meta)
 

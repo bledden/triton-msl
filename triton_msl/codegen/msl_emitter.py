@@ -314,6 +314,23 @@ class KernelBuilder:
         Variable names are suffixed with out_var to avoid collisions when
         called multiple times in the same kernel.
         """
+        # Defense-in-depth: the step-1 `simd_op(val)` below reduces over the full
+        # 32-wide SIMD group. When block_size > 32 and is NOT a multiple of 32, the
+        # trailing SIMD group has inactive lanes (e.g. block_size=48 -> lanes 48-63
+        # of group 1 never execute), and Apple leaves simd_* over inactive lanes
+        # UNDEFINED — so the first-level reduction would fold in garbage, silently.
+        # Triton's tl.arange is power-of-2, so block_size is normally pow2 (mult of
+        # 32) and templates always pad to a multiple of 32; this guard exists for an
+        # out-of-contract block_size (e.g. an inductor-fused odd tile) reaching here.
+        # Refuse loudly rather than emit a silently-wrong reduction.
+        if self.block_size > 32 and self.block_size % 32 != 0:
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"threadgroup reduction over a {self.block_size}-element tile spans "
+                f"a partial trailing SIMD group (block_size is not a multiple of 32). "
+                f"Apple does not define simd-group reductions over inactive lanes, so "
+                f"the result would be silently wrong; refusing. Pad the reduction tile "
+                f"to a multiple of 32 (the matmul/softmax templates already do this).")
         self._needs_simd_qualifiers = True
         from triton_msl.codegen.msl_builtins import SIMD_REDUCTIONS
 

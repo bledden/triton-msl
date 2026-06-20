@@ -292,14 +292,18 @@ UNIMPLEMENTED_FEATURES = {
     # rather than declaring fp8e4nv unsupported — the emulated path
     # works in practice.
     "test_fp8_support[dtype2]",
-    # test_device_assert: same hardware blocker as tl.device_print —
-    # no Metal device-side abort/printf, and the harness greps a
-    # captured CUDA stderr trace for the assertion message.
+    # test_device_assert: tl.device_assert is ELIDED on Metal (CUDA-release-style
+    # — see the tt.assert handling in generic_lowerer.py), because Apple GPUs have
+    # no device-side abort/trap channel. Its SEMANTICS ARE NOT HONORED: a failing
+    # assert does not raise the host-side RuntimeError("device-side assert") this
+    # test expects. This is a dropped DEBUG guard, NOT a wrong computed result
+    # (asserts are output-neutral when the assertion holds).
     "test_device_assert",
-    # ``test_sanitize_int_*_overflow`` rely on ``tl.device_assert`` to
-    # raise a host-side ``RuntimeError("device-side assert")`` when an
-    # arithmetic overflow is detected. Same Metal blocker as the other
-    # device-assert tests.
+    # ``test_sanitize_int_*_overflow`` rely on ``tl.device_assert`` firing a
+    # host-side ``RuntimeError("device-side assert")`` on overflow. Because device
+    # asserts are elided on Metal (above), that semantics is not honored — the
+    # overflow is not trapped. The arithmetic itself still wraps per two's
+    # complement as on CUDA; only the debug trap is absent.
     "test_sanitize_int_add_overflow",
     "test_sanitize_int_sub_overflow",
     "test_sanitize_int_mul_overflow",
