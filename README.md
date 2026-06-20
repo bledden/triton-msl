@@ -278,8 +278,8 @@ fp32 / fp16.
 | Reduction | 16M | 235 GB/s | 43% | 8.2× |
 | Matmul (fp32) | 2048³ | 11.4 TFLOP/s | 62% of fp32 peak | ~4× generic |
 | Matmul (fp16) | 2048³ | 12.4 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
-| FlashAttention (fp32, head_dim=128)‡ | Z=1,H=8,N=1024 | ~8.2 TFLOP/s | ~45% of fp32 peak | **~7.4× scalar FA** |
-| FlashAttention (fp16, head_dim=128)‡ | Z=1,H=8,N=1024 | ~9.6 TFLOP/s | ~26% of fp16 peak† | **~8.5× scalar FA** |
+| FlashAttention (fp32, head_dim=128)‡ | Z=1,H=8,N=1024 | 5.1 TFLOP/s | ~28% of fp32 peak | **~5.2× scalar FA** |
+| FlashAttention (fp16, head_dim=128)‡ | Z=1,H=8,N=1024 | 6.3 TFLOP/s | †| **~6.4× scalar FA** |
 
 \* fp16 matmul runs at roughly the fp32 matrix-unit rate (float accumulation for
 precision); Apple's simdgroup-matrix unit isn't faster for half accumulation, so the
@@ -288,13 +288,15 @@ and ~60% fp32-matmul numbers are **near the practical ceilings** for these kerne
 classes on this hardware (the raw 546 / 18.4 / 36.9 spec peaks are not reachable by
 compute) — see the Phase-5 readiness audit (`docs/audits/`).
 
-† FA fp16 accumulates in fp32 (correct); the ~26% of fp16 vector-ALU peak is not a
-useful comparison — the practical reference is the in-repo matmul peak (~70–80% of which
-FA achieves). The FA numbers are **not competitive with Apple metal-flash-attention or
-MLX in absolute terms**.
+† FA fp16 accumulates in fp32 (correct); % of the 36.9 fp16 vector-ALU peak is not a
+useful comparison — the practical reference is the in-repo matmul peak, of which fp32
+FA reaches ~45% (5.1 / 11.4) and fp16 ~51% (6.3 / 12.4). The FA numbers are **not
+competitive with Apple metal-flash-attention or MLX in absolute terms**.
 
-‡ FA rows are **design-target projections** from the simdgroup-MMA plan spec, derived
-from the in-repo matmul-template peak (not live hardware benchmark runs). Correctness
+‡ FA rows are **measured** on M4 Max (integration microbenchmark of the shipped
+`make_flash_attention_kernel_simdgroup`: warmup + median over 50 iters), not yet a
+committed regression-benchmark harness. Throughput scales with sequence length —
+~6.8 TFLOP/s (fp32, ~6.1×) / ~8.8 TFLOP/s (fp16, ~7.9×) at N=2048. Correctness
 is verified by the 12-case differential gate (`tests/test_fa_simdgroup_diff.py`: simd
 == scalar oracle == torch, all pass). A dedicated FA throughput benchmark is on the
 roadmap.

@@ -40,3 +40,6 @@ reports/hw_harness/
 .claude/
 compile_commands.json
 triton_msl/csrc/.cache/
+
+# SDD process scratch (subagent-driven-development ledger/reports)
+.superpowers/

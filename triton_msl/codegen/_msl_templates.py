@@ -1813,59 +1813,39 @@ kernel void flash_attention(
 """
 
 
-def make_flash_attention_kernel_simdgroup(head_dim=128, BLOCK_M=32, BLOCK_N=64,
-                                          causal=False, out_dtype="fp32",
-                                          arg_decls=None, bindings=None,
-                                          kernel_name="flash_attention", scale=None):
+def make_flash_attention_kernel_simdgroup(head_dim=128, BLOCK_M=32, BLOCK_N=64, causal=False,
+                       out_dtype="fp32", arg_decls=None, bindings=None,
+                       kernel_name="flash_attention", scale=None):
     """simdgroup_matrix FlashAttention-2 (fp32/fp16, causal/non-causal, head_dim=128).
 
     Device-direct simdgroup MMA: QK^T via transpose-load, register-resident O
     accumulator with diag-matrix-MMA alpha-rescale + 1/l-normalize, Q staged once,
     V loaded once-per-(col-tile,k) and prefetched. 256 threads / 8 SIMD groups,
-    q-tile BLOCK_M=32, kv-tile BLOCK_N=64. ALIGNED ONLY (N_CTX % BN == 0; partial
-    q-block handled by the Q-staging zero-pad); Task 2 adds the partial-kv tail.
+    q-tile BLOCK_M=32, kv-tile BLOCK_N=64. LOOP-SPLIT: full kv-blocks run a
+    branchless device-direct fast path; the single partial tail block (if
+    N_CTX %% BN != 0) runs a separate staged+masked path (keeps the hot loop free
+    of barrier-in-conditional, which otherwise ~halved throughput). Partial
+    q-blocks are handled by the Q-staging zero-pad + the guarded element-wise
+    final store. Correct for ANY N_CTX and contiguous innermost strides; the
+    routing contiguity gate sends non-contiguous FA to the scalar template.
     Same buffer ABI as make_flash_attention_kernel_tiled.
     """
     import math as _math
     D, BM, BN, NT = head_dim, BLOCK_M, BLOCK_N, 256
     if not (BM == 32 and BN == 64 and D % 8 == 0):
-        raise ValueError(f"simd FA requires BLOCK_M=32, BLOCK_N=64, head_dim%8==0 "
-                         f"(got {BM},{BN},{D})")
-    n_groups = NT // 32                 # 8
-    TPG = (D // 8) // n_groups           # O col-tiles per group (=2 for D=128)
+        raise ValueError("simd FA requires BLOCK_M=32, BLOCK_N=64, head_dim%8==0")
+    n_groups = NT // 32
+    TPG = (D // 8) // n_groups
     SCALE = float(scale) if scale is not None else 1.0 / _math.sqrt(float(D))
     if out_dtype in ("fp16", "f16"):
         elem, store_cast = "half", lambda e: f"half({e})"
-        p_decl, p_store, p_load_t = "half", "half", "simdgroup_half8x8"
-        kv_frag = "simdgroup_half8x8"
+        p_load_t, kv_frag = "simdgroup_half8x8", "simdgroup_half8x8"
     elif out_dtype in ("fp32", "f32"):
         elem, store_cast = "float", lambda e: e
-        p_decl, p_store, p_load_t = "float", "float", "simdgroup_float8x8"
-        kv_frag = "simdgroup_float8x8"
+        p_load_t, kv_frag = "simdgroup_float8x8", "simdgroup_float8x8"
     else:
         raise ValueError(f"out_dtype must be fp32/f32/fp16/f16 (got {out_dtype!r})")
-    # Softmax mask. Two independent components, ANDed in the guard:
-    #   - partial-kv tail: kv_row < N_CTX (padded columns of the final partial
-    #     block must be dropped, NOT read/contributed) — applies always.
-    #   - causal: kv_row <= q_row (positions after the query are -inf pre-exp).
-    # kv_row is therefore ALWAYS referenced (declared unconditionally). q_row is
-    # only used when causal, so its decl stays causal-only to avoid the
-    # unused-variable Metal warning that the compiler treats as an error.
-    # Width (in head-cols) of the per-kc partial-block staging tile. head_dim
-    # must be a multiple of it; the K-stage uses BN*Dc_tail elems, kept < 32KB.
     Dc_tail = 8
-    if D % Dc_tail != 0:
-        raise ValueError(f"simd FA: head_dim ({D}) must be a multiple of "
-                         f"Dc_tail ({Dc_tail})")
-    if causal:
-        guard = "((kv_row < N_CTX) && (kv_row <= q_row))"
-        q_row_decl = "uint q_row = q_start + r;"
-        kv_row_decl = "uint kv_row = kv_start + cj;"
-    else:
-        guard = "(kv_row < N_CTX)"
-        q_row_decl = ""
-        kv_row_decl = "uint kv_row = kv_start + cj;"
-
     _LOGICAL = ["q_sz", "q_sh", "q_sm", "q_sk", "k_sz", "k_sh", "k_sn", "k_sk",
                 "v_sz", "v_sh", "v_sn", "v_sk", "o_sz", "o_sh", "o_sm", "o_sk",
                 "Z", "H", "N_CTX"]
@@ -1881,22 +1861,120 @@ def make_flash_attention_kernel_simdgroup(head_dim=128, BLOCK_M=32, BLOCK_N=64,
         bindings = {nm: f"arg_{nm}" for nm in _LOGICAL}
     sig = ",\n".join(arg_decls)
     bind_lines = "\n".join(f"    const uint {nm} = {bindings[nm]};" for nm in _LOGICAL)
-    # P operand for the P@V MMA: fp16 uses a half tgP buffer; fp32 reuses tg_S.
-    # Both dtypes use a float on_scratch[n_groups*64] for the final store: it both
-    # (a) lets fp16 cast float->half (simdgroup_store can't write a float8x8 to
-    # half* directly) and (b) lets EITHER dtype mask OOB q-rows element-wise for a
-    # partial final q-block (q_start+BM > N_CTX) — a direct simdgroup_store would
-    # write the whole 8x8 tile and spill OOB rows into the next head (silent-wrong).
     if elem == "half":
         p_buffers = (f"    threadgroup half tgP[{BM} * {BN}];\n"
                      f"    threadgroup float on_scratch[{n_groups} * 64];")
-        p_write = "tgP[r*BN+cj] = half(p);"
-        p_src = "tgP"
+        p_write, p_src = "tgP[r*BN+cj] = half(p);", "tgP"
     else:
         p_buffers = f"    threadgroup float on_scratch[{n_groups} * 64];"
-        p_write = "tg_S[r*BN+cj] = p;"
-        p_src = "tg_S"
-    # Guarded element-wise final store (both dtypes). store_cast handles fp16 cast.
+        p_write, p_src = "tg_S[r*BN+cj] = p;", "tg_S"
+
+    # ---- per-block body emitter (mode in {'full','tail'}) ----
+    def guard_decls(mode):
+        if mode == "full" and not causal:
+            return "true", "", ""
+        if mode == "full" and causal:
+            return "(kv_row <= q_row)", "uint q_row = q_start + r;", "uint kv_row = kv_start + cj;"
+        if mode == "tail" and not causal:
+            return "(kv_row < N_CTX)", "", "uint kv_row = kv_start + cj;"
+        return "((kv_row < N_CTX) && (kv_row <= q_row))", "uint q_row = q_start + r;", "uint kv_row = kv_start + cj;"
+
+    def block(mode):
+        g, qd, kd = guard_decls(mode)
+        if mode == "full":
+            kload = ("            simdgroup_load(kf, K + k_base + (kv_start + sgitg*8u)*k_sn "
+                     "+ kc*k_sk, k_sn, 0, true);")
+        else:
+            kload = (
+                "            threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                "            for (uint e = lid; e < %(BN)du*%(Dct)du; e += NT) {\n"
+                "                uint rr = e / %(Dct)du, cc = e %% %(Dct)du; uint kvr = kv_start + rr;\n"
+                "                tgKV[rr*%(Dct)du + cc] = (kvr < N_CTX) ? K[k_base + kvr*k_sn + (kc+cc)*k_sk] : %(elem)s(0);\n"
+                "            }\n"
+                "            threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                "            simdgroup_load(kf, tgKV + (sgitg*8u)*%(Dct)du, %(Dct)du, 0, true);\n"
+                "            threadgroup_barrier(mem_flags::mem_threadgroup);"
+            ) % {"BN": BN, "Dct": Dc_tail, "elem": elem}
+        if mode == "full":
+            vload = (
+                "            for (uint kk=0u;kk<BN;kk+=8u)\n"
+                "                simdgroup_load(vfs[kk/8u], V + v_base + (kv_start + kk)*v_sn + (ct*8u)*v_sk, v_sn);"
+            )
+        else:
+            vload = (
+                "            for (uint kk=0u;kk<BN;kk+=8u) {\n"
+                "                threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                "                for (uint e = lid%%32u; e < 64u; e += 32u) {\n"
+                "                    uint rr = e / 8u, cc = e %% 8u; uint kvr = kv_start + kk + rr;\n"
+                "                    tgKV[sgitg*64u + rr*8u + cc] = (kvr < N_CTX) ? V[v_base + kvr*v_sn + (ct*8u + cc)*v_sk] : %(elem)s(0);\n"
+                "                }\n"
+                "                simdgroup_barrier(mem_flags::mem_threadgroup);\n"
+                "                simdgroup_load(vfs[kk/8u], tgKV + sgitg*64u, 8u);\n"
+                "            }\n"
+                "            threadgroup_barrier(mem_flags::mem_threadgroup);"
+            ) % {"elem": elem}
+        tmpl = """    {
+        simdgroup_float8x8 s0(0.0f), s1(0.0f), s2(0.0f), s3(0.0f);
+        %(KVFRAG)s qf, kf;
+        for (uint kc = 0u; kc < D; kc += %(DCT)du) {
+%(KLOAD)s
+            simdgroup_load(qf, tgQ + 0u*D + kc, D);  simdgroup_multiply_accumulate(s0, qf, kf, s0);
+            simdgroup_load(qf, tgQ + 8u*D + kc, D);  simdgroup_multiply_accumulate(s1, qf, kf, s1);
+            simdgroup_load(qf, tgQ + 16u*D + kc, D); simdgroup_multiply_accumulate(s2, qf, kf, s2);
+            simdgroup_load(qf, tgQ + 24u*D + kc, D); simdgroup_multiply_accumulate(s3, qf, kf, s3);
+        }
+        simdgroup_store(s0, tg_S + 0u*BN + sgitg*8u, BN);
+        simdgroup_store(s1, tg_S + 8u*BN + sgitg*8u, BN);
+        simdgroup_store(s2, tg_S + 16u*BN + sgitg*8u, BN);
+        simdgroup_store(s3, tg_S + 24u*BN + sgitg*8u, BN);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lid < BM) {
+            uint r = lid; %(QD)s
+            float m_prev=tg_m[r], l_prev=tg_l[r], m_new=m_prev;
+            for (uint cj=0u;cj<BN;cj++) {
+                %(KD)s
+                float s = %(GUARD)s ? (tg_S[r*BN+cj]*scale) : -INFINITY;
+                tg_S[r*BN+cj]=s; m_new=max(m_new,s);
+            }
+            float alpha=exp(m_prev-m_new); float l_new=l_prev*alpha;
+            for (uint cj=0u;cj<BN;cj++) {
+                %(KD)s
+                float p = %(GUARD)s ? exp(tg_S[r*BN+cj]-m_new) : 0.0f;
+                %(PWRITE)s l_new+=p;
+            }
+            tg_m[r]=m_new; tg_l[r]=l_new; tg_alpha[r]=alpha;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i=lid;i<4u*64u;i+=NT) adiag[i]=0.0f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lid < BM) { uint rb=lid/8u, ii=lid%%8u; adiag[rb*64u+ii*8u+ii]=tg_alpha[lid]; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_float8x8 ad0, ad1, ad2, ad3, tmp;
+        simdgroup_load(ad0, adiag + 0u*64u, 8); simdgroup_load(ad1, adiag + 1u*64u, 8);
+        simdgroup_load(ad2, adiag + 2u*64u, 8); simdgroup_load(ad3, adiag + 3u*64u, 8);
+        %(PLOADT)s pf, vf, vfs[%(BN)d/8];
+        for (uint t=0u;t<TPG;t++) {
+            uint ct = sgitg + t*%(NG)du;
+            tmp=simdgroup_float8x8(0.0f); simdgroup_multiply_accumulate(tmp, ad0, o[0][t], tmp); o[0][t]=tmp;
+            tmp=simdgroup_float8x8(0.0f); simdgroup_multiply_accumulate(tmp, ad1, o[1][t], tmp); o[1][t]=tmp;
+            tmp=simdgroup_float8x8(0.0f); simdgroup_multiply_accumulate(tmp, ad2, o[2][t], tmp); o[2][t]=tmp;
+            tmp=simdgroup_float8x8(0.0f); simdgroup_multiply_accumulate(tmp, ad3, o[3][t], tmp); o[3][t]=tmp;
+%(VLOAD)s
+            for (uint kk=0u;kk<BN;kk+=8u) {
+                vf = vfs[kk/8u];
+                simdgroup_load(pf, %(PSRC)s + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);
+                simdgroup_load(pf, %(PSRC)s + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);
+                simdgroup_load(pf, %(PSRC)s + 16u*BN + kk, BN); simdgroup_multiply_accumulate(o[2][t], pf, vf, o[2][t]);
+                simdgroup_load(pf, %(PSRC)s + 24u*BN + kk, BN); simdgroup_multiply_accumulate(o[3][t], pf, vf, o[3][t]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }"""
+        return tmpl % {"KVFRAG": kv_frag, "DCT": Dc_tail, "KLOAD": kload, "QD": qd,
+                       "KD": kd, "GUARD": g, "PWRITE": p_write, "PLOADT": p_load_t,
+                       "BN": BN, "NG": n_groups, "VLOAD": vload, "PSRC": p_src}
+
+    block_full, block_tail = block("full"), block("tail")
     final_store = (
         "            simdgroup_store(on, on_scratch + sgitg*64u, 8u);\n"
         "            threadgroup_barrier(mem_flags::mem_threadgroup);\n"
@@ -1909,12 +1987,12 @@ def make_flash_attention_kernel_simdgroup(head_dim=128, BLOCK_M=32, BLOCK_N=64,
         "            threadgroup_barrier(mem_flags::mem_threadgroup);"
     )
 
-    return f"""#include <metal_stdlib>
+    head = f"""#include <metal_stdlib>
 #include <metal_simdgroup_matrix>
 using namespace metal;
 
 // simdgroup-MMA FlashAttention-2 ({elem} in/out, fp32 compute, {"causal" if causal else "non-causal"}).
-// 256 threads / 8 SIMD groups. Register-resident O; diag-MMA alpha-rescale.
+// Loop-split: branchless full-block fast loop + separate staged/masked tail block.
 kernel void {kernel_name}(
 {sig},
     uint3 pid3 [[threadgroup_position_in_grid]],
@@ -1929,12 +2007,12 @@ kernel void {kernel_name}(
     uint q_start = q_block * BM;
     uint q_base = z*q_sz+h*q_sh, k_base = z*k_sz+h*k_sh, v_base = z*v_sz+h*v_sh, o_base = z*o_sz+h*o_sh;
 
-    threadgroup {elem} tgQ[{BM} * {D}];     // Q staged once (zero-pads OOB q-rows)
-    threadgroup float  tg_S[{BM} * {BN}];   // raw scores (fp32 for exp range)
+    threadgroup {elem} tgQ[{BM} * {D}];
+    threadgroup float  tg_S[{BM} * {BN}];
 {p_buffers}
     threadgroup float  tg_m[{BM}], tg_l[{BM}], tg_alpha[{BM}];
     threadgroup float  adiag[4 * 64];
-    threadgroup {elem} tgKV[{BN} * {Dc_tail}u];  // partial-block K/V staging (zero-pads OOB kv-rows)
+    threadgroup {elem} tgKV[{BN} * {Dc_tail}u];
 
     simdgroup_float8x8 o[4][TPG];
     for (uint rb=0u;rb<4u;rb++) for (uint t=0u;t<TPG;t++) o[rb][t]=simdgroup_float8x8(0.0f);
@@ -1946,101 +2024,14 @@ kernel void {kernel_name}(
     if (lid < BM) {{ tg_m[lid]=-INFINITY; tg_l[lid]=0.0f; }}
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    uint n_kv = (N_CTX + BN - 1u) / BN;  // ceil — include the partial kv tail (Task 2)
-    for (uint kv_block = 0u; kv_block < n_kv; kv_block++) {{
+    uint n_full = N_CTX / BN;            // floor: count of FULL kv-blocks
+    for (uint kv_block = 0u; kv_block < n_full; kv_block++) {{
         uint kv_start = kv_block * BN;
-        bool kv_full = (kv_start + BN <= N_CTX);  // full blocks: device-direct MMA
-        simdgroup_float8x8 s0(0.0f), s1(0.0f), s2(0.0f), s3(0.0f);
-        {kv_frag} qf, kf;
-        for (uint kc = 0u; kc < D; kc += {Dc_tail}u) {{
-            if (kv_full) {{
-                simdgroup_load(kf, K + k_base + (kv_start + sgitg*8u)*k_sn + kc*k_sk, k_sn, 0, true);
-            }} else {{
-                // Stage BN kv-rows x {Dc_tail} head-cols (cooperative) with OOB zero-pad,
-                // then this group transpose-loads its 8-row x 8-col slice.
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint e = lid; e < {BN}u*{Dc_tail}u; e += NT) {{
-                    uint rr = e / {Dc_tail}u, cc = e % {Dc_tail}u; uint kvr = kv_start + rr;
-                    tgKV[rr*{Dc_tail}u + cc] = (kvr < N_CTX) ? K[k_base + kvr*k_sn + (kc+cc)*k_sk] : {elem}(0);
-                }}
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                // staged tile row width == Dc_tail (the load stride MUST match it)
-                simdgroup_load(kf, tgKV + (sgitg*8u)*{Dc_tail}u, {Dc_tail}u, 0, true);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }}
-            simdgroup_load(qf, tgQ + 0u*D + kc, D);  simdgroup_multiply_accumulate(s0, qf, kf, s0);
-            simdgroup_load(qf, tgQ + 8u*D + kc, D);  simdgroup_multiply_accumulate(s1, qf, kf, s1);
-            simdgroup_load(qf, tgQ + 16u*D + kc, D); simdgroup_multiply_accumulate(s2, qf, kf, s2);
-            simdgroup_load(qf, tgQ + 24u*D + kc, D); simdgroup_multiply_accumulate(s3, qf, kf, s3);
-        }}
-        simdgroup_store(s0, tg_S + 0u*BN + sgitg*8u, BN);
-        simdgroup_store(s1, tg_S + 8u*BN + sgitg*8u, BN);
-        simdgroup_store(s2, tg_S + 16u*BN + sgitg*8u, BN);
-        simdgroup_store(s3, tg_S + 24u*BN + sgitg*8u, BN);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        if (lid < BM) {{
-            uint r = lid; {q_row_decl}
-            float m_prev=tg_m[r], l_prev=tg_l[r], m_new=m_prev;
-            for (uint cj=0u;cj<BN;cj++) {{
-                {kv_row_decl}
-                float s = {guard} ? (tg_S[r*BN+cj]*scale) : -INFINITY;
-                tg_S[r*BN+cj]=s; m_new=max(m_new,s);
-            }}
-            float alpha=exp(m_prev-m_new); float l_new=l_prev*alpha;
-            for (uint cj=0u;cj<BN;cj++) {{
-                {kv_row_decl}
-                float p = {guard} ? exp(tg_S[r*BN+cj]-m_new) : 0.0f;
-                {p_write} l_new+=p;
-            }}
-            tg_m[r]=m_new; tg_l[r]=l_new; tg_alpha[r]=alpha;
-        }}
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint i=lid;i<4u*64u;i+=NT) adiag[i]=0.0f;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lid < BM) {{ uint rb=lid/8u, ii=lid%8u; adiag[rb*64u+ii*8u+ii]=tg_alpha[lid]; }}
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        simdgroup_float8x8 ad0, ad1, ad2, ad3, tmp;
-        simdgroup_load(ad0, adiag + 0u*64u, 8); simdgroup_load(ad1, adiag + 1u*64u, 8);
-        simdgroup_load(ad2, adiag + 2u*64u, 8); simdgroup_load(ad3, adiag + 3u*64u, 8);
-        {p_load_t} pf, vf, vfs[{BN}/8];
-        for (uint t=0u;t<TPG;t++) {{
-            uint ct = sgitg + t*{n_groups}u;
-            tmp=simdgroup_float8x8(0.0f); simdgroup_multiply_accumulate(tmp, ad0, o[0][t], tmp); o[0][t]=tmp;
-            tmp=simdgroup_float8x8(0.0f); simdgroup_multiply_accumulate(tmp, ad1, o[1][t], tmp); o[1][t]=tmp;
-            tmp=simdgroup_float8x8(0.0f); simdgroup_multiply_accumulate(tmp, ad2, o[2][t], tmp); o[2][t]=tmp;
-            tmp=simdgroup_float8x8(0.0f); simdgroup_multiply_accumulate(tmp, ad3, o[3][t], tmp); o[3][t]=tmp;
-            if (kv_full) {{
-                for (uint kk=0u;kk<BN;kk+=8u)
-                    simdgroup_load(vfs[kk/8u], V + v_base + (kv_start + kk)*v_sn + (ct*8u)*v_sk, v_sn);
-            }} else {{
-                // Partial block: stage each group's 8 kv-rows x 8 head-cols (head-col
-                // offset ct*8) into its private tgKV slice with OOB zero-pad, then load.
-                // P's padded kv-columns are already 0 (softmax guard), so a zero V there
-                // only protects against the OOB read — never a silent-wrong contribution.
-                for (uint kk=0u;kk<BN;kk+=8u) {{
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                    for (uint e = lid%32u; e < 64u; e += 32u) {{
-                        uint rr = e / 8u, cc = e % 8u; uint kvr = kv_start + kk + rr;
-                        tgKV[sgitg*64u + rr*8u + cc] =
-                            (kvr < N_CTX) ? V[v_base + kvr*v_sn + (ct*8u + cc)*v_sk] : {elem}(0);
-                    }}
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
-                    // staged tile row width == 8 (the load stride MUST match it)
-                    simdgroup_load(vfs[kk/8u], tgKV + sgitg*64u, 8u);
-                }}
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }}
-            for (uint kk=0u;kk<BN;kk+=8u) {{
-                vf = vfs[kk/8u];
-                simdgroup_load(pf, {p_src} + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);
-                simdgroup_load(pf, {p_src} + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);
-                simdgroup_load(pf, {p_src} + 16u*BN + kk, BN); simdgroup_multiply_accumulate(o[2][t], pf, vf, o[2][t]);
-                simdgroup_load(pf, {p_src} + 24u*BN + kk, BN); simdgroup_multiply_accumulate(o[3][t], pf, vf, o[3][t]);
-            }}
-        }}
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+{block_full}
+    }}
+    if (n_full * BN < N_CTX) {{          // one partial tail block (masked staging)
+        uint kv_start = n_full * BN;
+{block_tail}
     }}
 
     for (uint i=lid;i<4u*64u;i+=NT) adiag[i]=0.0f;
@@ -2059,8 +2050,7 @@ kernel void {kernel_name}(
     }}
 }}
 """
-
-
+    return head
 def make_flash_attention_kernel_tiled(head_dim=128, BLOCK_M=32, BLOCK_N=32,
                                       Dc=64, causal=False, out_dtype="fp32",
                                       arg_decls=None, bindings=None,

@@ -65,8 +65,8 @@
   },
   "matmul_2048_fp32": {
     "name": "matmul_2048_fp32",
-    "min_ms": 1.498,
-    "tflops": 11.47
+    "min_ms": 1.4991,
+    "tflops": 11.46
   },
   "matmul_2048_fp16": {
     "name": "matmul_2048_fp16",
@@ -75,27 +75,53 @@
   },
   "matmul_2048_fp16out": {
     "name": "matmul_2048_fp16out",
-    "min_ms": 1.4045,
-    "tflops": 12.23
+    "min_ms": 1.3914,
+    "tflops": 12.35
   },
   "flash_attention_simdgroup_fp32": {
     "name": "flash_attention_simdgroup_fp32",
-    "_note": "DESIGN PROJECTION from 2026-06-20-simdgroup-flash-attention.md plan spec — NOT a live benchmark measurement. Numbers are plan-target projections based on simdgroup-matrix FLOPs and in-repo matmul-template peak (~11.4 TFLOP/s fp32). No hw_harness FA benchmark file exists yet. Correctness is verified (differential gate + torch parity, 12 cases all pass). Hardware: M4 Max.",
-    "config": "Z=1,H=8,N_CTX=1024,head_dim=128,causal=False",
+    "_note": "MEASURED on M4 Max via an integration microbenchmark of the shipped make_flash_attention_kernel_simdgroup (loop-split kernel; warmup + median over 50 iters). NOT yet a committed hw_harness regression benchmark. Correctness verified by the 12-case differential gate (simd==scalar==torch). Throughput scales with N_CTX. NOT competitive with Apple metal-flash-attention / MLX in absolute terms.",
     "kernel": "simdgroup_matrix MMA (make_flash_attention_kernel_simdgroup)",
-    "tflops_projected": 8.2,
-    "speedup_vs_scalar_projected": 7.4,
-    "pct_of_matmul_peak_projected": 70,
-    "NOT_competitive_with": ["Apple metal-flash-attention", "MLX"]
+    "measured": {
+      "N1024": {
+        "config": "Z=1,H=8,N_CTX=1024,head_dim=128,causal=False",
+        "tflops": 5.1,
+        "speedup_vs_scalar": 5.2,
+        "pct_of_matmul_peak": 45
+      },
+      "N2048": {
+        "config": "Z=1,H=8,N_CTX=2048,head_dim=128,causal=False",
+        "tflops": 6.8,
+        "speedup_vs_scalar": 6.1,
+        "pct_of_matmul_peak": 60
+      }
+    },
+    "NOT_competitive_with": [
+      "Apple metal-flash-attention",
+      "MLX"
+    ]
   },
   "flash_attention_simdgroup_fp16": {
     "name": "flash_attention_simdgroup_fp16",
-    "_note": "DESIGN PROJECTION from 2026-06-20-simdgroup-flash-attention.md plan spec — NOT a live benchmark measurement. Numbers are plan-target projections based on simdgroup-matrix FLOPs and in-repo matmul-template peak (~12.4 TFLOP/s fp16). No hw_harness FA benchmark file exists yet. Correctness is verified (differential gate + torch parity, 12 cases all pass). Hardware: M4 Max.",
-    "config": "Z=1,H=8,N_CTX=1024,head_dim=128,causal=False",
+    "_note": "MEASURED on M4 Max via an integration microbenchmark of the shipped make_flash_attention_kernel_simdgroup (loop-split kernel; warmup + median over 50 iters). NOT yet a committed hw_harness regression benchmark. Correctness verified by the 12-case differential gate (simd==scalar==torch). Throughput scales with N_CTX. NOT competitive with Apple metal-flash-attention / MLX in absolute terms.",
     "kernel": "simdgroup_matrix MMA (make_flash_attention_kernel_simdgroup)",
-    "tflops_projected": 9.6,
-    "speedup_vs_scalar_projected": 8.5,
-    "pct_of_matmul_peak_projected": 77,
-    "NOT_competitive_with": ["Apple metal-flash-attention", "MLX"]
+    "measured": {
+      "N1024": {
+        "config": "Z=1,H=8,N_CTX=1024,head_dim=128,causal=False",
+        "tflops": 6.3,
+        "speedup_vs_scalar": 6.4,
+        "pct_of_matmul_peak": 51
+      },
+      "N2048": {
+        "config": "Z=1,H=8,N_CTX=2048,head_dim=128,causal=False",
+        "tflops": 8.8,
+        "speedup_vs_scalar": 7.9,
+        "pct_of_matmul_peak": 71
+      }
+    },
+    "NOT_competitive_with": [
+      "Apple metal-flash-attention",
+      "MLX"
+    ]
   }
 }
