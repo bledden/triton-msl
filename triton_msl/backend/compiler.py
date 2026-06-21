@@ -95,10 +95,47 @@ def _msl_cache_key(mod_text, options_hash):
 # immediately on the first attempt without retrying.
 _METALLIB_COMPILE_ATTEMPTS = 3
 
+_NUM_STAGES_WARNED = False
+
+
+def _warn_inert_num_stages(n):
+    """Note ONCE (debug level >= 1) that num_stages > 1 is a no-op on Metal.
+
+    Keeps the contract honest: a user who sets num_stages expecting software
+    pipelining should know it has no effect here (correct result, just not
+    pipelined) rather than be silently ignored. One-shot to avoid log spam.
+    """
+    global _NUM_STAGES_WARNED
+    if _NUM_STAGES_WARNED:
+        return
+    _NUM_STAGES_WARNED = True
+    try:
+        from triton_msl.debug import _debug_level
+        if _debug_level() < 1:
+            return
+        import sys
+        print(f"[triton-msl] num_stages={n} requested but is a no-op on Metal: the "
+              f"backend's fast paths (direct-load + register-blocked matmul, "
+              f"prefetch+MLP FlashAttention) already saturate load/compute overlap; "
+              f"CUDA-style multi-stage pipelining measured no benefit. Result is "
+              f"correct, just not pipelined.", file=sys.stderr)
+    except Exception:
+        pass
+
 
 @dataclass(frozen=True)
 class MetalOptions:
     num_warps: int = 4
+    # num_stages is accepted for Triton-API compatibility but is INTENTIONALLY a
+    # no-op on Metal (default 1). On CUDA it sets the software-pipelining depth —
+    # multi-buffering threadgroup-staged operands to overlap global loads with MMA.
+    # That win does not transfer here: our fast paths stream operands DIRECTLY from
+    # device with register blocking (matmul) / explicit prefetch + MLP (FA), which
+    # already saturates load/compute overlap, and Apple GPUs have no cp.async to
+    # multi-stage. A num_stages=2 double-buffered matmul was measured flat-to-slower
+    # (11.13 vs 11.2 TFLOP/s at 2048^3 fp32 — extra live fragments just add register
+    # pressure), matching the FA K-prefetch (flat) and block-pipelining (wash)
+    # spikes. We do NOT silently imply pipelining: see _warn_inert_num_stages.
     num_stages: int = 1
     num_ctas: int = 1
     # Apple GPU SIMD-groups are always 32-wide.
@@ -187,6 +224,12 @@ class MetalBackend(BaseBackend):
         # Validate: no FP64 on Metal.
         arch = result.get("arch", "apple-m4")
         result["arch"] = arch
+
+        # num_stages is a no-op on Metal (see MetalOptions.num_stages). If the user
+        # explicitly asks for pipelining (>1), say so ONCE at debug level rather than
+        # silently ignoring it — the result is correct either way, just not pipelined.
+        if opts.get("num_stages", 1) and opts.get("num_stages", 1) > 1:
+            _warn_inert_num_stages(opts["num_stages"])
 
         return MetalOptions(**result)
 
