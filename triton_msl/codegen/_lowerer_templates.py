@@ -2449,7 +2449,9 @@ class _TemplateMixin:
         from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
         rr = rc = 4
         fast_msl = make_simdgroup_matmul_kernel_fast(dtype=msl_dtype, rr=rr, rc=rc, out_dtype=msl_out)
-        # (msl, m_idx, n_idx, k_idx, tile_m, tile_n); tile_m=8*rr, tile_n=32*rc.
-        return (fast_msl, 3, 4, 5, 8 * rr, 32 * rc)
+        # (msl, m_idx, n_idx, k_idx, tile_m, tile_n, msl_dtype, msl_out). The last two
+        # let the driver build alternative (rr,rc) variants for per-shape autotuning;
+        # the baked (4,4) msl stays the default/fallback.
+        return (fast_msl, 3, 4, 5, 8 * rr, 32 * rc, msl_dtype, msl_out)
 
 

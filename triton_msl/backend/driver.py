@@ -610,42 +610,18 @@ class MetalLauncher:
 
                     # --- Fast-matmul runtime dispatch (Phase 4) ---
                     # Dispatch the proven simdgroup fast template ONLY for MPS
-                    # tensors with aligned runtime dims. The compiled metallib is
-                    # the generic (bounds-checked, row-major) kernel and is the
-                    # fallback on ANY miss. M%32 is MANDATORY: otherwise the grid
-                    # rounds M up and the no-edge-handling template writes past C
-                    # (OOB). N%32 / K%8 are the col-strip / MMA-depth requirements.
+                    # tensors with aligned runtime dims.  Logic lives in
+                    # triton_msl.autotuning._fast_matmul_dispatch so it can be
+                    # unit-tested without triggering Triton backend discovery.
                     if (fast_matmul is not None and all_mps
                             and _os.environ.get("TRITON_MSL_FAST_MATMUL", "1") != "0"):
-                        try:
-                            fast_msl, m_idx, n_idx, k_idx, tile_m, tile_n = fast_matmul
-                        except (TypeError, ValueError):
-                            fast_msl = None
-                        if fast_msl is not None and not _rt.is_unsupported(fast_msl):
-                            try:
-                                M = int(kargs[m_idx]); N = int(kargs[n_idx]); K = int(kargs[k_idx])
-                                if (M > 0 and N > 0 and K > 0
-                                        and M % tile_m == 0 and N % 32 == 0 and K % 8 == 0):
-                                    import math as _math
-                                    n_groups = _math.ceil(M / tile_m) * _math.ceil(N / tile_n)
-                                    lib = _rt.get_library(fast_msl)
-                                    # The fast template declares exactly 6 buffers
-                                    # (A,B,C,M,N,K = kargs[:6]); pass only those so we
-                                    # don't rely on compile_shader silently ignoring the
-                                    # trailing stride args (which would self-disable the
-                                    # fast path if that tolerance ever changed).
-                                    _rt.dispatch(lib, "simdgroup_matmul_fast", kargs[:6],
-                                                 threads=n_groups * 128, group_size=128)
-                                    if launch_exit_hook:
-                                        launch_exit_hook(launch_metadata)
-                                    return
-                            except Exception:
-                                # Fast path failed -> mark its MSL unsupported and
-                                # fall through to the generic metallib (correct).
-                                try:
-                                    _rt.mark_unsupported(fast_msl)
-                                except Exception:
-                                    pass
+                        from triton_msl.autotuning._fast_matmul_dispatch import (
+                            dispatch_fast_matmul)
+                        if dispatch_fast_matmul(
+                                _rt, fast_matmul, kargs,
+                                launch_exit_hook=launch_exit_hook,
+                                launch_metadata=launch_metadata):
+                            return
 
                     # --- Existing elementwise 1-D-grid fast path (needs self._msl) ---
                     if self._msl is not None and not _rt.is_unsupported(self._msl):

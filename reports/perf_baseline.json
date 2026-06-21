@@ -123,5 +123,75 @@
       "Apple metal-flash-attention",
       "MLX"
     ]
+  },
+  "matmul_fast_path_unaligned_M": {
+    "_note": "Deterministic, occupancy-gated tile selection extends the fast simdgroup matmul to UNALIGNED M (TRITON_MSL_MATMUL_AUTOTUNE=1, default; =0 pins fixed (4,4)). NOT a GPU-timed autotuner (the earlier timed/disk-cached version measured within-noise AND introduced an N-contract silent-wrong; removed). The fixed (4,4) needs M%32==0, so M%32!=0 drops to the ~2.4 TFLOP/s generic path; a smaller tile (rr=2 tile_m=16 for M%16, rr=1 tile_m=8 for M%8) keeps LARGE unaligned-M matmuls on the fast path. Occupancy gate (n_groups >= 8*cores) so only enough-parallelism shapes use the fine tile; below it -> generic (never-regress). All configs provably correct (selection is perf-only). Measured 2026-06-20, M4 Max, @triton.jit fp32 (BM=BN=BK=32) through production dispatch_fast_matmul, ON vs OFF, 20 reps median.",
+    "platform": "M4 Max",
+    "candidates": [
+      [
+        4,
+        4
+      ],
+      [
+        4,
+        2
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        2,
+        8
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        2,
+        2
+      ],
+      [
+        1,
+        8
+      ],
+      [
+        1,
+        4
+      ],
+      [
+        1,
+        2
+      ]
+    ],
+    "occupancy_gate": "n_groups >= 8 * gpu_core_count (conservative; measured fast>generic crossover is noisy)",
+    "measured": {
+      "aligned_M2048_N2048_K2048": {
+        "on_tflops": 11.2,
+        "off_tflops": 11.1,
+        "ratio": 1.01,
+        "note": "(4,4) both ways -> no-op"
+      },
+      "unaligned_large_M2032_N2048_K2048": {
+        "on_tflops": 11.4,
+        "off_tflops": 2.4,
+        "ratio": 4.83,
+        "note": "rr=2 fast path vs generic"
+      },
+      "unaligned_large_M2040_N2048_K2048": {
+        "on_tflops": 8.4,
+        "off_tflops": 2.3,
+        "ratio": 3.66,
+        "note": "rr=1 fast path vs generic"
+      },
+      "unaligned_small_M48_N2048_K2048": {
+        "on_tflops": 0.2,
+        "off_tflops": 0.2,
+        "ratio": 1.06,
+        "note": "gate -> generic both ways; never-regress"
+      }
+    },
+    "opt_out": "TRITON_MSL_MATMUL_AUTOTUNE=0 pins fixed (4,4) (unaligned M -> generic)"
   }
 }

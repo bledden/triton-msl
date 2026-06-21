@@ -101,9 +101,17 @@ def test_eligible_fp32_emits_descriptor(monkeypatch):
     _run(_mm_fp32, A, B, C, M, N, K)            # fp32 in, fp32 out (no cast)
     descs = _descriptors()
     assert descs, "expected a fast_matmul descriptor for an eligible fp32 matmul"
-    msl, m_idx, n_idx, k_idx, tile_m, tile_n = descs[0]
+    desc = descs[0]
+    msl, m_idx, n_idx, k_idx, tile_m, tile_n = desc[0], desc[1], desc[2], desc[3], desc[4], desc[5]
     assert (m_idx, n_idx, k_idx, tile_m, tile_n) == (3, 4, 5, 32, 128)
     assert "simdgroup_matmul_fast" in msl
+    # Finding 1 coverage: descriptor must be 8 elements with msl_dtype / msl_out fields
+    assert len(desc) == 8, (
+        f"descriptor must be 8 elements (msl,m_idx,n_idx,k_idx,tile_m,tile_n,msl_dtype,msl_out); "
+        f"got {len(desc)}"
+    )
+    assert desc[6] == "fp32", f"desc[6] (msl_dtype) must be 'fp32' for fp32 input, got {desc[6]!r}"
+    assert desc[7] == "fp32", f"desc[7] (msl_out) must be 'fp32' for fp32 output, got {desc[7]!r}"
 
 
 @requires
@@ -117,10 +125,21 @@ def test_fp16_output_emits_half_variant_descriptor(monkeypatch):
     _run(_mm_fp16_out, A, B, C, M, N, K)
     descs = _descriptors()
     assert descs, "fp16-output matmul must now emit a fast_matmul descriptor"
-    msl, m_idx, n_idx, k_idx, tile_m, tile_n = descs[0]
+    desc = descs[0]
+    msl, m_idx, n_idx, k_idx, tile_m, tile_n = desc[0], desc[1], desc[2], desc[3], desc[4], desc[5]
     assert (m_idx, n_idx, k_idx, tile_m, tile_n) == (3, 4, 5, 32, 128)
     assert "device half* C [[buffer(2)]]" in msl          # the fp16-output variant
     assert "half(scratch[sgitg*64u + i])" in msl
+    # Finding 1 coverage: descriptor must be 8 elements with msl_dtype / msl_out fields
+    assert len(desc) == 8, (
+        f"descriptor must be 8 elements; got {len(desc)}"
+    )
+    assert desc[6] in ("fp16", "f16"), (
+        f"desc[6] (msl_dtype) must be a fp16 dtype string for fp16 input, got {desc[6]!r}"
+    )
+    assert desc[7] in ("fp16", "f16"), (
+        f"desc[7] (msl_out) must be a fp16 dtype string for fp16 output, got {desc[7]!r}"
+    )
 
 
 @requires
@@ -192,6 +211,7 @@ def test_abbreviated_name_emits_descriptor(monkeypatch):
         "expected a fast_matmul descriptor for an abbreviated-name fp32 matmul "
         "(routes through _lower_simple_dot_inline, not _lower_dot_simple_template)"
     )
-    msl, m_idx, n_idx, k_idx, tile_m, tile_n = descs[0]
+    desc = descs[0]
+    msl, m_idx, n_idx, k_idx, tile_m, tile_n = desc[0], desc[1], desc[2], desc[3], desc[4], desc[5]
     assert (m_idx, n_idx, k_idx, tile_m, tile_n) == (3, 4, 5, 32, 128)
     assert "simdgroup_matmul_fast" in msl
