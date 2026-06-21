@@ -1,19 +1,19 @@
 Triton Upstream Test Results: test_core.py
-Backend: metal
+Backend: metal   (captured 2026-06-17)
 ==================================================
 
-Total:   9194
-Passed:  5559 (60.5%)
+Total:   9342
+Passed:  5560 (60.5%)
 Failed:  0
-Skipped: 3635
+Skipped: 3782
 Errors:  0
 
 Failure Categories:
 
 Pytest summary (cross-check):
-  passed: 5559
-  skipped: 3783
-  warnings: 2296
+  passed: 5560
+  skipped: 3782
+  warnings: 121
 
 Sample passing tests:
   unit/language/test_core.py::test_scalar_overflow

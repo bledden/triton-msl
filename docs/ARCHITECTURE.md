@@ -295,15 +295,15 @@ Run `python benchmarks/bench_copy_overhead.py` for full numbers.
 ## Triton Upstream Test Results
 
 Against `triton/python/test/unit/language/test_core.py`, aligned to Triton
-3.7.0 (9,342 cases as of 2026-05-30; size drifts as upstream evolves), run
-with `scripts/run_upstream_test.sh` which loads
+3.7.0 (9,342 cases, captured 2026-06-17; size drifts as upstream evolves), run
+with `scripts/run_upstream_tests.py` which loads
 `-p conftest_metal` so the project's documented feature-gap skips apply:
 
 | Status | Count | % |
 |--------|-------|---|
-| Passed | 4,326 | 46.3% |
+| Passed | 5,560 | 59.5% |
 | Failed | 0 | 0.0% |
-| Skipped | 5,016 | 53.7% |
+| Skipped | 3,782 | 40.5% |
 
 - **Passed** = the backend compiled, dispatched, and the test assertion
   held end-to-end. No silent-wrong tolerated by a loose assertion (the

@@ -11,7 +11,7 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
 **Alpha** — actively developed, not yet production-ready.
 
 - **0 failures** across the upstream Triton `test_core.py` suite — 5,560 kernels
-  attempted and correct, ~3,634 documented feature-gap skips (each is either a
+  attempted and correct, 3,782 documented feature-gap skips (each is either a
   *refused* kernel — fails loudly, never silent-wrong — or a hardware-impossible
   case like FP64). Aligned with Triton [\[2\]](REFERENCES.md) release `3.7.0`.
   Measured by `scripts/run_upstream_tests.py` — the single source of truth for this
@@ -278,13 +278,17 @@ fp32 / fp16.
 | Softmax | 8192×1024 | 232 GB/s | 42% | **17.8×** |
 | Reduction | 16M | 235 GB/s | 43% | 8.2× |
 | Matmul (fp32) | 2048³ | 11.4 TFLOP/s | 62% of fp32 peak | ~4× generic |
-| Matmul (fp16) | 2048³ | 12.4 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
+| Matmul (fp16 in / fp32 out) | 2048³ | 12.4 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
+| Matmul (fp16 in / fp16 out) | 2048³ | 12.2 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
 | FlashAttention (fp32, head_dim=128)‡ | Z=1,H=8,N=1024 | 5.1 TFLOP/s | ~28% of fp32 peak | **~5.2× scalar FA** |
 | FlashAttention (fp16, head_dim=128)‡ | Z=1,H=8,N=1024 | 6.3 TFLOP/s | †| **~6.4× scalar FA** |
 
-\* fp16 matmul runs at roughly the fp32 matrix-unit rate (float accumulation for
-precision); Apple's simdgroup-matrix unit isn't faster for half accumulation, so the
-36.9 TFLOP/s fp16 figure is an unreachable vector-ALU peak. The ~58–64% memory-bound
+\* fp16 matmul uses fp16 inputs with a **float32 accumulator** (for precision). The
+12.4 figure is the default **fp32-output** path; the true **fp16→fp16** path
+(`out_dtype=fp16`) measures **12.2 TFLOP/s** — essentially identical, since both do
+the same MACs and the output-cast cost is negligible. Either way it runs at roughly
+the fp32 matrix-unit rate: Apple's simdgroup-matrix unit isn't faster for half
+accumulation, so the 36.9 TFLOP/s fp16 figure is an unreachable vector-ALU peak. The ~58–64% memory-bound
 and ~60% fp32-matmul numbers are **near the practical ceilings** for these kernel
 classes on this hardware (the raw 546 / 18.4 / 36.9 spec peaks are not reachable by
 compute) — see the Phase-5 readiness audit (`docs/audits/`).

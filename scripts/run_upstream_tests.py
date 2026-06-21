@@ -89,7 +89,13 @@ def parse_results(output):
 
     for line in output.split("\n"):
         # Match pytest -v format: test_path::test_name STATUS [pct%]
-        m = re.match(r"^(.*?)\s+(PASSED|FAILED|SKIPPED|ERROR)\s*(\[.*\])?\s*$", line)
+        # The optional `(?:\s+\([^)]*\))?` consumes the inline "(reason)" that
+        # pytest -v prints after SKIPPED for skips with a reason (skip/skipif with
+        # reason=...); without it the parser silently DROPPED those lines and
+        # under-counted skips by ~148 (reported 3,634 vs pytest's true 3,782).
+        m = re.match(
+            r"^(.*?)\s+(PASSED|FAILED|SKIPPED|ERROR)(?:\s+\([^)]*\))?\s*(\[.*\])?\s*$",
+            line)
         if m:
             test_name = m.group(1).strip()
             status = m.group(2).lower()
@@ -143,9 +149,11 @@ def write_report(results, failure_reasons, pytest_summary, report_dir, test_file
     pass_rate = (passed / total * 100) if total > 0 else 0
 
     # JSON report
+    import datetime
     report = {
         "test_file": test_file,
         "backend": "metal",
+        "captured_date": datetime.date.today().isoformat(),
         "total": total,
         "passed": passed,
         "failed": failed,

@@ -44,7 +44,7 @@ follow-up. #1 inductor, #3 training, #4 2D-gather all landed BEFORE the rebrand.
   Rollback if needed: `pip install --break-system-packages torch==2.9.1`.
 - Health: project suite **787/0** post-rebrand (was 808/0; the −21 = the C++ csrc tests now
   SKIP "not built" pending the `_triton_msl_cpp` rebuild — NOT failures); upstream `test_core`
-  **5,560/0/3,634** post-rebrand (re-confirmed via `scripts/run_upstream_tests.py --timeout 2400`;
+  **5,560/0/3,782** post-rebrand (re-confirmed via `scripts/run_upstream_tests.py --timeout 2400`;
   pass count == the post-2D-gather baseline exactly → rename is conformance-regression-free; the
   first attempt hit the 900s thermal timeout, hence the longer `--timeout`). FlashAttention causal +
   non-causal at head_dim 32/64/128. **`torch.compile` routes through triton-msl** (inference +

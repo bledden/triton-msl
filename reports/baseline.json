@@ -1,8 +1,8 @@
 {
-    "pass_count": 4280,
-    "fail_count": 0,
-    "skip_count": 5054,
-    "total": 9334,
-    "date": "2026-03-10",
-    "note": "After tt.map_elementwise + cf.cond_br support (+1)"
+  "pass_count": 5560,
+  "fail_count": 0,
+  "skip_count": 3782,
+  "total": 9342,
+  "date": "2026-06-17",
+  "note": "Conformance ratchet floor: scripts/check_upstream_regression.py fails if a future run drops below pass_count or exceeds fail_count. Refreshed from the 2026-03-10 / 4280-pass snapshot (which had drifted 103 days stale, making the gate near-useless) to the current verified test_core state (Triton 3.7.0). Re-run scripts/run_upstream_tests.py + bump this when passes increase."
 }

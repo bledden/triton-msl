@@ -12,8 +12,8 @@ dependencies, scope estimates, and file-level change lists.
 
 ## Current status (2026-06-17) — supersedes the 2026-04-09 status line
 
-**0.1.0-alpha; first public release 2026-06-16.** Upstream `test_core.py`: **5,559 passed /
-0 failed / ~3,783 skipped** via `scripts/run_upstream_tests.py` (`--device cpu`, which loads
+**0.1.0-alpha; first public release 2026-06-16.** Upstream `test_core.py`: **5,560 passed /
+0 failed / 3,782 skipped** (captured 2026-06-17) via `scripts/run_upstream_tests.py` (`--device cpu`, which loads
 the `conftest_metal` skip plugin). The skips are hardware-impossible (fp64, fp8/microscaling,
 64-bit atomics, TMA, device printf) or unimplemented features — **each refused loudly, never
 silent-wrong**. Project suite **799 / 0** (incl. 38 `torch.compile` + real-model tests + 7

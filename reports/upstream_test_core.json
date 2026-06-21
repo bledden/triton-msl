@@ -1,17 +1,17 @@
 {
   "test_file": "test_core.py",
   "backend": "metal",
-  "total": 9194,
-  "passed": 5559,
+  "total": 9342,
+  "passed": 5560,
   "failed": 0,
-  "skipped": 3635,
+  "skipped": 3782,
   "errors": 0,
-  "pass_rate": 60.5,
+  "pass_rate": 59.5,
   "failure_categories": {},
   "pytest_summary": {
-    "warnings": 2296,
-    "passed": 5559,
-    "skipped": 3783
+    "warnings": 121,
+    "passed": 5560,
+    "skipped": 3782
   },
   "passed_tests": [
     "unit/language/test_core.py::test_scalar_overflow",
@@ -65,5 +65,6 @@
     "unit/language/test_core.py::test_bin_op[1-uint8-int32-+]",
     "unit/language/test_core.py::test_bin_op[1-uint8-int64-+]"
   ],
-  "failed_tests": []
+  "failed_tests": [],
+  "captured_date": "2026-06-17"
 }

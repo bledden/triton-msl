@@ -65,8 +65,8 @@
   },
   "matmul_2048_fp32": {
     "name": "matmul_2048_fp32",
-    "min_ms": 1.4991,
-    "tflops": 11.46
+    "min_ms": 1.4746,
+    "tflops": 11.65
   },
   "matmul_2048_fp16": {
     "name": "matmul_2048_fp16",
@@ -75,8 +75,8 @@
   },
   "matmul_2048_fp16out": {
     "name": "matmul_2048_fp16out",
-    "min_ms": 1.3914,
-    "tflops": 12.35
+    "min_ms": 1.4046,
+    "tflops": 12.23
   },
   "flash_attention_simdgroup_fp32": {
     "name": "flash_attention_simdgroup_fp32",

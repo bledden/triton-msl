@@ -13,7 +13,7 @@ First public release on PyPI: `pip install triton-msl`, `import triton_msl`.
   backend/device id and every Apple-Metal API term (`Metal*` classes, `metal::`,
   `.metal`, `xcrun metal`) are unchanged. Env vars hard-renamed `TRITON_METAL_*` →
   `TRITON_MSL_*`. Verified regression-free: project suite 787/0, `test_core`
-  5,560/0/3,634.
+  5,560/0/3,782.
 
 ### torch.compile + training via the inductor backend (2026-06-18)
 
@@ -72,8 +72,8 @@ First public release on PyPI: `pip install triton-msl`, `import triton_msl`.
   This is **not** MLX-parity (fp16 runs at ~fp32 rate to keep float accumulation); the
   earlier "~13.8 TFLOP/s MLX parity" docstring claim was an overstatement and is corrected.
 - **MEPT** multi-element-per-thread register-array model is the default lowering path.
-- **Test suite (Triton 3.7.0):** upstream `test_core.py` **5,559 passed / 0 failed /
-  ~3,783 feature-gap skips** (each a loud refusal or HW-impossible); the single source of
+- **Test suite (Triton 3.7.0):** upstream `test_core.py` **5,560 passed / 0 failed /
+  3,782 feature-gap skips** (each a loud refusal or HW-impossible); the single source of
   truth is `scripts/run_upstream_tests.py` (`--device cpu`, which loads the `conftest_metal`
   skip plugin), not hand-maintained counts.
   Project suite **754 passed / 0 failed**. FlashAttention causal + non-causal at HEAD_DIM
