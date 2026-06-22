@@ -983,6 +983,38 @@ class _DetectionMixin:
                 if input_type:
                     input_shape = _extract_shape(input_type)
                     if input_shape and len(input_shape) == 3:
+                        # The 3D-reduce template reads the RAW load pointer, so any
+                        # value-changing op between the load and the reduce (e.g.
+                        # tl.sum(a * s) / a.to(f32) / a + b) is SILENTLY DROPPED
+                        # (2026-06-21 audit silent-wrong: tl.sum(a*s) returned the
+                        # unscaled sum). The op-by-op generic 3D-reduce path
+                        # (_lower_reduce_3d) ALSO mis-computes this shape (only the
+                        # first row), so there is no correct fall-through — REFUSE
+                        # LOUDLY rather than emit silently-wrong output. Only the
+                        # DIRECT-load case (reduce input traces to a tt.load through
+                        # layout-only ops) is validated and kept.
+                        _obid = {s.id: s for s in self.graph.ops}
+                        def _is_direct_load(_sid, _depth=0):
+                            _o = _obid.get(_sid)
+                            if _o is None or _depth > 16:
+                                return False
+                            if _o.op == "tt.load":
+                                return True
+                            if (_o.op in ("tt.reshape", "ttg.convert_layout")
+                                    and _o.operand_ids):
+                                return _is_direct_load(_o.operand_ids[0], _depth + 1)
+                            return False
+                        if not _is_direct_load(ssa.operand_ids[0]):
+                            from triton_msl.errors import MetalNonRecoverableError
+                            raise MetalNonRecoverableError(
+                                "3D reduce with a pre-reduce elementwise op (e.g. "
+                                "tl.sum(a * s, axis=2), a.to(f32), a + b before the "
+                                "reduce) is not supported: the 3D-reduce template "
+                                "reduces the RAW loaded values and would silently drop "
+                                "the op, and the generic 3D-reduce path mis-computes "
+                                "this shape. Refusing to emit silently-wrong output. "
+                                "Apply the op after the reduce where valid (e.g. "
+                                "s * tl.sum(a, axis=2)) or in a separate kernel.")
                         axis = ssa.attrs.get("axis", 0)
                         # Detect argmin/argmax: 2 operands (values, indices)
                         is_argminmax = len(ssa.operand_ids) >= 2

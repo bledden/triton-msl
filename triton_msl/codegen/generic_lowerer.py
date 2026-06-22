@@ -683,6 +683,25 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                         if _dims:
                             _fa_maxdim = max([_fa_maxdim] + _dims)
                             _fa_mindim = min([_fa_mindim] + _dims)
+            # DTYPE GATE (2026-06-21 audit): the attention lowering — generic,
+            # C++, and the tiled/simdgroup templates — is validated only for
+            # fp32/fp16 dot operands. bf16 dot operands SILENTLY mis-compute
+            # (head_dim 32/64 dispatched wrong numbers, max err 0.4..218; the
+            # head_dim>64 guard never fired, no dtype guard existed). Refuse them
+            # LOUDLY here, before any head_dim routing, rather than emit garbage.
+            # Covers bf16 introduced via explicit .to(tl.bfloat16) on Q/K/V or the
+            # scores (any dot operand). FA stays fp16/fp32 only.
+            _fa_has_bf16 = any(
+                (self._find_op_type_str(_oid) or "") and
+                ("bf16" in (self._find_op_type_str(_oid) or "")
+                 or "bfloat" in (self._find_op_type_str(_oid) or ""))
+                for _d in _fa_dots for _oid in (_d.operand_ids or []))
+            if _fa_has_bf16:
+                raise MetalNonRecoverableError(
+                    "FlashAttention with bf16 dot operands is not supported: the "
+                    "attention lowering (fp32/fp16 only) silently mis-computes for "
+                    "bf16 at any head_dim. Refusing to emit silently-wrong output. "
+                    "Use fp16 or fp32 for Q/K/V in attention.")
             # Empirically mapped failure boundary (2026-06-17): the attention
             # lowering is validated only at BLOCK_M = BLOCK_N = 32, head_dim in
             # {32, 64}. Two distinct out-of-range failure modes — only ONE was

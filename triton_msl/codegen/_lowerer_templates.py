@@ -198,22 +198,26 @@ class _TemplateMixin:
             lines.append(f"        simdgroup_store(acc2, {c_name} + c_batch_off + (row_base + 16u) * N + col_base, N);")
             lines.append(f"        simdgroup_store(acc3, {c_name} + c_batch_off + (row_base + 24u) * N + col_base, N);")
         else:
-            # For half output, store through threadgroup memory and convert
-            lines.append(f"        // Store accumulators (float) to threadgroup, then convert to {output_msl_type}")
-            lines.append(f"        threadgroup float tg_out[32 * 8];")
-            lines.append(f"        simdgroup_store(acc0, tg_out, 8);")
-            lines.append(f"        simdgroup_store(acc1, tg_out + 64u, 8);")
-            lines.append(f"        simdgroup_store(acc2, tg_out + 128u, 8);")
-            lines.append(f"        simdgroup_store(acc3, tg_out + 192u, 8);")
-            lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
-            lines.append(f"        for (uint i = tiitg; i < 256u; i += 128u) {{")
-            lines.append(f"            uint r = i / 8u, c = i % 8u;")
-            lines.append(f"            uint gr = row_base + r, gc = col_base + c;")
-            lines.append(f"            if (gr < M && gc < N) {{")
-            lines.append(f"                {c_name}[c_batch_off + gr * N + gc] = {output_msl_type}(tg_out[i]);")
-            lines.append(f"            }}")
-            lines.append(f"        }}")
-            lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
+            # Non-float (half/bfloat) output: a float8x8 accumulator can't
+            # simdgroup_store directly to a half/bfloat buffer, so stage through a
+            # threadgroup float slot, then cast per element. Each simdgroup owns a
+            # DISTINCT 8-column slice (col_base = tile_col*32 + sgitg*8), so it MUST
+            # stage into its OWN 64-float slot (tg_out + sgitg*64u) — the old code
+            # stored every simdgroup's acc0..3 to the SAME fixed offsets (0/64/128/
+            # 192), which RACED across simdgroups and returned wrong, nondeterministic
+            # results (silent-wrong). One accumulator (8-row block) at a time, with a
+            # barrier; mirrors the masked staged store in _lower_k_loop_dot_inline.
+            lines.append(f"        // Store accumulators (float) via per-simdgroup slot, convert to {output_msl_type}")
+            lines.append(f"        threadgroup float tg_out[4u * 64u];")
+            lines.append(f"        uint laneid = tiitg % 32u;")
+            for _n, _acc in enumerate(("acc0", "acc1", "acc2", "acc3")):
+                lines.append(f"        simdgroup_store({_acc}, tg_out + sgitg * 64u, 8);")
+                lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
+                lines.append(f"        for (uint i = laneid; i < 64u; i += 32u) {{")
+                lines.append(f"            uint gr = row_base + {_n * 8}u + i / 8u, gc = col_base + i % 8u;")
+                lines.append(f"            if (gr < M && gc < N) {{ {c_name}[c_batch_off + gr * N + gc] = {output_msl_type}(tg_out[sgitg * 64u + i]); }}")
+                lines.append(f"        }}")
+                lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         lines.append(f"    }} // tile_col")
         lines.append(f"    }} // tile_row")
