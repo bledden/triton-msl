@@ -233,9 +233,11 @@ def make_reduce_kernel(name, op, block_size=256, dtype="fp32"):
     kb.indent()
     kb._var("idx", f"pid * n_elements + i", ty="uint")
     if combine in ("+",):
-        kb.raw_line("acc += input[idx];")
+        kb.raw_line("acc += float(input[idx]);")
     else:
-        kb.raw_line(f"acc = {combine}(acc, input[idx]);")
+        # acc is float; cast the (possibly half/bfloat) input so max/min isn't an
+        # ambiguous mixed-type MSL overload (compile error for fp16/bf16 reduce).
+        kb.raw_line(f"acc = {combine}(acc, float(input[idx]));")
     kb.dedent()
     kb.raw_line("}")
 
@@ -500,6 +502,17 @@ def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32", out_dty
     if fp8_input:
         for fn_src in fp8_device_functions(dtype):
             kb._device_functions.append(fn_src)
+
+    # Threadgroup budget: tileA + tileB are fp32 (4 B each). Refuse if they exceed
+    # Metal's 32 KiB limit rather than emit a kernel that crashes cryptically at
+    # pipeline-state creation (e.g. block 128 -> two 64 KiB tiles = 128 KiB).
+    _tg_bytes = (block_m * block_k + block_k * block_n) * 4
+    if _tg_bytes > 32 * 1024:
+        from triton_msl.errors import MetalNonRecoverableError
+        raise MetalNonRecoverableError(
+            f"matmul tile {block_m}x{block_n}x{block_k} needs {_tg_bytes // 1024} KiB "
+            f"of threadgroup memory (tileA + tileB, fp32), over Metal's 32 KiB limit. "
+            f"Use smaller BLOCK_M/BLOCK_N/BLOCK_K.")
 
     # Shared memory tiles (always float for computation)
     kb.declare_threadgroup_array("tileA", dtype="fp32", size=block_m * block_k)

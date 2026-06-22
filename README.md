@@ -19,17 +19,17 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
   backend compiles and runs the kernels on the GPU, since upstream `test_core`
   otherwise assumes CUDA). Re-run it to reproduce; counts in this file and
   `CHANGELOG.md` are regenerated from it, not hand-maintained.
-- **787 passed / 0 failed** in the project suite (codegen, GPU correctness,
+- **877 passed / 0 failed** in the project suite (codegen, GPU correctness,
   integration, FlashAttention, MLX backend, fast-matmul / compile_shader
   zero-copy, `torch.compile`, and training). FlashAttention: causal + non-causal
   at **HEAD_DIM 32 / 64 / 128** (head_dim 128 fp32 + fp16 via the simdgroup-MMA
   template; see [\[4\]](REFERENCES.md) for the algorithm); **15 / 15** MLX backend
-  tests; the project suite grew from 434 → 603 → 716 → ~800 since `0.1.0-alpha`.
+  tests; the project suite grew from 434 → 603 → 716 → ~877 since `0.1.0-alpha`.
   (A further ~20 C++-MLIR-backend tests skip unless that optional extension is
   built.)
 - **`torch.compile` routes through triton-msl** on Python 3.10–3.14 (PyTorch
   Inductor [\[12\]](REFERENCES.md)) — inference and training (AOTAutograd
-  backward), static and `dynamic=True`; **32 / 32** `torch.compile` model tests
+  backward), static and `dynamic=True`; **33 / 33** `torch.compile` model tests
   plus the training suite pass.
 - Triton tutorials 01–03, 05 passing.
 - Built against Triton's `TRITON_EXT_ENABLED=1` plugin architecture
@@ -280,6 +280,8 @@ fp32 / fp16.
 | Matmul (fp32) | 2048³ | 11.4 TFLOP/s | 62% of fp32 peak | ~4× generic |
 | Matmul (fp16 in / fp32 out) | 2048³ | 12.4 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
 | Matmul (fp16 in / fp16 out) | 2048³ | 12.2 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
+| Matmul (bf16 in / fp32 out) | 2048³ | 12.0 TFLOP/s | ≈ fp32 rate\* | **~4.9× generic** |
+| Matmul (bf16 in / bf16 out) | 2048³ | 11.9 TFLOP/s | ≈ fp32 rate\* | **~4.9× generic** |
 | FlashAttention (fp32, head_dim=128)‡ | Z=1,H=8,N=1024 | 5.1 TFLOP/s | ~28% of fp32 peak | **~5.2× scalar FA** |
 | FlashAttention (fp16, head_dim=128)‡ | Z=1,H=8,N=1024 | 6.3 TFLOP/s | †| **~6.4× scalar FA** |
 
@@ -302,7 +304,7 @@ competitive with Apple metal-flash-attention or MLX in absolute terms**.
 `make_flash_attention_kernel_simdgroup`: warmup + median over 50 iters), not yet a
 committed regression-benchmark harness. Throughput scales with sequence length —
 ~6.8 TFLOP/s (fp32, ~6.1×) / ~8.8 TFLOP/s (fp16, ~7.9×) at N=2048. Correctness
-is verified by the 12-case differential gate (`tests/test_fa_simdgroup_diff.py`: simd
+is verified by the 16-case differential gate (`tests/test_fa_simdgroup_diff.py`: simd
 == scalar oracle == torch, all pass). A dedicated FA throughput benchmark is on the
 roadmap.
 

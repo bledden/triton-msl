@@ -192,7 +192,7 @@ A heuristic text parser cannot be *proven* correct for arbitrary kernels, so
 the legacy fallback is deliberately load-bearing for as few kernels as
 possible (the long-term goal is to retire it once the primary path is
 complete, leaving a single auditable lowering path). Correctness for the
-covered surface is enforced by the upstream suite (4327 passing, 0 failing).
+covered surface is enforced by the upstream suite (5,560 passing, 0 failing).
 
 These guards were found by **classifying the skip-listed feature-gap tests**
 as loud-failure (compile error / refusal — integrity-safe) vs silent-wrong
@@ -222,18 +222,18 @@ The generic lowerer assumes each thread processes one scalar element:
 
 **Limitation:** 2D tensor operations (`tt.expand_dims`, `tt.broadcast`, `ttg.convert_layout`) are no-ops in the generic lowerer. Kernels that rely on 2D tensor semantics (matmul, 2D convolution, multi-head attention with 2D tiling) must use the matmul template path or a dedicated prebuilt kernel.
 
-### Multi-element-per-thread (experimental, `TRITON_MSL_MEPT=1`)
+### Multi-element-per-thread (`TRITON_MSL_MEPT`, default-on)
 
-There is an **opt-in, off-by-default** experimental path that lets a thread
-hold *N* tensor elements as a register array (`T v[N]`) instead of one
-scalar — the prototype of a register-array programming model. It is gated
-end-to-end on the `mept_enabled` flag; the producer (`tt.make_range`) is the
-single activation root, and with the flag off the generated MSL is
-byte-identical to not having it.
+A thread can hold *N* tensor elements as a register array (`T v[N]`) instead of
+one scalar — the register-array programming model. It is **default-on**
+(`TRITON_MSL_MEPT` defaults to `1`; set `TRITON_MSL_MEPT=0` to disable as an
+escape hatch). It is gated end-to-end on the `mept_enabled` flag; the producer
+(`tt.make_range`) is the single activation root, and with the flag off the
+generated MSL is byte-identical to not having it.
 
 **Status, stated honestly for reviewers:**
 - *Correct:* the full upstream `test_core` suite passes with the flag **on**
-  as well as off (4327 / 0 both ways).
+  as well as off (5,560 / 0 both ways).
 - *Not a perf feature:* benchmarked perf-neutral on elementwise/reduce
   kernels (the array form and the scalar wrap-loop are both
   bandwidth-bound; deltas are within launch-overhead noise).

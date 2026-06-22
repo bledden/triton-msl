@@ -22,6 +22,9 @@ import os
 # Ordered preference: (4,4) first (the default / aligned common case, unchanged),
 # then rr=2 tiles (serve M%16), then rr=1 tiles (serve M%8). Within an rr, larger rc
 # first (more register blocking). Register budget rr*rc <= 32.
+# NOTE: (4,8) is effectively UNREACHABLE via best_rrrc — it needs N%256, which implies
+# N%128, so (4,4) is always also valid and is returned first. It is kept only for
+# valid_candidates completeness/symmetry; it is never *selected*.
 CANDIDATES = [(4, 4), (4, 2), (4, 8),
               (2, 8), (2, 4), (2, 2),
               (1, 8), (1, 4), (1, 2)]

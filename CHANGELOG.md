@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased (post-0.1.0a1)
+
+- **bf16 fast matmul** — bf16 is now a fast-matmul input via the M-series
+  `simdgroup_bfloat8x8` matrix unit (bf16 in + float32 accumulate, fp32/bf16 out),
+  ~12 TFLOP/s vs the ~2.4 TFLOP/s generic float-compute fallback (~4.9×). bf16 is
+  the dominant training dtype. FlashAttention bf16 stays refused (FA kernel is
+  fp16/fp32 only).
+- **Deterministic occupancy-gated matmul tile selection** — extends the fast path
+  to unaligned M (`M%32≠0`): ~3.7–4.8× for large unaligned-M matmuls vs the generic
+  path, no-op aligned, never-regress small (`TRITON_MSL_MATMUL_AUTOTUNE=0` opts out).
+- **simdgroup-MMA FlashAttention** at head_dim=128 (fp32 + fp16, causal + non-causal).
+- **`num_stages`** is a documented, honest no-op (pipelining measured not to help on
+  Apple — no `cp.async`; the fast paths already overlap load/compute).
+- **3 silent-wrongs fixed** (2026-06-21 dual-lens audit): the fp16/bf16 simple-dot
+  epilogue raced on a shared threadgroup slot; bf16 FlashAttention at head_dim 32/64
+  dispatched wrong (now refused via a dtype gate); a 3D reduce with a pre-reduce op
+  (`tl.sum(a*s)`) silently dropped the op (now refused, since both reduce paths
+  mis-handle it). Each is regression-tested.
+- **Reporting-honesty pass** — fixed a skip-count parser undercount (3,634 → true
+  3,782), refreshed the stale conformance ratchet baseline (4,280 → 5,560), corrected
+  the fp16 matmul headline label (fp16-in/fp32-out), and stale doc counts.
+
 ## 0.1.0a1 — first PyPI release as `triton-msl` (2026-06-19)
 
 First public release on PyPI: `pip install triton-msl`, `import triton_msl`.

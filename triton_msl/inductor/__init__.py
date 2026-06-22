@@ -98,6 +98,9 @@ def register_metal_triton_backend():
     # the compiled result reproducible and correct. Correctness > the autotuning
     # speedup; our real perf comes from the hand-written fast paths, not from
     # autotuning inductor's generic tiles.
+    # NOTE: this gates *pointwise* autotuning only. Persistent/reduction config
+    # correctness is enforced separately by the under-filling filter below (which
+    # drops configs whose dispatched threads would surplus-over-count a reduction).
     if hasattr(_ind_config, "triton") and hasattr(_ind_config.triton, "autotune_pointwise"):
         _ind_config.triton.autotune_pointwise = False
 

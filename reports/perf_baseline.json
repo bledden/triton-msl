@@ -65,22 +65,22 @@
   },
   "matmul_2048_fp32": {
     "name": "matmul_2048_fp32",
-    "min_ms": 1.4801,
-    "tflops": 11.61
+    "min_ms": 1.9045,
+    "tflops": 9.02
   },
   "matmul_2048_fp16": {
     "name": "matmul_2048_fp16",
-    "min_ms": 1.3801,
-    "tflops": 12.45
+    "min_ms": 1.8028,
+    "tflops": 9.53
   },
   "matmul_2048_fp16out": {
     "name": "matmul_2048_fp16out",
-    "min_ms": 1.4033,
-    "tflops": 12.24
+    "min_ms": 1.7451,
+    "tflops": 9.84
   },
   "flash_attention_simdgroup_fp32": {
     "name": "flash_attention_simdgroup_fp32",
-    "_note": "MEASURED on M4 Max via an integration microbenchmark of the shipped make_flash_attention_kernel_simdgroup (loop-split kernel; warmup + median over 50 iters). NOT yet a committed hw_harness regression benchmark. Correctness verified by the 12-case differential gate (simd==scalar==torch). Throughput scales with N_CTX. NOT competitive with Apple metal-flash-attention / MLX in absolute terms.",
+    "_note": "MEASURED on M4 Max via an integration microbenchmark of the shipped make_flash_attention_kernel_simdgroup (loop-split kernel; warmup + median over 50 iters). NOT yet a committed hw_harness regression benchmark. Correctness verified by the 16-case differential gate (simd==scalar==torch). Throughput scales with N_CTX. NOT competitive with Apple metal-flash-attention / MLX in absolute terms.",
     "kernel": "simdgroup_matrix MMA (make_flash_attention_kernel_simdgroup)",
     "measured": {
       "N1024": {
@@ -103,7 +103,7 @@
   },
   "flash_attention_simdgroup_fp16": {
     "name": "flash_attention_simdgroup_fp16",
-    "_note": "MEASURED on M4 Max via an integration microbenchmark of the shipped make_flash_attention_kernel_simdgroup (loop-split kernel; warmup + median over 50 iters). NOT yet a committed hw_harness regression benchmark. Correctness verified by the 12-case differential gate (simd==scalar==torch). Throughput scales with N_CTX. NOT competitive with Apple metal-flash-attention / MLX in absolute terms.",
+    "_note": "MEASURED on M4 Max via an integration microbenchmark of the shipped make_flash_attention_kernel_simdgroup (loop-split kernel; warmup + median over 50 iters). NOT yet a committed hw_harness regression benchmark. Correctness verified by the 16-case differential gate (simd==scalar==torch). Throughput scales with N_CTX. NOT competitive with Apple metal-flash-attention / MLX in absolute terms.",
     "kernel": "simdgroup_matrix MMA (make_flash_attention_kernel_simdgroup)",
     "measured": {
       "N1024": {

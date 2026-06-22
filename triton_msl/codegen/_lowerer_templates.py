@@ -427,7 +427,7 @@ class _TemplateMixin:
         # Threadgroup budget: the staged path needs tg_A + tg_B (plus a small
         # 1 KiB store scratch). Refuse if it exceeds Metal's 32 KiB threadgroup
         # limit rather than emit a kernel that silently overflows.
-        tg_elt = 2 if tg_type == "half" else 4
+        tg_elt = 2 if tg_type in ("half", "bfloat") else 4   # bfloat is 2 bytes too
         tg_bytes = (tg_a_size + tg_b_size) * tg_elt + 4 * 64 * 4
         if tg_bytes > 32 * 1024:
             raise MetalNonRecoverableError(
