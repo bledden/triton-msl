@@ -488,6 +488,10 @@ def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32", out_dty
     elif out_dtype is None:
         out_dtype = dtype
     kb.add_ptr_arg("C", dtype=out_dtype, const=False)
+    # The accumulator is float; the C store must cast to the output element type.
+    # MSL permits implicit float->half but NOT float->bfloat, so the cast is
+    # required for bf16 output (and harmless/correct for fp16/fp32).
+    out_msl = triton_type_to_msl(out_dtype)
     kb.add_scalar_arg("M", dtype="u32")
     kb.add_scalar_arg("N", dtype="u32")
     kb.add_scalar_arg("K", dtype="u32")
@@ -609,7 +613,7 @@ def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32", out_dty
         kb.raw_line(f"uint gc = tile_col * {block_n}u + olc;")
         kb.raw_line("if (gr < M && gc < N) {")
         kb.indent()
-        kb.raw_line("C[gr * N + gc] = acc;")
+        kb.raw_line(f"C[gr * N + gc] = {out_msl}(acc);")
         kb.dedent()
         kb.raw_line("}")
     else:
@@ -622,7 +626,7 @@ def make_matmul_kernel(block_m=32, block_n=32, block_k=32, dtype="fp32", out_dty
         kb.raw_line(f"uint gc = tile_col * {block_n}u + olc;")
         kb.raw_line("if (gr < M && gc < N) {")
         kb.indent()
-        kb.raw_line("C[gr * N + gc] = acc[_e];")
+        kb.raw_line(f"C[gr * N + gc] = {out_msl}(acc[_e]);")
         kb.dedent()
         kb.raw_line("}")
         kb.dedent()
@@ -4153,17 +4157,23 @@ def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4, out_dtype="fp32"
     """
     if dtype in ("fp16", "f16"):
         in_t, in_frag, pad = "half", "simdgroup_half8x8", "half(0.0h)"
+    elif dtype in ("bf16",):
+        # M-series simdgroup matrix units DO support bfloat (verified
+        # simdgroup_bfloat8x8 on M4); bf16 input + float accumulator, like fp16.
+        in_t, in_frag, pad = "bfloat", "simdgroup_bfloat8x8", "bfloat(0.0)"
     elif dtype in ("fp32", "f32"):
         in_t, in_frag, pad = "float", "simdgroup_float8x8", "0.0f"
     else:
-        raise ValueError(f"fast matmul supports fp16/fp32, got {dtype}")
+        raise ValueError(f"fast matmul supports fp16/bf16/fp32, got {dtype}")
 
     if out_dtype in ("fp32", "f32"):
         out_t = "float"
     elif out_dtype in ("fp16", "f16"):
         out_t = "half"
+    elif out_dtype in ("bf16",):
+        out_t = "bfloat"
     else:
-        raise ValueError(f"fast matmul out_dtype supports fp16/fp32, got {out_dtype}")
+        raise ValueError(f"fast matmul out_dtype supports fp16/bf16/fp32, got {out_dtype}")
 
     accs = "\n    ".join(
         "simdgroup_float8x8 " + ", ".join(f"c{r}_{c}(0)" for c in range(rc))
@@ -4179,7 +4189,9 @@ def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4, out_dtype="fp32"
             inner.append(
                 f"simdgroup_multiply_accumulate(c{r}_{c}, a_frag, b{c}, c{r}_{c});")
     inner = "\n        ".join(inner)
-    if out_dtype in ("fp16", "f16"):
+    if out_dtype in ("fp16", "f16", "bf16"):
+        # float8x8 accumulator can't simdgroup_store directly to a half/bfloat
+        # buffer -> store to a float scratch, then cast per-element to out_t.
         _tiisg_param = ",\n    uint tiisg [[thread_index_in_simdgroup]]"
         _scratch_line = "    threadgroup float scratch[4 * 64];\n"
         _epi = []
@@ -4190,7 +4202,7 @@ def make_simdgroup_matmul_kernel_fast(dtype="fp16", rr=4, rc=4, out_dtype="fp32"
                 _epi.append(
                     f"for (uint i = tiisg; i < 64u; i += 32u) {{ "
                     f"C[(row_base + {r * 8}u + i / 8u) * N + col0 + {c * 8}u + i % 8u] "
-                    f"= half(scratch[sgitg*64u + i]); }}")
+                    f"= {out_t}(scratch[sgitg*64u + i]); }}")
                 _epi.append("simdgroup_barrier(mem_flags::mem_threadgroup);")
         stores = "\n    ".join(_epi)
     else:

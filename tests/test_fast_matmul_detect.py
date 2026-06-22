@@ -61,7 +61,7 @@ def _mm_fp16_out(a_ptr, b_ptr, c_ptr, M, N, K,
 def _mm_bf16_out(a_ptr, b_ptr, c_ptr, M, N, K,
                  stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
-    """bf16 in -> bf16 out (NOT eligible: bf16 output is not supported by fast template)."""
+    """bf16 in -> bf16 out (eligible: simdgroup_bfloat8x8 input + bf16 cast-epilogue out)."""
     pid_m = tl.program_id(0); pid_n = tl.program_id(1)
     offm = pid_m * BM + tl.arange(0, BM); offn = pid_n * BN + tl.arange(0, BN); offk = tl.arange(0, BK)
     a_ptrs = a_ptr + (offm[:, None] * stride_am + offk[None, :] * stride_ak)
@@ -143,20 +143,18 @@ def test_fp16_output_emits_half_variant_descriptor(monkeypatch):
 
 
 @requires
-def test_bf16_output_no_descriptor(monkeypatch):
+def test_bf16_emits_descriptor_and_computes(monkeypatch):
     shutil.rmtree(CACHE, ignore_errors=True)
     monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
     M = N = K = 256
     A = torch.randn(M, K, device="mps", dtype=torch.bfloat16)
     B = torch.randn(K, N, device="mps", dtype=torch.bfloat16)
     C = torch.empty(M, N, device="mps", dtype=torch.bfloat16)
-    # bf16 generic-lowering may fail to compile (known Metal limitation); either way
-    # the detector must NOT emit a fast_matmul descriptor for bf16 output.
-    try:
-        _run(_mm_bf16_out, A, B, C, M, N, K)
-    except Exception:
-        pass
-    assert not _descriptors(), "bf16-output matmul must NOT emit a descriptor (deferred)"
+    # bf16 is now a fast-matmul input (M-series simdgroup_bfloat8x8): bf16 in / bf16
+    # out must emit a descriptor AND compute correctly (within bf16 tolerance).
+    _run(_mm_bf16_out, A, B, C, M, N, K)
+    assert _descriptors(), "bf16 matmul must emit a fast_matmul descriptor"
+    torch.testing.assert_close(C.float(), A.float() @ B.float(), rtol=3e-2, atol=3e-2)
 
 
 @requires

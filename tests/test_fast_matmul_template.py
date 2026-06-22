@@ -29,5 +29,10 @@ def test_fp16_out_has_half_C_and_cast_epilogue():
 
 def test_bad_out_dtype_raises():
     import pytest
+    # fp16/bf16/fp32 are the supported in/out dtypes; anything else must raise.
     with pytest.raises(ValueError):
-        make_simdgroup_matmul_kernel_fast(dtype="fp16", out_dtype="bf16")
+        make_simdgroup_matmul_kernel_fast(dtype="fp16", out_dtype="int8")
+    with pytest.raises(ValueError):
+        make_simdgroup_matmul_kernel_fast(dtype="int8", out_dtype="fp32")
+    # bf16 in/out is now valid (must NOT raise).
+    make_simdgroup_matmul_kernel_fast(dtype="bf16", out_dtype="bf16")

@@ -41,11 +41,14 @@ def _run(M, N, K, dtype, flag, monkeypatch):
 
 
 @requires
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("M,N,K", [(2048, 2048, 2048), (512, 512, 512),
                                    (256, 2080, 256), (256, 256, 264), (1024, 512, 256)])
 def test_parity_vs_torch_and_flagoff(dtype, M, N, K, monkeypatch):
-    rtol, atol = (2e-2, 2e-2) if dtype == torch.float16 else (1e-3, 1e-3)
+    # bf16 uses the M-series simdgroup_bfloat8x8 matrix unit (float accumulate) — the
+    # ~11 TFLOP/s fast path, not the old ~2.4 TFLOP/s generic fallback. Coarser dtype
+    # -> looser tol (8-bit mantissa); fp32 is exact.
+    rtol, atol = (1e-3, 1e-3) if dtype == torch.float32 else (2e-2, 2e-2)
     A, B, C_on = _run(M, N, K, dtype, "1", monkeypatch)
     ref = A.float() @ B.float()
     torch.testing.assert_close(C_on, ref, rtol=rtol, atol=atol)

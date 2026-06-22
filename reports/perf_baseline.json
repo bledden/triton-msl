@@ -65,8 +65,8 @@
   },
   "matmul_2048_fp32": {
     "name": "matmul_2048_fp32",
-    "min_ms": 1.4746,
-    "tflops": 11.65
+    "min_ms": 1.4801,
+    "tflops": 11.61
   },
   "matmul_2048_fp16": {
     "name": "matmul_2048_fp16",
@@ -75,8 +75,8 @@
   },
   "matmul_2048_fp16out": {
     "name": "matmul_2048_fp16out",
-    "min_ms": 1.4046,
-    "tflops": 12.23
+    "min_ms": 1.4033,
+    "tflops": 12.24
   },
   "flash_attention_simdgroup_fp32": {
     "name": "flash_attention_simdgroup_fp32",
@@ -193,5 +193,17 @@
       }
     },
     "opt_out": "TRITON_MSL_MATMUL_AUTOTUNE=0 pins fixed (4,4) (unaligned M -> generic)"
+  },
+  "matmul_2048_bf16": {
+    "name": "matmul_2048_bf16",
+    "_note": "bf16 in / fp32 out via simdgroup_bfloat8x8 (M-series bfloat matrix unit, float32 accumulate). Was the ~2.4 TF generic float-compute fallback; ~4.9x. Measured 2026-06-21 M4 Max, @triton.jit BM=BN=BK=32, 30 reps median.",
+    "min_ms": 1.4349,
+    "tflops": 11.97
+  },
+  "matmul_2048_bf16out": {
+    "name": "matmul_2048_bf16out",
+    "_note": "bf16 in / bf16 out (cast epilogue). Measured 2026-06-21 M4 Max.",
+    "min_ms": 1.4466,
+    "tflops": 11.88
   }
 }

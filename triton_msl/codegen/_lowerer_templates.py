@@ -81,11 +81,18 @@ class _TemplateMixin:
 
         # Genuine fp16 (WS1 Phase C): half INPUT fragments + float ACCUMULATOR;
         # fp16 staged as half (no upcast) so the half MMA is actually used. bf16
-        # / other stay on the float path (exact). Accumulator always float.
+        # uses the bfloat MMA (simdgroup_bfloat8x8); other types stay on the float
+        # path (exact). Accumulator always float.
         acc_frag = "simdgroup_float8x8"
         if input_msl_type == "half":
             in_frag, tg_type, stage_cast, pad = (
                 "simdgroup_half8x8", "half", "", "half(0.0h)")
+        elif input_msl_type == "bfloat":
+            # M-series simdgroup_bfloat8x8 matrix unit (verified on M4): bfloat
+            # input fragments + float accumulator, staged as bfloat (no upcast),
+            # so the direct-device-load path loads bfloat into a bfloat fragment.
+            in_frag, tg_type, stage_cast, pad = (
+                "simdgroup_bfloat8x8", "bfloat", "", "bfloat(0.0)")
         else:
             in_frag, tg_type, stage_cast, pad = (
                 "simdgroup_float8x8", "float", "float", "0.0f")
@@ -255,12 +262,18 @@ class _TemplateMixin:
         # (half x half -> float MMA, de-risked in test_simdgroup_half_mma.py).
         # fp16 inputs are staged as half and fed to simdgroup_half8x8 — no float
         # upcast, so Apple's ~2x fp16 matrix throughput is actually used. bf16
-        # and other types stay on the float path (bf16->float is exact; there is
-        # no simdgroup_bfloat8x8 to use). The accumulator is always float.
+        # uses simdgroup_bfloat8x8 (the M-series bfloat matrix unit, verified on
+        # M4); other types stay on the float path. The accumulator is always float.
         acc_frag = "simdgroup_float8x8"
         if input_msl_type == "half":
             in_frag, tg_type, stage_cast, pad = (
                 "simdgroup_half8x8", "half", "", "half(0.0h)")
+        elif input_msl_type == "bfloat":
+            # M-series simdgroup_bfloat8x8 matrix unit (verified on M4): bfloat
+            # input fragments + float accumulator, staged as bfloat (no upcast),
+            # so the direct-device-load path loads bfloat into a bfloat fragment.
+            in_frag, tg_type, stage_cast, pad = (
+                "simdgroup_bfloat8x8", "bfloat", "", "bfloat(0.0)")
         else:
             in_frag, tg_type, stage_cast, pad = (
                 "simdgroup_float8x8", "float", "float", "0.0f")
@@ -1218,8 +1231,10 @@ class _TemplateMixin:
         # Genuine fp16 (WS1 Phase C): half INPUT fragments + float ACCUMULATOR
         # (the matmul output tg_C stays float for the softmax epilogue). fp16 A/B
         # are staged as half and fed to simdgroup_half8x8 — no float upcast — so
-        # the half MMA is actually used. bf16/other stay on the float path
-        # (bf16->float is exact; there is no simdgroup_bfloat8x8).
+        # the half MMA is actually used. bf16 here stays on the float-upcast path
+        # (staged+cast to float — exact and correct); unlike the plain-matmul
+        # lowering it does NOT yet use simdgroup_bfloat8x8 in this fused template
+        # (a future optimization — would need its own coverage). Other types: float.
         input_msl_type = triton_type_to_msl(a_elem)
         if input_msl_type == "half":
             in_frag, in_stage_t, in_cast = "simdgroup_half8x8", "half", ""
@@ -2429,19 +2444,26 @@ class _TemplateMixin:
         if args[3].is_ptr or args[4].is_ptr or args[5].is_ptr:
             return None
         # Output dtype selects the template variant: fp32 -> direct float* store,
-        # fp16 -> half* C + cast epilogue (float accumulation preserved either way).
-        # bf16 / other output -> ineligible (fall back to the generic kernel).
+        # fp16/bf16 -> half/bfloat* C + cast epilogue (float accumulation preserved
+        # either way). Other output -> ineligible (fall back to the generic kernel).
         out_dtype_t = _mlir_to_triton_dtype(args[2].elem_type)
         if out_dtype_t in ("fp32", "f32", "float"):
             msl_out = "fp32"
         elif out_dtype_t in ("fp16", "f16"):
             msl_out = "fp16"
+        elif out_dtype_t in ("bf16",):
+            msl_out = "bf16"
         else:
             return None
-        # Input fp16 or fp32 (the template's two supported branches).
+        # Input fp16, bf16, or fp32 (the template's three supported branches). bf16
+        # uses the M-series simdgroup_bfloat8x8 matrix unit (float accumulate) — same
+        # ~11 TFLOP/s fast path as fp16, vs the ~2.4 TFLOP/s generic float-compute
+        # fallback bf16 used to take.
         in_dtype = _mlir_to_triton_dtype(args[0].elem_type)
         if in_dtype in ("fp16", "f16"):
             msl_dtype = "fp16"
+        elif in_dtype in ("bf16",):
+            msl_dtype = "bf16"
         elif in_dtype in ("fp32", "f32"):
             msl_dtype = "fp32"
         else:

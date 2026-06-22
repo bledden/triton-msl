@@ -15,7 +15,7 @@
 |---|---|---|
 | `float32` | ✓ | full support (compute + the zero-copy fast matmul) |
 | `float16` | ✓ | full support, incl. fast-matmul **input and output** (float accumulation for precision) |
-| `bfloat16` | ✓ (general) / ⚠ (matmul) | elementwise, reductions, atomics OK; **not a fast-matmul input** (no `simdgroup_bfloat8x8`) — bf16 matmul falls back to the generic float-compute path |
+| `bfloat16` | ✓ | elementwise, reductions, atomics OK; **fast-matmul input** via the M-series `simdgroup_bfloat8x8` matrix unit (bf16 in + float32 accumulate, fp32/bf16 out) — ~11 TFLOP/s, same fast path as fp16 (was the ~2.4 TFLOP/s generic fallback). FlashAttention bf16 is still refused (FA kernel is fp16/fp32 only) |
 | `int8/16/32` | ✓ | arithmetic, compare, reductions; int8/int4 matmul via dedicated templates |
 | `int64` | ✓ / ⚠ | supported, but: `scf.for` with **i64 loop bounds is refused** (induction var must be ≤32-bit); some i64 reduce combine ops refused |
 | `uint8/16/32/64` | ✓ | as int |
@@ -29,7 +29,7 @@
 | pointer / `tt.load` / `tt.store` | ✓ | incl. masked, broadcast, multi-dim; n>1-per-thread covered by the MEPT register-array path (see refusal #13/#14 for the uncovered edge) |
 | elementwise (`arith.*`, `math.*`, `tt.*` unary/binary) | ✓ | add/mul/sub/div, cmp (f/i), select, exp/log/sqrt/sin/cos, cast, etc. |
 | reductions (`tt.reduce`) | ✓ / ⚠ | sum/max/min/argmax/argmin/xor; in-loop reduce over a tile larger than the threadgroup is **refused** unless register-array-covered (#15) |
-| `tt.dot` / matmul | ✓ | generic + the zero-copy fast simdgroup path (fp16/fp32 in, fp16/fp32 out). **Deterministic, occupancy-gated tile selection extends the fast path to unaligned M** (`TRITON_MSL_MATMUL_AUTOTUNE=1`, default): the fixed `(4,4)` blocking needs `M%32==0`, so `M%32≠0` matmuls otherwise drop to the ~2.4 TFLOP/s generic path; a smaller tile (`rr=2`→tile_m=16 for M%16, `rr=1`→tile_m=8 for M%8) keeps **large** unaligned-M matmuls on the fast path — **measured ~3.7–4.8× vs generic** (M4 Max, fp32: M=2032→11.4 TF, M=2040→8.4 TF). Aligned shapes use `(4,4)` unchanged (**no-op**); small/low-occupancy shapes route to generic (**never-regress**: the fine tile only fires when `n_groups ≥ 8×cores`, the measured fast>generic threshold). No GPU timing, no cache — a pure deterministic selection. Disable with `TRITON_MSL_MATMUL_AUTOTUNE=0`. All configs are provably correct (selection is perf-only, never correctness). Size contract: `M%(8*rr)==0`, `N%(32*rc)==0`, `K%8==0`. See matmul refusals #1/#2/#8/#9/#10 |
+| `tt.dot` / matmul | ✓ | generic + the zero-copy fast simdgroup path (fp16/**bf16**/fp32 in, fp16/bf16/fp32 out — bf16 via the M-series `simdgroup_bfloat8x8` matrix unit, float32 accumulate, ~11 TFLOP/s like fp16). **Deterministic, occupancy-gated tile selection extends the fast path to unaligned M** (`TRITON_MSL_MATMUL_AUTOTUNE=1`, default): the fixed `(4,4)` blocking needs `M%32==0`, so `M%32≠0` matmuls otherwise drop to the ~2.4 TFLOP/s generic path; a smaller tile (`rr=2`→tile_m=16 for M%16, `rr=1`→tile_m=8 for M%8) keeps **large** unaligned-M matmuls on the fast path — **measured ~3.7–4.8× vs generic** (M4 Max, fp32: M=2032→11.4 TF, M=2040→8.4 TF). Aligned shapes use `(4,4)` unchanged (**no-op**); small/low-occupancy shapes route to generic (**never-regress**: the fine tile only fires when `n_groups ≥ 8×cores`, the measured fast>generic threshold). No GPU timing, no cache — a pure deterministic selection. Disable with `TRITON_MSL_MATMUL_AUTOTUNE=0`. All configs are provably correct (selection is perf-only, never correctness). Size contract: `M%(8*rr)==0`, `N%(32*rc)==0`, `K%8==0`. See matmul refusals #1/#2/#8/#9/#10 |
 | `tt.dot_scaled` (microscaling) | ✗ refused | no Apple HW |
 | control flow `scf.for` / `scf.if` / `scf.while` | ✓ | structured control flow; i64 loop bounds refused (#3); **unstructured** `cf.cond_br` / early-return-inside-conditional refused |
 | atomics (`tt.atomic_rmw` / `tt.atomic_cas`) | ✓ / ⚠ | add/max/min/cas, incl. fp16/bf16 add; some 16-bit-float rmw ops refused (#5); n>1-per-thread atomic scatter refused (#13) |
@@ -88,8 +88,9 @@ silent-wrong producers, closed by the integrity prescan — see `CHANGELOG.md`.)
     < 32 (min dot tile dim < 32) — which silently mis-computed (rows past the first → garbage)
     for *any* head_dim incl. 32/64, a hole the old head_dim>64-only guard missed (closed
     2026-06-17), and **(c)** any FA-shaped kernel whose pointer/stride/scale params can't be
-    resolved unambiguously (refuse-on-ambiguity — never a guessed kernel). bf16 matmul inputs
-    are rejected at the Triton frontend. Larger blocks / head_dim > 128 are future work.
+    resolved unambiguously (refuse-on-ambiguity — never a guessed kernel). bf16 *FlashAttention*
+    is refused (the FA MMA kernel is fp16/fp32 only); bf16 plain *matmul*, by contrast, now uses
+    the fast `simdgroup_bfloat8x8` path. Larger blocks / head_dim > 128 are future work.
 
 (Plus `tt.dot_scaled`, rank-≥2 `tt.cat`/`tt.join`, `tt.dot` in a noinline callee, and
 `tt.join`→`tt.dot`, listed by category above.)
