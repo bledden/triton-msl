@@ -23,6 +23,33 @@ from triton_msl.codegen.msl_types import triton_type_to_msl
 from triton_msl.codegen._lowerer_helpers import _mlir_to_triton_dtype
 
 
+def _emit_masked_staged_store(lines, *, acc, scratch, gr, gc, cond, dst, out_type,
+                              store_pfx="", indent="    "):
+    """Emit the masked, per-simdgroup staged store of ONE float8x8 accumulator.
+
+    simdgroup_store can't mask, so each simdgroup stages its 8x8 into its OWN
+    64-float slot (``{scratch} + sgitg*64u`` — NEVER a shared offset, which raced
+    across simdgroups), barriers, then its 32 lanes (``laneid = tiitg % 32u``, which
+    the caller must declare) write only the in-bounds elements with a cast to
+    ``out_type``. The caller supplies the per-site index math (``gr``/``gc``), the
+    bounds ``cond``, the ``dst`` lvalue, and an optional ``store_pfx`` column guard.
+
+    SINGLE SOURCE OF TRUTH for the staging mechanism: it previously existed as two
+    near-identical copies (the simple-dot and K-loop dot epilogues), and a fix
+    landing in only one twin caused two silent-wrongs (a cross-simdgroup race and an
+    unmasked-overflow OOB — 2026-06-21/22 audit). Both call sites MUST route through
+    here so the mechanism can't diverge again. (Per-site index math legitimately
+    differs and stays at the call site; only the bug-prone staging is shared.)
+    """
+    lines.append(f"{indent}{store_pfx}simdgroup_store({acc}, {scratch} + sgitg * 64u, 8);")
+    lines.append(f"{indent}threadgroup_barrier(mem_flags::mem_threadgroup);")
+    lines.append(f"{indent}for (uint i = laneid; i < 64u; i += 32u) {{")
+    lines.append(f"{indent}    uint gr = {gr}, gc = {gc};")
+    lines.append(f"{indent}    if ({cond}) {{ {dst} = {out_type}({scratch}[sgitg * 64u + i]); }}")
+    lines.append(f"{indent}}}")
+    lines.append(f"{indent}threadgroup_barrier(mem_flags::mem_threadgroup);")
+
+
 class _TemplateMixin:
     """Pattern-specialized MSL emitters.
 
@@ -219,13 +246,12 @@ class _TemplateMixin:
             lines.append(f"        threadgroup float tg_out[4u * 64u];")
             lines.append(f"        uint laneid = tiitg % 32u;")
             for _n, _acc in enumerate(("acc0", "acc1", "acc2", "acc3")):
-                lines.append(f"        simdgroup_store({_acc}, tg_out + sgitg * 64u, 8);")
-                lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
-                lines.append(f"        for (uint i = laneid; i < 64u; i += 32u) {{")
-                lines.append(f"            uint gr = row_base + {_n * 8}u + i / 8u, gc = col_base + i % 8u;")
-                lines.append(f"            if (gr < M && gc < N) {{ {c_name}[c_batch_off + gr * N + gc] = {output_msl_type}(tg_out[sgitg * 64u + i]); }}")
-                lines.append(f"        }}")
-                lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
+                _emit_masked_staged_store(
+                    lines, acc=_acc, scratch="tg_out",
+                    gr=f"row_base + {_n * 8}u + i / 8u", gc="col_base + i % 8u",
+                    cond="gr < M && gc < N",
+                    dst=f"{c_name}[c_batch_off + gr * N + gc]",
+                    out_type=output_msl_type, indent="        ")
 
         lines.append(f"    }} // tile_col")
         lines.append(f"    }} // tile_row")
@@ -539,14 +565,12 @@ class _TemplateMixin:
                 # store + write are per-simdgroup guarded; the barriers are NOT
                 # (every thread must reach them, regardless of which columns its
                 # simdgroup owns).
-                lines.append(f"    {spfx}simdgroup_store({acc_names[t][c]}, tg_st + sgitg * 64u, 8);")
-                lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-                lines.append(f"    for (uint i = laneid; i < 64u; i += 32u) {{")
-                lines.append(f"        uint gr = row_base + {t * 8}u + i / 8u;")
-                lines.append(f"        uint gc = col_base + sgitg * {cols_per_sg}u + {c * 8}u + i % 8u;")
-                lines.append(f"        if ({cond}) {{ {c_name}[gr * _N + gc] = {output_msl_type}(tg_st[sgitg * 64u + i]); }}")
-                lines.append(f"    }}")
-                lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
+                _emit_masked_staged_store(
+                    lines, acc=acc_names[t][c], scratch="tg_st",
+                    gr=f"row_base + {t * 8}u + i / 8u",
+                    gc=f"col_base + sgitg * {cols_per_sg}u + {c * 8}u + i % 8u",
+                    cond=cond, dst=f"{c_name}[gr * _N + gc]",
+                    out_type=output_msl_type, store_pfx=spfx, indent="    ")
 
         lines.append(f"}}")
 
