@@ -956,7 +956,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         )
         has_barrier_ops = any(
             ssa.op in ("tt.reduce", "tt.scan", "tt.debug_barrier", "ttg.barrier",
-                       "tt.trans", "tt.dot", "ttg.local_alloc")
+                       "tt.trans", "tt.dot", "ttg.local_alloc", "tt.gather")
             for ssa in all_ops_iter
         )
         # Multi-value reduces (argmin/argmax) need per-element indices which
@@ -3872,8 +3872,12 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
     def _lower_truncf(self, ssa: SSAValue):
         """arith.truncf — truncate float precision.
 
-        FP32 → FP8: call software conversion function.
-        FP32 → FP16: passthrough (cast happens at store).
+        FP32 → FP8: software conversion (round-trip, keep float register).
+        FP32 → FP16/BF16: round-trip through the narrow type to QUANTIZE the value,
+            then keep a float register for downstream arithmetic. (A plain passthrough
+            here was a silent-wrong: an explicit ``.to(tl.float16)`` mid-computation
+            never lost precision — 2026-06-22 re-audit: 2049.0 stayed 2049.0 instead
+            of quantizing to 2048.0.)
         """
         if not ssa.operand_ids:
             return
@@ -3895,7 +3899,37 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = dst_dtype
         else:
-            self._emit_passthrough(ssa)
+            narrow = ("half" if dst_dtype in ("fp16", "f16")
+                      else "bfloat" if dst_dtype in ("bf16",) else None)
+            # Quantize only in pure one-element-per-thread (scalar) mode. In MEPT
+            # array / wrap-loop kernels the value is a `float*` register array (or
+            # scalar-shaped inside a wrap loop), where a scalar static_cast<half>
+            # is a type error and the round-trip can't be applied per-element here.
+            _scalar_mode = (not getattr(self, "_needs_wrapping", False)
+                            and not getattr(self, "_mept_single_pass", False)
+                            and self.env_n_elems.get(ssa.operand_ids[0], 1) == 1)
+            if narrow is not None and _scalar_mode:
+                # SCALAR fp32->fp16/bf16: round-trip narrow->wide so the VALUE
+                # actually quantizes (e.g. 2049.0 -> 2048.0) while the register
+                # stays float for downstream arithmetic — mirrors the FP8 branch.
+                # (The old _emit_passthrough aliased the fp32 source unchanged, so
+                # an explicit `.to(tl.float16)` mid-computation did not lose
+                # precision — 2026-06-22 re-audit silent-wrong.)
+                src_var = self._lookup(ssa.operand_ids[0])
+                var_name = self._next_var("truncf")
+                self.kb.raw_line(
+                    f"    float {var_name} = "
+                    f"static_cast<float>(static_cast<{narrow}>({src_var}));")
+                self.env[ssa.id] = var_name
+            else:
+                # MEPT array-form (n_elems>1, src is a `float*` register array) or
+                # fp64->fp32: passthrough. The store boundary still narrows on write,
+                # so a cast that is only STORED is correct; the residual narrow case
+                # (an array-form `.to(fp16)` whose result is then used in further
+                # arithmetic) does NOT quantize — a documented MEPT follow-up
+                # (per-element quantize via _materialize). Scalar — the common +
+                # reproduced case — is quantized above.
+                self._emit_passthrough(ssa)
             self.env_types[ssa.id] = _mlir_to_triton_dtype(dst_elem) if dst_elem else "fp16"
         self._propagate_shape_elementwise(ssa)
 
@@ -5547,6 +5581,25 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             return
 
         S = src_shape[0] if src_shape else self.effective_block_size
+
+        # Threadgroup-cap guard (mirrors the 2-D gather guard, generic_lowerer ~5643).
+        # The source is staged ONE element per thread (`if (lid < S) shared[lid] = src`)
+        # and each thread gathers one result. Apple caps a threadgroup at 1024 threads,
+        # so for src size S > 1024 the shared slots 1024..S-1 are NEVER written -> a
+        # gather of any index >= 1024 reads UNINITIALIZED memory (silent-wrong;
+        # 2026-06-22 re-audit: S=2048 gave out[1536]=0 vs 1537.5). An index tensor
+        # larger than 1024 likewise under-computes the output. The 2-D sibling already
+        # refuses this; the 1-D path was missing the guard. Refuse rather than mis-gather.
+        _idx_total = 1
+        for _d in (idx_shape or [1]):
+            _idx_total *= _d
+        if S > 1024 or _idx_total > 1024:
+            raise MetalNonRecoverableError(
+                f"1-D tt.gather with source size {S} / index size {_idx_total} exceeds "
+                f"the 1024-thread threadgroup: the source is staged one element per "
+                f"thread, so slots/indices past 1024 read uninitialized memory "
+                f"(silent-wrong). Refusing; strided multi-pass staging is future work.",
+                op_name="tt.gather")
 
         # Determine types
         src_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")

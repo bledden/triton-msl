@@ -38,8 +38,9 @@ _DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 def _clear():
     import os
     import shutil
-    for p in ("~/.cache/triton_msl", "~/.triton/cache"):
-        shutil.rmtree(os.path.expanduser(p), ignore_errors=True)
+    # Clear ONLY the triton-msl codegen cache. Deleting the shared, content-addressed
+    # ~/.triton/cache per-test races sibling tests' in-flight pipelines (2026-06-22 re-audit).
+    shutil.rmtree(os.path.expanduser("~/.cache/triton_msl"), ignore_errors=True)
 
 
 def _invariant(run, reference, dtype, *, must=None):

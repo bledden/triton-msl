@@ -22,6 +22,13 @@
 | `float8` (e4m3/e5m2) | ✗ refused | no Apple matrix hardware for microscaling/fp8 (`tt.dot_scaled`, fp8 dot) |
 | `float64` | — impossible | Apple GPUs have no fp64 units |
 
+**Numeric-semantics divergence (hardware):** Apple GPUs run **flush-to-zero (FTZ)** — fp32
+*subnormal* operands (|x| < ~1.18e-38) are flushed to 0 in ALU arithmetic, where CUDA
+preserves them. A pure load→store passthrough keeps subnormals; arithmetic on them does not.
+This is inherent to the device (identical to native Metal), not a codegen choice, so it is
+not refusable; kernels that depend on subnormal-range fp32 values will diverge slightly from
+CUDA. (Like the absence of `cp.async` software pipelining, this is an Apple-hardware property.)
+
 ## Op coverage by category
 
 | category | status | detail |

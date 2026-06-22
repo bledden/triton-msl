@@ -38,8 +38,11 @@ _SENT = 2048.0   # exactly representable in fp32/fp16/bf16, far from any randn v
 
 def _clear():
     import os, shutil
-    for p in ("~/.cache/triton_msl", "~/.triton/cache"):
-        shutil.rmtree(os.path.expanduser(p), ignore_errors=True)
+    # Clear ONLY the triton-msl codegen cache (force re-codegen). Do NOT delete
+    # ~/.triton/cache: it is content-addressed and shared, and deleting it per-test
+    # races a sibling test's in-flight make_metallib pipeline -> nondeterministic
+    # FileNotFoundError mislabeled as a "cryptic crash" (2026-06-22 re-audit).
+    shutil.rmtree(os.path.expanduser("~/.cache/triton_msl"), ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +221,11 @@ def _run_f2i(rng):
 
 def _run_atomic(rng):
     dt = rng.choice(_DTYPES); n = rng.choice([8, 32, 64, 128]); K = rng.choice([1, 2, 4, 8])
+    # bf16 atomic-add accumulates in bf16; cap additions-per-bucket (n/K) so the
+    # accumulation error stays well inside tol and a loose bound can't HIDE a real
+    # mis-accumulation (2026-06-22 re-audit P4). fp16/fp32 are fine at any K.
+    if dt == torch.bfloat16:
+        K = max(K, 4, 1 << (max(1, n // 32) - 1).bit_length())
     BLOCK = 1 << (n - 1).bit_length()
     a = torch.randn(n, device="mps", dtype=dt); o = torch.zeros(K, device="mps", dtype=dt)
     _atomic[(1,)](a, o, n, K, BLOCK=BLOCK)
@@ -276,3 +284,52 @@ def test_transpose_over_threadgroup_refuses():
     with pytest.raises(MetalNonRecoverableError):
         _trans_sq[(1,)](a, o, S=S)
         torch.mps.synchronize()
+
+
+# --- The 6th + 7th silent-wrongs (found by the re-audit, 2026-06-22) ----------
+@triton.jit
+def _gather1d(src, idx, o, S: tl.constexpr):
+    i = tl.arange(0, S); s = tl.load(src + i); ix = tl.load(idx + i)
+    tl.store(o + i, tl.gather(s, ix, axis=0))
+
+
+@requires
+def test_gather1d_within_threadgroup_correct():
+    # 6th: 1-D gather at S=512 (<=1024) silently mis-gathered (under MEPT the
+    # one-element-per-thread staging filled only ~128 slots; indices past that read
+    # uninitialized memory). Now gather forces one-element-per-thread (has_barrier_ops).
+    S = 512
+    torch.manual_seed(0)
+    src = torch.arange(S, device="mps", dtype=torch.float32) + 0.5
+    idx = torch.randint(0, S, (S,), device="mps", dtype=torch.int32)
+    o = torch.empty(S, device="mps")
+    _gather1d[(1,)](src, idx, o, S=S); torch.mps.synchronize()
+    torch.testing.assert_close(o.cpu(), src.cpu()[idx.cpu().long()], rtol=1e-4, atol=1e-4)
+
+
+@requires
+def test_gather1d_over_threadgroup_refuses():
+    S = 2048  # > 1024-thread cap: one-element-per-thread staging can't cover -> must refuse
+    src = torch.arange(S, device="mps", dtype=torch.float32)
+    idx = torch.arange(S, device="mps", dtype=torch.int32)
+    o = torch.empty(S, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _gather1d[(1,)](src, idx, o, S=S)
+        torch.mps.synchronize()
+
+
+@triton.jit
+def _q_fp16(a, o, N: tl.constexpr):
+    i = tl.arange(0, N)
+    x = tl.load(a + i).to(tl.float16)
+    tl.store(o + i, (x * 1.0).to(tl.float32))   # *1.0 forces USE of the fp16 register
+
+
+@requires
+def test_truncf_scalar_quantizes():
+    # 7th: an explicit mid-computation `.to(tl.float16)` was a passthrough — 2049.0
+    # stayed 2049.0 instead of quantizing to fp16's 2048.0. Scalar path now quantizes.
+    a = torch.zeros(4, device="mps"); a[:3] = torch.tensor([2049.0, 4097.0, 100.0])
+    o = torch.empty(4, device="mps")
+    _q_fp16[(1,)](a, o, N=4); torch.mps.synchronize()
+    torch.testing.assert_close(o[:3].cpu(), a[:3].half().float().cpu(), rtol=1e-4, atol=1e-4)
