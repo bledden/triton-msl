@@ -4426,6 +4426,24 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         M, N = src_shape[0], src_shape[1]
         total = M * N
 
+        # The shared-memory exchange below maps EXACTLY ONE element per thread
+        # (shared[lid] = src; then read shared[transposed(lid)]). Apple caps a
+        # threadgroup at 1024 threads, so for total > 1024 the threads cover only
+        # the first 1024 elements and the rest are left UNTRANSPOSED — a silent
+        # garbage result (2026-06-22 fuzz: a 64x64 = 4096-element tt.trans returned
+        # err 3.8). The exchange is not multi-element-per-thread-coverable (a fixed
+        # lid per element), so REFUSE rather than mis-compute. (2-D transposes with
+        # M*N <= 1024, and the nd/reshape transpose templates that return before
+        # this generic path, are unaffected.)
+        _TG_MAX = 1024
+        if total > _TG_MAX:
+            raise MetalNonRecoverableError(
+                f"2-D tt.trans of a {M}x{N} ({total}-element) block exceeds the "
+                f"{_TG_MAX}-thread threadgroup: the shared-memory transpose maps one "
+                f"element per thread, so elements past {_TG_MAX} would be left "
+                f"untransposed (silent-wrong). Use a tile with M*N <= {_TG_MAX}.",
+                op_name="tt.trans")
+
         # Determine types
         input_dtype = self.env_types.get(src_id, "fp32")
         is_float = input_dtype.startswith("fp") or input_dtype.startswith("bf")
