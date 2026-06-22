@@ -311,11 +311,15 @@ def test_flash_attention_dtype(dtype, head_dim):
     def ref():
         return (torch.softmax((q.float() * (1.0 / math.sqrt(D))) @ k.float().transpose(-2, -1), -1)
                 @ v.float())
-    # bf16 FA MUST refuse loudly (the attention lowering is fp16/fp32 only — this pins
-    # the #3 fix). For fp32/fp16 the contract is only never-silent-wrong: the backend
-    # may compute OR refuse (this exact kernel shape happens to hit the matmul "constexpr
-    # M/N" refusal — a legitimate loud refusal). fp32/fp16 FA *correctness* is covered by
-    # test_flash_attention.py with a detector-recognized FA kernel.
+    # bf16 FA MUST refuse loudly (never silently mis-compute). NOTE (verified by
+    # fault injection 2026-06-22): bf16 FA is DOUBLE-GUARDED — the bf16 dtype gate
+    # in generic_lowerer.py AND the matmul "constexpr M/N" backstop both refuse it,
+    # so this cell verifies the CONTRACT (bf16 FA refuses) but is NOT a tight test
+    # of the dtype gate alone (it still passes with that gate disabled, via the
+    # backstop). No kernel structure has been found that makes bf16 FA dispatch a
+    # wrong result, so the gate is defense-in-depth. fp32/fp16: never-silent-wrong
+    # only (this shape hits the same constexpr backstop); fp32/fp16 FA *correctness*
+    # is covered by test_flash_attention.py with a detector-recognized FA kernel.
     _invariant(run, ref, dtype, must=("ref" if bf16 else None))
 
 

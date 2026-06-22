@@ -112,6 +112,14 @@ def _fa_bf16(Q, K, V, Out, sqz, sqh, sqm, sqk, skz, skh, skn, skk,
 @requires
 @pytest.mark.parametrize("head_dim", [32, 64])
 def test_bf16_flash_attention_refuses(head_dim):
+    # CONTRACT test: bf16 FA must refuse (never silently mis-compute). CAVEAT
+    # (verified by fault injection 2026-06-22): bf16 FA is double-guarded — this
+    # passes even with the bf16 dtype gate disabled, because the matmul "constexpr
+    # M/N" backstop also refuses this kernel. So this asserts the contract, NOT the
+    # dtype gate's sole necessity. No kernel has been found that makes bf16 FA
+    # dispatch a wrong result; the gate is defense-in-depth. (The audit reported a
+    # bf16-FA dispatch-wrong but it could not be reproduced here across several FA
+    # kernel structures — see audit memory.)
     Z, H, N, D = 1, 1, 64, head_dim
     q = torch.randn(Z, H, N, D, device="mps"); k = torch.randn(Z, H, N, D, device="mps")
     v = torch.randn(Z, H, N, D, device="mps"); o = torch.empty_like(q)
