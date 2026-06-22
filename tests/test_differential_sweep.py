@@ -121,30 +121,74 @@ def _mm_single(a, b, c, S: tl.constexpr):
     tl.store(c + om[:, None] * S + on[None, :], tl.dot(av, bv).to(c.dtype.element_ty))
 
 
+@triton.jit
+def _mm_single_rect(a, b, c, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+    om = tl.arange(0, M); on = tl.arange(0, N); ok = tl.arange(0, K)
+    av = tl.load(a + om[:, None] * K + ok[None, :])
+    bv = tl.load(b + ok[:, None] * N + on[None, :])
+    tl.store(c + om[:, None] * N + on[None, :], tl.dot(av, bv).to(c.dtype.element_ty))
+
+
 @requires
 @pytest.mark.parametrize("dtype", _DTYPES)
 @pytest.mark.parametrize("out_dtype", _DTYPES)
-@pytest.mark.parametrize("S", [32, 64])
+@pytest.mark.parametrize("S", [8, 16, 32, 64])   # powers of 2 incl. non-32-multiples (partial-tile store)
 def test_matmul_single_dot_no_kloop(dtype, out_dtype, S):
+    # Non-32-multiple S exercises the PARTIAL-TILE store: an unmasked simdgroup_store
+    # writes a full 8x8 and overflows the buffer. So check BOTH the values AND a canary
+    # buffer placed right after C — an OOB write corrupts adjacent memory even when C's
+    # own values happen to land correct (2026-06-21 sibling-divergence finding).
     _clear()
     torch.manual_seed(0)
     A = torch.randn(S, S, device="mps", dtype=dtype)
     B = torch.randn(S, S, device="mps", dtype=dtype)
-    C = torch.empty(S, S, device="mps", dtype=out_dtype)
+    PAD = 64
+    SENT = 2048.0   # exactly representable in fp32/fp16/bf16 (2^11) and far from any randn@randn value
+    Cbuf = torch.empty(S * S + PAD, device="mps", dtype=out_dtype)
+    Cbuf[S * S:] = SENT            # canary sentinel
+    C = Cbuf[:S * S].view(S, S)
     tol = max(_TOL[dtype], _TOL[out_dtype])
-    # use the looser of the two dtypes' tolerances
-    def run():
-        _mm_single[(1,)](A, B, C, S=S)
-        return C
     try:
-        C2 = run(); torch.mps.synchronize()
+        _mm_single[(1,)](A, B, C, S=S); torch.mps.synchronize()
     except MetalNonRecoverableError:
         return  # clean refusal acceptable
     except Exception as e:
         pytest.fail(f"cryptic crash: {type(e).__name__}: {str(e)[:200]}")
+    canary_bad = int((Cbuf[S * S:] != SENT).sum().item())
+    assert canary_bad == 0, (
+        f"OOB WRITE: single-dot {dtype}->{out_dtype} S={S} clobbered "
+        f"{canary_bad}/{PAD} bytes past the output buffer")
     ref = A.float() @ B.float()
-    rel = (C2.float() - ref).abs().max().item() / max(ref.abs().max().item(), 1e-9)
+    rel = (C.float() - ref).abs().max().item() / max(ref.abs().max().item(), 1e-9)
     assert rel < tol, f"SILENT-WRONG single-dot {dtype}->{out_dtype} S={S}: rel_err {rel:.3e}"
+
+
+@requires
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("M,N,K", [(32, 16, 32), (16, 32, 32), (16, 64, 32), (32, 16, 16)])
+def test_matmul_single_dot_rect(dtype, M, N, K):
+    # Non-square partial tiles: M%32==0 & N%32!=0 (partial cols), and vice-versa. This is
+    # the exact OOB shape the sibling-divergence sweep found in the unmasked float store.
+    _clear()
+    torch.manual_seed(0)
+    A = torch.randn(M, K, device="mps", dtype=dtype)
+    B = torch.randn(K, N, device="mps", dtype=dtype)
+    PAD = 64
+    SENT = 2048.0
+    Cbuf = torch.empty(M * N + PAD, device="mps", dtype=dtype)
+    Cbuf[M * N:] = SENT
+    C = Cbuf[:M * N].view(M, N)
+    try:
+        _mm_single_rect[(1,)](A, B, C, M=M, N=N, K=K); torch.mps.synchronize()
+    except MetalNonRecoverableError:
+        return
+    except Exception as e:
+        pytest.fail(f"cryptic crash: {type(e).__name__}: {str(e)[:200]}")
+    canary_bad = int((Cbuf[M * N:] != SENT).sum().item())
+    assert canary_bad == 0, f"OOB WRITE: rect dot {dtype} {M}x{N}x{K} clobbered {canary_bad}/{PAD} past buffer"
+    ref = A.float() @ B.float()
+    rel = (C.float() - ref).abs().max().item() / max(ref.abs().max().item(), 1e-9)
+    assert rel < _TOL[dtype], f"SILENT-WRONG rect dot {dtype} {M}x{N}x{K}: rel_err {rel:.3e}"
 
 
 # ===========================================================================

@@ -191,8 +191,16 @@ class _TemplateMixin:
         lines.append(f"        }}")
         lines.append(f"")
 
-        # Store results to global memory
-        if output_msl_type == "float":
+        # Store results to global memory.
+        # The fast direct simdgroup_store writes a FULL unmasked 8x8; that is only
+        # safe when every tile is full — i.e. M%32==0 AND N%32==0. For a partial
+        # tile (M or N not a multiple of 32, e.g. a 16x16 dot) acc2/acc3 (rows
+        # 16-31) and the overflow columns write PAST the output buffer -> wrong
+        # values + OOB writes that corrupt adjacent allocations (2026-06-21 audit
+        # sibling-divergence: the half/bfloat twin below already masked; this float
+        # branch did not). So only take the fast path when fully aligned; otherwise
+        # use the same masked per-simdgroup staged store (the cast is a no-op for float).
+        if output_msl_type == "float" and M % 32 == 0 and N % 32 == 0:
             lines.append(f"        simdgroup_store(acc0, {c_name} + c_batch_off + (row_base) * N + col_base, N);")
             lines.append(f"        simdgroup_store(acc1, {c_name} + c_batch_off + (row_base + 8u) * N + col_base, N);")
             lines.append(f"        simdgroup_store(acc2, {c_name} + c_batch_off + (row_base + 16u) * N + col_base, N);")

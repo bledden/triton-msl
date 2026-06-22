@@ -280,6 +280,18 @@ class _ReduceScanMixin:
                 combine_op = "max"
             elif combine_op == "sum" and has_cmpf_lt:
                 combine_op = "min"
+            # An xor combine (a standalone tl.reduce(xor) that didn't match the
+            # tl.flip/tl.sort detectors) is NOT sum/max/min — the multipass path
+            # has no xor branch and would SILENTLY compute it as a float SUM
+            # (2026-06-21 audit sibling-divergence: the scalar _lower_reduce DOES
+            # handle xor; this multipass helper did not). Refuse rather than
+            # mis-compute.
+            if combine_op == "sum" and any("xor" in (b.op or "") for b in ssa.region_ops):
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "Reduce with an xor combine is not supported on the multipass "
+                    "reduction path (it would be silently computed as a sum). "
+                    "Refusing to emit silently-wrong output.")
 
         identities = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY"}
         return combine_op, identities.get(combine_op, "0.0f")
@@ -733,6 +745,23 @@ class _ReduceScanMixin:
         For 2 inputs: argmax/argmin (value + index) via SIMD shuffle + shared memory.
         For 3 inputs: Welford online variance (mean + m2 + weight) via SIMD shuffle + shared memory.
         """
+        # Guard (2026-06-21 audit sibling-divergence): a multi-value reduce
+        # (argmax/argmin/Welford) over a 1-D tile WIDER than the threadgroup,
+        # INSIDE control flow, would have its tail dropped by the SIMD-shuffle tree
+        # (which covers only block_size elements) -> silent-wrong. The scalar
+        # single-value reduce folds-or-refuses this (see _lower_reduce); folding a
+        # tuple reduce is harder, so mirror the refusal here.
+        _ishape = self.env_shapes.get(ssa.operand_ids[0]) or _extract_shape(
+            self._find_op_type_str(ssa.operand_ids[0]))
+        if (self._control_flow_depth > 0 and _ishape is not None
+                and len(_ishape) == 1 and _ishape[0] > self.kb.block_size):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing in-loop multi-value reduce (argmax/argmin/Welford): a 1-D "
+                f"tile of {_ishape[0]} elements exceeds the {self.kb.block_size}-thread "
+                f"threadgroup, so the cross-lane tree would reduce only the first "
+                f"{self.kb.block_size} (silent-wrong). Use BLOCK <= num_threads.")
+
         # Dispatch Welford (3-value) vs argmax/argmin (2-value)
         if len(ssa.operand_ids) >= 3 and ssa.result_ids and len(ssa.result_ids) >= 3:
             self._lower_reduce_welford(ssa)
