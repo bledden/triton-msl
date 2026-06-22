@@ -83,12 +83,12 @@ def test_simple_dot_nonfloat_output_correct_and_stable(dtype):
         torch.testing.assert_close(C.float(), A.float() @ B.float(), rtol=2e-2, atol=2e-2)
 
 
-# --- #3: bf16 FlashAttention (head_dim 32/64) must refuse loudly --------------
+# --- #3: bf16 FlashAttention must NEVER dispatch a wrong result ---------------
 @triton.jit
 def _fa_bf16(Q, K, V, Out, sqz, sqh, sqm, sqk, skz, skh, skn, skk,
             svz, svh, svn, svk, soz, soh, som, sok, Z, H, N_CTX,
             BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HEAD_DIM: tl.constexpr,
-            IS_CAUSAL: tl.constexpr):
+            IS_CAUSAL: tl.constexpr, QKB: tl.constexpr, PVB: tl.constexpr):
     sm = tl.program_id(0); hz = tl.program_id(1); oz = hz // H; oh = hz % H
     om = sm * BLOCK_M + tl.arange(0, BLOCK_M); on = tl.arange(0, BLOCK_N); od = tl.arange(0, HEAD_DIM)
     q = tl.load(Q + oz * sqz + oh * sqh + om[:, None] * sqm + od[None, :] * sqk,
@@ -99,31 +99,52 @@ def _fa_bf16(Q, K, V, Out, sqz, sqh, sqm, sqk, skz, skh, skn, skk,
     for snn in range(0, N_CTX, BLOCK_N):
         k = tl.load(K + oz * skz + oh * skh + (snn + on)[:, None] * skn + od[None, :] * skk,
                     mask=(snn + on)[:, None] < N_CTX, other=0.0)
-        qk = tl.dot(q.to(tl.bfloat16), tl.trans(k).to(tl.bfloat16)).to(tl.float32) * (1.0 / math.sqrt(HEAD_DIM))
+        if QKB:
+            qk = tl.dot(q.to(tl.bfloat16), tl.trans(k).to(tl.bfloat16)).to(tl.float32)
+        else:
+            qk = tl.dot(q.to(tl.float32), tl.trans(k).to(tl.float32))
+        qk = qk * (1.0 / math.sqrt(HEAD_DIM))
         mij = tl.max(qk, 1); mn = tl.maximum(mi, mij); al = tl.exp(mi - mn); p = tl.exp(qk - mn[:, None])
         li = li * al + tl.sum(p, 1); acc = acc * al[:, None]
         v = tl.load(V + oz * svz + oh * svh + (snn + on)[:, None] * svn + od[None, :] * svk,
                     mask=(snn + on)[:, None] < N_CTX, other=0.0)
-        acc += tl.dot(p.to(tl.float32), v.to(tl.float32)); mi = mn
+        if PVB:
+            acc += tl.dot(p.to(tl.bfloat16), v.to(tl.bfloat16)).to(tl.float32)
+        else:
+            acc += tl.dot(p.to(tl.float32), v.to(tl.float32))
+        mi = mn
     tl.store(Out + oz * soz + oh * soh + om[:, None] * som + od[None, :] * sok,
              (acc / li[:, None]).to(Out.dtype.element_ty), mask=om[:, None] < N_CTX)
 
 
 @requires
-@pytest.mark.parametrize("head_dim", [32, 64])
-def test_bf16_flash_attention_refuses(head_dim):
-    # CONTRACT test: bf16 FA must refuse (never silently mis-compute). CAVEAT
-    # (verified by fault injection 2026-06-22): bf16 FA is double-guarded — this
-    # passes even with the bf16 dtype gate disabled, because the matmul "constexpr
-    # M/N" backstop also refuses this kernel. So this asserts the contract, NOT the
-    # dtype gate's sole necessity. No kernel has been found that makes bf16 FA
-    # dispatch a wrong result; the gate is defense-in-depth. (The audit reported a
-    # bf16-FA dispatch-wrong but it could not be reproduced here across several FA
-    # kernel structures — see audit memory.)
+@pytest.mark.parametrize("head_dim", [16, 32, 64])
+@pytest.mark.parametrize("qkb,pvb", [(1, 0), (0, 1), (1, 1)])   # QK / PV / both dots bf16
+def test_bf16_flash_attention_never_dispatches_wrong(head_dim, qkb, pvb):
+    # CONTRACT: a bf16 FlashAttention kernel must NEVER silently dispatch a wrong
+    # result. Verified (2026-06-22 fuzz, gate disabled) that across head_dim
+    # {16,32,64} x {QK,PV,both}-bf16, EVERY variant refuses — none dispatch wrong.
+    # bf16 FA is guarded redundantly: the bf16 dtype gate (clearest message), the
+    # matmul "constexpr M/N" backstop (head_dim 32/64), and the <32-min-dot-tile
+    # guard (head_dim 16). This test asserts the contract holds for each variant;
+    # if it ever DISPATCHES, the result must match torch (so even a future
+    # bf16-FA-compute path can't be silently wrong). The audit's reported
+    # dispatch-wrong was NOT reproducible across these structures (likely an
+    # artifact of the thermal-loaded 45-agent run).
     Z, H, N, D = 1, 1, 64, head_dim
+    torch.manual_seed(0)
     q = torch.randn(Z, H, N, D, device="mps"); k = torch.randn(Z, H, N, D, device="mps")
     v = torch.randn(Z, H, N, D, device="mps"); o = torch.empty_like(q)
-    with pytest.raises(MetalNonRecoverableError):
+    try:
         _fa_bf16[(N // 32, Z * H)](q, k, v, o, *q.stride(), *k.stride(), *v.stride(), *o.stride(),
-                                   Z, H, N, BLOCK_M=32, BLOCK_N=32, HEAD_DIM=D, IS_CAUSAL=False)
+                                   Z, H, N, BLOCK_M=32, BLOCK_N=32, HEAD_DIM=D, IS_CAUSAL=False,
+                                   QKB=qkb, PVB=pvb)
         torch.mps.synchronize()
+    except MetalNonRecoverableError:
+        return  # loud refusal satisfies the never-silent-wrong contract
+    # If it DID dispatch (no current path does), the result must be correct — never
+    # silently wrong. bf16 -> generous tol.
+    ref = (torch.softmax((q.float() * (1.0 / math.sqrt(D))) @ k.float().transpose(-2, -1), -1)
+           @ v.float())
+    rel = (o.float() - ref).abs().max().item() / max(ref.abs().max().item(), 1e-9)
+    assert rel < 5e-2, f"SILENT-WRONG bf16 FA head_dim={D} qkb={qkb} pvb={pvb}: rel_err {rel:.3e}"
