@@ -234,8 +234,84 @@ def _run_atomic(rng):
     return o.float(), ref.to("mps"), None, _TOL[dt] * 4, f"atomic {dt} n{n} K{K}"
 
 
+@triton.jit
+def _gather1d_fuzz(src, idx, o, S: tl.constexpr):
+    i = tl.arange(0, S)
+    s = tl.load(src + i)
+    ix = tl.load(idx + i)
+    tl.store(o + i, tl.gather(s, ix, axis=0))
+
+
+@triton.jit
+def _gather2d_fuzz(src, idx, out, M: tl.constexpr, N: tl.constexpr):
+    i = tl.arange(0, M)
+    j = tl.arange(0, N)
+    s = tl.load(src + i[:, None] * N + j[None, :])
+    ix = tl.load(idx + i[:, None] * N + j[None, :])
+    r = tl.gather(s, ix, axis=0)
+    tl.store(out + i[:, None] * N + j[None, :], r)
+
+
+@triton.jit
+def _cat_fuzz(a, b, out, N: tl.constexpr):
+    i = tl.arange(0, N)
+    av = tl.load(a + i)
+    bv = tl.load(b + i)
+    z = tl.cat(av, bv, can_reorder=True)
+    j = tl.arange(0, 2 * N)
+    tl.store(out + j, z)
+
+
+_GATHER_SIZES_1D = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+_GATHER_SHAPES_2D = [
+    (4, 8), (8, 8), (8, 16), (16, 16), (16, 32), (32, 16),
+    (32, 32), (32, 64), (64, 32), (64, 64),
+]
+
+
+def _run_gather1d(rng):
+    """1-D tt.gather: S elements staged one-per-thread; S >1024 must refuse."""
+    S = rng.choice(_GATHER_SIZES_1D)
+    src = torch.arange(S, device="mps", dtype=torch.float32) + 0.5
+    idx = torch.randint(0, S, (S,), device="mps", dtype=torch.int32)
+    o = torch.empty(S, device="mps", dtype=torch.float32)
+    _gather1d_fuzz[(1,)](src, idx, o, S=S)
+    ref = src.cpu()[idx.cpu().long()]
+    return o.float().cpu(), ref, None, 1e-4, f"gather1d S={S}"
+
+
+def _run_gather2d(rng):
+    """2-D tt.gather axis=0: out[i,j]=src[idx[i,j],j]; M*N >1024 must refuse."""
+    M, N = rng.choice(_GATHER_SHAPES_2D)
+    src = torch.arange(M * N, dtype=torch.float32, device="mps").reshape(M, N) + 0.5
+    idx = torch.randint(0, M, (M, N), dtype=torch.int32, device="mps")
+    out = torch.empty(M, N, dtype=torch.float32, device="mps")
+    _gather2d_fuzz[(1,)](src, idx, out, M=M, N=N)
+    # Reference via torch.gather (equivalent to loop over rows/cols for axis=0)
+    ref = torch.gather(src.cpu(), 0, idx.cpu().long())
+    return out.float().cpu(), ref, None, 1e-4, f"gather2d M={M} N={N}"
+
+
+def _run_cat(rng):
+    """tl.cat(a,b,can_reorder=True): out[:N]=a, out[N:]=b.
+    When 2*N > num_warps*32 the wrapping-loop staging uses lid (wrong) instead of
+    _loop_e, so out[N:] silently reads OOB from a instead of copying b.
+    """
+    N = rng.choice([8, 16, 32, 64, 128, 256, 512, 1024])
+    dt = rng.choice([torch.float32])   # fp32 only: sign distinguishes a vs b cleanly
+    # Use distinctly-signed a/b so positional errors are unmistakable
+    a = (torch.arange(N, dtype=dt, device="mps") + 100.0)
+    b = -(torch.arange(N, dtype=dt, device="mps") + 1.0)
+    out = torch.zeros(2 * N, dtype=dt, device="mps")
+    _cat_fuzz[(1,)](a, b, out, N=N)
+    # Reference: cat([a,b]) along dim=0
+    ref = torch.cat([a.cpu(), b.cpu()])
+    return out.float().cpu(), ref.float(), None, 1e-4, f"cat N={N}"
+
+
 _RUNNERS = [_run_matmul, _run_single_dot, _run_reduce, _run_ew,
-            _run_scan, _run_transpose, _run_f2i, _run_atomic]
+            _run_scan, _run_transpose, _run_f2i, _run_atomic,
+            _run_gather1d, _run_gather2d, _run_cat]
 
 
 @requires
@@ -333,3 +409,100 @@ def test_truncf_scalar_quantizes():
     o = torch.empty(4, device="mps")
     _q_fp16[(1,)](a, o, N=4); torch.mps.synchronize()
     torch.testing.assert_close(o[:3].cpu(), a[:3].half().float().cpu(), rtol=1e-4, atol=1e-4)
+
+
+# --- Re-audit 2: CLASS-A gather + cat coverage (2026-06-22) ------------------
+#
+# 1-D gather: already pinned above (tests 6+7). Added to the fuzz runner.
+#
+# 2-D gather: sizes within the 1024-thread cap are correct; larger are refused.
+@triton.jit
+def _gather2d_pin(src, idx, out, M: tl.constexpr, N: tl.constexpr):
+    i = tl.arange(0, M); j = tl.arange(0, N)
+    s = tl.load(src + i[:, None] * N + j[None, :])
+    ix = tl.load(idx + i[:, None] * N + j[None, :])
+    tl.store(out + i[:, None] * N + j[None, :], tl.gather(s, ix, axis=0))
+
+
+@requires
+def test_gather2d_within_threadgroup_correct():
+    for M, N in [(4, 8), (8, 16), (16, 32), (32, 32)]:
+        torch.manual_seed(0)
+        src = (torch.arange(M * N, dtype=torch.float32, device="mps").reshape(M, N) + 0.5)
+        idx = torch.randint(0, M, (M, N), dtype=torch.int32, device="mps")
+        out = torch.empty(M, N, dtype=torch.float32, device="mps")
+        _gather2d_pin[(1,)](src, idx, out, M=M, N=N); torch.mps.synchronize()
+        ref = torch.gather(src.cpu(), 0, idx.cpu().long())
+        torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4), \
+            f"2D gather M={M} N={N} SILENT-WRONG"
+
+
+@requires
+def test_gather2d_over_threadgroup_refuses():
+    for M, N in [(32, 64), (64, 32), (64, 64)]:
+        src = torch.zeros(M, N, device="mps")
+        idx = torch.zeros(M, N, dtype=torch.int32, device="mps")
+        out = torch.empty(M, N, device="mps")
+        with pytest.raises(MetalNonRecoverableError):
+            _gather2d_pin[(1,)](src, idx, out, M=M, N=N); torch.mps.synchronize()
+
+
+# --- The 8th/9th/10th silent-wrongs (re-audit #2, 2026-06-22): tt.cat / tt.join /
+#     tt.split threadgroup-limit (CLASS A) + truncf wrap-loop quantize (CLASS B) ---
+@triton.jit
+def _cat_reorder(a, b, o, N: tl.constexpr):
+    i = tl.arange(0, N)
+    tl.store(o + tl.arange(0, 2 * N), tl.cat(tl.load(a + i), tl.load(b + i), can_reorder=True))
+
+
+@triton.jit
+def _cat_concat(a, b, o, N: tl.constexpr):
+    i = tl.arange(0, N)
+    tl.store(o + tl.arange(0, 2 * N), tl.cat(tl.load(a + i), tl.load(b + i), can_reorder=False))
+
+
+@requires
+@pytest.mark.parametrize("fn", [_cat_reorder, _cat_concat])
+def test_cat_within_threadgroup_correct(fn):
+    # 2*N <= 1024: must concat correctly. A POISONED guard region after the output
+    # catches an OOB write that would otherwise be masked (the cat bug was hidden by
+    # an OOB read landing in the adjacent buffer).
+    N = 256
+    torch.manual_seed(0)
+    a = torch.arange(N, device="mps", dtype=torch.float32)
+    b = torch.arange(N, 2 * N, device="mps", dtype=torch.float32)
+    PAD = 64
+    obuf = torch.full((2 * N + PAD,), float("nan"), device="mps"); obuf[2 * N:] = 1234.0
+    o = obuf[:2 * N]
+    fn[(1,)](a, b, o, N=N); torch.mps.synchronize()
+    assert int((obuf[2 * N:] != 1234.0).sum().item()) == 0, "OOB write past cat output"
+    torch.testing.assert_close(o.cpu(), torch.cat([a.cpu(), b.cpu()]), rtol=1e-4, atol=1e-4)
+
+
+@requires
+@pytest.mark.parametrize("fn", [_cat_reorder, _cat_concat])
+def test_cat_over_threadgroup_refuses(fn):
+    N = 1024  # 2*N = 2048 > 1024-thread cap -> must refuse, never leave the high half unwritten
+    a = torch.arange(N, device="mps", dtype=torch.float32)
+    b = torch.arange(N, 2 * N, device="mps", dtype=torch.float32)
+    o = torch.empty(2 * N, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        fn[(1,)](a, b, o, N=N); torch.mps.synchronize()
+
+
+@triton.jit
+def _q_fp16_big(a, o, N: tl.constexpr):
+    i = tl.arange(0, N)
+    x = tl.load(a + i).to(tl.float16)
+    tl.store(o + i, (x * 2.0).to(tl.float32))   # *2 forces USE of the fp16 register
+
+
+@requires
+@pytest.mark.parametrize("N", [64, 4096])   # 64 = scalar, 4096 = wrap-loop
+def test_truncf_quantizes_scalar_and_wraploop(N):
+    # 10th: `.to(tl.float16)` mid-compute must quantize in BOTH scalar and wrap-loop
+    # mode (the fix had over-excluded wrap-loop). 2049.0 -> fp16 2048.0 -> *2 = 4096.0.
+    a = torch.full((N,), 2049.0, device="mps")
+    o = torch.empty(N, device="mps")
+    _q_fp16_big[(1,)](a, o, N=N); torch.mps.synchronize()
+    assert abs(o[0].item() - 4096.0) < 1.0, f"N={N} did not quantize: {o[0].item()}"

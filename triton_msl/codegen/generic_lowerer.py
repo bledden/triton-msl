@@ -956,7 +956,8 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         )
         has_barrier_ops = any(
             ssa.op in ("tt.reduce", "tt.scan", "tt.debug_barrier", "ttg.barrier",
-                       "tt.trans", "tt.dot", "ttg.local_alloc", "tt.gather")
+                       "tt.trans", "tt.dot", "ttg.local_alloc", "tt.gather",
+                       "tt.cat", "tt.join", "tt.split")
             for ssa in all_ops_iter
         )
         # Multi-value reduces (argmin/argmax) need per-element indices which
@@ -3901,12 +3902,15 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         else:
             narrow = ("half" if dst_dtype in ("fp16", "f16")
                       else "bfloat" if dst_dtype in ("bf16",) else None)
-            # Quantize only in pure one-element-per-thread (scalar) mode. In MEPT
-            # array / wrap-loop kernels the value is a `float*` register array (or
-            # scalar-shaped inside a wrap loop), where a scalar static_cast<half>
-            # is a type error and the round-trip can't be applied per-element here.
-            _scalar_mode = (not getattr(self, "_needs_wrapping", False)
-                            and not getattr(self, "_mept_single_pass", False)
+            # Quantize when the source is a SCALAR float (the static_cast round-trip
+            # is valid MSL). That covers BOTH the pure one-element-per-thread kernel
+            # AND the wrap-loop body (where the value is scalar-shaped per iteration,
+            # indexed by _loop_e). It is NOT valid only for the MEPT single-pass
+            # array form (env value is a `float*` register array) — excluded by
+            # _mept_single_pass / env_n_elems>1 (that array case is a documented
+            # per-element follow-up). The earlier `not _needs_wrapping` over-excluded
+            # the wrap-loop and left `.to(fp16)` un-quantized for large N (re-audit #2).
+            _scalar_mode = (not getattr(self, "_mept_single_pass", False)
                             and self.env_n_elems.get(ssa.operand_ids[0], 1) == 1)
             if narrow is not None and _scalar_mode:
                 # SCALAR fp32->fp16/bf16: round-trip narrow->wide so the VALUE
@@ -5120,6 +5124,16 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         src_shape = _extract_shape(self._find_op_type_str(a_id))
         N = src_shape[0] if src_shape else self.graph.block_size
 
+        # Threadgroup-cap guard. The output is 2*N. With 2*N > 1024 only 1024 threads
+        # dispatch (hard cap), so the `(lid < N) ? a : b` select is always-true and the
+        # upper 1024 outputs are never written (re-audit #2 silent-wrong). tt.join is
+        # in has_barrier_ops so 2*N <= 1024 dispatches one element per thread; refuse above.
+        if 2 * N > 1024:
+            raise MetalNonRecoverableError(
+                f"tt.join / tl.cat producing {2 * N} elements exceeds the 1024-thread "
+                f"threadgroup: only 1024 threads dispatch, so the upper half is never "
+                f"written. Refusing rather than mis-compute.", op_name="tt.join")
+
         # Detect the join → trans → reshape pattern
         trans_ssa = None
         reshape_ssa = None
@@ -5145,9 +5159,10 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         result_var = self._next_var("cat")
 
         if trans_ssa and reshape_ssa:
-            # Fused cat: in 2D mode, all threads have valid values via wrapping
+            # Fused cat: one element per thread (tt.join in has_barrier_ops), 2*N<=1024
+            # guaranteed by the guard above. Use _lid_expr (== lid here) for the select.
             self.kb.raw_line(
-                f"    {msl_type} {result_var} = (lid < {N}u) ? {a_var} : {b_var};"
+                f"    {msl_type} {result_var} = ({self._lid_expr} < {N}u) ? {a_var} : {b_var};"
             )
             # Register result for all intermediate SSA ids
             self.env[ssa.id] = result_var
@@ -5210,6 +5225,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # Get input size N
         src_shape = _extract_shape(self._find_op_type_str(a_id))
         N = src_shape[0] if src_shape else self.graph.block_size
+
+        # Threadgroup-cap guard. The output is 2*N, staged one element per thread
+        # (`if (lid < N) shared[lid] = ...`). With tt.cat in has_barrier_ops the
+        # kernel dispatches 2*N threads (one element per thread, no wrap loop), but
+        # Apple caps a threadgroup at 1024, so 2*N > 1024 can't be covered -> the
+        # high half is left unwritten / OOB (re-audit #2 silent-wrong). Refuse.
+        if 2 * N > 1024:
+            raise MetalNonRecoverableError(
+                f"tt.cat producing {2 * N} elements exceeds the 1024-thread "
+                f"threadgroup: the one-element-per-thread shared-memory concat can't "
+                f"cover it (high half unwritten). Refusing rather than mis-compute.",
+                op_name="tt.cat")
 
         # Determine type
         input_dtype = self.env_types.get(a_id, "fp32")
@@ -5278,6 +5305,16 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             N = self.effective_block_size // 2
 
         total = N * 2
+
+        # Threadgroup-cap guard (mirrors tt.cat/tt.join): the 2*N flat input is staged
+        # one element per thread; 2*N > 1024 can't be covered -> wrong (re-audit #2
+        # class-A pattern). tt.split is in has_barrier_ops so 2*N<=1024 is one-element-
+        # per-thread; refuse above.
+        if total > 1024:
+            raise MetalNonRecoverableError(
+                f"tt.split of a {total}-element interleaved input exceeds the 1024-thread "
+                f"threadgroup (one-element-per-thread de-interleave can't cover it). "
+                f"Refusing rather than mis-compute.", op_name="tt.split")
 
         # Determine types
         input_dtype = self.env_types.get(src_id, "i32")
