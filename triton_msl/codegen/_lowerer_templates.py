@@ -737,11 +737,21 @@ class _TemplateMixin:
         #   - n_cols is a runtime multiple of 4 (checked at runtime)
         # Other element types (fp16/bf16/integer) fall through to the scalar
         # path until a typed-vector emission is added.
-        input_arg_obj = next((a for a in self.graph.args
-                              if a.is_ptr and a.name == input_arg), None)
-        is_fp32_input = (input_arg_obj is not None
-                         and input_arg_obj.elem_type in ("f32", "fp32"))
-        vectorize = is_fp32_input and (block_size % 4 == 0)
+        # Vectorize only when EVERY pointer arg (input AND output) is fp32: the
+        # float4 store reinterpret-casts the OUTPUT pointer to device float4*, which
+        # is garbage (-> NaN) for a half*/bfloat* output. Gating on the input dtype
+        # alone shipped a fp32-in / fp16-out softmax that stored NaN (re-audit #9).
+        # Non-fp32 output falls through to the scalar store, which casts per element.
+        _ptr_args = [a for a in self.graph.args if a.is_ptr]
+        all_fp32_ptrs = all(a.elem_type in ("f32", "fp32") for a in _ptr_args)
+        vectorize = all_fp32_ptrs and (block_size % 4 == 0)
+
+        # float -> half is implicit in MSL, but float -> bfloat is NOT, so an uncast
+        # bf16-output store is an MSL compile error (cryptic crash). Cast the scalar
+        # store value to the output element type when it isn't float (re-audit #9).
+        _out_elem = next((a.elem_type for a in _ptr_args if a.name == output_arg), None)
+        _out_msl = triton_type_to_msl(_out_elem) if _out_elem else "float"
+        _store_cast = "" if _out_msl == "float" else f"({_out_msl})"
 
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
@@ -859,12 +869,12 @@ class _TemplateMixin:
             lines.append("        }")
             lines.append("    } else {")
             lines.append(f"        for (uint i = lid; i < (uint){n_arg}; i += {threads}u) {{")
-            lines.append(f"            {output_arg}[row_start + i] = row_cache[i] * inv_sum;")
+            lines.append(f"            {output_arg}[row_start + i] = {_store_cast}(row_cache[i] * inv_sum);")
             lines.append("        }")
             lines.append("    }")
         else:
             lines.append(f"    for (uint i = lid; i < (uint){n_arg}; i += {threads}u) {{")
-            lines.append(f"        {output_arg}[row_start + i] = row_cache[i] * inv_sum;")
+            lines.append(f"        {output_arg}[row_start + i] = {_store_cast}(row_cache[i] * inv_sum);")
             lines.append("    }")
         lines.append("}")
         lines.append("")
@@ -898,11 +908,21 @@ class _TemplateMixin:
         threads = num_warps * warp_size
         n_simd = num_warps
 
-        input_arg_obj = next((a for a in self.graph.args
-                              if a.is_ptr and a.name == input_arg), None)
-        is_fp32_input = (input_arg_obj is not None
-                         and input_arg_obj.elem_type in ("f32", "fp32"))
-        vectorize = is_fp32_input and (block_size % 4 == 0)
+        # Vectorize only when EVERY pointer arg (input AND output) is fp32: the
+        # float4 store reinterpret-casts the OUTPUT pointer to device float4*, which
+        # is garbage (-> NaN) for a half*/bfloat* output. Gating on the input dtype
+        # alone shipped a fp32-in / fp16-out softmax that stored NaN (re-audit #9).
+        # Non-fp32 output falls through to the scalar store, which casts per element.
+        _ptr_args = [a for a in self.graph.args if a.is_ptr]
+        all_fp32_ptrs = all(a.elem_type in ("f32", "fp32") for a in _ptr_args)
+        vectorize = all_fp32_ptrs and (block_size % 4 == 0)
+
+        # float -> half is implicit in MSL, but float -> bfloat is NOT, so an uncast
+        # bf16-output store is an MSL compile error (cryptic crash). Cast the scalar
+        # store value to the output element type when it isn't float (re-audit #9).
+        _out_elem = next((a.elem_type for a in _ptr_args if a.name == output_arg), None)
+        _out_msl = triton_type_to_msl(_out_elem) if _out_elem else "float"
+        _store_cast = "" if _out_msl == "float" else f"({_out_msl})"
 
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
@@ -1002,12 +1022,12 @@ class _TemplateMixin:
             lines.append("        }")
             lines.append("    } else {")
             lines.append(f"        for (uint i = lid; i < (uint){n_arg}; i += {threads}u) {{")
-            lines.append(f"            {output_arg}[row_start + i] = (row_cache[i] - mean) * inv_std;")
+            lines.append(f"            {output_arg}[row_start + i] = {_store_cast}((row_cache[i] - mean) * inv_std);")
             lines.append("        }")
             lines.append("    }")
         else:
             lines.append(f"    for (uint i = lid; i < (uint){n_arg}; i += {threads}u) {{")
-            lines.append(f"        {output_arg}[row_start + i] = (row_cache[i] - mean) * inv_std;")
+            lines.append(f"        {output_arg}[row_start + i] = {_store_cast}((row_cache[i] - mean) * inv_std);")
             lines.append("    }")
         lines.append("}")
         lines.append("")

@@ -707,7 +707,9 @@ class _ReduceScanMixin:
         self.kb.declare_threadgroup_array(shared_name, dtype=shared_dtype, size=n_simd_groups)
 
         result_var = self._next_var("reduced")
-        self.kb.threadgroup_reduce(combine_op, input_var, shared_name, result_var)
+        # Reduce IN the element type — integer reductions in float lost precision >2^24.
+        self.kb.threadgroup_reduce(combine_op, input_var, shared_name, result_var,
+                                   reduce_ty=msl_type)
 
         # Narrow-type masking: when reducing in wider type but output is narrow,
         # apply modular arithmetic (i1 sum = XOR, i8 sum = mod 256, etc.)

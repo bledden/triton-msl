@@ -425,3 +425,51 @@ def test_split_refuses_at_small_sizes(N):
     o0 = torch.empty(N, device="mps"); o1 = torch.empty(N, device="mps")
     with pytest.raises(MetalNonRecoverableError):
         _join_split[(1,)](a, o0, o1, N=N); torch.mps.synchronize()
+
+
+# --- Re-audit #9 (2026-06-23): softmax fp16/bf16 output + i32-reduce precision ---
+@triton.jit
+def _softmax_row(a, o, NC, BLOCK: tl.constexpr):
+    r = tl.program_id(0); cc = tl.arange(0, BLOCK); m = cc < NC
+    x = tl.load(a + r * NC + cc, mask=m, other=-float("inf"))
+    x = x - tl.max(x, 0); e = tl.exp(x); s = e / tl.sum(e, 0)
+    tl.store(o + r * NC + cc, s.to(o.dtype.element_ty), mask=m)
+
+
+@requires
+@pytest.mark.parametrize("out_dt", [torch.float32, torch.float16, torch.bfloat16])
+def test_softmax_nonfp32_output_correct(out_dt):
+    # The vectorized float4 store reinterpret-cast a half*/bfloat* output -> NaN
+    # (fp16) / compile crash (bf16). Now non-fp32 output takes the scalar store with a
+    # proper cast. (Vectorize only when ALL ptr args are fp32.)
+    import math
+    R, NC, BLOCK = 4, 64, 64
+    torch.manual_seed(0)
+    a = torch.randn(R, NC, device="mps"); o = torch.empty(R, NC, device="mps", dtype=out_dt)
+    _softmax_row[(R,)](a, o, NC, BLOCK=BLOCK); torch.mps.synchronize()
+    ref = torch.softmax(a, dim=1).to(out_dt)
+    err = (o.float() - ref.float()).abs().max().item()
+    assert not math.isnan(err) and err < 8e-2, f"softmax {out_dt} output wrong: {err}"
+
+
+@triton.jit
+def _isum(a, o, N: tl.constexpr):
+    tl.store(o, tl.sum(tl.load(a + tl.arange(0, N)), 0))
+
+
+@triton.jit
+def _imax(a, o, N: tl.constexpr):
+    tl.store(o, tl.max(tl.load(a + tl.arange(0, N)), 0))
+
+
+@requires
+def test_i32_reduce_exact_above_2_24():
+    # i32 reductions were emitted through the float-hardcoded threadgroup_reduce,
+    # silently losing precision above 2^24. Now reduced in the int type.
+    N = 256
+    a = torch.full((N,), 100000, device="mps", dtype=torch.int32); o = torch.empty(1, device="mps", dtype=torch.int32)
+    _isum[(1,)](a, o, N=N); torch.mps.synchronize()
+    assert o.item() == N * 100000, f"i32 sum lost precision: {o.item()} != {N*100000}"
+    a2 = torch.arange(N, device="mps", dtype=torch.int32) + (1 << 25); o2 = torch.empty(1, device="mps", dtype=torch.int32)
+    _imax[(1,)](a2, o2, N=N); torch.mps.synchronize()
+    assert o2.item() == (N - 1) + (1 << 25), f"i32 max lost precision: {o2.item()}"

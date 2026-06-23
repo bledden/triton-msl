@@ -302,7 +302,7 @@ class KernelBuilder:
         self._var(out_var, f"{intrinsic}({val_var})", ty="float")
         return out_var
 
-    def threadgroup_reduce(self, op, val_var, shared_var, out_var):
+    def threadgroup_reduce(self, op, val_var, shared_var, out_var, reduce_ty="float"):
         """Emit a full threadgroup reduction: SIMD reduce → shared mem → final SIMD reduce.
 
         Standard two-level pattern:
@@ -335,18 +335,27 @@ class KernelBuilder:
         from triton_msl.codegen.msl_builtins import SIMD_REDUCTIONS
 
         intrinsic = SIMD_REDUCTIONS[op]
-        identity = {
-            "sum": "0.0f",
-            "max": "-INFINITY",
-            "min": "INFINITY",
-        }[op]
+        # Reduce IN the element type. Integer reductions were emitted in float
+        # (ty="float"), silently losing precision above 2^24 (re-audit #9: i32
+        # tl.sum/max/min). simd_sum/max/min are defined for integer types, so reduce
+        # natively. float-family (fp16/bf16/fp32) stays "float" — that's deliberately
+        # MORE precise than reducing in half/bfloat.
+        _is_float = reduce_ty in ("float", "half", "bfloat")
+        if _is_float:
+            identity = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY"}[op]
+        else:
+            identity = {
+                "sum": f"({reduce_ty})0",
+                "max": f"metal::numeric_limits<{reduce_ty}>::lowest()",
+                "min": f"metal::numeric_limits<{reduce_ty}>::max()",
+            }[op]
 
         # Unique intermediate variable names
         simd_var = f"simd_{out_var}"
         read_var = f"shared_{out_var}"
 
         # Step 1: SIMD-level reduction
-        self._var(simd_var, f"{intrinsic}({val_var})", ty="float")
+        self._var(simd_var, f"{intrinsic}({val_var})", ty=reduce_ty)
 
         n_simd_groups = (self.block_size + 31) // 32
 
@@ -370,8 +379,8 @@ class KernelBuilder:
         self.barrier("threadgroup")
 
         # Step 4: SIMD group 0 reads back and does final reduction (bounds-guarded)
-        self._var(read_var, f"(tiisg < {n_simd_groups}u) ? {shared_var}[tiisg] : {identity}", ty="float")
-        self._var(out_var, f"{intrinsic}({read_var})", ty="float")
+        self._var(read_var, f"(tiisg < {n_simd_groups}u) ? {shared_var}[tiisg] : {identity}", ty=reduce_ty)
+        self._var(out_var, f"{intrinsic}({read_var})", ty=reduce_ty)
         return out_var
 
     # -- Build the MSL source --
