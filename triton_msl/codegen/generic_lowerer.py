@@ -3424,18 +3424,21 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self._emit_builtin_binary(ssa, "fmod")
         elif op == "arith.negf":
             self._emit_unary(ssa, "-")
-        elif op in ("arith.maxf", "arith.maxsi"):
+        elif op == "arith.maxsi":
             self._emit_builtin_binary(ssa, "max")
         elif op == "arith.maxui":
             self._emit_builtin_binary(ssa, "max", force_unsigned=True)
-        elif op in ("arith.minf", "arith.minsi"):
+        elif op == "arith.minsi":
             self._emit_builtin_binary(ssa, "min")
         elif op == "arith.minui":
             self._emit_builtin_binary(ssa, "min", force_unsigned=True)
-        # NaN-quiet min/max (IEEE 754 minNum/maxNum): return non-NaN operand
-        elif op == "arith.maxnumf":
+        # NaN-quiet min/max (IEEE 754 minNum/maxNum): return the non-NaN operand.
+        # The deprecated arith.maxf/minf (never emitted by Triton 3.7) are the
+        # NaN-quiet variant (llvm.maxnum lineage) too, so they map here — kept OFF
+        # the integer max()/min() path, which would mis-handle float NaN (re-audit #4).
+        elif op in ("arith.maxnumf", "arith.maxf"):
             self._emit_builtin_binary(ssa, "fmax")
-        elif op == "arith.minnumf":
+        elif op in ("arith.minnumf", "arith.minf"):
             self._emit_builtin_binary(ssa, "fmin")
         # NaN-propagating min/max: if either operand is NaN, result is NaN
         elif op == "arith.maximumf":

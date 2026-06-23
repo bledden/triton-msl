@@ -163,13 +163,32 @@ class _EmissionMixin:
             mept_ty, mept_dtype = _msl_int_type(ssa.elem_type, unsigned=True)
         else:
             mept_ty, mept_dtype = _msl_int_type(ssa.elem_type, unsigned=False)
+        # Shift-amount clamp. MSL/ARM mod-masks a shift amount >= the element
+        # bitwidth (a << 32 == a << 0), which is undefined behaviour; CUDA/PTX
+        # clamps out-of-range shifts to a DEFINED result (0 for left + logical
+        # right, sign-fill for arithmetic right). Match CUDA so shifts never
+        # silently diverge (re-audit #4). Constant amounts fold the ternary away.
+        _shift_W = (int(mept_dtype[1:]) if (op_str in ("<<", ">>")
+                                            and not is_float) else None)
         if force_unsigned and not is_float:
             unsigned_ty, _ud = _msl_int_type(ssa.elem_type, unsigned=True)
-            def _make_expr(av, bv, _u=unsigned_ty, _op=op_str):
-                return f"({_u}){av} {_op} ({_u}){bv}"
+            def _make_expr(av, bv, _u=unsigned_ty, _op=op_str, _W=_shift_W):
+                base = f"({_u}){av} {_op} ({_u}){bv}"
+                if _W is None:
+                    return base
+                # left / logical-right out-of-range -> 0
+                return f"((uint)({bv}) >= {_W}u ? 0 : ({base}))"
         else:
-            def _make_expr(av, bv, _op=op_str):
-                return f"{av} {_op} {bv}"
+            def _make_expr(av, bv, _op=op_str, _W=_shift_W, _arith=(op_str == ">>")):
+                base = f"{av} {_op} {bv}"
+                if _W is None:
+                    return base
+                if _arith:
+                    # arithmetic right out-of-range -> sign fill (a >> (W-1))
+                    return (f"((uint)({bv}) >= {_W}u ? (({av}) >> {_W - 1}) "
+                            f": ({base}))")
+                # left out-of-range -> 0
+                return f"((uint)({bv}) >= {_W}u ? 0 : ({base}))"
         if self._mept_binary_dispatch(
                 ssa, ssa.operand_ids[0], ssa.operand_ids[1], a, b,
                 _make_expr, mept_ty, mept_dtype):
@@ -259,12 +278,10 @@ class _EmissionMixin:
         else:
             # Use the correct signed width from elem_type
             ty, dtype = _msl_int_type(ssa.elem_type, unsigned=False)
-        if force_unsigned and not is_float:
-            # Cast operands to the correct unsigned type for unsigned semantics
-            unsigned_ty, _ = _msl_int_type(ssa.elem_type, unsigned=True)
-            self.kb.raw_line(f"    {ty} {var_name} = ({unsigned_ty}){a} {op_str} ({unsigned_ty}){b};")
-        else:
-            self.kb.raw_line(f"    {ty} {var_name} = {a} {op_str} {b};")
+        # Route the scalar emission through _make_expr so the shift-amount clamp
+        # (and the unsigned-cast for force_unsigned) apply uniformly with the MEPT
+        # path. For non-shifts _make_expr is byte-identical to the prior inline form.
+        self.kb.raw_line(f"    {ty} {var_name} = {_make_expr(a, b)};")
         self.env[ssa.id] = var_name
         self.env_types[ssa.id] = dtype
         # Shape: element-wise binary inherits shape from operands

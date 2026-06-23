@@ -191,3 +191,31 @@ def test_argmax_within_threadgroup_correct():
     a = torch.randn(N, device="mps"); o = torch.empty(1, device="mps", dtype=torch.int32)
     _argmax1d[(1,)](a, o, N=N); torch.mps.synchronize()
     assert o[0].item() == a.cpu().argmax().item()
+
+
+# --- Re-audit #4 (2026-06-22): integer shift >= bitwidth -> CUDA-clamped ------
+@triton.jit
+def _shl_k(a, b, o, N: tl.constexpr):
+    i = tl.arange(0, N); tl.store(o + i, tl.load(a + i) << tl.load(b + i))
+
+
+@triton.jit
+def _shr_k(a, b, o, N: tl.constexpr):
+    i = tl.arange(0, N); tl.store(o + i, tl.load(a + i) >> tl.load(b + i))
+
+
+@requires
+def test_shift_by_ge_bitwidth_matches_cuda():
+    # An out-of-range shift (amount >= 32) is UB in MSL/ARM (mod-masks the amount);
+    # CUDA/PTX clamps to a DEFINED result. We match CUDA: << and logical >> -> 0,
+    # arithmetic >> -> sign fill. In-range shifts are unchanged.
+    N = 4
+    amt = torch.tensor([32, 64, 33, 3], device="mps", dtype=torch.int32)  # 3 OOR + 1 in-range
+    # shli: 1 << amt  -> [0, 0, 0, 8]
+    a = torch.ones(N, device="mps", dtype=torch.int32); o = torch.empty(N, device="mps", dtype=torch.int32)
+    _shl_k[(1,)](a, amt, o, N=N); torch.mps.synchronize()
+    assert o.cpu().tolist() == [0, 0, 0, 8], f"shli not CUDA-clamped: {o.cpu().tolist()}"
+    # arithmetic shrsi: -8 >> amt -> sign fill (-1) for OOR; -8>>3 == -1 in-range
+    a = torch.full((N,), -8, device="mps", dtype=torch.int32); o = torch.empty(N, device="mps", dtype=torch.int32)
+    _shr_k[(1,)](a, amt, o, N=N); torch.mps.synchronize()
+    assert o.cpu().tolist() == [-1, -1, -1, -1], f"shrsi not sign-filled: {o.cpu().tolist()}"
