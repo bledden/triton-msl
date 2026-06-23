@@ -114,18 +114,16 @@ def test_matmul_chained_pointwise():
 
 
 @requires_metal
-def test_matmul_rowreduce_epilogue_correct():
-    # matmul + row-reduce-subtract epilogue (acc - sum(acc, axis=1)). The prebuilt
-    # matmul template can't represent the reduce and previously REFUSED here; re-audit
-    # #6 showed that same prebuilt path was also SILENTLY DROPPING simpler epilogues
-    # (looped matmul + fma/scale/relu returned the bare dot). The fix routes every
-    # matmul-with-compute-epilogue to the generic op-by-op lowerer, which applies
-    # this correctly — correct compute replacing a limitation-refusal.
+def test_matmul_rowreduce_epilogue_refuses():
+    # matmul + row-reduce-subtract epilogue (acc - sum(acc, axis=1)). The fused
+    # epilogue template can't represent the reduce, so it must REFUSE loudly. (Routing
+    # such matmul-with-epilogue kernels to the generic lowerer was tried and reverted:
+    # the combination fuzzer showed generic matmul+epilogue is correct at some shapes
+    # but grossly wrong at others — re-audit #6. The integrity boundary stands.)
+    from triton_msl.errors import MetalNonRecoverableError
     a, b = _ab(); c = torch.zeros(M, N)
-    _mm_rowreduce[(1,)](a, b, c, M=M, N=N, K=K)
-    mm = (a @ b).numpy()
-    ref = mm - mm.sum(axis=1, keepdims=True)
-    np.testing.assert_allclose(c.numpy(), ref, atol=2e-2, rtol=2e-2)
+    with pytest.raises(MetalNonRecoverableError):
+        _mm_rowreduce[(1,)](a, b, c, M=M, N=N, K=K)
 
 
 if HAS:
@@ -139,15 +137,15 @@ if HAS:
 
 
 @requires_metal
-def test_matmul_runtime_scalar_epilogue_correct():
-    # An epilogue that scales by a RUNTIME scalar arg. The epilogue TEMPLATE couldn't
-    # lower the kernel-arg scalar (a splat leaf) and previously refused; the generic
-    # op-by-op lowerer uses the scalar arg directly, so matmul-with-runtime-scalar
-    # now computes correctly instead of refusing (re-audit #6). Never silently
-    # resolves the scalar to 0.
+def test_matmul_runtime_scalar_epilogue_refuses_not_silentwrong():
+    # An epilogue that scales by a RUNTIME scalar arg (a kernel-arg splat leaf) the
+    # fused template can't lower. Must REFUSE loudly, never silently resolve the scalar
+    # to 0 (-> wrong output). #158 integrity boundary (re-audit #6: generic routing was
+    # not reliable, so refusal stands).
+    from triton_msl.errors import MetalNonRecoverableError
     a, b = _ab(); c = torch.zeros(M, N)
-    _mm_scale_runtime_arg[(1,)](a, b, c, 2.5, M=M, N=N, K=K)
-    np.testing.assert_allclose(c.numpy(), (a @ b).numpy() * 2.5, atol=2e-2, rtol=2e-2)
+    with pytest.raises(MetalNonRecoverableError):
+        _mm_scale_runtime_arg[(1,)](a, b, c, 2.5, M=M, N=N, K=K)
 
 
 if HAS:
@@ -165,14 +163,14 @@ if HAS:
 
 
 @requires_metal
-def test_matmul_kloop_epilogue_not_dropped():
+def test_matmul_kloop_epilogue_refuses_not_dropped():
     # re-audit #6: a LOOPED matmul (dot inside scf.for) with a trailing epilogue was
     # claimed by the inline-dot template, which stored the raw accumulator and SILENTLY
-    # DROPPED the fma (returned the bare dot, maxerr ~16-33). The dot lives in the
-    # scf.for region while the epilogue is top-level, so this routes to the generic
-    # lowerer which applies it. Pins fma specifically (the op that slipped the epilogue
-    # allow-list with no emission branch).
+    # DROPPED the fma (returned the bare dot, maxerr ~16-33). The fused-epilogue
+    # template only follows a DIRECT dot, so the looped case can't be emitted — it must
+    # REFUSE loudly rather than drop the epilogue (generic routing proved unreliable).
+    from triton_msl.errors import MetalNonRecoverableError
     a, b = _ab(); c = torch.zeros(M, N)
-    _mm_kloop_fma[(1, 1)](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0),
-                          b.stride(1), c.stride(0), c.stride(1), BM=M, BN=N, BK=K)
-    np.testing.assert_allclose(c.numpy(), (a @ b).numpy() * 2.0 + 1.0, atol=2e-2, rtol=2e-2)
+    with pytest.raises(MetalNonRecoverableError):
+        _mm_kloop_fma[(1, 1)](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0),
+                              b.stride(1), c.stride(0), c.stride(1), BM=M, BN=N, BK=K)

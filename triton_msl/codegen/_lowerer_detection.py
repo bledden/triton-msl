@@ -127,29 +127,16 @@ class _DetectionMixin:
         if has_strides:
             return None
 
-        # Don't claim a SINGLE-dot matmul that has a trailing COMPUTE epilogue on
-        # the result — the inline simdgroup lowering stores the raw accumulator and
-        # would SILENTLY DROP it (re-audit #6: looped matmul + fma/scale/relu
-        # returned the bare dot). A TOP-LEVEL compute op is the epilogue (the K-loop
-        # accumulation `acc += dot` lives in the scf.for region). Restricted to
-        # exactly ONE dot so multi-dot kernels (FlashAttention = 2 dots + softmax)
-        # are unaffected. Falls through to the generic op-by-op lowerer, which
-        # applies the epilogue. (_detect_matmul_epilogue already claimed the
-        # non-looped single-dot case that the template CAN emit.)
-        def _count_dots(ops):
-            n = 0
-            for o in ops:
-                if o.op == "tt.dot":
-                    n += 1
-                if o.region_ops:
-                    n += _count_dots(o.region_ops)
-            return n
-
-        from triton_msl.codegen.generic_lowerer import _MATMUL_EPILOGUE_COMPUTE_OPS
-        if (_count_dots(self.graph.ops) == 1
-                and any(op.op in _MATMUL_EPILOGUE_COMPUTE_OPS
-                        for op in self.graph.ops)):
-            return None
+        # A single-dot matmul with a trailing compute epilogue the fused template
+        # didn't claim (looped dot-in-K-loop, etc.) must REFUSE — the inline simdgroup
+        # lowering stores the RAW accumulator and would SILENTLY DROP the epilogue
+        # (re-audit #6), and routing to the generic lowerer mis-tiles it. See
+        # _has_unhandled_matmul_compute_epilogue. (_detect_matmul_epilogue already
+        # claimed the non-looped single-dot case the template CAN emit.)
+        if self._has_unhandled_matmul_compute_epilogue():
+            from triton_msl.codegen.generic_lowerer import _MATMUL_EPILOGUE_REFUSE_MSG
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(_MATMUL_EPILOGUE_REFUSE_MSG, op_name="tt.dot")
 
         # Find scf.for and check if it contains tt.dot (K-loop pattern)
         scf_for_ssa = None

@@ -259,18 +259,14 @@ def test_reduce_plus_scan_small_still_computes():
 
 
 @triton.jit
-def _mm_relu_nanprop(a, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn,
-                     BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
-    pm = tl.program_id(0); pn = tl.program_id(1)
-    rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
-    acc = tl.zeros((BM, BN), dtype=tl.float32)
-    for k0 in range(0, K, BK):
-        kk = k0 + rk
-        av = tl.load(a + rm[:, None] * sam + kk[None, :] * sak)
-        bv = tl.load(b + kk[:, None] * sbk + rn[None, :] * sbn)
-        acc += tl.dot(av, bv)
+def _mm_relu_nanprop(a, b, c, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+    # NON-looped single dot -> the fused-epilogue template (where the NaN-propagation
+    # fix lives). A LOOPED matmul + epilogue is refused, not computed (re-audit #6).
+    om = tl.arange(0, M); on = tl.arange(0, N); ok = tl.arange(0, K)
+    acc = tl.dot(tl.load(a + om[:, None] * K + ok[None, :]),
+                 tl.load(b + ok[:, None] * N + on[None, :]))
     r = tl.maximum(acc, 0.0, propagate_nan=tl.PropagateNan.ALL)
-    tl.store(c + rm[:, None] * scm + rn[None, :] * scn, r)
+    tl.store(c + om[:, None] * N + on[None, :], r)
 
 
 @requires
@@ -281,8 +277,7 @@ def test_matmul_epilogue_propagates_nan():
     M = N = K = 32
     A = torch.randn(M, K, device="mps"); A[0, 0] = float("nan")
     B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
-    _mm_relu_nanprop[(1, 1)](A, B, C, M, N, K, *A.stride(), *B.stride(), *C.stride(),
-                             BM=M, BN=N, BK=K); torch.mps.synchronize()
+    _mm_relu_nanprop[(1,)](A, B, C, M=M, N=N, K=K); torch.mps.synchronize()
     assert math.isnan(C[0, 0].item()), f"epilogue dropped NaN: {C[0, 0].item()}"
 
 

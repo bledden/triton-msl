@@ -142,6 +142,14 @@ _MATMUL_EPILOGUE_COMPUTE_OPS = frozenset({
     "tt.clampf",
 })
 
+_MATMUL_EPILOGUE_REFUSE_MSG = (
+    "matmul with a trailing compute epilogue (bias/activation/fma/clamp) that the "
+    "fused-epilogue template can't emit (e.g. the dot is inside an scf.for K-loop): the "
+    "inline/prebuilt matmul templates store the raw accumulator and would SILENTLY DROP "
+    "the epilogue, and the generic fallback mis-tiles it. Refusing rather than "
+    "mis-compute. Split the epilogue into a separate kernel after the matmul."
+)
+
 
 # ---------------------------------------------------------------------------
 # Generic Lowerer
@@ -1455,17 +1463,41 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         if has_reduce or has_where:
             return False
 
-        # A trailing COMPUTE epilogue (bias/activation/fma on the matmul RESULT)
-        # is a TOP-LEVEL compute op (the K-loop accumulation `acc += dot` lives
-        # inside the scf.for region). The prebuilt template stores the raw
-        # accumulator and would SILENTLY DROP it (re-audit #6). _detect_matmul_epilogue
-        # claims the non-looped case first; route anything it didn't claim to the
-        # generic op-by-op lowerer, which applies the epilogue. Top-level casts are
-        # fine (the template casts on store), so they're excluded from the set.
-        if any(ssa.op in _MATMUL_EPILOGUE_COMPUTE_OPS for ssa in self.graph.ops):
-            return False
+        # A single-dot matmul with a trailing compute epilogue the fused template
+        # didn't claim (looped dot-in-K-loop, etc.) must REFUSE — the prebuilt template
+        # would silently DROP it and routing to generic mis-tiles (see the helper).
+        if self._has_unhandled_matmul_compute_epilogue():
+            raise MetalNonRecoverableError(_MATMUL_EPILOGUE_REFUSE_MSG)
 
         return True
+
+    def _has_unhandled_matmul_compute_epilogue(self):
+        """True if this is a SINGLE-dot matmul carrying a trailing TOP-LEVEL compute
+        epilogue (bias/activation/fma/clamp) that the fused-epilogue template
+        (_detect_matmul_epilogue, checked FIRST in lower()) did NOT claim. What remains
+        is the inline-dot / prebuilt matmul template, which stores the RAW accumulator
+        and would SILENTLY DROP the epilogue (re-audit #6: looped matmul + fma/scale/relu
+        returned the bare dot). Such kernels must REFUSE: routing them to the generic
+        op-by-op lowerer is NOT reliable — the combination fuzzer showed generic matmul +
+        epilogue is correct at some shapes (M32xN32) yet grossly WRONG at others
+        (M16xN16, M32xN64), mis-tiling the dot in a size-dependent way. Restricted to
+        EXACTLY ONE dot so multi-dot kernels (FlashAttention = 2 dots + softmax) are
+        never touched (the K-loop accumulation `acc += dot` is in the scf.for region, so
+        a TOP-LEVEL compute op is the epilogue). Proper follow-up: teach the fused
+        template the looped case so large fused matmuls stay fast + correct.
+        """
+        dots = []
+
+        def _find(ops):
+            for o in ops:
+                if o.op == "tt.dot":
+                    dots.append(o)
+                if o.region_ops:
+                    _find(o.region_ops)
+        _find(self.graph.ops)
+        if len(dots) != 1:
+            return False
+        return any(ssa.op in _MATMUL_EPILOGUE_COMPUTE_OPS for ssa in self.graph.ops)
 
     def _resolve_constant_int(self, ssa_id):
         """Resolve an SSA ID to its integer constant value, or None."""
