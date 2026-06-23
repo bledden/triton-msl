@@ -3444,8 +3444,23 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             return
 
         # Determine type and format
-        if isinstance(value, bool) or (isinstance(value, str) and value in ("true", "false")):
-            bool_val = value if isinstance(value, str) else ("true" if value else "false")
+        if (isinstance(value, bool)
+                or (isinstance(value, str) and value in ("true", "false"))
+                or ssa.elem_type == "i1"):
+            # i1 must render as 0/1 (or true/false). An i1 all-ones constant arrives as
+            # the integer -1 (or "-1"); the int path below would emit it verbatim, and
+            # `mask ^ -1` (bool NOT via arith.xori) is then ALWAYS truthy — re-audit #10:
+            # fp32 atomic_min/max ran BOTH the signed and unsigned branches. Map any i1
+            # value to its truthiness so the bool render (1/0) is correct.
+            if isinstance(value, bool):
+                bool_val = "true" if value else "false"
+            elif isinstance(value, str) and value in ("true", "false"):
+                bool_val = value
+            else:
+                try:
+                    bool_val = "true" if int(str(value).strip()) != 0 else "false"
+                except (TypeError, ValueError):
+                    bool_val = "true" if value else "false"
             if ssa.is_tensor:
                 # Tensor bool: store as int (1/0) for SIMD reduction compatibility
                 int_val = "1" if bool_val == "true" else "0"

@@ -701,6 +701,17 @@ class _ControlFlowMixin:
         store_dtype = self._trace_ptr_dtype(ptr_id)
         is_float_ptr = store_dtype.startswith("fp") or store_dtype.startswith("bf")
 
+        # Metal has NO 64-bit device atomic. The integer path below casts to
+        # device atomic_int* and the value to (int), silently truncating a 64-bit
+        # pointer + value to the low 32 bits (re-audit #10: int64 atomic_add wrote 0).
+        # Refuse loudly rather than mis-compute.
+        if val_dtype in ("i64", "u64", "ui64") or store_dtype in ("i64", "u64", "ui64"):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "64-bit atomic (i64/u64) is not supported: Metal has no 64-bit device "
+                "atomic, and emitting a 32-bit atomic would silently truncate the value. "
+                "Refusing.", op_name="tt.atomic_rmw")
+
         # Use float detection: if either the value or the pointer is float
         is_float = is_float or is_float_ptr
 
@@ -896,6 +907,15 @@ class _ControlFlowMixin:
         store_dtype = self._trace_ptr_dtype(ptr_id)
         is_float_ptr = store_dtype.startswith("fp") or store_dtype.startswith("bf")
         is_float = is_float or is_float_ptr
+
+        # Metal has no 64-bit device atomic — refuse rather than truncate to 32 bits
+        # (re-audit #10), mirroring _lower_atomic_rmw.
+        if val_dtype in ("i64", "u64", "ui64") or store_dtype in ("i64", "u64", "ui64"):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "64-bit atomic CAS (i64/u64) is not supported: Metal has no 64-bit "
+                "device atomic, and a 32-bit CAS would silently truncate. Refusing.",
+                op_name="tt.atomic_cas")
 
         # Scalar CAS: only thread 0 per threadgroup should execute
         is_scalar = not ssa.is_tensor

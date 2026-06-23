@@ -473,3 +473,49 @@ def test_i32_reduce_exact_above_2_24():
     a2 = torch.arange(N, device="mps", dtype=torch.int32) + (1 << 25); o2 = torch.empty(1, device="mps", dtype=torch.int32)
     _imax[(1,)](a2, o2, N=N); torch.mps.synchronize()
     assert o2.item() == (N - 1) + (1 << 25), f"i32 max lost precision: {o2.item()}"
+
+
+# --- Re-audit #10 (2026-06-23): bool-xori/atomic-min-max + i64 atomic refuse ----
+@triton.jit
+def _amin(a, o, N: tl.constexpr, K: tl.constexpr):
+    i = tl.arange(0, N); tl.atomic_min(o + (i % K), tl.load(a + i))
+
+
+@triton.jit
+def _amax(a, o, N: tl.constexpr, K: tl.constexpr):
+    i = tl.arange(0, N); tl.atomic_max(o + (i % K), tl.load(a + i))
+
+
+@requires
+def test_fp32_atomic_min_max_correct():
+    # arith.xori on i1 emitted `mask ^ -1` (an i1 all-ones constant rendered as -1),
+    # always truthy -> both the signed-min and unsigned-min/max branches of the float
+    # atomic sign-bit decomposition ran on every element (re-audit #10). Now the i1
+    # constant renders 0/1, so the mask is correct.
+    N, K = 128, 4
+    torch.manual_seed(1); a = torch.randn(N, device="mps")
+    o = torch.full((K,), 1e30, device="mps"); _amin[(1,)](a, o, N=N, K=K); torch.mps.synchronize()
+    ref = torch.full((K,), 1e30)
+    for idx in range(N):
+        ref[idx % K] = min(ref[idx % K], a.cpu()[idx])
+    torch.testing.assert_close(o.cpu(), ref, rtol=1e-4, atol=1e-4)
+    an = -torch.rand(N, device="mps") - 0.1
+    o2 = torch.full((K,), -1e30, device="mps"); _amax[(1,)](an, o2, N=N, K=K); torch.mps.synchronize()
+    ref2 = torch.full((K,), -1e30)
+    for idx in range(N):
+        ref2[idx % K] = max(ref2[idx % K], an.cpu()[idx])
+    torch.testing.assert_close(o2.cpu(), ref2, rtol=1e-4, atol=1e-4)
+
+
+@triton.jit
+def _aadd64(a, o, N: tl.constexpr):
+    i = tl.arange(0, N); tl.atomic_add(o + (i * 0), tl.load(a + i))
+
+
+@requires
+def test_i64_atomic_refuses():
+    # Metal has no 64-bit device atomic; the int path truncated to 32 bits (wrote 0).
+    a = torch.full((8,), 1 << 40, device="mps", dtype=torch.int64)
+    o = torch.zeros(1, device="mps", dtype=torch.int64)
+    with pytest.raises(MetalNonRecoverableError):
+        _aadd64[(1,)](a, o, N=8); torch.mps.synchronize()
