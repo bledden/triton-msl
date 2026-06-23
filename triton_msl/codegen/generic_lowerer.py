@@ -960,6 +960,17 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                        "tt.cat", "tt.join", "tt.split")
             for ssa in all_ops_iter
         )
+        # Cooperative shared-memory-staging ops (one element per thread). When a
+        # kernel ALSO contains a tt.reduce that forces the multipass path (which
+        # dispatches only num_threads / 1024 threads), the staging tail is
+        # under-computed — a reduce+scan re-accumulated the partial, histogram
+        # re-counted each bin num_warps times (re-audit #5 silent-wrong). These two
+        # dispatch strategies are mutually exclusive, so the combination refuses.
+        _coop_staging_ops = any(
+            ssa.op in ("tt.scan", "tt.trans", "tt.gather", "tt.cat",
+                       "tt.join", "tt.split", "tt.histogram")
+            for ssa in all_ops_iter
+        )
         # Multi-value reduces (argmin/argmax) need per-element indices which
         # are incompatible with the multi-pass accumulation loop (the loop
         # variable goes out of scope before the reduce handler runs).
@@ -1243,6 +1254,15 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 block_size = num_threads
                 self._mept_single_pass = True
             elif has_reduce_ops:
+                if _coop_staging_ops:
+                    raise MetalNonRecoverableError(
+                        "Kernel combines a reduce with a cooperative shared-memory "
+                        "op (scan/transpose/gather/cat/join/split/histogram) over a "
+                        "tile wider than the threadgroup: the multipass reduce "
+                        "dispatches only num_threads threads while the cooperative op "
+                        "stages one element per thread, so the staging tail is "
+                        "under-computed (silent-wrong). Split into separate kernels "
+                        "or use BLOCK <= num_threads.", op_name="tt.reduce")
                 use_multipass = True
                 self._total_elements = block_size
                 block_size = num_threads
@@ -1268,6 +1288,14 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 block_size = num_threads
         elif block_size > 1024:
             if has_reduce_ops:
+                if _coop_staging_ops:
+                    raise MetalNonRecoverableError(
+                        "Kernel combines a reduce with a cooperative shared-memory "
+                        "op (scan/transpose/gather/cat/join/split/histogram) over a "
+                        ">1024 tile: the multipass reduce and one-element-per-thread "
+                        "staging are mutually exclusive, so the staging tail is "
+                        "under-computed (silent-wrong). Split into separate kernels.",
+                        op_name="tt.reduce")
                 use_multipass = True
                 self._total_elements = block_size
                 block_size = 1024

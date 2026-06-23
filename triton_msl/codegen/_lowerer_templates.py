@@ -1433,8 +1433,13 @@ class _TemplateMixin:
     _EPI_BIN = {"arith.addf": "+", "arith.subf": "-", "arith.mulf": "*",
                 "arith.divf": "/", "arith.addi": "+", "arith.subi": "-",
                 "arith.muli": "*"}
-    _EPI_FN2 = {"arith.maximumf": "fmax", "arith.minimumf": "fmin",
-                "arith.maxnumf": "fmax", "arith.minnumf": "fmin"}
+    # NaN-QUIET min/max (IEEE minNum/maxNum): MSL fmax/fmin return the non-NaN
+    # operand — correct for maxnumf/minnumf.
+    _EPI_FN2 = {"arith.maxnumf": "fmax", "arith.minnumf": "fmin"}
+    # NaN-PROPAGATING min/max (tl.maximum/minimum with propagate_nan=ALL): if either
+    # operand is NaN the result must be NaN. Plain fmax/fmin would silently drop it
+    # (re-audit #5 — relu(NaN accumulator) returned 0.0 instead of NaN).
+    _EPI_FN2_NANPROP = {"arith.maximumf": "fmax", "arith.minimumf": "fmin"}
     _EPI_FN1 = {"math.exp": "exp", "math.exp2": "exp2", "math.log": "log",
                 "math.log2": "log2", "math.sqrt": "sqrt", "math.rsqrt": "rsqrt",
                 "math.sin": "precise::sin", "math.cos": "precise::cos",
@@ -1500,6 +1505,10 @@ class _TemplateMixin:
                 e = f"(({es[0]}) {self._EPI_BIN[op.op]} ({es[1]}))"
             elif op.op in self._EPI_FN2 and len(es) >= 2:
                 e = f"{self._EPI_FN2[op.op]}(({es[0]}), ({es[1]}))"
+            elif op.op in self._EPI_FN2_NANPROP and len(es) >= 2:
+                _fn = self._EPI_FN2_NANPROP[op.op]
+                e = (f"((isnan({es[0]}) || isnan({es[1]})) ? NAN : "
+                     f"{_fn}(({es[0]}), ({es[1]})))")
             elif op.op in self._EPI_FN1 and es:
                 e = f"{self._EPI_FN1[op.op]}(({es[0]}))"
             elif op.op == "tt.clampf" and len(es) >= 3:

@@ -219,3 +219,68 @@ def test_shift_by_ge_bitwidth_matches_cuda():
     a = torch.full((N,), -8, device="mps", dtype=torch.int32); o = torch.empty(N, device="mps", dtype=torch.int32)
     _shr_k[(1,)](a, amt, o, N=N); torch.mps.synchronize()
     assert o.cpu().tolist() == [-1, -1, -1, -1], f"shrsi not sign-filled: {o.cpu().tolist()}"
+
+
+# --- Re-audit #5 (2026-06-22): reduce+cooperative-op interaction + epilogue NaN ---
+@triton.jit
+def _scan_then_reduce(a, o, N: tl.constexpr):
+    i = tl.arange(0, N)
+    tl.store(o, tl.sum(tl.cumsum(tl.load(a + i), 0), 0))
+
+
+@triton.jit
+def _hist_then_reduce(a, o, N: tl.constexpr, B: tl.constexpr):
+    i = tl.arange(0, N)
+    tl.store(o, tl.sum(tl.histogram(tl.load(a + i), B), 0))
+
+
+@requires
+def test_reduce_plus_cooperative_op_over_threadgroup_refuses():
+    # A reduce paired with a cooperative shared-memory op (scan/histogram/...) over a
+    # tile > num_threads took the multipass-reduce dispatch, which under-computes the
+    # cooperative op's one-element-per-thread staging (scan+reduce gave 33024 vs 131328;
+    # histogram re-counted each bin num_warps times). Must refuse loudly.
+    N = 512
+    a = torch.ones(N, device="mps"); o = torch.empty(1, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _scan_then_reduce[(1,)](a, o, N=N); torch.mps.synchronize()
+    ai = torch.zeros(N, device="mps", dtype=torch.int32); oi = torch.empty(1, device="mps", dtype=torch.int32)
+    with pytest.raises(MetalNonRecoverableError):
+        _hist_then_reduce[(1,)](ai, oi, N=N, B=16); torch.mps.synchronize()
+
+
+@requires
+def test_reduce_plus_scan_small_still_computes():
+    # Below the threadgroup (no multipass) the combination is correct — must NOT over-refuse.
+    N = 64
+    a = torch.ones(N, device="mps"); o = torch.empty(1, device="mps")
+    _scan_then_reduce[(1,)](a, o, N=N); torch.mps.synchronize()
+    assert abs(o.item() - N * (N + 1) / 2) < 1.0
+
+
+@triton.jit
+def _mm_relu_nanprop(a, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn,
+                     BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pm = tl.program_id(0); pn = tl.program_id(1)
+    rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k0 in range(0, K, BK):
+        kk = k0 + rk
+        av = tl.load(a + rm[:, None] * sam + kk[None, :] * sak)
+        bv = tl.load(b + kk[:, None] * sbk + rn[None, :] * sbn)
+        acc += tl.dot(av, bv)
+    r = tl.maximum(acc, 0.0, propagate_nan=tl.PropagateNan.ALL)
+    tl.store(c + rm[:, None] * scm + rn[None, :] * scn, r)
+
+
+@requires
+def test_matmul_epilogue_propagates_nan():
+    # The fused matmul-epilogue mapped maximumf/minimumf to NaN-quiet fmax/fmin,
+    # dropping NaN under propagate_nan=ALL (relu of a NaN accumulator gave 0.0).
+    import math
+    M = N = K = 32
+    A = torch.randn(M, K, device="mps"); A[0, 0] = float("nan")
+    B = torch.randn(K, N, device="mps"); C = torch.empty(M, N, device="mps")
+    _mm_relu_nanprop[(1, 1)](A, B, C, M, N, K, *A.stride(), *B.stride(), *C.stride(),
+                             BM=M, BN=N, BK=K); torch.mps.synchronize()
+    assert math.isnan(C[0, 0].item()), f"epilogue dropped NaN: {C[0, 0].item()}"
