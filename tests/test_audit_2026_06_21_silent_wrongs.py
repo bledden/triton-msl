@@ -361,3 +361,67 @@ def test_split_over_threadgroup_refuses():
     o0 = torch.empty(N, device="mps"); o1 = torch.empty(N, device="mps")
     with pytest.raises(MetalNonRecoverableError):
         _split_kernel[(1,)](a, o0, o1, N=N); torch.mps.synchronize()
+
+
+# --- Re-audit #8 (confirming audit, 2026-06-23): 3 more, all REFUSE now ---------
+@triton.jit
+def _kloop_where(a, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn,
+                 BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pm = tl.program_id(0); pn = tl.program_id(1)
+    rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k0 in range(0, K, BK):
+        kk = k0 + rk
+        acc += tl.dot(tl.load(a + rm[:, None] * sam + kk[None, :] * sak),
+                      tl.load(b + kk[:, None] * sbk + rn[None, :] * sbn))
+    tl.store(c + rm[:, None] * scm + rn[None, :] * scn, tl.where(acc > 0, acc, 0.0))
+
+
+@requires
+def test_kloop_matmul_where_epilogue_refuses():
+    # A K-loop matmul + relu-via-tl.where silently dropped the where (stored the raw
+    # dot, 505 negatives). tl.where is a top-level arith.select -> now refuses (a masked
+    # LOAD's select lives in the loop region, so masked matmuls are NOT over-refused).
+    M = N = K = 32
+    a = torch.randn(M, K, device="mps"); b = torch.randn(K, N, device="mps"); c = torch.empty(M, N, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _kloop_where[(1, 1)](a, b, c, M, N, K, *a.stride(), *b.stride(), *c.stride(),
+                             BM=M, BN=N, BK=K); torch.mps.synchronize()
+
+
+@triton.jit
+def _fused_rowbias(a, bias, b, c, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+    om = tl.arange(0, M); on = tl.arange(0, N); ok = tl.arange(0, K)
+    bv = tl.load(bias + om)[:, None]
+    acc = tl.dot(tl.load(a + om[:, None] * K + ok[None, :]),
+                 tl.load(b + ok[:, None] * N + on[None, :]), tl.broadcast_to(bv, (M, N)))
+    tl.store(c + om[:, None] * N + on[None, :], acc * 2.0)
+
+
+@requires
+def test_fused_row_bias_matmul_refuses():
+    # A fused per-ROW bias (M-length bias as the dot accumulator) is mis-computed
+    # (re-audit #8: M=64 row 40 grossly wrong; direct repro wrong even at M=32). Refuses.
+    M, N, K = 64, 32, 32
+    a = torch.randn(M, K, device="mps"); b = torch.randn(K, N, device="mps")
+    bias = torch.arange(M, device="mps", dtype=torch.float32); c = torch.empty(M, N, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _fused_rowbias[(1,)](a, bias, b, c, M=M, N=N, K=K); torch.mps.synchronize()
+
+
+@triton.jit
+def _join_split(a, o0, o1, N: tl.constexpr):
+    i = tl.arange(0, N)
+    lo, hi = tl.split(tl.join(tl.load(a + 2 * i), tl.load(a + 2 * i + 1)))
+    tl.store(o0 + i, lo); tl.store(o1 + i, hi)
+
+
+@requires
+@pytest.mark.parametrize("N", [32, 256])
+def test_split_refuses_at_small_sizes(N):
+    # tt.split de-interleave mis-matches the store index -> wrong at ALL sizes (the old
+    # guard only refused >1024). Now refuses everywhere (re-audit #8).
+    a = torch.arange(2 * N, device="mps", dtype=torch.float32)
+    o0 = torch.empty(N, device="mps"); o1 = torch.empty(N, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _join_split[(1,)](a, o0, o1, N=N); torch.mps.synchronize()

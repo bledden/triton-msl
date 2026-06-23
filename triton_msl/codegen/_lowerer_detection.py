@@ -662,6 +662,20 @@ class _DetectionMixin:
                         return None
                     acc_bias_ptr = bptr.name
                     acc_bias_dim = "col" if str(axis) in ("0",) else "row"
+                    # A fused ROW bias (M-length, broadcast over N as the dot accumulator
+                    # init) is mis-computed: re-audit #8 found M=64 row 40 grossly wrong
+                    # (strip-local bias index), and a direct repro shows even M=32 wrong
+                    # (the simdgroup matmul mis-handles a non-zero fused-bias accumulator).
+                    # The mechanism isn't reliably fixable here, so REFUSE the row-bias
+                    # case loudly for all M. COL bias (the common per-output-feature bias)
+                    # is strip-independent and verified correct — unaffected.
+                    if acc_bias_dim == "row":
+                        from triton_msl.errors import MetalNonRecoverableError
+                        raise MetalNonRecoverableError(
+                            "fused ROW-bias matmul (per-row bias as the dot accumulator) "
+                            "is mis-computed and not reliably lowerable. Refusing rather "
+                            "than mis-compute. Use a column bias, or add the row bias in a "
+                            "separate kernel after the matmul.", op_name="tt.dot")
                 else:
                     return None   # non-zero, non-bias accumulator: unsupported
 

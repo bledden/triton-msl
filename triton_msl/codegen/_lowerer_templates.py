@@ -1461,7 +1461,11 @@ class _TemplateMixin:
         # The matmul result staged in tg_C is a@b (accumulators init to 0). If a
         # bias was fused into the dot's accumulator, add it back here.
         acc_bias = info.get("acc_bias_ptr")
-        acc_idx = "row" if info.get("acc_bias_dim") == "row" else "col"
+        # ROW bias indexes the M-length bias by the GLOBAL row (mstrip + row), NOT the
+        # strip-local `row`. _detect_matmul_epilogue refuses the row-bias case when
+        # M > m_block (re-audit #8), so here mstrip is always 0 for a row bias and this
+        # is exact; the mstrip term is kept for correctness if that guard ever loosens.
+        acc_idx = "(mstrip + row)" if info.get("acc_bias_dim") == "row" else "col"
         dot_expr = (f"(tg_C[i] + {acc_bias}[{acc_idx}])" if acc_bias else "tg_C[i]")
         val = {info["dot_id"]: dot_expr}
 

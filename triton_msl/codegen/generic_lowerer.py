@@ -140,6 +140,11 @@ _MATMUL_EPILOGUE_COMPUTE_OPS = frozenset({
     "math.tanh", "math.floor", "math.ceil", "math.absf", "math.powf",
     "arith.maximumf", "arith.minimumf", "arith.maxnumf", "arith.minnumf",
     "tt.clampf",
+    # tl.where(cond, acc, x) — e.g. relu-via-where — is a TOP-LEVEL arith.select on
+    # the matmul result. (A masked LOAD's select lives inside the scf.for region, not
+    # at top level, so this does NOT over-refuse bounds-masked matmuls.) re-audit #8:
+    # a K-loop matmul + relu-via-where silently dropped the mask, storing the raw dot.
+    "arith.select",
 })
 
 _MATMUL_EPILOGUE_REFUSE_MSG = (
@@ -5404,15 +5409,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         total = N * 2
 
-        # Threadgroup-cap guard (mirrors tt.cat/tt.join): the 2*N flat input is staged
-        # one element per thread; 2*N > 1024 can't be covered -> wrong (re-audit #2
-        # class-A pattern). tt.split is in has_barrier_ops so 2*N<=1024 is one-element-
-        # per-thread; refuse above.
-        if total > 1024:
-            raise MetalNonRecoverableError(
-                f"tt.split of a {total}-element interleaved input exceeds the 1024-thread "
-                f"threadgroup (one-element-per-thread de-interleave can't cover it). "
-                f"Refusing rather than mis-compute.", op_name="tt.split")
+        # tt.split is SILENTLY WRONG at ALL sizes (re-audit #8): the de-interleave maps
+        # thread lid -> source row (lid % N) but the downstream store keeps the join-era
+        # output index (lid / 2), so output[k] receives source element 2k (every other
+        # element) — verified wrong at N=32 and N=256, not just the >1024 staging cap.
+        # The layout/store mismatch is a real follow-up (reconcile the per-thread layout
+        # the split produces with the store-offset emission); until then, REFUSE rather
+        # than mis-compute. (Was a >1024-only guard, which missed the small-N silent-wrong.)
+        raise MetalNonRecoverableError(
+            f"tt.split (de-interleave of a {total}-element input) is not correctly "
+            f"lowered: the de-interleave layout does not match the store index, so it "
+            f"mis-computes at every size. Refusing rather than silently mis-compute.",
+            op_name="tt.split")
 
         # Determine types
         input_dtype = self.env_types.get(src_id, "i32")
