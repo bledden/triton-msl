@@ -284,3 +284,85 @@ def test_matmul_epilogue_propagates_nan():
     _mm_relu_nanprop[(1, 1)](A, B, C, M, N, K, *A.stride(), *B.stride(), *C.stride(),
                              BM=M, BN=N, BK=K); torch.mps.synchronize()
     assert math.isnan(C[0, 0].item()), f"epilogue dropped NaN: {C[0, 0].item()}"
+
+
+# --- Re-audit #6 (2026-06-22): scan-in-loop race / splat-reduce / split gap ----
+@triton.jit
+def _cumsum_twice(a, o, N: tl.constexpr):
+    i = tl.arange(0, N); x = tl.load(a + i)
+    for _ in range(2):
+        x = tl.cumsum(x, 0)
+    tl.store(o + i, x)
+
+
+@requires
+@pytest.mark.parametrize("B", [512, 1024])
+def test_cumsum_in_loop_no_race(B):
+    # tl.cumsum inside an scf.for reused the scan shared buffer across iterations with
+    # NO trailing barrier when total==block_size -> non-deterministic huge errors.
+    # The trailing barrier after the scan loop fixes it; run 3x and require determinism.
+    a = torch.ones(B, device="mps")
+    ref = a.clone()
+    for _ in range(2):
+        ref = torch.cumsum(ref, 0)
+    outs = []
+    for _ in range(3):
+        o = torch.empty(B, device="mps")
+        _cumsum_twice[(1,)](a, o, N=B); torch.mps.synchronize()
+        outs.append((o - ref).abs().max().item())
+    assert all(e < 1.0 for e in outs), f"cumsum-in-loop wrong/racy: {outs}"
+
+
+@triton.jit
+def _scan_then_gather(a, idx, o, N: tl.constexpr):
+    i = tl.arange(0, N)
+    s = tl.cumsum(tl.load(a + i), 0)
+    tl.store(o + i, tl.gather(s, tl.load(idx + i), axis=0))
+
+
+@requires
+def test_scan_then_gather_correct():
+    # Two cooperative ops sharing threadgroup buffers; the scan trailing barrier
+    # ensures the scan finishes reading before the gather staging reuses memory.
+    N = 512
+    torch.manual_seed(0)
+    a = torch.ones(N, device="mps")
+    idx = torch.randint(0, N, (N,), device="mps", dtype=torch.int32)
+    o = torch.empty(N, device="mps")
+    _scan_then_gather[(1,)](a, idx, o, N=N); torch.mps.synchronize()
+    ref = torch.cumsum(a.cpu(), 0)[idx.cpu().long()]
+    torch.testing.assert_close(o.cpu(), ref, rtol=1e-4, atol=1e-4)
+
+
+@triton.jit
+def _splat_sum(o, N: tl.constexpr):
+    tl.store(o, tl.sum(tl.full((N,), 3.0, tl.float32), 0))
+
+
+@requires
+@pytest.mark.parametrize("N", [8, 16, 64])
+def test_reduce_over_splat_counts_N_not_threads(N):
+    # tl.sum over a tt.splat of N had no make_range to pin block_size to N, so the
+    # cross-lane reduce summed num_threads copies (768 vs 24). Tail lanes now masked.
+    o = torch.empty(1, device="mps")
+    _splat_sum[(1,)](o, N=N); torch.mps.synchronize()
+    assert abs(o.item() - N * 3.0) < 0.5, f"splat sum N={N}: {o.item()} != {N*3.0}"
+
+
+@triton.jit
+def _split_kernel(a, o0, o1, N: tl.constexpr):
+    i = tl.arange(0, N)
+    x = tl.load(a + 2 * i)
+    y = tl.load(a + 2 * i + 1)
+    lo, hi = tl.split(tl.join(x, y))
+    tl.store(o0 + i, lo); tl.store(o1 + i, hi)
+
+
+@requires
+def test_split_over_threadgroup_refuses():
+    # GPU-execution coverage for the tt.split >1024 guard (was assertion-only).
+    N = 1024  # join -> 2048 interleaved > 1024-thread cap
+    a = torch.arange(2 * N, device="mps", dtype=torch.float32)
+    o0 = torch.empty(N, device="mps"); o1 = torch.empty(N, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _split_kernel[(1,)](a, o0, o1, N=N); torch.mps.synchronize()

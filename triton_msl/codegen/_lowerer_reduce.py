@@ -671,6 +671,35 @@ class _ReduceScanMixin:
                                       msl_type, shared_dtype)
             return
 
+        # The dispatch may run more threads (block_size = num_threads) than the
+        # logical reduce length N when the input has no make_range to pin block_size
+        # to N — e.g. a reduce over a tt.splat/full. Lanes >= N then hold a value that
+        # must NOT contribute (re-audit #6: sum over a splat of N summed num_threads
+        # copies — 768 vs 24). Mask the tail to the combine identity. No-op when
+        # N == block_size (the common make_range case, where N lanes == all lanes).
+        _rn = input_shape[0] if (input_shape and len(input_shape) == 1) else None
+        if _rn is not None and _rn < self.kb.block_size:
+            from triton_msl.errors import MetalNonRecoverableError
+            _is_float = msl_type in ("float", "half", "bfloat")
+            if combine_op == "sum":
+                _ident = "0"
+            elif combine_op == "max" and _is_float:
+                _ident = "-INFINITY"
+            elif combine_op == "min" and _is_float:
+                _ident = "INFINITY"
+            else:
+                raise MetalNonRecoverableError(
+                    f"reduce ('{combine_op}') over a {_rn}-element value dispatched "
+                    f"with {self.kb.block_size} threads (no make_range pins the "
+                    f"length): cannot mask the tail lanes for this combine/dtype, so "
+                    f"the cross-lane reduce would over-count. Refusing.",
+                    op_name="tt.reduce")
+            _masked = self._next_var("rmask")
+            self.kb.raw_line(
+                f"    {msl_type} {_masked} = (lid < {_rn}u) ? "
+                f"({msl_type}){input_var} : ({msl_type}){_ident};")
+            input_var = _masked
+
         # 1D full reduction (original behavior)
         shared_name = f"shared_{self._shared_counter}"
         self._shared_counter += 1
@@ -1679,6 +1708,17 @@ class _ReduceScanMixin:
                 self.kb.raw_line(f"        {acc_vars[i]} = {new_val};")
 
         self.kb.raw_line(f"    }}")
+
+        # Trailing barrier: every thread must finish READING the scan_shared buffer
+        # in the loop above before any thread REUSES it. This is critical when the
+        # scan runs inside an scf.for (e.g. two tl.cumsum in a loop): the SAME
+        # threadgroup buffer is rewritten at the top of the next iteration, and
+        # without this fence a fast thread's write clobbered slots a slow thread was
+        # still reading -> non-deterministic wrong results (re-audit #6). The
+        # write-back branch below adds its own barrier only when total<block_size,
+        # so the total==block_size case had NO trailing fence. Cheap + always safe
+        # (emitted in the loop body's uniform control flow, after the scan loop).
+        self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         # For 1D scans, subsequent reshape+broadcast needs all threads to access
         # the scan results. Write back to shared memory and read with modular index.
