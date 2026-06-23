@@ -519,3 +519,62 @@ def test_i64_atomic_refuses():
     o = torch.zeros(1, device="mps", dtype=torch.int64)
     with pytest.raises(MetalNonRecoverableError):
         _aadd64[(1,)](a, o, N=8); torch.mps.synchronize()
+
+
+# --- Re-audit #10 part 2 (2026-06-23): argmin/max sub-warp + topk refuse --------
+@triton.jit
+def _argmin1d(a, o, N: tl.constexpr):
+    tl.store(o, tl.argmin(tl.load(a + tl.arange(0, N)), 0))
+
+
+@triton.jit
+def _argmax1d(a, o, N: tl.constexpr):
+    tl.store(o, tl.argmax(tl.load(a + tl.arange(0, N)), 0))
+
+
+@requires
+@pytest.mark.parametrize("N", [8, 16, 32, 64])
+def test_argminmax_subwarp_correct(N):
+    # For N<32 (sub-warp) the simd_shuffle_down tree read INACTIVE lanes (garbage 0),
+    # so an all-positive argmin collapsed to index 0 (re-audit #10). Now the take is
+    # guarded on the source thread being a real element (lid + _d < block_size).
+    torch.manual_seed(N)
+    a = torch.rand(N, device="mps") + 0.1
+    o = torch.empty(1, device="mps", dtype=torch.int32)
+    _argmin1d[(1,)](a, o, N=N); torch.mps.synchronize()
+    assert o.item() == a.cpu().argmin().item(), f"argmin N={N}: {o.item()}"
+    o2 = torch.empty(1, device="mps", dtype=torch.int32)
+    _argmax1d[(1,)](a, o2, N=N); torch.mps.synchronize()
+    assert o2.item() == a.cpu().argmax().item(), f"argmax N={N}: {o2.item()}"
+
+
+@triton.jit
+def _sort1d(a, o, N: tl.constexpr):
+    tl.store(o + tl.arange(0, N), tl.sort(tl.load(a + tl.arange(0, N))))
+
+
+@triton.jit
+def _topk1d(a, o, N: tl.constexpr, K: tl.constexpr):
+    tl.store(o + tl.arange(0, K), tl.topk(tl.load(a + tl.arange(0, N)), K, 0))
+
+
+@triton.jit
+def _topk2d(a, o, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+    i = tl.arange(0, M); j = tl.arange(0, N); kk = tl.arange(0, K)
+    tl.store(o + i[:, None] * K + kk[None, :], tl.topk(tl.load(a + i[:, None] * N + j[None, :]), K, 1))
+
+
+@requires
+def test_topk_refuses_full_sort_correct():
+    # tl.topk (K<N) mis-computed to duplicated values in BOTH the template and generic
+    # paths (re-audit #10); refuse it. A full tl.sort (K==N) stays correct.
+    torch.manual_seed(0)
+    a = torch.randn(16, device="mps"); o = torch.empty(16, device="mps")
+    _sort1d[(1,)](a, o, N=16); torch.mps.synchronize()
+    torch.testing.assert_close(o.cpu(), a.cpu().sort().values, rtol=1e-4, atol=1e-4)
+    for kernel, args in [(_topk1d, dict(N=16, K=4)), (_topk2d, dict(M=2, N=16, K=4))]:
+        sz = 4 if kernel is _topk1d else (2, 4)
+        a2 = torch.randn(16 if kernel is _topk1d else (2, 16), device="mps")
+        o2 = torch.empty(sz, device="mps")
+        with pytest.raises(MetalNonRecoverableError):
+            kernel[(1,)](a2, o2, **args); torch.mps.synchronize()

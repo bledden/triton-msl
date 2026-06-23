@@ -29,6 +29,16 @@ This is inherent to the device (identical to native Metal), not a codegen choice
 not refusable; kernels that depend on subnormal-range fp32 values will diverge slightly from
 CUDA. (Like the absence of `cp.async` software pipelining, this is an Apple-hardware property.)
 
+**Numeric-semantics divergence (fp16/bf16 compute precision):** fp16/bf16 **intermediate
+arithmetic is computed in fp32** (loads widen to float, binary ops run in float, the result
+narrows on store). This is a deliberate precision win — it matches the common fp16-in /
+fp32-accumulate pattern and avoids fp16 rounding on every intermediate. The one observable
+divergence from CUDA: an fp16 intermediate that would **overflow to inf** in true fp16 (e.g.
+`x + x` for `x = 65504`) does **not** overflow here (it stays finite in fp32 until the store).
+Final fp16/bf16 *outputs* are narrowed correctly; only mid-computation overflow-to-inf differs.
+This is a design choice (precision over bit-exact fp16 overflow), not a silent bug — documented
+here so it's an acknowledged divergence.
+
 ## Op coverage by category
 
 | category | status | detail |

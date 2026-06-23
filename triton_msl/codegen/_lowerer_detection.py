@@ -1696,29 +1696,57 @@ class _DetectionMixin:
         if not has_hypercube_reshape:
             return None
 
-        # Load shape must be 2D: tensor<MxNx...>
+        # Load shape: 2D tensor<MxNx...>, or 1D tensor<N> (treated as M=1). The 1D
+        # case is admitted ONLY to route a 1D tl.topk (K<N) to the template, which
+        # REFUSES it (the K<N trim is broken — re-audit #10); a 1D FULL sort (K==N)
+        # is correctly handled by the generic path, so it is left unclaimed below.
         load_shape = _extract_shape(load_ssa.type_str)
-        if not load_shape or len(load_shape) != 2:
+        if not load_shape or len(load_shape) not in (1, 2):
             return None
-        M, N = load_shape
+        if len(load_shape) == 2:
+            M, N = load_shape
+        else:
+            M, N = 1, load_shape[0]
         # N must be a power of 2
         if N < 1 or (N & (N - 1)) != 0:
             return None
 
-        # Identify the final store shape: (M, K) where K in {N, user_k}
+        # Identify the final store shape: (M, K) [2D] or (K,) [1D, M==1].
         store_shape = None
         if store_ssa.operand_ids and len(store_ssa.operand_ids) >= 2:
             val_id = store_ssa.operand_ids[1]
             val_type = self._find_op_type_str(val_id)
             store_shape = _extract_shape(val_type) if val_type else None
-        if not store_shape or len(store_shape) != 2:
+        if not store_shape or len(store_shape) not in (1, 2):
             return None
-        if store_shape[0] != M:
-            return None
-        K_out = store_shape[1]
+        if len(store_shape) == 2:
+            if store_shape[0] != M:
+                return None
+            K_out = store_shape[1]
+        else:
+            if M != 1:
+                return None
+            K_out = store_shape[0]
         # K_out must be a power of 2 and <= N
         if K_out < 1 or (K_out & (K_out - 1)) != 0 or K_out > N:
             return None
+        # 1D FULL sort (K==N) is correctly lowered by the generic path — don't claim
+        # it (the template's M-row layout is for the 2D case).
+        if M == 1 and K_out == N:
+            return None
+
+        # topk (K < N): the sort signature is confirmed (>=1 xori reduce + hypercube
+        # reshape) but the output is trimmed to K < N. That K<N trim mis-computes in
+        # BOTH the template and the generic path (re-audit #10: duplicated values).
+        # REFUSE here — before the reduce-axis gate below would otherwise drop a topk
+        # to the broken generic path. The full sort (K == N) continues normally.
+        if K_out < N:
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"tl.topk (k={K_out} < N={N}) is not correctly lowered — the K<N trim "
+                f"mis-computes (duplicated values, not the K distinct top elements). "
+                f"Refusing rather than return wrong results. Use a full tl.sort and "
+                f"slice the top k, or k == N.", op_name="tt.reduce")
 
         total = M * N
         n_dims = total.bit_length() - 1  # log2(total)

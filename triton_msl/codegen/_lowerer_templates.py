@@ -1596,6 +1596,17 @@ class _TemplateMixin:
         M = info["M"]
         N = info["N"]
         K = info["K"]
+        # tl.topk (K < N) is mis-computed: the K<N trim returns duplicated pairs, not
+        # the K distinct top values — verified WRONG in BOTH this template (2D) and the
+        # generic xor path (1D) (re-audit #10: topk N=16 K=4 gave [2.18,0.77,2.18,0.77]
+        # vs [2.18,0.83,0.77,0.77]). Only the FULL sort (K == N) is correct. Refuse
+        # topk loudly rather than mis-compute (fixing the K<N trim is a follow-up).
+        if K < N:
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"tl.topk (k={K} < N={N}) is not correctly lowered — the K<N trim "
+                f"mis-computes (duplicated values). Refusing rather than return wrong "
+                f"results. Use a full tl.sort and slice, or k == N.", op_name="tt.reduce")
         descending = info["descending"]
         elem_type = info["elem_type"]
         x_ptr = info["x_ptr"]

@@ -946,11 +946,20 @@ class _ReduceScanMixin:
         self.kb.raw_line(f"    {msl_val_type} {mv} = {val_var};")
         self.kb.raw_line(f"    int {mi} = {idx_var};")
 
-        # SIMD-level tree reduction using simd_shuffle_down
+        # SIMD-level tree reduction using simd_shuffle_down. The source lane is
+        # group-relative (tiisg + _d); its GLOBAL thread index is lid + _d. When the
+        # tile is smaller than the SIMD group (block_size < 32, e.g. argmin over N=16)
+        # those source lanes are INACTIVE and simd_shuffle_down returns garbage (often
+        # 0) — for an all-positive argmin the 0 wins and the index collapses to 0
+        # (re-audit #10). Guard the take on the source thread being a real element
+        # (lid + _d < block_size). No-op for full groups (lane 0 reads 16,8,..,1, all
+        # valid); the upper lanes' results are discarded regardless.
+        _bs = self.kb.block_size
         self.kb.raw_line(f"    for (ushort _d = 16; _d >= 1; _d >>= 1) {{")
         self.kb.raw_line(f"        {msl_val_type} _ov = simd_shuffle_down({mv}, _d);")
         self.kb.raw_line(f"        int _oi = simd_shuffle_down({mi}, _d);")
-        self.kb.raw_line(f"        bool _take = (_ov {cmp_op} {mv}) || (_ov == {mv} && _oi < {mi});")
+        self.kb.raw_line(f"        bool _take = ((lid + _d) < {_bs}u) && "
+                         f"((_ov {cmp_op} {mv}) || (_ov == {mv} && _oi < {mi}));")
         self.kb.raw_line(f"        {mv} = _take ? _ov : {mv};")
         self.kb.raw_line(f"        {mi} = _take ? _oi : {mi};")
         self.kb.raw_line(f"    }}")
