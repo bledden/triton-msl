@@ -114,15 +114,18 @@ def test_matmul_chained_pointwise():
 
 
 @requires_metal
-def test_matmul_unsupported_epilogue_still_refuses():
-    # A non-softmax reduce epilogue is not representable -> must REFUSE loudly
-    # (never silently drop), the #157 integrity boundary.
-    from triton_msl.errors import MetalNonRecoverableError
+def test_matmul_rowreduce_epilogue_correct():
+    # matmul + row-reduce-subtract epilogue (acc - sum(acc, axis=1)). The prebuilt
+    # matmul template can't represent the reduce and previously REFUSED here; re-audit
+    # #6 showed that same prebuilt path was also SILENTLY DROPPING simpler epilogues
+    # (looped matmul + fma/scale/relu returned the bare dot). The fix routes every
+    # matmul-with-compute-epilogue to the generic op-by-op lowerer, which applies
+    # this correctly — correct compute replacing a limitation-refusal.
     a, b = _ab(); c = torch.zeros(M, N)
-    with pytest.raises(Exception) as ei:
-        _mm_rowreduce[(1,)](a, b, c, M=M, N=N, K=K)
-    assert ("epilogue" in str(ei.value).lower()
-            or "MetalNonRecoverable" in type(ei.value).__name__)
+    _mm_rowreduce[(1,)](a, b, c, M=M, N=N, K=K)
+    mm = (a @ b).numpy()
+    ref = mm - mm.sum(axis=1, keepdims=True)
+    np.testing.assert_allclose(c.numpy(), ref, atol=2e-2, rtol=2e-2)
 
 
 if HAS:
@@ -136,12 +139,40 @@ if HAS:
 
 
 @requires_metal
-def test_matmul_runtime_scalar_epilogue_refuses_not_silentwrong():
-    # An epilogue that scales by a RUNTIME scalar arg (not a constant) cannot be
-    # lowered by the per-element emitter (the scalar is a kernel-arg leaf). It
-    # must REFUSE LOUDLY (MetalNonRecoverableError), never silently resolve the
-    # scalar to 0 (-> wrong output) nor crash the MSL compiler. #158 integrity.
-    from triton_msl.errors import MetalNonRecoverableError
+def test_matmul_runtime_scalar_epilogue_correct():
+    # An epilogue that scales by a RUNTIME scalar arg. The epilogue TEMPLATE couldn't
+    # lower the kernel-arg scalar (a splat leaf) and previously refused; the generic
+    # op-by-op lowerer uses the scalar arg directly, so matmul-with-runtime-scalar
+    # now computes correctly instead of refusing (re-audit #6). Never silently
+    # resolves the scalar to 0.
     a, b = _ab(); c = torch.zeros(M, N)
-    with pytest.raises(MetalNonRecoverableError):
-        _mm_scale_runtime_arg[(1,)](a, b, c, 2.5, M=M, N=N, K=K)
+    _mm_scale_runtime_arg[(1,)](a, b, c, 2.5, M=M, N=N, K=K)
+    np.testing.assert_allclose(c.numpy(), (a @ b).numpy() * 2.5, atol=2e-2, rtol=2e-2)
+
+
+if HAS:
+    @triton.jit
+    def _mm_kloop_fma(A, B, C, M, N, K, sam, sak, sbk, sbn, scm, scn,
+                      BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+        pm = tl.program_id(0); pn = tl.program_id(1)
+        rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        for k0 in range(0, K, BK):
+            kk = k0 + rk
+            acc += tl.dot(tl.load(A + rm[:, None] * sam + kk[None, :] * sak),
+                          tl.load(B + kk[:, None] * sbk + rn[None, :] * sbn))
+        tl.store(C + rm[:, None] * scm + rn[None, :] * scn, tl.math.fma(acc, 2.0, 1.0))
+
+
+@requires_metal
+def test_matmul_kloop_epilogue_not_dropped():
+    # re-audit #6: a LOOPED matmul (dot inside scf.for) with a trailing epilogue was
+    # claimed by the inline-dot template, which stored the raw accumulator and SILENTLY
+    # DROPPED the fma (returned the bare dot, maxerr ~16-33). The dot lives in the
+    # scf.for region while the epilogue is top-level, so this routes to the generic
+    # lowerer which applies it. Pins fma specifically (the op that slipped the epilogue
+    # allow-list with no emission branch).
+    a, b = _ab(); c = torch.zeros(M, N)
+    _mm_kloop_fma[(1, 1)](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0),
+                          b.stride(1), c.stride(0), c.stride(1), BM=M, BN=N, BK=K)
+    np.testing.assert_allclose(c.numpy(), (a @ b).numpy() * 2.0 + 1.0, atol=2e-2, rtol=2e-2)

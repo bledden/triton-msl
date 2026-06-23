@@ -1511,10 +1511,30 @@ class _TemplateMixin:
                      f"{_fn}(({es[0]}), ({es[1]})))")
             elif op.op in self._EPI_FN1 and es:
                 e = f"{self._EPI_FN1[op.op]}(({es[0]}))"
+            elif op.op == "math.fma" and len(es) >= 3:
+                # fma(a,b,c) = a*b+c. The old else returned only operand 0 (acc
+                # unchanged) — a silent-wrong (re-audit #6).
+                e = f"fma(({es[0]}), ({es[1]}), ({es[2]}))"
+            elif op.op == "arith.extf" and es:
+                # fp16/bf16 -> fp32 widening: a no-op in the float epilogue.
+                e = f"({es[0]})"
             elif op.op == "tt.clampf" and len(es) >= 3:
-                e = f"clamp(({es[0]}), ({es[1]}), ({es[2]}))"
+                if op.attrs.get("propagateNan", "none") == "all":
+                    # propagate_nan=ALL: NaN in -> NaN out (plain clamp would drop it,
+                    # the same class as the maximumf/minimumf NaN-drop — re-audit #6).
+                    e = (f"(isnan({es[0]}) ? NAN : "
+                         f"clamp(({es[0]}), ({es[1]}), ({es[2]})))")
+                else:
+                    e = f"clamp(({es[0]}), ({es[1]}), ({es[2]}))"
             else:
-                e = f"({es[0]})" if es else "0.0f"
+                # An allow-listed epilogue op with NO emission branch previously fell
+                # through to `e = es[0]` (return operand 0) — a SILENT-WRONG trap (that
+                # is how math.fma slipped through). Refuse loudly instead.
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    f"Fused matmul epilogue has no correct lowering for '{op.op}'. "
+                    f"Refusing rather than emit operand-0 (silent-wrong).",
+                    op_name=op.op)
             var = f"ep{n}"
             n += 1
             body.append(f"            float {var} = {e};")

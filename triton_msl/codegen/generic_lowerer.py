@@ -126,6 +126,23 @@ _MEPT_SAFE_OPS = frozenset({
 })
 
 
+# Compute ops that, when present at TOP LEVEL (not inside the K-loop scf.for
+# region, where `acc += dot` lives), indicate a trailing matmul epilogue
+# (bias / activation / fma) on the matmul RESULT. The inline-dot and prebuilt
+# matmul templates store the raw accumulator and would SILENTLY DROP these, so a
+# matmul kernel containing one is routed to the generic op-by-op lowerer instead
+# (re-audit #6). Pure casts/broadcasts are intentionally EXCLUDED (the templates
+# cast on store), as are comparisons/selects (matmuls don't carry those).
+_MATMUL_EPILOGUE_COMPUTE_OPS = frozenset({
+    "arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf",
+    "math.fma", "math.exp", "math.exp2", "math.log", "math.log2",
+    "math.sqrt", "math.rsqrt", "math.sin", "math.cos", "math.erf",
+    "math.tanh", "math.floor", "math.ceil", "math.absf", "math.powf",
+    "arith.maximumf", "arith.minimumf", "arith.maxnumf", "arith.minnumf",
+    "tt.clampf",
+})
+
+
 # ---------------------------------------------------------------------------
 # Generic Lowerer
 # ---------------------------------------------------------------------------
@@ -1436,6 +1453,16 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # Complex kernels (flash attention, fused matmul+softmax) have
         # reductions/masking alongside dot and must go through generic lowerer.
         if has_reduce or has_where:
+            return False
+
+        # A trailing COMPUTE epilogue (bias/activation/fma on the matmul RESULT)
+        # is a TOP-LEVEL compute op (the K-loop accumulation `acc += dot` lives
+        # inside the scf.for region). The prebuilt template stores the raw
+        # accumulator and would SILENTLY DROP it (re-audit #6). _detect_matmul_epilogue
+        # claims the non-looped case first; route anything it didn't claim to the
+        # generic op-by-op lowerer, which applies the epilogue. Top-level casts are
+        # fine (the template casts on store), so they're excluded from the set.
+        if any(ssa.op in _MATMUL_EPILOGUE_COMPUTE_OPS for ssa in self.graph.ops):
             return False
 
         return True
