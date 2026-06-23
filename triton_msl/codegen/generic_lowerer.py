@@ -3925,14 +3925,22 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                     f"    float {var_name} = "
                     f"static_cast<float>(static_cast<{narrow}>({src_var}));")
                 self.env[ssa.id] = var_name
+            elif narrow is not None and ssa.operand_ids[0] in self.env_array:
+                # MEPT single-pass ARRAY form: the source is a per-thread register
+                # array (float src[n]); quantize EACH element (round-trip narrow->wide)
+                # so a mid-computation `.to(fp16)` that then feeds arithmetic loses
+                # precision, exactly as in the scalar path. (Was a passthrough that
+                # dropped quantization for large array kernels — re-audit #3 silent-wrong.)
+                _src_name, _n, _ = self.env_array[ssa.operand_ids[0]]
+                _exprs = [f"static_cast<float>(static_cast<{narrow}>({_src_name}[{_i}]))"
+                          for _i in range(_n)]
+                _arr = self._var_array("truncf", _exprs, "float")
+                self.env[ssa.id] = _arr
+                self.env_array[ssa.id] = (_arr, _n, "float")
+                self.env_n_elems[ssa.id] = _n
             else:
-                # MEPT array-form (n_elems>1, src is a `float*` register array) or
-                # fp64->fp32: passthrough. The store boundary still narrows on write,
-                # so a cast that is only STORED is correct; the residual narrow case
-                # (an array-form `.to(fp16)` whose result is then used in further
-                # arithmetic) does NOT quantize — a documented MEPT follow-up
-                # (per-element quantize via _materialize). Scalar — the common +
-                # reproduced case — is quantized above.
+                # fp64->fp32 or unknown: passthrough (the store boundary narrows on
+                # write, so a cast that is only stored is still correct).
                 self._emit_passthrough(ssa)
             self.env_types[ssa.id] = _mlir_to_triton_dtype(dst_elem) if dst_elem else "fp16"
         self._propagate_shape_elementwise(ssa)

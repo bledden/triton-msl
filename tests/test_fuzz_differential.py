@@ -498,10 +498,12 @@ def _q_fp16_big(a, o, N: tl.constexpr):
 
 
 @requires
-@pytest.mark.parametrize("N", [64, 4096])   # 64 = scalar, 4096 = wrap-loop
+@pytest.mark.parametrize("N", [64, 256, 512, 1024, 4096])  # scalar / MEPT-array / wrap-loop
 def test_truncf_quantizes_scalar_and_wraploop(N):
-    # 10th: `.to(tl.float16)` mid-compute must quantize in BOTH scalar and wrap-loop
-    # mode (the fix had over-excluded wrap-loop). 2049.0 -> fp16 2048.0 -> *2 = 4096.0.
+    # 10th + 11th: `.to(tl.float16)` mid-compute must quantize in ALL regimes — scalar
+    # (64,1024), MEPT single-pass array (256,512), wrap-loop (4096). The fix first
+    # over-excluded wrap-loop (re-audit #2) then left the array form un-quantized
+    # (re-audit #3). 2049.0 -> fp16 2048.0 -> *2 = 4096.0.
     a = torch.full((N,), 2049.0, device="mps")
     o = torch.empty(N, device="mps")
     _q_fp16_big[(1,)](a, o, N=N); torch.mps.synchronize()

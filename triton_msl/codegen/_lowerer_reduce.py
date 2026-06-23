@@ -751,16 +751,23 @@ class _ReduceScanMixin:
         # (which covers only block_size elements) -> silent-wrong. The scalar
         # single-value reduce folds-or-refuses this (see _lower_reduce); folding a
         # tuple reduce is harder, so mirror the refusal here.
+        # This now covers BOTH (a) the in-control-flow case (the SIMD tree would
+        # drop the tail -> silent-wrong) AND (b) the top-level N>block_size case,
+        # where the multipass reduction path has no argmin/argmax/Welford aggregation
+        # and emits uncompilable MSL (an undeclared per-iteration var) -> a cryptic
+        # MetalCompilationError instead of a clean refusal (re-audit #3). Either way,
+        # a 1-D multi-value reduce wider than the threadgroup is unsupported: refuse.
         _ishape = self.env_shapes.get(ssa.operand_ids[0]) or _extract_shape(
             self._find_op_type_str(ssa.operand_ids[0]))
-        if (self._control_flow_depth > 0 and _ishape is not None
+        if (_ishape is not None
                 and len(_ishape) == 1 and _ishape[0] > self.kb.block_size):
             from triton_msl.errors import MetalNonRecoverableError
             raise MetalNonRecoverableError(
-                f"Refusing in-loop multi-value reduce (argmax/argmin/Welford): a 1-D "
-                f"tile of {_ishape[0]} elements exceeds the {self.kb.block_size}-thread "
-                f"threadgroup, so the cross-lane tree would reduce only the first "
-                f"{self.kb.block_size} (silent-wrong). Use BLOCK <= num_threads.")
+                f"Multi-value reduce (argmax/argmin/Welford) over a 1-D tile of "
+                f"{_ishape[0]} elements exceeds the {self.kb.block_size}-thread "
+                f"threadgroup; the multipass path can't aggregate a tuple reduce, so "
+                f"this would be silently wrong / uncompilable. Refusing. "
+                f"Use BLOCK <= num_threads.")
 
         # Dispatch Welford (3-value) vs argmax/argmin (2-value)
         if len(ssa.operand_ids) >= 3 and ssa.result_ids and len(ssa.result_ids) >= 3:

@@ -148,3 +148,46 @@ def test_bf16_flash_attention_never_dispatches_wrong(head_dim, qkb, pvb):
            @ v.float())
     rel = (o.float() - ref).abs().max().item() / max(ref.abs().max().item(), 1e-9)
     assert rel < 5e-2, f"SILENT-WRONG bf16 FA head_dim={D} qkb={qkb} pvb={pvb}: rel_err {rel:.3e}"
+
+
+# --- Re-audit #3 (2026-06-22) follow-ups -------------------------------------
+@requires
+def test_bf16_flash_attention_strictly_refuses():
+    # Strict refusal pin (re-audit #3 test-gap): bf16 FA (head_dim=64, both dots bf16)
+    # MUST raise, never dispatch. Catches a regression where bf16 FA starts dispatching.
+    # (bf16 FA is multiply-guarded — the dtype gate AND the matmul/block backstops — so
+    # this pins the never-silent-wrong contract, not the dtype gate alone; a gate-only-
+    # load-bearing test is impossible since the backstops refuse anyway. See audit memory.)
+    Z, H, N, D = 1, 1, 64, 64
+    q = torch.randn(Z, H, N, D, device="mps"); k = torch.randn(Z, H, N, D, device="mps")
+    v = torch.randn(Z, H, N, D, device="mps"); o = torch.empty_like(q)
+    with pytest.raises(MetalNonRecoverableError):
+        _fa_bf16[(N // 32, Z * H)](q, k, v, o, *q.stride(), *k.stride(), *v.stride(), *o.stride(),
+                                   Z, H, N, BLOCK_M=32, BLOCK_N=32, HEAD_DIM=D, IS_CAUSAL=False,
+                                   QKB=1, PVB=1)
+        torch.mps.synchronize()
+
+
+@triton.jit
+def _argmax1d(a, o, N: tl.constexpr):
+    tl.store(o + tl.program_id(0), tl.argmax(tl.load(a + tl.arange(0, N)), axis=0))
+
+
+@requires
+def test_argmax_over_threadgroup_refuses_cleanly():
+    # Re-audit #3: argmax/argmin over a 1-D tile > threadgroup needs the multipass
+    # path, which has no tuple-reduce aggregation -> emitted UNCOMPILABLE MSL (a raw
+    # MetalCompilationError). Must now be a clean MetalNonRecoverableError instead.
+    N = 2048
+    a = torch.randn(N, device="mps"); o = torch.empty(1, device="mps", dtype=torch.int32)
+    with pytest.raises(MetalNonRecoverableError):
+        _argmax1d[(1,)](a, o, N=N); torch.mps.synchronize()
+
+
+@requires
+def test_argmax_within_threadgroup_correct():
+    N = 1024
+    torch.manual_seed(0)
+    a = torch.randn(N, device="mps"); o = torch.empty(1, device="mps", dtype=torch.int32)
+    _argmax1d[(1,)](a, o, N=N); torch.mps.synchronize()
+    assert o[0].item() == a.cpu().argmax().item()
