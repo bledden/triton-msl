@@ -270,3 +270,30 @@ def _deep(n_seeds):
 
 if __name__ == "__main__":
     sys.exit(_deep(int(sys.argv[1]) if len(sys.argv) > 1 else 2))
+
+
+# --- combined 2-D reduce form (reduce-probe #7 blind spot) -------------------------
+@triton.jit
+def _k_combined_2d(a, o, M: tl.constexpr, N: tl.constexpr):
+    i = tl.arange(0, M); j = tl.arange(0, N)
+    x = tl.load(a + i[:, None] * N + j[None, :])
+    tl.store(o + i, tl.sum(x, 1) + tl.max(x, 1))
+
+
+@requires
+@pytest.mark.parametrize("M,N", [(8, 64), (16, 32), (4, 32), (8, 16), (16, 16), (32, 32)])
+def test_combined_2d_reduce_correct_or_refuse(M, N):
+    # Two 2-D axis reduces combined in one expression: must be correct OR loud-refuse,
+    # never a silent tail-of-rows mis-compute (reduce-probe #7 family — the single-reduce
+    # fuzzer sweep above does not exercise this interaction).
+    _clear_cache()
+    torch.manual_seed(0)
+    a = torch.randn(M, N, device="mps"); o = torch.empty(M, device="mps")
+    try:
+        _k_combined_2d[(1,)](a, o, M=M, N=N); torch.mps.synchronize()
+    except MetalNonRecoverableError:
+        return  # loud refusal is acceptable
+    exp = a.cpu().sum(1) + a.cpu().max(1).values
+    err = (o.cpu() - exp).abs().max().item()
+    assert err <= 3e-3 + 3e-3 * max(exp.abs().max().item(), 1e-6), \
+        f"SILENT-WRONG combined 2D reduce {M}x{N}: err {err}"

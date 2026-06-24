@@ -1212,6 +1212,63 @@ class _ReduceScanMixin:
                 self.env_shapes[rid] = out_shape
 
 
+    def _has_combined_2d_reduce(self):
+        """True if two DIFFERENT 2-D axis-reduce results are the two operands of one
+        binary arithmetic op (e.g. tl.sum(x,1) + tl.max(x,1)).
+
+        That combined result is NOT convert_layout-ed before the store (only a single
+        reduce is), so it is stored under the broadcast layout and a tail subset of rows
+        reads incorrectly — reduce-probe #7 (in-loop acc+= form) and its no-loop sibling
+        (direct store), same convert_layout root cause. FlashAttention's reduces always
+        feed an arith op whose OTHER operand is NOT a reduce (max -> qk-max, sum -> li*a),
+        so this discriminator does not over-refuse FA.
+        """
+        # Flatten scf.for/scf.if region bodies too — for the in-loop acc+= form (#7) the
+        # reduces and the combining arith op live in the loop region, not at top level.
+        all_ops = list(self.graph.ops)
+        for s in self.graph.ops:
+            if getattr(s, "region_ops", None):
+                all_ops.extend(s.region_ops)
+        by_id = {s.id: s for s in all_ops}
+        reduce_ids = set()
+        for s in all_ops:
+            if s.op == "tt.reduce" and s.operand_ids:
+                _it = self._find_op_type_str(s.operand_ids[0])
+                _ish = _extract_shape(_it) if _it else None
+                if _ish and len(_ish) == 2:
+                    reduce_ids.add(s.id)
+                    for _rid in (s.result_ids or []):
+                        reduce_ids.add(_rid)
+        if len(reduce_ids) < 2:
+            return False
+        _LAYOUT = {"tt.broadcast", "tt.expand_dims", "ttg.convert_layout",
+                   "tt.reshape", "tt.splat"}
+
+        def _to_reduce(sid, depth=0, seen=None):
+            if seen is None:
+                seen = set()
+            if depth > 8 or sid in seen:
+                return None
+            seen.add(sid)
+            if sid in reduce_ids:
+                return sid
+            op = by_id.get(sid)
+            if op is None or not op.operand_ids:
+                return None
+            if op.op in _LAYOUT:
+                return _to_reduce(op.operand_ids[0], depth + 1, seen)
+            return None
+        _BIN = {"arith.addf", "arith.subf", "arith.mulf", "arith.divf",
+                "arith.addi", "arith.subi", "arith.muli", "arith.maxnumf",
+                "arith.minnumf", "arith.maximumf", "arith.minimumf"}
+        for s in all_ops:
+            if s.op in _BIN and s.operand_ids and len(s.operand_ids) >= 2:
+                r0 = _to_reduce(s.operand_ids[0])
+                r1 = _to_reduce(s.operand_ids[1])
+                if r0 is not None and r1 is not None and r0 != r1:
+                    return True
+        return False
+
     def _lower_reduce_2d(self, ssa, input_var, axis, combine_op,
                          msl_type, shared_dtype, input_shape):
         """Lower a 2D axis-specific reduction.
@@ -1224,6 +1281,19 @@ class _ReduceScanMixin:
         """
         M, N = input_shape[0], input_shape[1]
         total = M * N
+
+        # Combined 2-D reduce (reduce-probe #7 + its no-loop sibling): two 2-D axis
+        # reduces arithmetically combined in one expression mis-compute a tail subset of
+        # rows (the combined result isn't layout-converted before the store). Refuse
+        # loudly — both the in-loop acc+= and the no-loop direct-store forms — rather than
+        # silently mis-compute. Single reduces, separate stores, and 1-D combines are fine.
+        if self._has_combined_2d_reduce():
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "two 2-D axis reductions combined in one arithmetic expression (e.g. "
+                "tl.sum(x,1) + tl.max(x,1)) mis-compute a subset of rows — the combined "
+                "result is not layout-converted before the store. Refusing. Use separate "
+                "stores, or reduce to 1-D.", op_name="tt.reduce")
 
         # UNDER-FILL guard (re-audit #14, twin of the >block_size over-fill guard). Inside
         # control flow the threadgroup is forced to the num_warps*32 minimum, so a small

@@ -1122,3 +1122,49 @@ def test_multiprogram_3d_reduce_computes_all_batches():
     _reduce3d_multiprog[(P,)](a, o, M=M, N=N, K=K); torch.mps.synchronize()
     torch.testing.assert_close(o.cpu(), a.cpu().sum(3), rtol=2e-3, atol=2e-3)
     assert o[1].abs().sum().item() > 0, "batch 1 left untouched — pid offset missing"
+
+
+# --- #7 + no-loop sibling (2026-06-24): combined 2-D reduce refuse -----------------
+@triton.jit
+def _combined_2d_noloop(a, o, M: tl.constexpr, N: tl.constexpr):
+    i = tl.arange(0, M); j = tl.arange(0, N)
+    x = tl.load(a + i[:, None] * N + j[None, :])
+    tl.store(o + i, tl.sum(x, 1) + tl.max(x, 1))
+
+
+@triton.jit
+def _combined_2d_inloop(a, o, M: tl.constexpr, N: tl.constexpr, T: tl.constexpr):
+    i = tl.arange(0, M); acc = tl.zeros((M,), tl.float32)
+    for t in range(0, T):
+        j = tl.arange(0, N)
+        x = tl.load(a + t * M * N + i[:, None] * N + j[None, :])
+        acc += tl.sum(x, 1) + tl.max(x, 1)
+    tl.store(o + i, acc)
+
+
+@triton.jit
+def _separate_2d(a, os_, om, M: tl.constexpr, N: tl.constexpr):
+    i = tl.arange(0, M); j = tl.arange(0, N)
+    x = tl.load(a + i[:, None] * N + j[None, :])
+    tl.store(os_ + i, tl.sum(x, 1)); tl.store(om + i, tl.max(x, 1))
+
+
+@requires
+def test_combined_2d_reduce_refuses_both_forms():
+    # Two 2-D axis reduces COMBINED in one arithmetic expression (sum(x,1)+max(x,1))
+    # mis-compute a tail subset of rows — the combined result isn't convert_layout'd
+    # before the store (reduce-probe #7 in-loop form + its no-loop sibling found by the
+    # confirming re-audit). Both refuse now. Separate stores (each reduce stored on its
+    # own) still compute correctly — that's the supported alternative.
+    M, N = 8, 64
+    a = torch.randn(M, N, device="mps"); o = torch.empty(M, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _combined_2d_noloop[(1,)](a, o, M=M, N=N); torch.mps.synchronize()
+    a2 = torch.randn(3, M, N, device="mps"); o2 = torch.empty(M, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _combined_2d_inloop[(1,)](a2, o2, M=M, N=N, T=3); torch.mps.synchronize()
+    # separate stores compute correctly (not over-refused)
+    os_ = torch.empty(M, device="mps"); om = torch.empty(M, device="mps")
+    _separate_2d[(1,)](a, os_, om, M=M, N=N); torch.mps.synchronize()
+    torch.testing.assert_close(os_.cpu(), a.cpu().sum(1), rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(om.cpu(), a.cpu().max(1).values, rtol=2e-3, atol=2e-3)
