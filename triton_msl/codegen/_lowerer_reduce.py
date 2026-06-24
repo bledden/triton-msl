@@ -334,6 +334,12 @@ class _ReduceScanMixin:
         elif combine_op == "xor":
             identity = "0"
             combine_expr = "acc ^ val"
+        elif combine_op == "and":
+            identity = "~0"            # all-ones: AND identity
+            combine_expr = "acc & val"
+        elif combine_op == "or":
+            identity = "0"             # OR identity
+            combine_expr = "acc | val"
         else:
             identity = "0.0f" if is_float else "0"
             combine_expr = "acc + val"
@@ -534,27 +540,53 @@ class _ReduceScanMixin:
         if ssa.region_ops:
             has_cmpf_gt = False
             has_cmpf_lt = False
+            has_real_combine = False
+            has_andi = False
+            has_ori = False
             for body_op in ssa.region_ops:
                 op_name = body_op.op
                 if "addf" in op_name or "addi" in op_name:
-                    combine_op = "sum"
+                    combine_op = "sum"; has_real_combine = True
                 elif "max" in op_name:
-                    combine_op = "max"
+                    combine_op = "max"; has_real_combine = True
                 elif "min" in op_name:
-                    combine_op = "min"
+                    combine_op = "min"; has_real_combine = True
                 elif "xor" in op_name:
-                    combine_op = "xor"
+                    combine_op = "xor"; has_real_combine = True
+                elif op_name == "arith.andi":
+                    has_andi = True
+                elif op_name == "arith.ori":
+                    has_ori = True
                 elif op_name == "arith.cmpf":
                     pred = body_op.attrs.get("predicate_name", "")
                     if "gt" in pred:
                         has_cmpf_gt = True
                     elif "lt" in pred:
                         has_cmpf_lt = True
+                elif op_name == "arith.cmpi":
+                    has_real_combine = True   # int comparison combine (not pure bitwise)
             # cmpf ogt + select = NaN-propagating max (triton_helpers.max2)
             if combine_op == "sum" and has_cmpf_gt:
-                combine_op = "max"
+                combine_op = "max"; has_real_combine = True
             elif combine_op == "sum" and has_cmpf_lt:
-                combine_op = "min"
+                combine_op = "min"; has_real_combine = True
+            # A PURE bitwise reduce (andi/ori as the ONLY combine — all()/any()) was
+            # silently defaulting to SUM (reduce-probe finding). Compute it as and/or
+            # (threadgroup_reduce routes to simd_and/simd_or). Only override when NO
+            # arithmetic/comparison combine matched, so an incidental andi (e.g. a select
+            # mask inside a sum/cmpi reduce — which broke training) does NOT mis-route.
+            # A pure bitwise reduce (andi/ori as the ONLY combine — all()/any()) was
+            # silently a SUM (reduce-probe). Compute it as and/or (threadgroup_reduce
+            # routes to simd_and/simd_or; identities in _reduce_identity_combine). Only
+            # when NO arithmetic/comparison combine matched, so an incidental andi (e.g.
+            # a select mask in a sum/cmpi reduce — which broke training) is NOT
+            # mis-routed. Where a particular and/or route can't lower it refuses loudly
+            # (never a silent SUM).
+            if not has_real_combine:
+                if has_andi:
+                    combine_op = "and"
+                elif has_ori:
+                    combine_op = "or"
 
         # Determine type from input operand. After a multipass wrap-loop the
         # operand is rebound to a freshly-typed accumulator whose env_type is
@@ -828,6 +860,19 @@ class _ReduceScanMixin:
         if len(ssa.operand_ids) >= 3 and ssa.result_ids and len(ssa.result_ids) >= 3:
             self._lower_reduce_welford(ssa)
             return
+
+        # A 2-value reduce is handled ONLY as argmax/argmin (value+index). Verify the body
+        # has a COMPARISON (cmpf/cmpi) — argmin/argmax compare values. A custom 2-value
+        # combine (e.g. (x+y, i+j)) has no comparison and would be SILENTLY mis-computed
+        # by the argminmax path (reduce-probe finding). Refuse it.
+        if (len(ssa.operand_ids) >= 2
+                and not any(bop.op in ("arith.cmpf", "arith.cmpi")
+                            for bop in (ssa.region_ops or []))):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "multi-value tl.reduce whose body is not argmax/argmin (no comparison) "
+                "is not supported — only value+index argmax/argmin 2-tuples are handled. "
+                "Refusing.", op_name="tt.reduce")
 
         # Check for 2D argmin/argmax
         if len(ssa.operand_ids) >= 2:
@@ -1470,6 +1515,17 @@ class _ReduceScanMixin:
           src_stride[i] = product of input_shape[i+1:]
           res_stride[j] = product of result_shape[j+1:] (result_shape drops axis d)
         """
+        # The general N-D (rank>=4) reduce mis-computes for ALL axes — the readback/store
+        # compaction writes results to the wrong slots (reduce-probe: (2,2,2,2) sum
+        # garbage on every axis). The ONLY correct user of this path is tl.sort's bitonic
+        # xor-decomposition, whose xor result feeds the next compare-swap step rather than
+        # a direct store. Refuse a non-xor N-D reduce rather than silently mis-compute.
+        if combine_op != "xor":
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"N-D (rank {len(input_shape)}) tl.reduce with a '{combine_op}' combine "
+                f"is not correctly lowered (the result compaction is wrong for all axes). "
+                f"Refusing. Reduce in <= 3 dimensions.", op_name="tt.reduce")
         n = len(input_shape)
         total = 1
         for s in input_shape:

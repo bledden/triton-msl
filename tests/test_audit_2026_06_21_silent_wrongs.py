@@ -1018,3 +1018,82 @@ def test_int_max_over_splat_not_over_refused():
     o = torch.empty(1, device="mps", dtype=torch.int32)
     _intmax_splat[(1,)](o, V=7, N=32); torch.mps.synchronize()
     assert o.item() == 7
+
+
+# --- Reduce-probe grind (2026-06-24): and/or + custom-2value + ND refuse ----------
+@triton.jit
+def _and_comb(a, b):
+    return a & b
+
+
+@triton.jit
+def _and_reduce(a, o, N: tl.constexpr):
+    tl.store(o, tl.reduce(tl.load(a + tl.arange(0, N)), 0, _and_comb))
+
+
+@requires
+def test_bitwise_and_reduce_never_silent_sum():
+    # A pure bitwise and/or reduce silently defaulted to SUM (reduce-probe). It's now
+    # detected as combine_op=and/or (only when no arithmetic/comparison combine matched,
+    # so an incidental select-mask andi in a sum/cmpi reduce is NOT mis-routed — that
+    # broke training). It computes via simd_and where the route supports it, else refuses
+    # loudly — NEVER a silent SUM (which would give 96 here, not 3).
+    a = torch.full((32,), 3, device="mps", dtype=torch.int32)
+    o = torch.empty(1, device="mps", dtype=torch.int32)
+    try:
+        _and_reduce[(1,)](a, o, N=32); torch.mps.synchronize()
+        assert o.item() == 3, f"SILENT-WRONG and-reduce: {o.item()} (sum would be 96)"
+    except MetalNonRecoverableError:
+        pass  # loud refusal satisfies the never-silent-wrong contract
+
+
+@triton.jit
+def _sum2_comb(a, b, c, d):
+    return a + c, b + d
+
+
+@triton.jit
+def _custom_2value(a, b, oc, od, N: tl.constexpr):
+    i = tl.arange(0, N)
+    rc, rd = tl.reduce((tl.load(a + i), tl.load(b + i)), 0, _sum2_comb)
+    tl.store(oc, rc); tl.store(od, rd)
+
+
+@requires
+def test_custom_2value_reduce_refuses():
+    # A custom 2-value reduce (non-argmax body) was mis-routed to the argminmax path and
+    # returned a single-element result (reduce-probe). Now refuses (only value+index
+    # argmax/argmin 2-tuples are handled).
+    a = torch.randn(64, device="mps"); b = torch.randn(64, device="mps")
+    oc = torch.empty(1, device="mps"); od = torch.empty(1, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _custom_2value[(1,)](a, b, oc, od, N=64); torch.mps.synchronize()
+
+
+@triton.jit
+def _nd_sum(a, o, A: tl.constexpr, B: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    i = tl.arange(0, A); j = tl.arange(0, B); k = tl.arange(0, C); l = tl.arange(0, D)
+    x = tl.load(a + i[:, None, None, None] * B * C * D + j[None, :, None, None] * C * D
+                + k[None, None, :, None] * D + l[None, None, None, :])
+    ii = tl.arange(0, A); kk = tl.arange(0, C); ll = tl.arange(0, D)
+    tl.store(o + ii[:, None, None] * C * D + kk[None, :, None] * D + ll[None, None, :],
+             tl.sum(x, 1))
+
+
+@requires
+def test_nd_nonxor_reduce_refuses_sort_ok():
+    # A general N-D (rank>=4) non-xor reduce mis-compacts results for all axes
+    # (reduce-probe). Refuse non-xor ND; tl.sort's xor ND-decomposition is unaffected.
+    a = torch.randn(2, 2, 2, 2, device="mps"); o = torch.empty(2, 2, 2, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _nd_sum[(1,)](a, o, A=2, B=2, C=2, D=2); torch.mps.synchronize()
+    # sort still works (xor ND reduce)
+    a2 = torch.randn(2, 16, device="mps"); o2 = torch.empty(2, 16, device="mps")
+    _sort_rows[(1,)](a2, o2, M=2, N=16); torch.mps.synchronize()
+    torch.testing.assert_close(o2.cpu(), a2.cpu().sort(1).values, rtol=1e-4, atol=1e-4)
+
+
+@triton.jit
+def _sort_rows(a, o, M: tl.constexpr, N: tl.constexpr):
+    i = tl.arange(0, M); j = tl.arange(0, N)
+    tl.store(o + i[:, None] * N + j[None, :], tl.sort(tl.load(a + i[:, None] * N + j[None, :])))
