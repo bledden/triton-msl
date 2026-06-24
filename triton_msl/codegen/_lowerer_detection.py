@@ -1333,6 +1333,35 @@ class _DetectionMixin:
         }
 
 
+    def _row_stride_is_constexpr(self):
+        """True if the kernel's per-row stride (the program_id multiplier in the
+        load/store address) is a COMPILE-TIME CONSTANT rather than a runtime scalar.
+
+        The softmax/layernorm templates compute ``row_start = pid * n_arg`` using the
+        sole runtime scalar as the row length. That is correct only when the kernel's
+        own per-row stride IS that scalar. A kernel ``softmax(x, out, M, N: constexpr)``
+        strides by the CONSTEXPR N (baked as an arith.constant) while its sole runtime
+        scalar M is the row COUNT — so n_arg=M is the wrong span (re-audit #12: rows
+        summed to M, not 1). When the stride is constant the row length is constexpr and
+        the template cannot represent it; the caller declines to the generic lowering.
+        """
+        by_id = {s.id: s for s in self.graph.ops}
+        pid_ids = {s.id for s in self.graph.ops if "program_id" in s.op}
+        if not pid_ids:
+            return False
+        for o in self.graph.ops:
+            if o.op in ("arith.muli", "arith.mul") and o.operand_ids and len(o.operand_ids) >= 2:
+                if any(x in pid_ids for x in o.operand_ids):
+                    # the operand that is NOT the program_id is the row stride
+                    for x in o.operand_ids:
+                        if x in pid_ids:
+                            continue
+                        so = by_id.get(x)
+                        if so is not None and so.op == "arith.constant":
+                            return True
+        return False
+
+
     def _detect_softmax(self):
         """Detect a row-wise softmax kernel:
             x = tl.load(x_ptr + row * n + offsets, mask, other=-inf)
@@ -1423,6 +1452,11 @@ class _DetectionMixin:
         if len(scalar_args) != 1:
             return None
         n_arg = scalar_args[0]
+        # The sole scalar is the row length ONLY if the per-row stride is that runtime
+        # value, not a constexpr. Otherwise it is the row COUNT and the template would
+        # normalize the wrong span (re-audit #12) — decline to the generic lowering.
+        if self._row_stride_is_constexpr():
+            return None
 
         # Block size = the tensor's dim (we look at make_range end values).
         block_size = self.graph.block_size
@@ -1530,6 +1564,10 @@ class _DetectionMixin:
         if len(scalar_args) != 1:
             return None
         n_arg = scalar_args[0]
+        # Sole scalar must be the row length (per-row stride), not the row COUNT — else
+        # the template normalizes the wrong span (re-audit #12). Decline to the generic.
+        if self._row_stride_is_constexpr():
+            return None
 
         block_size = self.graph.block_size
         if block_size > 1024:

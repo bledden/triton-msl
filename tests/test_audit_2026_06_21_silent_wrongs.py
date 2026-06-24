@@ -702,3 +702,36 @@ def test_3d_reduce_i64_refuses():
     o = torch.empty(B, R, device="mps", dtype=torch.int64)
     with pytest.raises(MetalNonRecoverableError):
         _reduce3d_i64[(1,)](a, o, B=B, R=R, C=C); torch.mps.synchronize()
+
+
+# --- Re-audit #12 part 2 (2026-06-23): softmax/layernorm sole-scalar-is-row-COUNT ---
+@triton.jit
+def _softmax_count_scalar(x, o, M, N: tl.constexpr):
+    r = tl.program_id(0); c = tl.arange(0, N)
+    v = tl.load(x + r * N + c); v = v - tl.max(v, 0); e = tl.exp(v)
+    tl.store(o + r * N + c, e / tl.sum(e, 0))
+
+
+@triton.jit
+def _layernorm_count_scalar(x, o, M, N: tl.constexpr):
+    r = tl.program_id(0); c = tl.arange(0, N)
+    v = tl.load(x + r * N + c); mu = tl.sum(v, 0) / N; vc = v - mu
+    var = tl.sum(vc * vc, 0) / N
+    tl.store(o + r * N + c, vc / tl.sqrt(var + 1e-5))
+
+
+@requires
+def test_softmax_layernorm_count_scalar_correct():
+    # softmax/layernorm(x, out, M, N: constexpr) has ONE runtime scalar M = the row
+    # COUNT (row length N is constexpr). The template grabbed M as the row length and
+    # normalized the wrong span (re-audit #12). The row-stride-is-constexpr guard now
+    # declines to the generic lowerer, which is correct.
+    import torch.nn.functional as F
+    X = torch.randn(4, 64, device="mps")
+    O = torch.empty(4, 64, device="mps")
+    _softmax_count_scalar[(4,)](X, O, 4, N=64); torch.mps.synchronize()
+    torch.testing.assert_close(O.cpu(), F.softmax(X.cpu(), dim=1), rtol=2e-3, atol=2e-3)
+    O2 = torch.empty(4, 64, device="mps")
+    _layernorm_count_scalar[(4,)](X, O2, 4, N=64); torch.mps.synchronize()
+    ref = (X.cpu() - X.cpu().mean(1, keepdim=True)) / (X.cpu().var(1, keepdim=True, unbiased=False) + 1e-5).sqrt()
+    torch.testing.assert_close(O2.cpu(), ref, rtol=2e-3, atol=2e-3)
