@@ -881,3 +881,46 @@ def test_2d_argmax_axis1_indices_correct():
     oi = torch.empty(M, device="mps", dtype=torch.int32)
     _argmax2d_idx[(1,)](X, oi, M=M, N=N); torch.mps.synchronize()
     assert oi.cpu().tolist() == [0, 1, 2, 3]
+
+
+# --- Re-audit #14 #2 (2026-06-23): in-loop 2D-reduce under-fill -------------------
+@triton.jit
+def _inloop_2dreduce(a, o, M: tl.constexpr, N: tl.constexpr, T: tl.constexpr):
+    rm = tl.arange(0, M); acc = tl.zeros((M,), tl.float32)
+    for t in range(0, T):
+        cols = tl.arange(0, N)
+        x = tl.load(a + t * M * N + rm[:, None] * N + cols[None, :])
+        acc += tl.sum(x, axis=1)
+    tl.store(o + rm, acc)
+
+
+@requires
+def test_inloop_2d_reduce_underfill_refuses_or_correct():
+    # An in-loop 2D reduce whose tile UNDER-fills the (256-min) threadgroup (M*N < 256)
+    # had its staged reduce corrupted by the surplus threads -> silent-wrong (re-audit
+    # #14, the under-fill twin of the >block_size over-fill guard). Small tiles now
+    # refuse; tiles that fill the group (M*N >= 256) still compute correctly.
+    T = 3
+    # under-fill (M*N=128) -> must refuse, never silent-wrong
+    a = torch.randn(T, 8, 16, device="mps"); o = torch.empty(8, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _inloop_2dreduce[(1,)](a, o, M=8, N=16, T=T); torch.mps.synchronize()
+    # filled (M*N=512) -> correct
+    a2 = torch.randn(T, 8, 64, device="mps"); o2 = torch.empty(8, device="mps")
+    _inloop_2dreduce[(1,)](a2, o2, M=8, N=64, T=T); torch.mps.synchronize()
+    torch.testing.assert_close(o2.cpu(), a2.cpu().sum(dim=(0, 2)), rtol=2e-3, atol=2e-3)
+
+
+@triton.jit
+def _noloop_2dreduce(a, o, M: tl.constexpr, N: tl.constexpr):
+    rm = tl.arange(0, M); cols = tl.arange(0, N)
+    tl.store(o + rm, tl.sum(tl.load(a + rm[:, None] * N + cols[None, :]), axis=1))
+
+
+@requires
+def test_noloop_2d_reduce_small_tile_not_over_refused():
+    # The no-loop 2D reduce has block_size == total (no surplus), so a small tile is
+    # correct and must NOT be caught by the in-loop under-fill guard (depth-gated).
+    a = torch.randn(8, 16, device="mps"); o = torch.empty(8, device="mps")
+    _noloop_2dreduce[(1,)](a, o, M=8, N=16); torch.mps.synchronize()
+    torch.testing.assert_close(o.cpu(), a.cpu().sum(1), rtol=2e-3, atol=2e-3)

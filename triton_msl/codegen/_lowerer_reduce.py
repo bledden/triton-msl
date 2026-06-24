@@ -1149,6 +1149,27 @@ class _ReduceScanMixin:
         M, N = input_shape[0], input_shape[1]
         total = M * N
 
+        # UNDER-FILL guard (re-audit #14, twin of the >block_size over-fill guard). Inside
+        # control flow the threadgroup is forced to the num_warps*32 minimum, so a small
+        # tile (M*N < block_size) under-fills it: the extra threads [total, block_size)
+        # corrupt the staged 2-D reduce (uninitialized-read — verified WRONG for M*N<=128
+        # in a loop, CORRECT at >=256; the no-loop case has block_size==total so was
+        # always correct). Refuse loudly rather than mis-compute. The fused softmax/FA and
+        # MEPT reduces don't hit this (their tiles fill the group, or are 1-D).
+        # In control flow the threadgroup is dispatched at a 256-thread minimum (8
+        # SIMD groups), even when num_warps*32 is smaller — that surplus is what
+        # corrupts a small under-filling tile.
+        _tg_threads = max(max(1, getattr(self.graph, "num_warps", 1)) * 32, 256)
+        if (getattr(self, "_control_flow_depth", 0) > 0
+                and total < _tg_threads):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing in-loop 2-D reduction of a {tuple(input_shape)} tile that "
+                f"under-fills the {_tg_threads}-thread group "
+                f"(M*N={total} < block_size): the surplus threads corrupt the staged "
+                f"reduce (silent-wrong). Use a tile with M*N >= block_size, or reduce "
+                f"outside the loop.", op_name="tt.reduce")
+
         # Check if the input data is already in a shared memory array (e.g.,
         # from a dot result or local_alloc). If so, skip the copy and reuse it.
         input_id = ssa.operand_ids[0] if ssa.operand_ids else None
