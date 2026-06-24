@@ -1820,10 +1820,17 @@ class _TemplateMixin:
         lines.append(f"    }}")
         lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
-        # Store results to output (row-major 2D)
+        # Store results to output (row-major 2D). Cast `_result` (accumulated in
+        # `msl_type`, float for fp/bf inputs) to the OUTPUT element type. MSL allows
+        # implicit float->half but NOT float->bfloat, so a bf16 output otherwise fails to
+        # compile ("assigning to 'bfloat' from 'float'") — reduce-fuzzer finding. No-op
+        # for float/half.
+        _out_msl3d = (triton_type_to_msl(ptr_args[1].elem_type)
+                      if len(ptr_args) > 1 else "float")
+        _scast3d = "" if _out_msl3d in ("float", "half") else f"({_out_msl3d})"
         R0, R1 = result_dims
         lines.append(f"    for (uint _r = lid; _r < {result_total}u; _r += {block_size}u)")
-        lines.append(f"        {z_name}[_r] = _result[_r];")
+        lines.append(f"        {z_name}[_r] = {_scast3d}_result[_r];")
 
         lines.append("}")
         lines.append("")

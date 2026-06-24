@@ -924,3 +924,48 @@ def test_noloop_2d_reduce_small_tile_not_over_refused():
     a = torch.randn(8, 16, device="mps"); o = torch.empty(8, device="mps")
     _noloop_2dreduce[(1,)](a, o, M=8, N=16); torch.mps.synchronize()
     torch.testing.assert_close(o.cpu(), a.cpu().sum(1), rtol=2e-3, atol=2e-3)
+
+
+# --- Reduce fuzzer findings (2026-06-23): bf16 3D reduce + fp16/bf16 in-loop 2D ----
+@triton.jit
+def _reduce3d_bf16(a, o, B: tl.constexpr, R: tl.constexpr, C: tl.constexpr):
+    b = tl.arange(0, B); r = tl.arange(0, R); c = tl.arange(0, C)
+    x = tl.load(a + b[:, None, None] * R * C + r[None, :, None] * C + c[None, None, :])
+    tl.store(o + b[:, None] * R + r[None, :], tl.sum(x, 2))
+
+
+@requires
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_3d_reduce_fp16_bf16_compiles_correct(dtype):
+    # The 3D reduce template accumulates in float; storing to a bf16 output without a
+    # cast failed the MSL compile ('assigning to bfloat from float' — MSL has no implicit
+    # float->bfloat; half is implicit). Now cast on store; both fp16 and bf16 correct.
+    B, R, C = 2, 4, 4
+    a = torch.randn(B, R, C, device="mps", dtype=dtype)
+    o = torch.empty(B, R, device="mps", dtype=dtype)
+    _reduce3d_bf16[(1,)](a, o, B=B, R=R, C=C); torch.mps.synchronize()
+    torch.testing.assert_close(o.float().cpu(), a.float().cpu().sum(2), rtol=3e-2, atol=3e-2)
+
+
+@triton.jit
+def _inloop_2dreduce_dt(a, o, M: tl.constexpr, N: tl.constexpr, T: tl.constexpr):
+    i = tl.arange(0, M); acc = tl.zeros((M,), tl.float32)
+    for t in range(0, T):
+        j = tl.arange(0, N)
+        acc += tl.sum(tl.load(a + t * M * N + i[:, None] * N + j[None, :]), 1)
+    tl.store(o + i, acc)
+
+
+@requires
+def test_inloop_2d_reduce_fp16_refuses_fp32_ok():
+    # An in-loop 2D reduce of fp16/bf16 input was mis-staged across iterations (T>=2):
+    # every row collapsed to the first row's value (fp32 fine). Refuse fp16/bf16; fp32
+    # (filled tile) still computes.
+    M, N, T = 8, 64, 3
+    for dt in (torch.float16, torch.bfloat16):
+        a = torch.randn(T, M, N, device="mps", dtype=dt); o = torch.empty(M, device="mps", dtype=dt)
+        with pytest.raises(MetalNonRecoverableError):
+            _inloop_2dreduce_dt[(1,)](a, o, M=M, N=N, T=T); torch.mps.synchronize()
+    a2 = torch.randn(T, M, N, device="mps"); o2 = torch.empty(M, device="mps")
+    _inloop_2dreduce_dt[(1,)](a2, o2, M=M, N=N, T=T); torch.mps.synchronize()
+    torch.testing.assert_close(o2.cpu(), a2.cpu().sum(dim=(0, 2)), rtol=2e-3, atol=2e-3)

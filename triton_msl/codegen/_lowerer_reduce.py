@@ -1159,6 +1159,20 @@ class _ReduceScanMixin:
         # In control flow the threadgroup is dispatched at a 256-thread minimum (8
         # SIMD groups), even when num_warps*32 is smaller — that surplus is what
         # corrupts a small under-filling tile.
+        # An in-loop 2-D reduce of fp16/bf16 input is mis-staged ACROSS iterations: the
+        # shared-memory staging/result reuse corrupts iterations 2+ so every row collapses
+        # to the first row's value (reduce-fuzzer: T=1 fp16 correct, T>=2 WRONG; fp32 fine
+        # at any T). Refuse fp16/bf16 in-loop 2-D reduces; fp32 + no-loop are unaffected.
+        _in_dt = (self.env_types.get(ssa.operand_ids[0], "fp32")
+                  if ssa.operand_ids else "fp32")
+        if (getattr(self, "_control_flow_depth", 0) > 0
+                and _in_dt in ("fp16", "bf16")):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "in-loop 2-D reduction of fp16/bf16 input is mis-staged across iterations "
+                "(silent-wrong: rows collapse to the first). Refusing. Reduce in fp32, or "
+                "outside the loop.", op_name="tt.reduce")
+
         _tg_threads = max(max(1, getattr(self.graph, "num_warps", 1)) * 32, 256)
         if (getattr(self, "_control_flow_depth", 0) > 0
                 and total < _tg_threads):

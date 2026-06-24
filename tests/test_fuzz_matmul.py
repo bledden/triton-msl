@@ -105,8 +105,12 @@ def _k_strided_masked(a, b, c, sam, sak, sbk, sbn, scm, scn, M, N, K,
 
 # --------------------------------------------------------------------------- runner
 def _run_cell(form, M, N, K, dtype, seed):
-    """Return ('correct'|'refused'|'wrong:<err>'|'crash:<type>', detail)."""
-    _clear_cache()
+    """Return ('correct'|'refused'|'wrong:<err>'|'crash:<type>', detail).
+
+    Cache is NOT cleared per cell — Triton/triton-msl key by dtype + constexpr shape, so
+    cells never collide, and clearing on-disk mid-session races the in-memory<->disk cache
+    (spurious FileNotFoundError under heavy load). A FileNotFoundError is retried once.
+    """
     torch.manual_seed(seed)
     A = torch.randn(M, K, device="mps", dtype=dtype)
     B = torch.randn(K, N, device="mps", dtype=dtype)
@@ -134,6 +138,14 @@ def _run_cell(form, M, N, K, dtype, seed):
         torch.mps.synchronize()
     except MetalNonRecoverableError:
         return ("refused", None)
+    except FileNotFoundError:
+        _clear_cache()                                     # transient cache race; retry
+        try:
+            return _run_cell(form, M, N, K, dtype, seed + 100000)
+        except MetalNonRecoverableError:
+            return ("refused", None)
+        except Exception as e:                             # noqa: BLE001
+            return (f"crash:{type(e).__name__}", str(e)[:80])
     except Exception as e:                                 # noqa: BLE001
         return (f"crash:{type(e).__name__}", str(e)[:80])
     got = C.float()
