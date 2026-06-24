@@ -58,6 +58,181 @@ class _TemplateMixin:
     but never define new state — that belongs in ``GenericLowerer.__init__``.
     """
 
+    def _matmul_stride_decision(self, info):
+        """Decide the stride-aware lowering route for a bare-matmul ``info``.
+
+        Returns one of:
+          - ``("simdgroup", (a_row, a_col, b_row, b_col, c_row, c_col))``: every
+            operand has a CONTIGUOUS inner dim (col stride ``"1"``), so the
+            simdgroup-MMA fast path can load it — using the inferred ROW strides
+            as the simdgroup_load leading dims (correct for sliced/padded rows,
+            not just dim==stride).
+          - ``("scalar", descriptors)``: at least one operand has a
+            NON-contiguous inner dim (col stride is a runtime arg or a non-unit
+            constant, e.g. a transposed B from ``x @ w.t()``). simdgroup_load
+            needs a contiguous inner dim, so route to the stride-aware scalar
+            matmul which addresses with all 6 strides.
+          - ``None``: no traceable single-dot stride info -> caller keeps its
+            existing (legacy / dim-based) behavior.
+
+        REFUSES loudly (MetalNonRecoverableError) when the kernel IS a single-dot
+        matmul but a stride is un-inferable (infer returned a None slot) — never
+        falls through to a row-major guess (the silent-wrong this fixes).
+        """
+        sd = self.infer_dot_strides()
+        if sd is None:
+            return None              # not a traceable single-dot matmul
+        descriptors = self._inferred_stride_descriptors()
+        if descriptors is None:
+            # Single-dot matmul but a stride could not be inferred. Guessing
+            # row-major here is exactly the silent-wrong we are eliminating.
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "matmul operand stride could not be inferred from the address "
+                "arithmetic (traced layout: "
+                f"{sd}); refusing to assume a row-major layout, which would "
+                "silently mis-compute a transposed/strided operand. File an "
+                "issue at https://github.com/bledden/triton-msl/issues",
+                op_name="tt.dot")
+        a_row, a_col, b_row, b_col, c_row, c_col = descriptors
+        # Contiguous inner dim == col stride is literal "1". A runtime-arg or
+        # non-unit-constant col stride means the inner dim is strided.
+        if a_col == "1" and b_col == "1" and c_col == "1":
+            return ("simdgroup", descriptors)
+        return ("scalar", descriptors)
+
+    def _lower_strided_scalar_matmul(self, info, descriptors):
+        """Fully stride-aware scalar matmul for a NON-contiguous-inner operand.
+
+        Used when the simdgroup-MMA path can't load an operand because its inner
+        dim is strided (a transposed B from ``x @ w.t()``, a column-major C, a
+        sliced operand). Each thread computes a set of output elements; every
+        load/store addresses through the 6 inferred strides
+        ``A[m*a_row + k*a_col]``, ``B[k*b_row + n*b_col]``,
+        ``C[m*c_row + n*c_col]`` (each stride emitted as a literal or a runtime
+        ``int`` arg), so it is correct for ANY layout. Slower than the simdgroup
+        fast path, but that path is correctness-impossible here; the common
+        contiguous case never reaches this method.
+
+        Handles both the pid-tiled K-loop form (runtime M/N/K, grid tiles over
+        BLOCK_M/BLOCK_N) and the single-tile form (constexpr dims).
+        """
+        a_row, a_col, b_row, b_col, c_row, c_col = descriptors
+        ptr_args = info["ptr_args"]
+        a_name = ptr_args[0].name
+        b_name = ptr_args[1].name
+        c_name = ptr_args[2].name
+        a_msl = triton_type_to_msl(ptr_args[0].elem_type)
+        b_msl = triton_type_to_msl(ptr_args[1].elem_type)
+        c_msl = triton_type_to_msl(ptr_args[2].elem_type)
+
+        all_scalar_args = [a for a in self.graph.args if not a.is_ptr]
+        scalar_names = {a.name for a in all_scalar_args}
+
+        def _sx(desc):
+            # Stride descriptor -> MSL expression. A runtime arg name must be a
+            # declared scalar (unpacked from its buffer below); a literal int
+            # string passes through. (Descriptors only ever hold an arg NAME or
+            # an integer literal — never None here; the gate refused None.)
+            return desc if desc not in scalar_names else f"(uint){desc}"
+
+        a_rs, a_cs = _sx(a_row), _sx(a_col)
+        b_rs, b_cs = _sx(b_row), _sx(b_col)
+        c_rs, c_cs = _sx(c_row), _sx(c_col)
+
+        has_k_loop = bool(info.get("has_k_loop"))
+        if has_k_loop:
+            BLOCK_M = info["BLOCK_M"]; BLOCK_N = info["BLOCK_N"]; BLOCK_K = info["BLOCK_K"]
+            scalar_arg_map = info.get("scalar_args", {})
+        else:
+            BLOCK_M = info["M"]; BLOCK_N = info["N"]; BLOCK_K = info["K"]
+            scalar_arg_map = {a.name: a for a in all_scalar_args}
+
+        has_M = "M" in scalar_arg_map
+        has_N = "N" in scalar_arg_map
+        has_K = "K" in scalar_arg_map
+        pid_axes = {s.attrs.get("axis", 0) for s in self.graph.ops
+                    if s.op == "tt.get_program_id"}
+        has_pid = len(pid_axes) > 0
+
+        # Same integrity guard as the simdgroup K-loop: if the kernel tiles the
+        # output across programs but M/N are constexpr (no runtime arg), the true
+        # output extent is unknown here -> refuse rather than guess.
+        if (1 in pid_axes and not has_N) or (0 in pid_axes and not has_M):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "strided matmul tiles the output across programs "
+                f"(program_id axes {sorted(pid_axes)}) but M/N are baked as "
+                "constexpr, not runtime args — the true output extent can't be "
+                "derived. Refusing.", op_name="tt.dot")
+
+        # 256 threads per threadgroup; each handles a strided subset of the tile.
+        block_size = 256
+        self.effective_block_size = block_size
+        tile = BLOCK_M * BLOCK_N
+
+        safe_name = _sanitize_msl_name(self.graph.func_name)
+        lines = []
+        lines.append("#include <metal_stdlib>")
+        lines.append("using namespace metal;")
+        lines.append("")
+        lines.append(f"kernel void {safe_name}(")
+        arg_decls = []
+        for i, arg in enumerate(self.graph.args):
+            if arg.is_ptr:
+                m = triton_type_to_msl(arg.elem_type)
+                arg_decls.append(f"    device {m}* {arg.name} [[buffer({i})]]")
+            else:
+                arg_decls.append(f"    device int* {arg.name}_buf [[buffer({i})]]")
+        lines.append(",\n".join(arg_decls) + ",")
+        if has_pid:
+            self._used_pid_axes = {0, 1}
+            # Metal requires all thread-index attributes to share a type; use
+            # uint3 for both when multi-axis dispatch is in play.
+            lines.append("    uint3 pid3 [[threadgroup_position_in_grid]],")
+            lines.append("    uint3 _lid3 [[thread_position_in_threadgroup]]")
+            lines.append(") {")
+            lines.append("    uint pid_m = pid3.x;")
+            lines.append("    uint pid_n = pid3.y;")
+            lines.append("    uint lid = _lid3.x;")
+        else:
+            lines.append("    uint pid [[threadgroup_position_in_grid]],")
+            lines.append("    uint lid [[thread_position_in_threadgroup]]")
+            lines.append(") {")
+            lines.append("    uint pid_m = 0u, pid_n = 0u;")
+        for arg in all_scalar_args:
+            lines.append(f"    int {arg.name} = {arg.name}_buf[0];")
+
+        lines.append(f"    uint _M = {'(uint)M' if has_M else f'{BLOCK_M}u'};")
+        lines.append(f"    uint _N = {'(uint)N' if has_N else f'{BLOCK_N}u'};")
+        if has_K:
+            lines.append("    uint _K = (uint)K;")
+        else:
+            scf_iters = info.get("scf_iters")
+            if has_k_loop and scf_iters and scf_iters > 1:
+                lines.append(f"    uint _K = {BLOCK_K * scf_iters}u;")
+            else:
+                lines.append(f"    uint _K = {BLOCK_K}u;")
+        lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
+        lines.append(f"    uint col_base = pid_n * {BLOCK_N}u;")
+        lines.append("")
+        # Each thread strides over the BLOCK_M x BLOCK_N tile.
+        lines.append(f"    for (uint _e = lid; _e < {tile}u; _e += {block_size}u) {{")
+        lines.append(f"        uint _lm = _e / {BLOCK_N}u;")
+        lines.append(f"        uint _ln = _e % {BLOCK_N}u;")
+        lines.append("        uint m = row_base + _lm;")
+        lines.append("        uint n = col_base + _ln;")
+        lines.append("        if (m >= _M || n >= _N) continue;")
+        lines.append("        float _sum = 0.0f;")
+        lines.append("        for (uint k = 0u; k < _K; k++) {")
+        lines.append(f"            _sum += (float){a_name}[m * {a_rs} + k * {a_cs}]")
+        lines.append(f"                  * (float){b_name}[k * {b_rs} + n * {b_cs}];")
+        lines.append("        }")
+        lines.append(f"        {c_name}[m * {c_rs} + n * {c_cs}] = ({c_msl})_sum;")
+        lines.append("    }")
+        lines.append("}")
+        return "\n".join(lines)
+
     def _lower_simple_dot_inline(self, info):
         """Generate MSL for a simple dot kernel using simdgroup MMA.
 
@@ -73,6 +248,18 @@ class _TemplateMixin:
         threadgroup handles one BLOCK_M x BLOCK_N output tile and iterates
         over K in steps of BLOCK_K.
         """
+        # Stride-awareness gate (BLOCKER 1): a transposed/strided operand
+        # (non-contiguous INNER dim — e.g. a transposed B from x @ w.t()) can't be
+        # loaded by simdgroup_load, and the simdgroup templates hard-code
+        # row-major addressing — so it would be silently wrong. Inspect the traced
+        # strides: route a non-contiguous-inner matmul to the stride-aware scalar
+        # template (which addresses with all 6 strides), and refuse loudly when a
+        # stride is un-inferable. A contiguous-inner operand stays on the
+        # simdgroup fast path (the common ~11 TFLOP/s case).
+        decision = self._matmul_stride_decision(info)
+        if decision is not None and decision[0] == "scalar":
+            return self._lower_strided_scalar_matmul(info, decision[1])
+
         # Phase 4: record the runtime fast-matmul dispatch descriptor (additive;
         # the generic inline kernel below is still emitted + returned).
         self._fast_matmul = self._maybe_fast_matmul_descriptor()
@@ -413,6 +600,17 @@ class _TemplateMixin:
         else:
             lines.append(f"    uint _K = {BLOCK_K}u;  // no K arg, single tile")
 
+        # Leading dims for the simdgroup loads/stores = the DENSE row-major row
+        # stride. This path only handles contiguous-INNER operands (the
+        # stride-aware gate routed any strided inner dim to the scalar template),
+        # and the Metal driver materializes each operand DENSE row-major before
+        # dispatch (a non-contiguous host tensor is memmove'd as contiguous
+        # bytes), so the in-kernel row stride is always the matrix dim: A leading
+        # = K, B/C leading = N. (A passed runtime stride that differs from the
+        # dim describes the HOST layout, not the materialized device buffer, so
+        # using it here would mis-address — the dim is correct.)
+        a_ld, b_ld, c_ld = "_K", "_N", "_N"
+
         lines.append(f"")
         lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
         lines.append(f"    uint col_base = pid_n * {BLOCK_N}u;")
@@ -491,9 +689,9 @@ class _TemplateMixin:
             for c in range(col_tiles):
                 g = _col_guard(c)
                 pfx = f"if ({g}) " if g else ""
-                lines.append(f"            {pfx}simdgroup_load(b_frag{c}, {b_name} + k * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+                lines.append(f"            {pfx}simdgroup_load(b_frag{c}, {b_name} + k * {b_ld} + col_base + sgitg * {cols_per_sg}u + {c * 8}u, {b_ld});")
             for t in range(n_row_tiles):
-                lines.append(f"            simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * _K + k, _K);")
+                lines.append(f"            simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * {a_ld} + k, {a_ld});")
                 for c in range(col_tiles):
                     g = _col_guard(c)
                     pfx = f"if ({g}) " if g else ""
@@ -503,7 +701,7 @@ class _TemplateMixin:
                 for c in range(col_tiles):
                     g = _col_guard(c)
                     pfx = f"if ({g}) " if g else ""
-                    lines.append(f"        {pfx}simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+                    lines.append(f"        {pfx}simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * {c_ld} + col_base + sgitg * {cols_per_sg}u + {c * 8}u, {c_ld});")
             lines.append(f"        return;")
             lines.append(f"    }}")
             lines.append(f"")
@@ -518,14 +716,14 @@ class _TemplateMixin:
         lines.append(f"        for (uint i = tiitg; i < {tg_a_size}u; i += 128u) {{")
         lines.append(f"            uint r = i / {STAGE_DEPTH}u, c = i % {STAGE_DEPTH}u;")
         lines.append(f"            uint gr = row_base + r, gc = _k + c;")
-        lines.append(f"            tg_A[i] = (gr < _M && gc < _K) ? {stage_cast}({a_name}[gr * _K + gc]) : {pad};")
+        lines.append(f"            tg_A[i] = (gr < _M && gc < _K) ? {stage_cast}({a_name}[gr * {a_ld} + gc]) : {pad};")
         lines.append(f"        }}")
 
         # Cooperative masked load B tile (STAGE_DEPTH x BLOCK_N).
         lines.append(f"        for (uint i = tiitg; i < {tg_b_size}u; i += 128u) {{")
         lines.append(f"            uint r = i / {BLOCK_N}u, c = i % {BLOCK_N}u;")
         lines.append(f"            uint gr = _k + r, gc = col_base + c;")
-        lines.append(f"            tg_B[i] = (gr < _K && gc < _N) ? {stage_cast}({b_name}[gr * _N + gc]) : {pad};")
+        lines.append(f"            tg_B[i] = (gr < _K && gc < _N) ? {stage_cast}({b_name}[gr * {b_ld} + gc]) : {pad};")
         lines.append(f"        }}")
         lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append(f"")
@@ -569,7 +767,7 @@ class _TemplateMixin:
                     lines, acc=acc_names[t][c], scratch="tg_st",
                     gr=f"row_base + {t * 8}u + i / 8u",
                     gc=f"col_base + sgitg * {cols_per_sg}u + {c * 8}u + i % 8u",
-                    cond=cond, dst=f"{c_name}[gr * _N + gc]",
+                    cond=cond, dst=f"{c_name}[gr * {c_ld} + gc]",
                     out_type=output_msl_type, store_pfx=spfx, indent="    ")
 
         lines.append(f"}}")
@@ -605,9 +803,9 @@ class _TemplateMixin:
             for c in range(col_tiles):
                 g = _col_guard(c)
                 pfx = f"if ({g}) " if g else ""
-                lines.append(f"        {pfx}simdgroup_load(b_frag{c}, {b_name} + k * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+                lines.append(f"        {pfx}simdgroup_load(b_frag{c}, {b_name} + k * {b_ld} + col_base + sgitg * {cols_per_sg}u + {c * 8}u, {b_ld});")
             for t in range(n_row_tiles):
-                lines.append(f"        simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * _K + k, _K);")
+                lines.append(f"        simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * {a_ld} + k, {a_ld});")
                 for c in range(col_tiles):
                     g = _col_guard(c)
                     pfx = f"if ({g}) " if g else ""
@@ -617,7 +815,7 @@ class _TemplateMixin:
                 for c in range(col_tiles):
                     g = _col_guard(c)
                     pfx = f"if ({g}) " if g else ""
-                    lines.append(f"    {pfx}simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * _N + col_base + sgitg * {cols_per_sg}u + {c * 8}u, _N);")
+                    lines.append(f"    {pfx}simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * {c_ld} + col_base + sgitg * {cols_per_sg}u + {c * 8}u, {c_ld});")
             lines.append(f"}}")
             self._mm_two_kernel = {
                 "direct_name": dn, "block_m": BLOCK_M, "block_n": BLOCK_N,
@@ -2662,12 +2860,67 @@ class _TemplateMixin:
                     _hi = _hop.operand_ids[0]; _depth += 1
                 if _arg_index.get(_hi) != 5:
                     return None   # K-loop bound is not args[5] => non-canonical => refuse
+        # STRIDE GATE (brief): the fast compile_shader template hard-codes
+        # ROW-MAJOR addressing — leading dims = the M/N/K args, all INNER strides
+        # = 1. A non-contiguous inner dim (a transposed B from ``x @ w.t()``)
+        # cannot be loaded this way and would be silently wrong, so decline when
+        # the traced layout shows ANY operand's col (inner) stride is not the
+        # unit "1". The non-contiguous case then takes the stride-aware scalar
+        # template; a contiguous-inner operand whose row stride differs from the
+        # dim is handled by the simdgroup template's inferred leading dims (this
+        # fast descriptor's row==dim assumption is additionally net-checked by
+        # the launcher's runtime alignment gate). Only gates when traceable.
+        # Build a RUNTIME stride contract: the fast template uses the M/N/K dim
+        # buffers as leading dims and assumes inner stride 1. That is correct iff
+        # the operand strides equal that row-major layout AT RUNTIME. When the
+        # kernel passes explicit stride args (their values aren't known at
+        # compile time), the launcher must verify them and skip the fast path if
+        # they differ (a column-sliced contiguous operand, or any non-row-major
+        # layout). stride_checks = [(arg_index, expected_dim_arg_index_or_-1)]
+        # where -1 means "expected literal 1".
+        _name_to_idx = {a.name: i for i, a in enumerate(args)}
+        try:
+            _sd = self.infer_dot_strides()
+        except Exception:                                      # noqa: BLE001
+            _sd = None
+        stride_checks = []
+        if _sd is not None:
+            _ar, _ac = _sd.get("A", (None, None))
+            _br, _bc = _sd.get("B", (None, None))
+            _cr, _cc = _sd.get("C", (None, None))
+            # Inner (col) stride must be contiguous; a non-unit inner dim
+            # (transposed B) can't be loaded by the fast template at all.
+            if not (_ac == "1" and _bc == "1" and _cc == "1"):
+                return None
+            # Row strides: name-equal to the dim arg => statically canonical (no
+            # runtime check). A *different* runtime arg => emit a runtime check
+            # (value must equal the dim). A literal int constant must equal the
+            # dim too, but the dim is a runtime arg here so a constant row stride
+            # can't be statically validated -> require a runtime check is
+            # impossible (no arg to read) => decline to be safe.
+            _kidx, _nidx = 5, 4
+            for _rs, _exp_idx in ((_ar, _kidx), (_br, _nidx), (_cr, _nidx)):
+                if _rs in _name_to_idx:
+                    _ri = _name_to_idx[_rs]
+                    if _ri != _exp_idx:               # explicit stride arg != dim
+                        stride_checks.append((_ri, _exp_idx))
+                elif _rs == "1":
+                    # row stride literally 1 but the dim is a runtime arg: only
+                    # correct if that dim is 1 at runtime — too degenerate; the
+                    # fast template would mis-stride. Decline.
+                    return None
+                else:
+                    # row stride is a non-1 literal constant; can't prove it
+                    # equals the runtime dim. Decline rather than risk it.
+                    return None
         from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
         rr = rc = 4
         fast_msl = make_simdgroup_matmul_kernel_fast(dtype=msl_dtype, rr=rr, rc=rc, out_dtype=msl_out)
-        # (msl, m_idx, n_idx, k_idx, tile_m, tile_n, msl_dtype, msl_out). The last two
-        # let the driver build alternative (rr,rc) variants for per-shape autotuning;
-        # the baked (4,4) msl stays the default/fallback.
-        return (fast_msl, 3, 4, 5, 8 * rr, 32 * rc, msl_dtype, msl_out)
+        # (msl, m_idx, n_idx, k_idx, tile_m, tile_n, msl_dtype, msl_out, stride_checks).
+        # The driver builds alternative (rr,rc) variants for per-shape autotuning;
+        # stride_checks are verified at dispatch (skip fast path if a runtime
+        # stride doesn't match the assumed row-major layout).
+        return (fast_msl, 3, 4, 5, 8 * rr, 32 * rc, msl_dtype, msl_out,
+                tuple(stride_checks))
 
 

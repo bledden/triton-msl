@@ -48,13 +48,15 @@ def dispatch_fast_matmul(rt, descriptor, kargs, *, launch_exit_hook=None,
         True  — fast path dispatched; caller should return immediately.
         False — fast path skipped or failed; caller falls through to generic path.
     """
-    # Unpack descriptor defensively (6- or 8-element; older descriptors lack dtype fields)
+    # Unpack descriptor defensively (6/8/9-element; older descriptors lack dtype
+    # / stride-check fields).
     try:
         fast_msl = descriptor[0]
         m_idx, n_idx, k_idx = descriptor[1], descriptor[2], descriptor[3]
         tile_m, tile_n = descriptor[4], descriptor[5]
         msl_dtype = descriptor[6] if len(descriptor) > 6 else None
         msl_out   = descriptor[7] if len(descriptor) > 7 else None
+        stride_checks = descriptor[8] if len(descriptor) > 8 else ()
     except (TypeError, ValueError, IndexError):
         return False  # malformed descriptor -> skip
 
@@ -67,6 +69,21 @@ def dispatch_fast_matmul(rt, descriptor, kargs, *, launch_exit_hook=None,
         M = int(kargs[m_idx])
         N = int(kargs[n_idx])
         K = int(kargs[k_idx])
+
+        # RUNTIME STRIDE CONTRACT: the fast template assumes a ROW-MAJOR layout
+        # (leading dims = M/N/K, inner stride 1). When the kernel passes explicit
+        # stride args, verify each runtime row stride equals the dim it must be —
+        # otherwise a transposed/column-sliced operand would be SILENTLY WRONG.
+        # Mismatch -> skip the fast path; the generic stride-aware kernel handles
+        # it. (expected_idx == -1 means "must equal literal 1".)
+        for arg_idx, expected_idx in stride_checks:
+            try:
+                actual = int(kargs[arg_idx])
+                expected = 1 if expected_idx < 0 else int(kargs[expected_idx])
+            except (TypeError, ValueError, IndexError):
+                return False
+            if actual != expected:
+                return False
 
         # --- Per-shape deterministic tile selection (safe: every CANDIDATES config
         #     computes a correct matmul; selection only affects perf).  Any error in this

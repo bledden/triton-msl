@@ -105,13 +105,18 @@ def test_eligible_fp32_emits_descriptor(monkeypatch):
     msl, m_idx, n_idx, k_idx, tile_m, tile_n = desc[0], desc[1], desc[2], desc[3], desc[4], desc[5]
     assert (m_idx, n_idx, k_idx, tile_m, tile_n) == (3, 4, 5, 32, 128)
     assert "simdgroup_matmul_fast" in msl
-    # Finding 1 coverage: descriptor must be 8 elements with msl_dtype / msl_out fields
-    assert len(desc) == 8, (
-        f"descriptor must be 8 elements (msl,m_idx,n_idx,k_idx,tile_m,tile_n,msl_dtype,msl_out); "
+    # Finding 1 coverage: descriptor carries msl_dtype / msl_out fields (and now
+    # a 9th stride-checks field for the runtime row-major contract).
+    assert len(desc) >= 8, (
+        f"descriptor must be >=8 elements (msl,m_idx,n_idx,k_idx,tile_m,tile_n,msl_dtype,msl_out[,stride_checks]); "
         f"got {len(desc)}"
     )
     assert desc[6] == "fp32", f"desc[6] (msl_dtype) must be 'fp32' for fp32 input, got {desc[6]!r}"
     assert desc[7] == "fp32", f"desc[7] (msl_out) must be 'fp32' for fp32 output, got {desc[7]!r}"
+    # stride_checks: a sequence of (arg_idx, expected_dim_idx) runtime-stride
+    # contract pairs. (JSON round-trip in the cache turns tuples into lists.)
+    assert isinstance(desc[8], (tuple, list)), \
+        f"desc[8] (stride_checks) must be a sequence, got {desc[8]!r}"
 
 
 @requires
@@ -130,9 +135,10 @@ def test_fp16_output_emits_half_variant_descriptor(monkeypatch):
     assert (m_idx, n_idx, k_idx, tile_m, tile_n) == (3, 4, 5, 32, 128)
     assert "device half* C [[buffer(2)]]" in msl          # the fp16-output variant
     assert "half(scratch[sgitg*64u + i])" in msl
-    # Finding 1 coverage: descriptor must be 8 elements with msl_dtype / msl_out fields
-    assert len(desc) == 8, (
-        f"descriptor must be 8 elements; got {len(desc)}"
+    # Finding 1 coverage: descriptor carries msl_dtype / msl_out fields (and now
+    # a 9th stride-checks field for the runtime row-major contract).
+    assert len(desc) >= 8, (
+        f"descriptor must be >=8 elements; got {len(desc)}"
     )
     assert desc[6] in ("fp16", "f16"), (
         f"desc[6] (msl_dtype) must be a fp16 dtype string for fp16 input, got {desc[6]!r}"

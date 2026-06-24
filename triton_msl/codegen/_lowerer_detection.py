@@ -109,6 +109,213 @@ class _DetectionMixin:
         extras = [p for p in all_ptr_args if p.name not in {q.name for q in ptrs}]
         return ptrs + extras
 
+    def infer_dot_strides(self):
+        """General ADDRESS-TRACED stride inference for a single-dot matmul.
+
+        Returns ``{"A": (row, col), "B": (row, col), "C": (row, col)}`` where each
+        slot is one of: a stride func-arg NAME (runtime stride), the literal
+        ``"1"`` (a unit stride that Triton folded away at compile time), or
+        ``None`` (the stride could not be unambiguously inferred -> the caller
+        MUST refuse loudly rather than guess; never silently wrong).
+
+        Returns ``None`` for the whole kernel when it is not a single-dot matmul
+        we can trace (>1 dot, missing store, unreachable addptr) — caller falls
+        back to its existing path / refuses.
+
+        Unlike the name-match ``stride_map`` (which needs args literally named
+        ``stride_*`` and bakes in row-major roles) this traces the actual
+        ``tt.addptr`` offset arithmetic: each additive offset term is either a
+        bare ``tt.expand_dims(range)`` (folded unit stride) or
+        ``arith.muli(expand_dims(range), tt.splat(stride_arg))``; the
+        ``expand_dims`` axis (1 -> row/dim0, 0 -> col/dim1) classifies the term,
+        layout-agnostically (so a transposed/strided operand is read correctly).
+        """
+        op_by_id = {}
+        def _collect(ops):
+            for s in ops:
+                op_by_id[s.id] = s
+                if s.region_ops:
+                    _collect(s.region_ops)
+                if s.else_ops:
+                    _collect(s.else_ops)
+        _collect(self.graph.ops)
+        arg_by_id = {a.id: a for a in self.graph.args}
+
+        dots = [s for s in op_by_id.values() if s.op == "tt.dot"]
+        if len(dots) != 1:
+            return None
+        all_ptr_args = [a for a in self.graph.args if a.is_ptr]
+        if len(all_ptr_args) < 3:
+            return None
+        roles = self._resolve_dot_ptr_roles(dots[0], all_ptr_args)
+        if roles is not None and len(roles) >= 3:
+            a_ptr, b_ptr, c_ptr = roles[0], roles[1], roles[2]
+        else:
+            a_ptr, b_ptr, c_ptr = all_ptr_args[0], all_ptr_args[1], all_ptr_args[-1]
+
+        def _skip(o):
+            # Follow operand 0 through layout-only wrappers to the real op.
+            seen = 0
+            while o is not None and seen < 16 and o.op in (
+                    "tt.broadcast", "ttg.convert_layout", "tt.reshape",
+                    "arith.sitofp", "arith.extsi", "arith.trunci"):
+                if not o.operand_ids:
+                    return o
+                o = op_by_id.get(o.operand_ids[0]); seen += 1
+            return o
+
+        def _addptr_for(ptr_arg):
+            # The matmul's per-operand offset lives on the addptr whose BASE
+            # traces to this pointer func-arg (the pre-loop addptr for a K-loop;
+            # the in-loop advance's base is the loop block-arg, which does NOT
+            # trace to the arg, so it is naturally excluded). Pick the one whose
+            # offset is a 2D tensor (the row+col offset, not a scalar advance).
+            best = None
+            for o in op_by_id.values():
+                if o.op != "tt.addptr" or len(o.operand_ids) < 2:
+                    continue
+                base = self._trace_ptr_source(o.operand_ids[0], op_by_id)
+                if base is None or base.name != ptr_arg.name:
+                    continue
+                off = op_by_id.get(o.operand_ids[1])
+                if off is not None and off.is_tensor:
+                    best = o
+            return best
+
+        def _chain_offset_terms(addptr, acc):
+            # Triton lowers ``P + r*Sr + c*Sc`` either as ONE addptr with an
+            # arith.addi offset, or as a CHAIN ``addptr(addptr(P, r*Sr), c*Sc)``
+            # (each Python ``+`` becomes its own addptr when not parenthesized).
+            # Walk the chain back toward the base, collecting each link's flattened
+            # offset terms, so the row AND col factors are both seen regardless of
+            # how the additions were grouped. Stops at the first base that is not an
+            # addptr on this same operand (a splat(arg) / loop block-arg / a
+            # different chain) — its terms aren't part of this offset.
+            seen_ids = set()
+            cur = addptr
+            depth = 0
+            while (cur is not None and cur.op == "tt.addptr"
+                   and len(cur.operand_ids) >= 2 and cur.id not in seen_ids
+                   and depth < 16):
+                seen_ids.add(cur.id)
+                depth += 1
+                _flatten_addi(op_by_id.get(cur.operand_ids[1]), acc)
+                base = op_by_id.get(cur.operand_ids[0])
+                # Follow layout-only wrappers down to the next real op.
+                base = _skip(base)
+                cur = base
+
+        def _flatten_addi(o, acc):
+            o = _skip(o)
+            if o is None:
+                return
+            if o.op in ("arith.addi", "arith.add"):
+                for oid in o.operand_ids:
+                    _flatten_addi(op_by_id.get(oid), acc)
+            else:
+                acc.append(o)
+
+        def _const_stride(srcop):
+            # If srcop is an integer arith.constant, return its value as a string
+            # ("1", "32", ...); else None. A constexpr matrix dim (e.g. K folded
+            # to `arith.constant 32`) is a compile-time-known stride, so resolving
+            # it lets a constexpr-dim row-major matmul address correctly rather
+            # than refuse. (Purely additive: runtime-arg and unit-stride results
+            # are unchanged.)
+            if srcop is None or srcop.op != "arith.constant":
+                return None
+            raw = str(srcop.attrs.get("value", "")).strip()
+            tok = raw.split(":")[0].strip()    # "32 : i32" -> "32"
+            try:
+                return str(int(float(tok)))
+            except (TypeError, ValueError):
+                return None
+
+        def _classify(term):
+            # Return (axis, stride) for an offset term. stride is an arg NAME, an
+            # integer literal string ("1" folded unit / "32" constexpr dim), or
+            # None (present but unresolvable -> caller refuses).
+            term = _skip(term)
+            if term is None:
+                return (None, None)
+            stride = "1"
+            if term.op in ("arith.muli", "arith.mul") and len(term.operand_ids) == 2:
+                o0 = _skip(op_by_id.get(term.operand_ids[0]))
+                o1 = _skip(op_by_id.get(term.operand_ids[1]))
+                ed = o0 if (o0 and o0.op == "tt.expand_dims") else (
+                     o1 if (o1 and o1.op == "tt.expand_dims") else None)
+                other = o1 if ed is o0 else o0
+                if ed is None:
+                    return (None, None)
+                sp = _skip(other)
+                if sp is not None and sp.op == "tt.splat" and sp.operand_ids:
+                    src = sp.operand_ids[0]
+                    if src in arg_by_id:
+                        stride = arg_by_id[src].name
+                    else:
+                        stride = _const_stride(op_by_id.get(src))   # constexpr dim or None
+                elif sp is not None and sp.op == "arith.constant":
+                    stride = _const_stride(sp)
+                else:
+                    stride = None
+                term = ed
+            if term.op == "tt.expand_dims":
+                return (term.attrs.get("axis"), stride)
+            return (None, None)
+
+        def _strides(addptr):
+            if addptr is None or len(addptr.operand_ids) < 2:
+                return (None, None)
+            terms = []
+            _chain_offset_terms(addptr, terms)
+            row = col = None
+            for t in terms:
+                axis, stride = _classify(t)
+                if axis == 1:
+                    row = stride
+                elif axis == 0:
+                    col = stride
+            return (row, col)
+
+        a_addr = _addptr_for(a_ptr)
+        b_addr = _addptr_for(b_ptr)
+        c_addr = None
+        for s in op_by_id.values():
+            if s.op == "tt.store" and s.operand_ids:
+                base = self._trace_ptr_source(s.operand_ids[0], op_by_id)
+                if base is not None and base.name == c_ptr.name:
+                    c_addr = op_by_id.get(s.operand_ids[0])
+                    break
+        if a_addr is None or b_addr is None or c_addr is None:
+            return None
+        return {"A": _strides(a_addr), "B": _strides(b_addr), "C": _strides(c_addr)}
+
+    def _inferred_stride_descriptors(self):
+        """Address-traced 6-tuple of matmul stride descriptors, or None.
+
+        Wraps ``infer_dot_strides()`` into the
+        ``(a_row, a_col, b_row, b_col, c_row, c_col)`` shape the matmul
+        templates consume. Each element is a runtime stride func-arg NAME or
+        the literal string ``"1"`` (a folded unit stride). Returns ``None`` when
+        the kernel is not a single-dot matmul we can trace, OR when ANY operand
+        stride is un-inferable (``infer_dot_strides`` returned ``None`` for that
+        slot) — in which case the caller MUST refuse loudly rather than guess a
+        row-major layout. Never returns a partially-guessed descriptor.
+        """
+        sd = self.infer_dot_strides()
+        if sd is None:
+            return None
+        try:
+            a_row, a_col = sd["A"]
+            b_row, b_col = sd["B"]
+            c_row, c_col = sd["C"]
+        except (KeyError, TypeError, ValueError):
+            return None
+        # A None in any slot = a present-but-unresolvable stride -> caller refuses.
+        if any(s is None for s in (a_row, a_col, b_row, b_col, c_row, c_col)):
+            return None
+        return (a_row, a_col, b_row, b_col, c_row, c_col)
+
     def _detect_simple_dot(self):
         """Detect a simple dot kernel: load→local_alloc→local_load→dot→store.
 
@@ -665,24 +872,34 @@ class _DetectionMixin:
         b_ptr = ptr_args[1]
         c_ptr = ptr_args[-1]
 
-        # Read the two stride args immediately following each pointer in
-        # the kernel signature. Triton\'s naming for the inner dim varies
-        # (``stride_xk`` vs ``stride_ym`` vs ``stride_zn``), so positional
-        # adjacency is the only convention reliable across matrices.
-        def _strides_after(ptr_arg):
-            idx = ptr_arg.index
-            row = None
-            col = None
-            for a in scalar_args:
-                if a.index == idx + 1:
-                    row = a.name
-                elif a.index == idx + 2:
-                    col = a.name
-            return row, col
+        # ADDRESS-TRACED strides first (same fix as _detect_matmul_epilogue): the
+        # positional index+1/+2 reader below lands on the M/N dim args for a
+        # `(a,b,c,M,N,K,strides...)` signature and silently mis-addresses a
+        # transposed operand. infer_dot_strides() reads the real addptr offset
+        # arithmetic, so a fused-softmax matmul over a transposed operand is read
+        # correctly. Fall back to the positional reader only when the tracer
+        # cannot resolve the kernel (preserving back-compat for any softmax shape
+        # it doesn't model) — never a guess that's known-wrong.
+        descriptors = self._inferred_stride_descriptors()
+        if descriptors is not None:
+            a_row_s, a_col_s, b_row_s, b_col_s, c_row_s, c_col_s = descriptors
+        else:
+            # Read the two stride args immediately following each pointer in
+            # the kernel signature (positional fallback).
+            def _strides_after(ptr_arg):
+                idx = ptr_arg.index
+                row = None
+                col = None
+                for a in scalar_args:
+                    if a.index == idx + 1:
+                        row = a.name
+                    elif a.index == idx + 2:
+                        col = a.name
+                return row, col
 
-        a_row_s, a_col_s = _strides_after(a_ptr)
-        b_row_s, b_col_s = _strides_after(b_ptr)
-        c_row_s, c_col_s = _strides_after(c_ptr)
+            a_row_s, a_col_s = _strides_after(a_ptr)
+            b_row_s, b_col_s = _strides_after(b_ptr)
+            c_row_s, c_col_s = _strides_after(c_ptr)
 
         return {
             "M": M, "N": N, "K": K,
@@ -862,25 +1079,23 @@ class _DetectionMixin:
                     bias_ptr = bptr
 
         ptr_args = [a for a in self.graph.args if a.is_ptr]
-        scalar_args = [a for a in self.graph.args if not a.is_ptr]
         if len(ptr_args) < 3:
             return None
         a_ptr = ptr_args[0]
         b_ptr = ptr_args[1]
         c_ptr = ptr_args[-1]
 
-        def _strides_after(ptr_arg):
-            row = col = None
-            for a in scalar_args:
-                if a.index == ptr_arg.index + 1:
-                    row = a.name
-                elif a.index == ptr_arg.index + 2:
-                    col = a.name
-            return row, col
-
-        a_row_s, a_col_s = _strides_after(a_ptr)
-        b_row_s, b_col_s = _strides_after(b_ptr)
-        c_row_s, c_col_s = _strides_after(c_ptr)
+        # ADDRESS-TRACED strides (not the old positional index+1/+2 read, which
+        # landed on the M/N dim args for a `(a,b,c,M,N,K,sam,sak,...)` signature
+        # and silently mis-addressed a transposed/strided operand — BLOCKER 2).
+        # infer_dot_strides() reads the actual tt.addptr offset arithmetic, so a
+        # transposed B (col stride = a runtime arg) is read correctly. When any
+        # operand stride is un-inferable, bail to None so the kernel refuses via
+        # the #157 catch-all rather than emit a row-major guess.
+        descriptors = self._inferred_stride_descriptors()
+        if descriptors is None:
+            return None
+        a_row_s, a_col_s, b_row_s, b_col_s, c_row_s, c_col_s = descriptors
 
         # Topologically-ordered epilogue ops (graph order is topo).
         epilogue_ops = [ssa for ssa in self.graph.ops if ssa.id in epilogue_ids]
