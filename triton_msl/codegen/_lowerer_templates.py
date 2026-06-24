@@ -1789,9 +1789,13 @@ class _TemplateMixin:
         lines.append(f"    threadgroup {msl_type} _input[{total}];")
         lines.append(f"    threadgroup {msl_type} _result[{result_total}];")
 
-        # Stage all input values to shared memory
+        # Stage all input values to shared memory. Offset by program_id: each program in
+        # a multi-program (batched) dispatch processes its OWN contiguous `total`-element
+        # 3-D slice. Previously this read x_name[_e] with NO pid offset, so a multi-program
+        # dispatch silently computed only program 0's slice and left the others untouched
+        # (reduce-probe finding). pid*total is a no-op for a single-program (grid=1) launch.
         lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u)")
-        lines.append(f"        _input[_e] = ({msl_type}){x_name}[_e];")
+        lines.append(f"        _input[_e] = ({msl_type}){x_name}[pid * {total}u + _e];")
         lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         # Reduce along axis
@@ -1830,7 +1834,7 @@ class _TemplateMixin:
         _scast3d = "" if _out_msl3d in ("float", "half") else f"({_out_msl3d})"
         R0, R1 = result_dims
         lines.append(f"    for (uint _r = lid; _r < {result_total}u; _r += {block_size}u)")
-        lines.append(f"        {z_name}[_r] = {_scast3d}_result[_r];")
+        lines.append(f"        {z_name}[pid * {result_total}u + _r] = {_scast3d}_result[_r];")
 
         lines.append("}")
         lines.append("")
@@ -1909,9 +1913,13 @@ class _TemplateMixin:
         lines.append(f"    threadgroup {msl_type} _input[{total}];")
         lines.append(f"    threadgroup int _result_idx[{result_total}];")
 
-        # Stage all input values to shared memory
+        # Stage all input values to shared memory. Offset by program_id: each program in
+        # a multi-program (batched) dispatch processes its OWN contiguous `total`-element
+        # 3-D slice. Previously this read x_name[_e] with NO pid offset, so a multi-program
+        # dispatch silently computed only program 0's slice and left the others untouched
+        # (reduce-probe finding). pid*total is a no-op for a single-program (grid=1) launch.
         lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u)")
-        lines.append(f"        _input[_e] = ({msl_type}){x_name}[_e];")
+        lines.append(f"        _input[_e] = ({msl_type}){x_name}[pid * {total}u + _e];")
         lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         # Reduce along axis, tracking best value and index
@@ -1943,9 +1951,9 @@ class _TemplateMixin:
         lines.append(f"    }}")
         lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
-        # Store index results to output
+        # Store index results to output (program_id-offset for multi-program dispatch).
         lines.append(f"    for (uint _r = lid; _r < {result_total}u; _r += {block_size}u)")
-        lines.append(f"        {z_name}[_r] = _result_idx[_r];")
+        lines.append(f"        {z_name}[pid * {result_total}u + _r] = _result_idx[_r];")
 
         lines.append("}")
         lines.append("")

@@ -1112,15 +1112,23 @@ class _DetectionMixin:
         # Reject complex kernels that need op-by-op lowering
         has_scf_for = False
         has_num_programs = False
+        has_dot = False
         reduce_count = 0
         for ssa in self.graph.ops:
             if ssa.op == "scf.for":
                 has_scf_for = True
             elif ssa.op == "tt.get_num_programs":
                 has_num_programs = True
+            elif ssa.op == "tt.dot":
+                has_dot = True
             elif ssa.op == "tt.reduce":
                 reduce_count += 1
-        if has_scf_for or has_num_programs or reduce_count > 1:
+        # A pure 3-D reduce never contains a tt.dot. Rejecting dot-kernels stops a
+        # FlashAttention kernel from being MIS-DETECTED as a 3-D reduce (it has 2-D
+        # softmax reduces + dots) and routed to / refused by the 3-D template instead of
+        # reaching its own head_dim/dtype guards — which also unblocks adding correct
+        # multi-program (program_id) support to the 3-D template below.
+        if has_scf_for or has_num_programs or has_dot or reduce_count > 1:
             return None
 
         # Look for tt.reduce with a 3D input

@@ -1097,3 +1097,28 @@ def test_nd_nonxor_reduce_refuses_sort_ok():
 def _sort_rows(a, o, M: tl.constexpr, N: tl.constexpr):
     i = tl.arange(0, M); j = tl.arange(0, N)
     tl.store(o + i[:, None] * N + j[None, :], tl.sort(tl.load(a + i[:, None] * N + j[None, :])))
+
+
+# --- #3 codegen fix (2026-06-24): multi-program 3D reduce computes (pid offset) -----
+@triton.jit
+def _reduce3d_multiprog(a, o, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+    pid = tl.program_id(0)
+    i = tl.arange(0, M); j = tl.arange(0, N); k = tl.arange(0, K)
+    off = pid * M * N * K + i[:, None, None] * N * K + j[None, :, None] * K + k[None, None, :]
+    x = tl.load(a + off)
+    oi = tl.arange(0, M); oj = tl.arange(0, N)
+    tl.store(o + pid * M * N + oi[:, None] * N + oj[None, :], tl.sum(x, 2))
+
+
+@requires
+def test_multiprogram_3d_reduce_computes_all_batches():
+    # The 3D reduce template ignored program_id, so a multi-program dispatch silently
+    # computed only batch-0 (reduce-probe #3). The template now offsets staging/store by
+    # pid*total (a no-op for grid=1), so every batch computes; FA is no longer
+    # mis-detected as a 3D reduce (the detector now rejects tt.dot kernels).
+    P, M, N, K = 3, 4, 2, 2
+    a = torch.randn(P, M, N, K, device="mps")
+    o = torch.empty(P, M, N, device="mps")
+    _reduce3d_multiprog[(P,)](a, o, M=M, N=N, K=K); torch.mps.synchronize()
+    torch.testing.assert_close(o.cpu(), a.cpu().sum(3), rtol=2e-3, atol=2e-3)
+    assert o[1].abs().sum().item() > 0, "batch 1 left untouched — pid offset missing"
