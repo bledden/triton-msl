@@ -969,3 +969,52 @@ def test_inloop_2d_reduce_fp16_refuses_fp32_ok():
     a2 = torch.randn(T, M, N, device="mps"); o2 = torch.empty(M, device="mps")
     _inloop_2dreduce_dt[(1,)](a2, o2, M=M, N=N, T=T); torch.mps.synchronize()
     torch.testing.assert_close(o2.cpu(), a2.cpu().sum(dim=(0, 2)), rtol=2e-3, atol=2e-3)
+
+
+# --- Reduce-surface probe findings (2026-06-23): argmax-index + int-max-over-splat ---
+@triton.jit
+def _argmax2d_both(x, ov, oi, M: tl.constexpr, N: tl.constexpr):
+    i = tl.arange(0, M); j = tl.arange(0, N)
+    v, idx = tl.max(tl.load(x + i[:, None] * N + j[None, :]), 1, return_indices=True)
+    tl.store(ov + i, v); tl.store(oi + i, idx)
+
+
+@triton.jit
+def _argmax2d_ax0(x, oi, M: tl.constexpr, N: tl.constexpr):
+    i = tl.arange(0, M); j = tl.arange(0, N)
+    _v, idx = tl.max(tl.load(x + i[:, None] * N + j[None, :]), 0, return_indices=True)
+    tl.store(oi + j, idx)
+
+
+@requires
+def test_argmax2d_index_layout_refuses_broken_cases():
+    # The reduce-surface probe found two 2D argmax INDEX-layout silent-wrongs (the value
+    # is convert_layout'd before its store but the index is not): axis=1 with BOTH value
+    # and index consumed broadcasts row-0's index; axis=0 on a SQUARE tile broadcasts
+    # column-0's index. Both now refuse; rectangular axis=0 still computes.
+    X = torch.randn(8, 8, device="mps")
+    ov = torch.empty(8, device="mps"); oi = torch.empty(8, device="mps", dtype=torch.int32)
+    with pytest.raises(MetalNonRecoverableError):
+        _argmax2d_both[(1,)](X, ov, oi, M=8, N=8); torch.mps.synchronize()
+    oi2 = torch.empty(8, device="mps", dtype=torch.int32)
+    with pytest.raises(MetalNonRecoverableError):
+        _argmax2d_ax0[(1,)](X, oi2, M=8, N=8); torch.mps.synchronize()  # square
+    # rectangular axis=0 is correct (not over-refused)
+    Xr = torch.randn(4, 8, device="mps"); oi3 = torch.empty(8, device="mps", dtype=torch.int32)
+    _argmax2d_ax0[(1,)](Xr, oi3, M=4, N=8); torch.mps.synchronize()
+    assert oi3.cpu().tolist() == Xr.cpu().argmax(0).tolist()
+
+
+@triton.jit
+def _intmax_splat(o, V: tl.constexpr, N: tl.constexpr):
+    tl.store(o, tl.max(tl.full((N,), V, tl.int32), 0))
+
+
+@requires
+def test_int_max_over_splat_not_over_refused():
+    # The tail-mask guard refused an integer max/min over a tl.full/splat (no make_range
+    # to pin block_size) because it lacked an int identity. Now uses numeric_limits;
+    # int max over a splat computes (== the splat value).
+    o = torch.empty(1, device="mps", dtype=torch.int32)
+    _intmax_splat[(1,)](o, V=7, N=32); torch.mps.synchronize()
+    assert o.item() == 7

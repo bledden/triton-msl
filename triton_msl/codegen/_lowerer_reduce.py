@@ -703,6 +703,14 @@ class _ReduceScanMixin:
                 _ident = "-INFINITY"
             elif combine_op == "min" and _is_float:
                 _ident = "INFINITY"
+            elif combine_op == "max":
+                # integer max identity (reduce-probe over-refusal fix: int max/min over a
+                # splat was wrongly refused).
+                _ident = f"metal::numeric_limits<{msl_type}>::lowest()"
+            elif combine_op == "min":
+                _ident = f"metal::numeric_limits<{msl_type}>::max()"
+            elif combine_op == "xor":
+                _ident = "0"
             else:
                 raise MetalNonRecoverableError(
                     f"reduce ('{combine_op}') over a {_rn}-element value dispatched "
@@ -1026,6 +1034,29 @@ class _ReduceScanMixin:
         """
         M, N = input_shape[0], input_shape[1]
         total = M * N
+
+        # (#6 reduce-probe) axis=0 argmin/argmax on a SQUARE (M==N) tile mis-broadcasts
+        # the index (column-0's index to every column); rectangular tiles are correct.
+        if axis == 0 and M == N:
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "2-D argmin/argmax along axis=0 on a square (M==N) tile mis-broadcasts "
+                "the index. Refusing. Use a non-square tile or reduce along axis=1.",
+                op_name="tt.reduce")
+        # (#5 reduce-probe) axis=1, BOTH value AND index consumed: the value is moved to
+        # simple layout (convert_layout) before its store but the index is not, so the
+        # index store broadcasts row-0's index. Index-only / value-only is correct.
+        if axis == 1 and ssa.result_ids and len(ssa.result_ids) >= 2:
+            _used_ids = set()
+            for o in self.graph.ops:
+                _used_ids.update(o.operand_ids or [])
+            if ssa.result_ids[0] in _used_ids and ssa.result_ids[1] in _used_ids:
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "2-D argmin/argmax along axis=1 with BOTH the value and the index "
+                    "consumed mis-stores the index (broadcasts row-0's index). Refusing. "
+                    "Use the value or the index alone, or separate kernels.",
+                    op_name="tt.reduce")
 
         val_var = self._lookup(ssa.operand_ids[0])
         idx_var = self._lookup(ssa.operand_ids[1])
