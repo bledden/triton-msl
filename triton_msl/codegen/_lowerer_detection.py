@@ -174,6 +174,7 @@ class _DetectionMixin:
             dot_in_loop = None
             has_loads_in_loop = False
             has_local_alloc_in_loop = False
+            has_store_in_loop = False
             if scf_for_ssa.region_ops:
                 for body_op in scf_for_ssa.region_ops:
                     if body_op.op == "tt.dot":
@@ -182,9 +183,47 @@ class _DetectionMixin:
                         has_loads_in_loop = True
                     elif body_op.op == "ttg.local_alloc":
                         has_local_alloc_in_loop = True
+                    elif body_op.op == "tt.store":
+                        has_store_in_loop = True
 
             if not dot_in_loop:
                 return None  # scf.for without dot — not our pattern
+
+            # A tt.store INSIDE the loop body means this is a TILE-iteration loop (the
+            # body computes + writes one output tile per iteration), NOT a K-reduction
+            # loop. The inline simdgroup template assumes a K-loop (accumulate, store
+            # once after) and mis-computes a tile-loop (re-audit #11). Refuse.
+            if has_store_in_loop:
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "matmul with a tt.store inside the scf.for loop body is a "
+                    "tile-iteration loop, not a K-reduction loop; the inline simdgroup "
+                    "template only handles the K-loop form and would mis-compute. "
+                    "Refusing.", op_name="tt.dot")
+
+            # A non-zero accumulator INIT (operand_ids[2] of the dot — a fused bias) is
+            # NOT seeded into the simdgroup accumulators by the inline template, so it is
+            # silently dropped (re-audit #11: K-loop matmul + fused col-bias returned
+            # A@B only). The non-looped path already checks this; refuse here too (the
+            # twin). A zero/absent init is fine.
+            if len(dot_in_loop.operand_ids) >= 3:
+                _acc = {s.id: s for s in self.graph.ops}.get(dot_in_loop.operand_ids[2])
+
+                def _is_zero_const(op):
+                    if op is None or op.op != "arith.constant":
+                        return False
+                    v = op.attrs.get("value")
+                    try:
+                        return float(str(v).strip()) == 0.0
+                    except (TypeError, ValueError):
+                        return "0.0" in str(v) or str(v) in ("0", "false")
+                if _acc is not None and not _is_zero_const(_acc):
+                    from triton_msl.errors import MetalNonRecoverableError
+                    raise MetalNonRecoverableError(
+                        "K-loop matmul with a non-zero accumulator init (fused bias) is "
+                        "not supported by the inline simdgroup template (the init is "
+                        "silently dropped). Refusing. Add the bias as a separate kernel "
+                        "after the matmul.", op_name="tt.dot")
 
             # Extract BLOCK_M x BLOCK_K and BLOCK_K x BLOCK_N from dot operands
             a_type = self._find_op_type_str(dot_in_loop.operand_ids[0])
@@ -1417,13 +1456,16 @@ class _DetectionMixin:
         if input_arg is None or output_arg is None:
             return None
 
-        n_arg = None
-        for arg in self.graph.args:
-            if not arg.is_ptr:
-                n_arg = arg.name
-                break
-        if n_arg is None:
+        # The row length is the SOLE scalar arg (BLOCK_SIZE is constexpr, not in args).
+        # Without this guard the first non-ptr arg was grabbed as the row length, so a
+        # layernorm kernel passing BOTH M and N (or eps) as runtime args used the wrong
+        # one — normalizing only the first M of N elements (re-audit #11: zeros 448/512).
+        # Mirror the sibling _detect_softmax guard; multi-scalar kernels fall through to
+        # the generic reduction lowerer, which handles the 2D keep_dims pattern.
+        scalar_args = [arg.name for arg in self.graph.args if not arg.is_ptr]
+        if len(scalar_args) != 1:
             return None
+        n_arg = scalar_args[0]
 
         block_size = self.graph.block_size
         if block_size > 1024:

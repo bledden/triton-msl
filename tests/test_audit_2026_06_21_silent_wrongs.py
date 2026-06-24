@@ -578,3 +578,72 @@ def test_topk_refuses_full_sort_correct():
         o2 = torch.empty(sz, device="mps")
         with pytest.raises(MetalNonRecoverableError):
             kernel[(1,)](a2, o2, **args); torch.mps.synchronize()
+
+
+# --- Re-audit #11 (2026-06-23): K-loop dot twins + 2D-reduce gap + layernorm arg ---
+@triton.jit
+def _kloop_bias(a, bias, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn,
+                BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pm = tl.program_id(0); pn = tl.program_id(1)
+    rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
+    acc = tl.load(bias + rn)[None, :] + tl.zeros((BM, BN), tl.float32)
+    for k0 in range(0, K, BK):
+        kk = k0 + rk
+        acc = tl.dot(tl.load(a + rm[:, None] * sam + kk[None, :] * sak),
+                     tl.load(b + kk[:, None] * sbk + rn[None, :] * sbn), acc)
+    tl.store(c + rm[:, None] * scm + rn[None, :] * scn, acc)
+
+
+@requires
+def test_kloop_dot_fused_bias_refuses():
+    # K-loop matmul with a non-zero accumulator init (fused bias) had the init silently
+    # DROPPED by the inline template (computed A@B only) — an unguarded twin of the
+    # non-looped fused-bias class (re-audit #11). Now refuses.
+    M = N = K = 32
+    a = torch.randn(M, K, device="mps"); b = torch.randn(K, N, device="mps")
+    bias = torch.randn(N, device="mps"); c = torch.empty(M, N, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _kloop_bias[(1, 1)](a, bias, b, c, M, N, K, *a.stride(), *b.stride(), *c.stride(),
+                            BM=M, BN=N, BK=16); torch.mps.synchronize()
+
+
+@triton.jit
+def _tile_loop_dot(a, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn,
+                   BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pm = tl.program_id(0); rm = pm * BM + tl.arange(0, BM); rk = tl.arange(0, BK)
+    for n0 in range(0, N, BN):
+        rn = n0 + tl.arange(0, BN)
+        acc = tl.dot(tl.load(a + rm[:, None] * sam + rk[None, :] * sak),
+                     tl.load(b + rk[:, None] * sbk + rn[None, :] * sbn))
+        tl.store(c + rm[:, None] * scm + rn[None, :] * scn, acc)
+
+
+@requires
+def test_tile_loop_dot_with_store_in_body_refuses():
+    # A tt.dot in a TILE-iteration loop (store INSIDE the loop body) was mis-lowered to
+    # the K-loop template (re-audit #11). Now detected (store-in-loop) and refused.
+    M, K, N = 16, 16, 32
+    a = torch.randn(M, K, device="mps"); b = torch.randn(K, N, device="mps"); c = torch.empty(M, N, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _tile_loop_dot[(1,)](a, b, c, M, N, K, *a.stride(), *b.stride(), *c.stride(),
+                             BM=16, BN=16, BK=16); torch.mps.synchronize()
+
+
+@triton.jit
+def _ln_2scalar(X, O, M, N, BLOCK: tl.constexpr):
+    r = tl.program_id(0); c = tl.arange(0, BLOCK); m = c < N
+    x = tl.load(X + r * N + c, mask=m, other=0.0); mu = tl.sum(x, 0) / N
+    xc = tl.where(m, x - mu, 0.0); var = tl.sum(xc * xc, 0) / N; inv = 1.0 / tl.sqrt(var + 1e-5)
+    tl.store(O + r * N + c, xc * inv, mask=m)
+
+
+@requires
+def test_layernorm_two_scalar_args_correct():
+    # _detect_layer_norm grabbed the FIRST scalar arg as the row length, so a kernel
+    # passing both M and N normalized only the first M of N (re-audit #11: zeros 448/512).
+    # With the scalar-args==1 guard it falls to the generic lowerer, which is correct.
+    M, N = 8, 64
+    X = torch.randn(M, N, device="mps"); O = torch.empty(M, N, device="mps")
+    _ln_2scalar[(M,)](X, O, M, N, BLOCK=64); torch.mps.synchronize()
+    ref = (X.cpu() - X.cpu().mean(1, keepdim=True)) / (X.cpu().var(1, keepdim=True, unbiased=False) + 1e-5).sqrt()
+    torch.testing.assert_close(O.cpu(), ref, rtol=2e-3, atol=2e-3)

@@ -621,6 +621,22 @@ class _ReduceScanMixin:
             if input_shape[0] == 1 and axis == 1:
                 pass  # Fall through to 1D SIMD reduction below
             else:
+                # A 2-D axis reduce whose tile exceeds the threadgroup under-covers the
+                # same way the 1-D in-loop case does (the Stage-B guard below is 1-D
+                # scoped). _lower_reduce_2d then silently reduces only the first
+                # block_size lanes (re-audit #11: 2-D tl.sum(axis=1) inside scf.for, and
+                # the inductor layernorm-backward weight-grad). Refuse loudly when the
+                # whole tile can't be covered one-element-per-thread.
+                _tot2d = 1
+                for _d in input_shape:
+                    _tot2d *= _d
+                if _tot2d > self.kb.block_size:
+                    from triton_msl.errors import MetalNonRecoverableError
+                    raise MetalNonRecoverableError(
+                        f"Refusing 2-D reduction: a {tuple(input_shape)} tile exceeds "
+                        f"the {self.kb.block_size}-thread threadgroup, so the cross-lane "
+                        f"reduce would cover only the first {self.kb.block_size} lanes "
+                        f"(silent-wrong). Use BLOCK <= num_threads.", op_name="tt.reduce")
                 self._lower_reduce_2d(ssa, input_var, axis, combine_op,
                                       msl_type, shared_dtype, input_shape)
                 return
