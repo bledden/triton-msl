@@ -201,29 +201,47 @@ class _DetectionMixin:
                     "template only handles the K-loop form and would mis-compute. "
                     "Refusing.", op_name="tt.dot")
 
-            # A non-zero accumulator INIT (operand_ids[2] of the dot — a fused bias) is
-            # NOT seeded into the simdgroup accumulators by the inline template, so it is
-            # silently dropped (re-audit #11: K-loop matmul + fused col-bias returned
-            # A@B only). The non-looped path already checks this; refuse here too (the
-            # twin). A zero/absent init is fine.
-            if len(dot_in_loop.operand_ids) >= 3:
-                _acc = {s.id: s for s in self.graph.ops}.get(dot_in_loop.operand_ids[2])
+            # A non-zero accumulator INIT (a fused bias / tl.full) is NOT seeded into the
+            # simdgroup accumulators by the inline template, so it is silently DROPPED
+            # (re-audit #11/#12). In the STANDARD K-loop the accumulator is an scf.for
+            # ITER-ARG, so its init is the for-op's initial operand (operand_ids[3:],
+            # after lo/hi/step) — NOT a dot operand in graph.ops. The original #11 guard
+            # looked at the dot operand and missed every loop-carried accumulator. Check
+            # the loop inits: refuse if any is not a zero constant (a non-zero constant,
+            # or a non-constant load/broadcast bias).
+            by_id_all = {s.id: s for s in self.graph.ops}
 
-                def _is_zero_const(op):
-                    if op is None or op.op != "arith.constant":
-                        return False
-                    v = op.attrs.get("value")
-                    try:
-                        return float(str(v).strip()) == 0.0
-                    except (TypeError, ValueError):
-                        return "0.0" in str(v) or str(v) in ("0", "false")
-                if _acc is not None and not _is_zero_const(_acc):
+            def _init_is_bias(_id):
+                # True only when the loop-carried init is CLEARLY a fused bias the inline
+                # template drops: a loaded value (tt.load through splat/broadcast) or a
+                # NON-ZERO constant. A zero init (the standard tl.zeros accumulator, in
+                # whatever lowered form) or an unrecognized form returns False so we never
+                # over-refuse a normal matmul.
+                _op = by_id_all.get(_id); _seen = set()
+                while _op is not None and _op.id not in _seen:
+                    _seen.add(_op.id)
+                    if _op.op in ("tt.splat", "tt.broadcast", "ttg.convert_layout",
+                                  "tt.reshape", "tt.expand_dims"):
+                        _op = by_id_all.get(_op.operand_ids[0]) if _op.operand_ids else None
+                        continue
+                    break
+                if _op is None:
+                    return False
+                if _op.op == "tt.load":
+                    return True
+                if _op.op == "arith.constant":
+                    return any(ch in "123456789"
+                               for ch in str(_op.attrs.get("value", "")))
+                return False
+            for _init_id in (scf_for_ssa.operand_ids[3:]
+                             if len(scf_for_ssa.operand_ids) > 3 else []):
+                if _init_is_bias(_init_id):
                     from triton_msl.errors import MetalNonRecoverableError
                     raise MetalNonRecoverableError(
-                        "K-loop matmul with a non-zero accumulator init (fused bias) is "
-                        "not supported by the inline simdgroup template (the init is "
-                        "silently dropped). Refusing. Add the bias as a separate kernel "
-                        "after the matmul.", op_name="tt.dot")
+                        "K-loop matmul with a non-zero loop-carried accumulator init "
+                        "(fused bias / tl.full) is not supported by the inline simdgroup "
+                        "template (the init is silently dropped). Refusing. Add the bias "
+                        "as a separate kernel after the matmul.", op_name="tt.dot")
 
             # Extract BLOCK_M x BLOCK_K and BLOCK_K x BLOCK_N from dot operands
             a_type = self._find_op_type_str(dot_in_loop.operand_ids[0])
@@ -275,6 +293,39 @@ class _DetectionMixin:
                 break
         if not dot_ssa or len(dot_ssa.operand_ids) < 3:
             return None
+
+        # A non-zero accumulator INIT (a fused bias / tl.full) on the non-looped dot is
+        # silently DROPPED by _lower_simple_dot_inline (it emits acc0(0)) — the TWIN of
+        # the K-loop guard above (re-audit #12). Here the init IS a dot operand in
+        # graph.ops (no scf.for iter-arg). Refuse if it is not a zero constant.
+        _by0 = {s.id: s for s in self.graph.ops}
+
+        def _init_is_bias0(_id):
+            # True only when the dot's accumulator init is CLEARLY a fused bias (a loaded
+            # value or a non-zero constant); zero/unrecognized inits return False so a
+            # normal matmul (tl.zeros accumulator) is never over-refused.
+            _op = _by0.get(_id); _seen = set()
+            while _op is not None and _op.id not in _seen:
+                _seen.add(_op.id)
+                if _op.op in ("tt.splat", "tt.broadcast", "ttg.convert_layout",
+                              "tt.reshape", "tt.expand_dims"):
+                    _op = _by0.get(_op.operand_ids[0]) if _op.operand_ids else None
+                    continue
+                break
+            if _op is None:
+                return False
+            if _op.op == "tt.load":
+                return True
+            if _op.op == "arith.constant":
+                return any(ch in "123456789" for ch in str(_op.attrs.get("value", "")))
+            return False
+        if _init_is_bias0(dot_ssa.operand_ids[2]):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "non-looped matmul with a non-zero accumulator init (fused bias / "
+                "tl.full) is silently dropped by the inline simdgroup template. "
+                "Refusing. Add the bias as a separate kernel after the matmul.",
+                op_name="tt.dot")
 
         # Detect a post-dot EPILOGUE on the dot result. _lower_simple_dot_inline
         # emits a bare matmul + store; if the dot result feeds any value-changing
@@ -1103,6 +1154,19 @@ class _DetectionMixin:
                             # argmax uses cmpf(ogt) → detected as "max"
                             combine_op = "argmin" if combine_op == "min" else "argmax"
                         M, N, K = input_shape
+                        # 64-bit integer 3-D reduce / argminmax is not correctly lowered
+                        # by ANY path: the TEMPLATE computes in float32 (its dtype switch
+                        # is i32->int, ELSE->float), and the generic fallback truncates to
+                        # 32 bits (verified: a non-power-of-2 i64 sum = the low-32 sum;
+                        # i64 argmax can't distinguish 2^25 from 2^25+1). Refuse loudly
+                        # rather than mis-compute (re-audit #12).
+                        if input_type and ("i64" in input_type or "u64" in input_type):
+                            from triton_msl.errors import MetalNonRecoverableError
+                            raise MetalNonRecoverableError(
+                                "3-D reduce / argminmax over a 64-bit integer is not "
+                                "correctly lowered (the template rounds in float32 and the "
+                                "generic path truncates to 32 bits). Refusing. Use a "
+                                "32-bit integer, or reduce in 2-D/1-D.", op_name="tt.reduce")
                         total = M * N * K
                         # Use block_size that covers all elements
                         block_size = max(total, self.graph.num_warps * 32)

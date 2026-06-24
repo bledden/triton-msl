@@ -647,3 +647,58 @@ def test_layernorm_two_scalar_args_correct():
     _ln_2scalar[(M,)](X, O, M, N, BLOCK=64); torch.mps.synchronize()
     ref = (X.cpu() - X.cpu().mean(1, keepdim=True)) / (X.cpu().var(1, keepdim=True, unbiased=False) + 1e-5).sqrt()
     torch.testing.assert_close(O.cpu(), ref, rtol=2e-3, atol=2e-3)
+
+
+# --- Re-audit #12 (2026-06-23): dot acc-init twins + 3D-i64 dtype twin ----------
+@triton.jit
+def _nonlooped_acc(a, b, c, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+    om = tl.arange(0, M); on = tl.arange(0, N); ok = tl.arange(0, K)
+    acc = tl.dot(tl.load(a + om[:, None] * K + ok[None, :]),
+                 tl.load(b + ok[:, None] * N + on[None, :]), tl.full((M, N), 5.0, tl.float32))
+    tl.store(c + om[:, None] * N + on[None, :], acc)
+
+
+@triton.jit
+def _kloop_acc(a, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn,
+               BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pm = tl.program_id(0); pn = tl.program_id(1)
+    rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
+    acc = tl.full((BM, BN), 7.0, tl.float32)
+    for k0 in range(0, K, BK):
+        kk = k0 + rk
+        acc = tl.dot(tl.load(a + rm[:, None] * sam + kk[None, :] * sak),
+                     tl.load(b + kk[:, None] * sbk + rn[None, :] * sbn), acc)
+    tl.store(c + rm[:, None] * scm + rn[None, :] * scn, acc)
+
+
+@requires
+def test_dot_nonzero_acc_init_refuses_both_forms():
+    # A non-zero accumulator init (fused bias / tl.full) is silently dropped by the
+    # inline simdgroup template. Both the NON-LOOPED (init is a dot operand) and the
+    # K-LOOP (init is an scf.for iter-arg) forms must refuse (re-audit #12 — twins; the
+    # K-loop one was an INEFFECTIVE #11 guard that missed the loop-carried init).
+    a = torch.randn(32, 32, device="mps"); b = torch.randn(32, 32, device="mps"); c = torch.empty(32, 32, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _nonlooped_acc[(1,)](a, b, c, M=32, N=32, K=32); torch.mps.synchronize()
+    c2 = torch.empty(32, 32, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _kloop_acc[(1, 1)](a, b, c2, 32, 32, 32, *a.stride(), *b.stride(), *c2.stride(),
+                           BM=32, BN=32, BK=16); torch.mps.synchronize()
+
+
+@triton.jit
+def _reduce3d_i64(a, o, B: tl.constexpr, R: tl.constexpr, C: tl.constexpr):
+    bb = tl.arange(0, B); rr = tl.arange(0, R); cc = tl.arange(0, C)
+    tl.store(o + bb[:, None] * R + rr[None, :],
+             tl.sum(tl.load(a + bb[:, None, None] * R * C + rr[None, :, None] * C + cc[None, None, :]), 2))
+
+
+@requires
+def test_3d_reduce_i64_refuses():
+    # The 3D reduce/argminmax template computes in float32 and the generic path
+    # truncates to 32 bits — neither handles i64 (re-audit #12: non-pow2 i64 sum wrong).
+    B, R, C = 2, 4, 4
+    a = torch.full((B, R, C), (1 << 40) + 1234567, device="mps", dtype=torch.int64)
+    o = torch.empty(B, R, device="mps", dtype=torch.int64)
+    with pytest.raises(MetalNonRecoverableError):
+        _reduce3d_i64[(1,)](a, o, B=B, R=R, C=C); torch.mps.synchronize()
