@@ -1081,7 +1081,9 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"        int best_i = 0;")
             self.kb.raw_line(f"        for (uint j = 0; j < {N}u; j++) {{")
             self.kb.raw_line(f"            {msl_val_type} v = {shared_val}[lid * {N}u + j];")
-            self.kb.raw_line(f"            int idx = {shared_idx}[lid * {N}u + j];")
+            # The argmin/max index along axis=1 IS the column position j; the staged
+            # shared_idx came back uniformly 0 (re-audit #14) so use the position.
+            self.kb.raw_line(f"            int idx = (int)j;")
             self.kb.raw_line(f"            if (v {cmp_op} best_v || (v == best_v && idx < best_i)) {{")
             self.kb.raw_line(f"                best_v = v; best_i = idx;")
             self.kb.raw_line(f"            }}")
@@ -1096,7 +1098,9 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"        int best_i = 0;")
             self.kb.raw_line(f"        for (uint i = 0; i < {M}u; i++) {{")
             self.kb.raw_line(f"            {msl_val_type} v = {shared_val}[i * {N}u + lid];")
-            self.kb.raw_line(f"            int idx = {shared_idx}[i * {N}u + lid];")
+            # The argmin/max index along axis=0 IS the row position i (staged shared_idx
+            # came back uniformly 0 — re-audit #14).
+            self.kb.raw_line(f"            int idx = (int)i;")
             self.kb.raw_line(f"            if (v {cmp_op} best_v || (v == best_v && idx < best_i)) {{")
             self.kb.raw_line(f"                best_v = v; best_i = idx;")
             self.kb.raw_line(f"            }}")
@@ -1644,6 +1648,19 @@ class _ReduceScanMixin:
         else:
             msl_type = "float"
             shared_dtype = "fp32"
+
+        # A multi-value scan stages EVERY slot with operand-0's dtype (single
+        # shared_dtype), so a mixed-dtype scan (e.g. i32 count + fp32 sum) silently
+        # truncates the other slots (re-audit #14: the fp32 sum slot became i32 -> all
+        # zeros). Refuse mixed-dtype multi-value scans; same-dtype scans proceed.
+        if n_values > 1:
+            _slot_dtypes = {self.env_types.get(o, "fp32") for o in ssa.operand_ids}
+            if len(_slot_dtypes) > 1:
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "multi-value tl.associative_scan with mixed operand dtypes is not "
+                    "supported — all slots would be staged with the first operand's "
+                    "dtype, silently truncating the others. Refusing.", op_name="tt.scan")
 
         # Allocate shared memory for each input value
         shared_names = []

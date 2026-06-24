@@ -384,6 +384,39 @@ class _DetectionMixin:
         if not has_local_alloc:
             return None
 
+        # (#6 re-audit #14) The simple/K-loop simdgroup templates map program_id(0)->M
+        # tile and program_id(1)->N tile and IGNORE any further program_id axis. A 3-D
+        # grid batched matmul uses program_id(2) (or a pid axis feeding a batch pointer
+        # offset) which the template silently DROPS -> wrong batch. Refuse when any
+        # program_id with axis >= 2 is present.
+        for _pop in self.graph.ops:
+            if _pop.op in ("tt.get_program_id", "tt.program_id"):
+                try:
+                    _ax = int(str(_pop.attrs.get("axis", _pop.attrs.get("dim", 0))))
+                except (TypeError, ValueError):
+                    _ax = 0
+                if _ax >= 2:
+                    from triton_msl.errors import MetalNonRecoverableError
+                    raise MetalNonRecoverableError(
+                        "batched matmul using program_id(2) (a 3-D grid batch axis) is "
+                        "not supported by the simdgroup matmul template, which maps only "
+                        "program_id(0/1) to the M/N tiles and would drop the batch "
+                        "offset. Refusing.", op_name="tt.dot")
+
+        # (#5 re-audit #14) A masked dot input load signals a PADDED dimension (e.g. K
+        # padded to a power of 2 with mask k<K, so the real A row stride is the runtime
+        # K, not the BLOCK_K tile width the simple-dot template bakes in). The template
+        # ignores the mask and strides by the tile width -> wrong. Refuse a masked
+        # simple-dot rather than mis-stride.
+        for _lop in self.graph.ops:
+            if _lop.op == "tt.load" and len(_lop.operand_ids or []) >= 2:
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "matmul with a masked input load (a padded M/N/K dimension) is not "
+                    "supported by the inline simdgroup template — it ignores the mask and "
+                    "strides by the tile width, not the runtime dimension. Refusing.",
+                    op_name="tt.dot")
+
         # Extract shapes from dot operands
         a_type = self._find_op_type_str(dot_ssa.operand_ids[0])
         b_type = self._find_op_type_str(dot_ssa.operand_ids[1])

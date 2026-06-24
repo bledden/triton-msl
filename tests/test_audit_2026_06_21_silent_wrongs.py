@@ -782,3 +782,102 @@ def test_cumsum_i64_no_truncation():
     o2 = torch.empty(N, device="mps", dtype=torch.int32)
     _cumsum_1d[(1,)](a2, o2, N=N); torch.mps.synchronize()
     assert o2.cpu().tolist() == a2.cpu().cumsum(0).tolist()
+
+
+# --- Re-audit #14 (2026-06-23): matmul-template edges + scan/argmax twins ---------
+@triton.jit
+def _strided_pid_bias(a, b, c, sam, sak, sbk, sbn, scm, scn, K,
+                      BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pm = tl.program_id(0); pn = tl.program_id(1)
+    rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
+    acc = tl.full((BM, BN), 5.0, tl.float32)
+    for k0 in range(0, K, BK):
+        kk = k0 + rk
+        acc += tl.dot(tl.load(a + rm[:, None] * sam + kk[None, :] * sak),
+                      tl.load(b + kk[:, None] * sbk + rn[None, :] * sbn))
+    tl.store(c + rm[:, None] * scm + rn[None, :] * scn, acc)
+
+
+@triton.jit
+def _masked_k_dot(a, b, c, M: tl.constexpr, N: tl.constexpr, BK: tl.constexpr, K):
+    om = tl.arange(0, M); on = tl.arange(0, N); ok = tl.arange(0, BK); mk = ok < K
+    av = tl.load(a + om[:, None] * K + ok[None, :], mask=mk[None, :], other=0.0)
+    bv = tl.load(b + ok[:, None] * N + on[None, :], mask=mk[:, None], other=0.0)
+    tl.store(c + om[:, None] * N + on[None, :], tl.dot(av, bv))
+
+
+@triton.jit
+def _batch_pid_dot(a, b, c, sb, sam, sak, sbk, sbn, scm, scn, K,
+                   BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pb = tl.program_id(2); pm = tl.program_id(0); pn = tl.program_id(1)
+    rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
+    acc = tl.zeros((BM, BN), tl.float32)
+    for k0 in range(0, K, BK):
+        kk = k0 + rk
+        acc += tl.dot(tl.load(a + pb * sb + rm[:, None] * sam + kk[None, :] * sak),
+                      tl.load(b + kk[:, None] * sbk + rn[None, :] * sbn))
+    tl.store(c + pb * sb + rm[:, None] * scm + rn[None, :] * scn, acc)
+
+
+@requires
+def test_matmul_template_edges_refuse():
+    # Three matmul fast-path edges the simdgroup/strided templates mis-handle, now
+    # refused (re-audit #14): strided pid K-loop with non-zero acc init (the #13 strided
+    # mirror was dead — tt.dot only in scf.for region_ops); masked input load (padded K,
+    # template strides by tile width not runtime K); 3-D-grid batched matmul (program_id(2)
+    # batch axis dropped).
+    a = torch.randn(32, 32, device="mps"); b = torch.randn(32, 32, device="mps"); c = torch.empty(32, 32, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _strided_pid_bias[(1, 1)](a, b, c, *a.stride(), *b.stride(), *c.stride(), 32,
+                                  BM=32, BN=32, BK=16); torch.mps.synchronize()
+    a2 = torch.randn(16, 3, device="mps"); b2 = torch.randn(3, 16, device="mps"); c2 = torch.empty(16, 16, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _masked_k_dot[(1,)](a2, b2, c2, M=16, N=16, BK=8, K=3); torch.mps.synchronize()
+    a3 = torch.randn(2, 16, 16, device="mps"); b3 = torch.randn(16, 16, device="mps"); c3 = torch.empty(2, 16, 16, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _batch_pid_dot[(1, 1, 2)](a3, b3, c3, a3.stride(0), a3.stride(1), a3.stride(2),
+                                  b3.stride(0), b3.stride(1), c3.stride(1), c3.stride(2), 16,
+                                  BM=16, BN=16, BK=16); torch.mps.synchronize()
+
+
+@triton.jit
+def _mixed_scan_comb(c1, v1, c2, v2):
+    return c1 + c2, v1 + v2
+
+
+@triton.jit
+def _mixed_scan(a, b, oc, osu, N: tl.constexpr):
+    i = tl.arange(0, N); cnt = tl.load(a + i); val = tl.load(b + i)
+    cc, vv = tl.associative_scan((cnt, val), 0, _mixed_scan_comb)
+    tl.store(oc + i, cc); tl.store(osu + i, vv)
+
+
+@requires
+def test_mixed_dtype_multivalue_scan_refuses():
+    # A multi-value scan staged every slot with operand-0's dtype, truncating the others
+    # (re-audit #14: fp32 sum slot -> i32 -> zeros). Mixed-dtype now refuses.
+    a = torch.ones(8, device="mps", dtype=torch.int32)
+    b = (torch.arange(8, device="mps", dtype=torch.float32) + 1) * 0.1
+    oc = torch.empty(8, device="mps", dtype=torch.int32); osu = torch.empty(8, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _mixed_scan[(1,)](a, b, oc, osu, N=8); torch.mps.synchronize()
+
+
+@triton.jit
+def _argmax2d_idx(x, oi, M: tl.constexpr, N: tl.constexpr):
+    r = tl.arange(0, M); c = tl.arange(0, N)
+    _v, idx = tl.max(tl.load(x + r[:, None] * N + c[None, :]), 1, return_indices=True)
+    tl.store(oi + r, idx)
+
+
+@requires
+def test_2d_argmax_axis1_indices_correct():
+    # 2D argmax axis=1 returned correct values but indices uniformly 0 (re-audit #14).
+    # The index along axis=1 IS the column position; now correct.
+    M, N = 4, 8
+    X = torch.full((M, N), -9.0, device="mps")
+    for r in range(M):
+        X[r, r] = 10.0 + r
+    oi = torch.empty(M, device="mps", dtype=torch.int32)
+    _argmax2d_idx[(1,)](X, oi, M=M, N=N); torch.mps.synchronize()
+    assert oi.cpu().tolist() == [0, 1, 2, 3]

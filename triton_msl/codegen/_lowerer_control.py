@@ -457,6 +457,17 @@ class _ControlFlowMixin:
             for body_op in all_body_ops:
                 if body_op.op == "scf.yield" and body_op.operand_ids:
                     for yid in body_op.operand_ids:
+                        # scf.if declares a SCALAR result var below; a yielded MEPT
+                        # register array (n>1, block > num_threads) then fails the MSL
+                        # compile with 'assigning from incompatible type float[n]' — a
+                        # cryptic crash, not a clean refusal (re-audit #14). Refuse loudly.
+                        if getattr(self, "env_n_elems", {}).get(yid, 1) > 1:
+                            from triton_msl.errors import MetalNonRecoverableError
+                            raise MetalNonRecoverableError(
+                                "scf.if returning a multi-element-per-thread register "
+                                "array (block > num_threads) is not supported. Refusing "
+                                "rather than emit a cryptic MSL compile error. Use "
+                                "BLOCK <= num_threads or restructure.", op_name="scf.if")
                         yt = self.env_types.get(yid, "fp32")
                         yield_types.append(yt)
                     break

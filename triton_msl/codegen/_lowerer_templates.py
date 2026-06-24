@@ -1983,6 +1983,16 @@ class _TemplateMixin:
             if _s.op == "tt.dot":
                 _dot_shape = _extract_shape(_s.type_str)
                 break
+            # In a strided pid K-loop the tt.dot lives ONLY in the scf.for body — the
+            # top-level scan above misses it (re-audit #14: _dot_shape stayed None so the
+            # whole bias guard was dead). Search the loop region too.
+            if _s.op == "scf.for" and getattr(_s, "region_ops", None):
+                for _ro in _s.region_ops:
+                    if _ro.op == "tt.dot":
+                        _dot_shape = _extract_shape(_ro.type_str)
+                        break
+                if _dot_shape is not None:
+                    break
 
         def _init_is_bias(_id):
             _op = _by.get(_id); _seen = set()
