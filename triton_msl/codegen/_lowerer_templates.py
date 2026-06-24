@@ -2641,6 +2641,27 @@ class _TemplateMixin:
             msl_dtype = "fp32"
         else:
             return None
+        # VERIFY the assumed K (buffer 5) is REALLY the matmul K: the K-loop's scf.for
+        # upper bound must trace to args[5]. The descriptor hard-codes m/n/k_idx = 3/4/5
+        # (the canonical `(a,b,c,M,N,K,...)` signature) and the fast template IGNORES the
+        # kernel's explicit stride args + assumes row-major M/N/K. A non-standard signature
+        # — strides at 3/4/5 with K elsewhere (a kernel passing strides before the dims, or
+        # M/N as constexpr) — would mis-bind strides as M/N/K and SILENTLY mis-compute.
+        # (Triton drops unit strides, so arg positions shift; the K-loop bound is the
+        # reliable anchor.) If any K-loop's bound is not args[5], refuse -> generic path.
+        _arg_index = {getattr(a, "id", None): i for i, a in enumerate(args)}
+        _by_id = {o.id: o for o in self.graph.ops}
+        for _o in _all(self.graph.ops):
+            if _o.op == "scf.for" and _o.operand_ids and len(_o.operand_ids) >= 2:
+                _hi = _o.operand_ids[1]
+                _depth = 0
+                while _depth < 8 and _hi not in _arg_index:
+                    _hop = _by_id.get(_hi)
+                    if _hop is None or not _hop.operand_ids:
+                        break
+                    _hi = _hop.operand_ids[0]; _depth += 1
+                if _arg_index.get(_hi) != 5:
+                    return None   # K-loop bound is not args[5] => non-canonical => refuse
         from triton_msl.codegen._msl_templates import make_simdgroup_matmul_kernel_fast
         rr = rc = 4
         fast_msl = make_simdgroup_matmul_kernel_fast(dtype=msl_dtype, rr=rr, rc=rc, out_dtype=msl_out)

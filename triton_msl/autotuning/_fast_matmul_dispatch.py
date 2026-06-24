@@ -102,14 +102,21 @@ def dispatch_fast_matmul(rt, descriptor, kargs, *, launch_exit_hook=None,
         if rt.is_unsupported(sel_msl):
             return False
 
-        # --- Size-contract gate. valid_candidates guarantees M%sel_tm==0 and
-        #     N%sel_tn==0 for the chosen config; we re-check here for defence-in-
-        #     depth (e.g. a caller bypassing best_rrrc, or a future candidate-set
-        #     change) so a config can never be dispatched for a shape it mis-fits.
-        #     NOTE: N%32 alone is NOT sufficient — tile_n = 32*rc can be 64..256;
-        #     an N that is a multiple of 32 but not of tile_n produces OOB writes.
+        # --- Size-contract gate. The fast template guards the boundary COLUMN tile per
+        #     simdgroup: each of the 4 simdgroups owns a strip of width 8*rc (= sel_tn/4)
+        #     and `if (col0 >= N) return;` skips strips entirely beyond N. So the real
+        #     requirement is N % (8*rc) == 0 (the per-simdgroup strip width) — NOT
+        #     N % (32*rc) (the full threadgroup tile). The grid uses ceil(N/sel_tn) and the
+        #     per-strip guard masks the overshoot, so any N that is a multiple of the strip
+        #     width is correct. The old N%sel_tn gate was 4x too strict and dropped e.g.
+        #     N=2080 (%32, not %128) to the ~3 TF generic path despite the fast template
+        #     handling it (verified byte-exact vs torch). M still needs %sel_tm (no row
+        #     guard). [The descriptor (_maybe_fast_matmul_descriptor) verifies the kernel's
+        #     M/N/K binding via the K-loop bound, so a non-canonical signature can't reach
+        #     here with mis-bound dims.]
+        sel_strip = sel_tn // 4
         if not (M > 0 and N > 0 and K > 0
-                and M % sel_tm == 0 and N % sel_tn == 0 and K % 8 == 0):
+                and M % sel_tm == 0 and N % sel_strip == 0 and K % 8 == 0):
             return False
 
         n_groups = _math.ceil(M / sel_tm) * _math.ceil(N / sel_tn)

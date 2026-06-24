@@ -1168,3 +1168,41 @@ def test_combined_2d_reduce_refuses_both_forms():
     _separate_2d[(1,)](a, os_, om, M=M, N=N); torch.mps.synchronize()
     torch.testing.assert_close(os_.cpu(), a.cpu().sum(1), rtol=2e-3, atol=2e-3)
     torch.testing.assert_close(om.cpu(), a.cpu().max(1).values, rtol=2e-3, atol=2e-3)
+
+
+# --- Perf (2026-06-24): N%32 fast-matmul fires + byte-exact; non-canonical refused ---
+@triton.jit
+def _mm_canonical(a, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn,
+                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid_m = tl.program_id(0); pid_n = tl.program_id(1)
+    offm = pid_m * BM + tl.arange(0, BM); offn = pid_n * BN + tl.arange(0, BN); offk = tl.arange(0, BK)
+    a_ptrs = a + (offm[:, None] * sam + offk[None, :] * sak)
+    b_ptrs = b + (offk[:, None] * sbk + offn[None, :] * sbn)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k in range(0, K, BK):
+        acc += tl.dot(tl.load(a_ptrs), tl.load(b_ptrs))
+        a_ptrs += BK * sak; b_ptrs += BK * sbk
+    tl.store(c + (offm[:, None] * scm + offn[None, :] * scn), acc)
+
+
+@requires
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("N", [160, 1056])   # %32 but NOT %128 (the routing hole)
+def test_fast_matmul_n_mod32_byte_exact(dtype, N):
+    # The fast-matmul gate required N%128; the template actually guards the boundary
+    # column per-simdgroup (strip = 8*rc), so N%32 is correct. Gate relaxed to N%(sel_tn/4)
+    # — but ONLY after the descriptor verifies M/N/K binding (the K-loop bound is args[5]),
+    # so a non-canonical signature can't mis-bind. N%32-not-%128 now hits the ~11 TF fast
+    # path and must be byte-exact (it's a fast path — a bug here is a silent-wrong).
+    import os
+    os.environ["TRITON_MSL_FAST_MATMUL"] = "1"; os.environ["TRITON_MSL_COMPILE_SHADER"] = "1"
+    M, K = 64, 64
+    A = torch.randn(M, K, device="mps", dtype=dtype); B = torch.randn(K, N, device="mps", dtype=dtype)
+    C = torch.empty(M, N, device="mps", dtype=torch.float32)
+    grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
+    _mm_canonical[grid](A, B, C, M, N, K, A.stride(0), A.stride(1), B.stride(0), B.stride(1),
+                        C.stride(0), C.stride(1), BM=64, BN=64, BK=32)
+    torch.mps.synchronize()
+    ref = A.float() @ B.float()
+    rel = (C.float().cpu() - ref.cpu()).abs().max().item() / max(ref.abs().max().item(), 1e-6)
+    assert rel < 4e-2, f"N%32 fast-matmul N={N} {dtype}: rel_err {rel}"
