@@ -1628,9 +1628,16 @@ class _ReduceScanMixin:
         # Determine element type and MSL type
         input_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
         is_int = not (input_dtype.startswith("fp") or input_dtype.startswith("bf"))
+        is_i64 = input_dtype in ("i64", "u64", "ui64")
+        is_u64 = input_dtype in ("u64", "ui64")
         if input_dtype == "bf16":
             msl_type = "float"
             shared_dtype = "fp32"
+        elif is_i64:
+            # 64-bit ints must NOT be truncated to i32 — cumsum/associative_scan wrapped
+            # at 2^31 (re-audit #13). Mirror the i64-aware _lower_reduce sibling.
+            msl_type = "ulong" if is_u64 else "long"
+            shared_dtype = "u64" if is_u64 else "i64"
         elif is_int:
             msl_type = "int"
             shared_dtype = "i32"

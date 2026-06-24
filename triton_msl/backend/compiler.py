@@ -2325,4 +2325,8 @@ class MetalBackend(BaseBackend):
             ).decode().strip()
         except (subprocess.CalledProcessError, FileNotFoundError):
             sdk_version = "unknown"
-        return f"metal-{sdk_version}-{self.target.arch}"
+        # Include CODEGEN_VERSION so a codegen change invalidates the Triton-level
+        # compile cache too, not only the MSL-text cache (_msl_cache_key). Closes the
+        # dev-time in-place-edit replay window (re-audit #13 hardening).
+        from triton_msl import CODEGEN_VERSION
+        return f"metal-{sdk_version}-{self.target.arch}-{CODEGEN_VERSION}"

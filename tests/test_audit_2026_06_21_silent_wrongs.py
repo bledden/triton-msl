@@ -735,3 +735,50 @@ def test_softmax_layernorm_count_scalar_correct():
     _layernorm_count_scalar[(4,)](X, O2, 4, N=64); torch.mps.synchronize()
     ref = (X.cpu() - X.cpu().mean(1, keepdim=True)) / (X.cpu().var(1, keepdim=True, unbiased=False) + 1e-5).sqrt()
     torch.testing.assert_close(O2.cpu(), ref, rtol=2e-3, atol=2e-3)
+
+
+# --- Re-audit #13 (2026-06-23): strided dot acc-init twin + scan i64 twin ---------
+@triton.jit
+def _strided_dot_bias(a, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn,
+                      BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pm = tl.program_id(0); pn = tl.program_id(1)
+    rm = pm * BM + tl.arange(0, BM); rn = pn * BN + tl.arange(0, BN); rk = tl.arange(0, BK)
+    acc = tl.full((BM, BN), 2.0, tl.float32)
+    for k0 in range(0, K, BK):
+        kk = k0 + rk
+        acc += tl.dot(tl.load(a + rm[:, None] * sam + kk[None, :] * sak),
+                      tl.load(b + kk[:, None] * sbk + rn[None, :] * sbn))
+    tl.store(c + rm[:, None] * scm + rn[None, :] * scn, acc)
+
+
+@requires
+def test_strided_dot_nonzero_acc_init_refuses():
+    # The acc-init guard lived only in _detect_simple_dot, which early-returns on stride
+    # args — so the STRIDED template silently dropped a non-zero const init (re-audit #13,
+    # twin). Now mirrored onto the strided path (scoped to the accumulator tile).
+    a = torch.randn(32, 32, device="mps"); b = torch.randn(32, 32, device="mps"); c = torch.empty(32, 32, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _strided_dot_bias[(1, 1)](a, b, c, 32, 32, 32, *a.stride(), *b.stride(), *c.stride(),
+                                  BM=32, BN=32, BK=16); torch.mps.synchronize()
+
+
+@triton.jit
+def _cumsum_1d(a, o, N: tl.constexpr):
+    tl.store(o + tl.arange(0, N), tl.cumsum(tl.load(a + tl.arange(0, N)), 0))
+
+
+@requires
+def test_cumsum_i64_no_truncation():
+    # _lower_scan mapped any int to i32 while its sibling _lower_reduce branches to
+    # long/ulong — so i64 cumsum wrapped at 2^31 (re-audit #13). Now i64-aware.
+    N = 8
+    a = torch.full((N,), 800000000, device="mps", dtype=torch.int64)
+    o = torch.empty(N, device="mps", dtype=torch.int64)
+    _cumsum_1d[(1,)](a, o, N=N); torch.mps.synchronize()
+    # compare values (torch.cumsum promotes int dtypes, so compare as lists)
+    assert o.cpu().tolist() == a.cpu().cumsum(0).tolist()
+    # i32 stays correct (no over-widening regression)
+    a2 = torch.arange(1, N + 1, device="mps", dtype=torch.int32)
+    o2 = torch.empty(N, device="mps", dtype=torch.int32)
+    _cumsum_1d[(1,)](a2, o2, N=N); torch.mps.synchronize()
+    assert o2.cpu().tolist() == a2.cpu().cumsum(0).tolist()

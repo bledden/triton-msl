@@ -1970,6 +1970,54 @@ class _TemplateMixin:
         ptr_args = [a for a in self.graph.args if a.is_ptr]
         scalar_args = [a for a in self.graph.args if not a.is_ptr]
 
+        # Mirror the simple-dot acc-init guard onto the STRIDED path. _detect_simple_dot
+        # early-returns on stride args, so a strided/pid K-loop matmul with a non-zero
+        # accumulator init (acc = tl.full(...)) would otherwise be SILENTLY DROPPED — the
+        # strided template seeds acc=0 (re-audit #13). Refuse only a CLEAR bias: a loaded
+        # value (through splat/broadcast) or a non-zero constant whose shape matches the
+        # dot output tile (the accumulator). tl.zeros and scalar loop-carried values
+        # (pointer/counter iter-args) are unaffected.
+        _by = {s.id: s for s in self.graph.ops}
+        _dot_shape = None
+        for _s in self.graph.ops:
+            if _s.op == "tt.dot":
+                _dot_shape = _extract_shape(_s.type_str)
+                break
+
+        def _init_is_bias(_id):
+            _op = _by.get(_id); _seen = set()
+            while _op is not None and _op.id not in _seen:
+                _seen.add(_op.id)
+                if _op.op in ("tt.splat", "tt.broadcast", "ttg.convert_layout",
+                              "tt.reshape", "tt.expand_dims"):
+                    _op = _by.get(_op.operand_ids[0]) if _op.operand_ids else None
+                    continue
+                break
+            if _op is None:
+                return False
+            # Only the accumulator (2-D tile matching the dot output) is the risk.
+            if _extract_shape(_op.type_str) != _dot_shape:
+                return False
+            if _op.op == "tt.load":
+                return True
+            if _op.op == "arith.constant":
+                return any(ch in "123456789" for ch in str(_op.attrs.get("value", "")))
+            return False
+        _init_ids = []
+        for _s in self.graph.ops:
+            if _s.op == "scf.for" and len(_s.operand_ids) > 3:
+                _init_ids.extend(_s.operand_ids[3:])
+        if not _init_ids:
+            for _s in self.graph.ops:
+                if _s.op == "tt.dot" and len(_s.operand_ids) >= 3:
+                    _init_ids.append(_s.operand_ids[2]); break
+        if _dot_shape and any(_init_is_bias(_i) for _i in _init_ids):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "strided matmul with a non-zero accumulator init (fused bias / tl.full) "
+                "is silently dropped by the strided template (it seeds acc=0). Refusing. "
+                "Add the bias as a separate kernel after the matmul.", op_name="tt.dot")
+
         # Determine dtype from pointer args
         dtype = "fp32"
         if ptr_args:
