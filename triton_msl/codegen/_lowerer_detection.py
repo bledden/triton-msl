@@ -435,26 +435,66 @@ class _DetectionMixin:
                 for oid in (o.operand_ids or []):
                     names |= _argnames(oid, depth + 1, seen)
             return names
-        def _refs_non_2d_stride(off_id):
-            # The advance references a func-arg that is not one of the 2-D strides -> a real
-            # batch dimension. If empty, the advance uses only 2-D strides -> a tile advance.
-            return bool(_argnames(off_id) - _2d_strides)
+        # tt.make_range extents = the tile sizes (BM/BN/BK). A folded contiguous tile advance
+        # is pid*BM (col stride folded to 1), so its constant multiplier IS a tile extent; a
+        # batch advance is pid*(M*K), whose constant is NOT a tile extent.
+        _extents = set()
+        for _ms in op_by_id.values():
+            if _ms.op == "tt.make_range":
+                _e = _ms.attrs.get("end")
+                if isinstance(_e, int):
+                    _extents.add(_e)
 
-        def _batch_term_in_tensor_offset(off_id):
-            # An idiomatic batched matmul broadcast-ADDS the batch advance
-            # (``pid * stride_batch``) INTO the 2-D tile offset, producing ONE addptr
-            # whose offset is a TENSOR (so the scalar-offset check below misses it).
-            # Flatten the additive terms: a term that depends on a program_id but has
-            # NO make_range/expand_dims factor is a UNIFORM (per-tile-constant) batch
-            # advance the simdgroup template drops -> refuse.
+        def _const_mult(o, depth=0):
+            # Product of the arith.constant int factors in a muli chain (the constexpr part of
+            # a pid term). None if a non-constant, non-program_id factor (a func-arg) is present
+            # — those are classified by the 2-D-stride check instead.
+            o = _skip_wrap(o)
+            if o is None or depth > 24:
+                return 1
+            if o.op == "arith.constant":
+                try:
+                    return int(str(o.attrs.get("value", "")).split(":")[0].strip())
+                except Exception:
+                    return None
+            if o.op in ("tt.get_program_id", "tt.program_id", "tt.get_num_programs"):
+                return 1
+            if o.op in ("arith.muli", "arith.mul"):
+                p = 1
+                for oid in (o.operand_ids or []):
+                    m = _const_mult(op_by_id.get(oid), depth + 1)
+                    if m is None:
+                        return None
+                    p *= m
+                return p
+            return None
+
+        def _is_batch_advance(off_id):
+            # A program_id-derived advance into an A/B/C base pointer is a BATCH advance — which
+            # the simdgroup template DROPS (silently computing only batch 0) -> must REFUSE —
+            # unless EVERY uniform pid term is provably a TILE offset. Works for a scalar advance
+            # (a += pid*stride_batch) AND a tensor offset that broadcast-ADDS the batch term.
+            # A uniform pid term (depends on a program_id, no make_range/expand_dims factor) is a
+            # valid tile advance iff: (a) it multiplies an inferred 2-D stride ARG (runtime tile
+            # advance pid_m*BM*stride_row), OR (b) it is a pure constexpr multiple whose constant
+            # equals a make_range EXTENT (folded contiguous tile advance pid_m*BM, col stride
+            # folded to 1). Anything else — a batch-stride arg (pid*sab), or a constexpr
+            # multiplier that is NOT a tile extent (pid*M*K, the batch stride) — is a batch
+            # advance. AMBIGUITY = REFUSE. (re-audit: the constexpr-folded spelling z*(M*K)
+            # slipped the prior arg-only gate and silently computed only batch 0.)
             terms = []
             _flatten_add(op_by_id.get(off_id), terms)
             for t in terms:
-                if t is None:
+                if t is None or not _depends_on_pid(t.id) or _term_has_range(t):
                     continue
-                if (_depends_on_pid(t.id) and not _term_has_range(t)
-                        and _refs_non_2d_stride(t.id)):
-                    return True
+                _names = _argnames(t.id)
+                if _names and not (_names - _2d_strides):
+                    continue   # runtime 2-D-stride tile advance -> allow
+                if not _names:
+                    _m = _const_mult(t)
+                    if _m is not None and _m in _extents:
+                        continue   # folded tile advance (multiplier == a tile extent) -> allow
+                return True        # batch / ambiguous -> refuse
             return False
 
         for o in op_by_id.values():
@@ -466,22 +506,10 @@ class _DetectionMixin:
             off = op_by_id.get(o.operand_ids[1])
             if off is None:
                 continue
-            # The matmul's modeled offset is the 2-D row+col tensor (built from
-            # make_range/expand_dims). A program_id-derived advance is a BATCH offset
-            # the simdgroup template drops. It appears two ways, BOTH refused here:
-            #   (1) a separate SCALAR addptr ``a += pid*stride_batch`` (off not a tensor)
-            #   (2) the batch term broadcast-ADDED into the 2-D tile offset (off IS a
-            #       tensor, but carries a uniform pid term with no range factor).
-            _is_batch = False
-            if not off.is_tensor:
-                # A scalar base advance is a BATCH advance only if it is pid-derived AND
-                # references a non-2-D stride (a real batch dim). A pid-derived advance by a
-                # 2-D stride (pid_m*BM*stride_row) is the canonical TILE-base advance — allow.
-                _is_batch = (_depends_on_pid(o.operand_ids[1])
-                             and _refs_non_2d_stride(o.operand_ids[1]))
-            else:
-                _is_batch = _batch_term_in_tensor_offset(o.operand_ids[1])
-            if _is_batch:
+            # A program_id-derived advance into a matmul base pointer is a BATCH offset the
+            # simdgroup template drops. _is_batch_advance flattens the offset (scalar OR tensor)
+            # and refuses any uniform pid term that is not a provable 2-D tile advance.
+            if _is_batch_advance(o.operand_ids[1]):
                 from triton_msl.errors import MetalNonRecoverableError
                 raise MetalNonRecoverableError(
                     "batched matmul (an A/B/C base pointer advanced by a "
