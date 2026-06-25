@@ -307,6 +307,14 @@ It is **thermally sensitive**: under sustained GPU load an M4 Max throttles the 
 path to ~9 TFLOP/s, so `reports/perf_baseline.json` — re-measured after a long
 benchmark session — currently records ~9.2; re-run `test_fast_matmul_perf` on an idle
 machine to see the cold peak. fp16/fp16out throttle less (measured ~12.3/12.2 cold).
+The 11.2 figure is the **dense row-major (contiguous-innermost) case only**.
+**Non-contiguous / transposed / sliced operands** (e.g. `x @ w.t()`, a column-major
+output, or a column slice `t[:, :K]` whose inner stride ≠ 1 or whose row stride ≠ the
+matrix dim) fall **off** the simdgroup fast path — they are computed **correctly** by a
+fully stride-aware scalar matmul (or refused when un-inferable; **never silently
+wrong**), but that scalar path is **~15–23× slower** (below the generic floor).
+`contiguous()` the operand before the kernel to stay on the fast path. (Batched 3-D
+matmuls are not yet implemented and **refuse loudly**.)
 
 ◊ bf16 matmul uses Apple's `simdgroup_bfloat8x8` matrix unit (float32 accumulate),
 **verified on M4**; on a part without a bfloat matrix unit it falls back to the

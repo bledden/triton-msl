@@ -316,6 +316,184 @@ class _DetectionMixin:
             return None
         return (a_row, a_col, b_row, b_col, c_row, c_col)
 
+    def _refuse_batched_matmul_base_offset(self):
+        """Refuse loudly (MetalNonRecoverableError) when an A/B/C base pointer is
+        advanced by a program_id-derived BATCH offset the simdgroup matmul templates
+        drop (BLOCKER 4 — batched MMA is not implemented).
+
+        ROOT CAUSE this closes: an idiomatic batched matmul (grid (Bz, cdiv(M,BM),
+        cdiv(N,BN)); ``a += pb*sab`` etc., K-loop over BK) computed batch 0's tile
+        region for EVERY batch — the simple/K-loop simdgroup templates map only
+        program_id(0/1) to the M/N tiles and IGNORE any batch-pointer offset. The
+        old axis>=2 guard ran ONLY in the non-K-loop branch (and only caught a
+        program_id(2) batch), so the K-loop twin with batch on program_id(0) slipped
+        through. This runs for BOTH branches and traces the actual base-pointer
+        offset arithmetic instead of a single pid axis.
+
+        Detection: for each A/B/C pointer func-arg, find any ``tt.addptr`` whose base
+        traces to that arg and whose offset is a SCALAR (not the 2-D row+col tensor
+        offset ``infer_dot_strides`` already accounts for) and depends on a
+        ``tt.get_program_id`` / ``tt.get_num_programs``. Such a term is a batch (or
+        otherwise un-modeled) pointer advance -> refuse.
+        """
+        op_by_id = {}
+        def _collect(ops):
+            for s in ops:
+                op_by_id[s.id] = s
+                if s.region_ops:
+                    _collect(s.region_ops)
+                if s.else_ops:
+                    _collect(s.else_ops)
+        _collect(self.graph.ops)
+
+        all_ptr_args = [a for a in self.graph.args if a.is_ptr]
+        dots = [s for s in op_by_id.values() if s.op == "tt.dot"]
+        if len(dots) != 1 or len(all_ptr_args) < 3:
+            return     # only guard the single-dot matmul shape we route here
+        roles = self._resolve_dot_ptr_roles(dots[0], all_ptr_args)
+        ptrs = roles[:3] if (roles and len(roles) >= 3) else (
+            [all_ptr_args[0], all_ptr_args[1], all_ptr_args[-1]])
+        ptr_names = {p.name for p in ptrs}
+
+        def _depends_on_pid(start_id, depth=0, seen=None):
+            if seen is None:
+                seen = set()
+            if start_id in seen or depth > 32:
+                return False
+            seen.add(start_id)
+            o = op_by_id.get(start_id)
+            if o is None:
+                return False
+            if o.op in ("tt.get_program_id", "tt.program_id",
+                        "tt.get_num_programs"):
+                return True
+            return any(_depends_on_pid(oid, depth + 1, seen)
+                       for oid in (o.operand_ids or []))
+
+        def _skip_wrap(o):
+            # Follow operand 0 through layout-only wrappers to the real op.
+            seen = 0
+            while o is not None and seen < 16 and o.op in (
+                    "tt.broadcast", "ttg.convert_layout", "tt.reshape",
+                    "arith.sitofp", "arith.extsi", "arith.trunci"):
+                if not o.operand_ids:
+                    return o
+                o = op_by_id.get(o.operand_ids[0]); seen += 1
+            return o
+
+        def _flatten_add(o, acc, depth=0):
+            o = _skip_wrap(o)
+            if o is None or depth > 24:
+                return
+            if o.op in ("arith.addi", "arith.add"):
+                for oid in o.operand_ids:
+                    _flatten_add(op_by_id.get(oid), acc, depth + 1)
+            else:
+                acc.append(o)
+
+        def _term_has_range(o, depth=0):
+            # True if this offset term is built from a tt.make_range / tt.expand_dims
+            # (the modeled per-row/col 2-D offset), i.e. it VARIES across the tile.
+            o = _skip_wrap(o)
+            if o is None or depth > 24:
+                return False
+            if o.op in ("tt.make_range", "tt.expand_dims"):
+                return True
+            return any(_term_has_range(op_by_id.get(oid), depth + 1)
+                       for oid in (o.operand_ids or []))
+
+        # 2-D stride arg names (address-traced). The CANONICAL tiled matmul advances an
+        # A/B/C base by ``pid_m*BM*stride_row`` — a valid 2-D tiling whose multiplier is the
+        # operand's OWN 2-D stride. A genuine BATCH advance (``pid*stride_batch``) multiplies
+        # a DIFFERENT stride (the batch dimension). So a program_id-derived advance is a real
+        # batch advance (drop -> refuse) ONLY if it references a stride arg that is NOT one of
+        # the inferred 2-D strides. (Without this the guard over-refuses the common tile-base
+        # advance idiom — re-audit MAJOR.)
+        _sd = None
+        try:
+            _sd = self.infer_dot_strides()
+        except Exception:
+            _sd = None
+        _2d_strides = set()
+        if _sd:
+            for _rc in _sd.values():
+                for _s in _rc:
+                    if _s and _s != "1":
+                        _2d_strides.add(_s)
+        _arg_name_by_id = {a.id: a.name for a in self.graph.args}
+        def _argnames(start_id, depth=0, seen=None):
+            if seen is None:
+                seen = set()
+            if start_id in seen or depth > 32:
+                return set()
+            seen.add(start_id)
+            names = set()
+            if start_id in _arg_name_by_id:
+                names.add(_arg_name_by_id[start_id])
+            o = op_by_id.get(start_id)
+            if o:
+                for oid in (o.operand_ids or []):
+                    names |= _argnames(oid, depth + 1, seen)
+            return names
+        def _refs_non_2d_stride(off_id):
+            # The advance references a func-arg that is not one of the 2-D strides -> a real
+            # batch dimension. If empty, the advance uses only 2-D strides -> a tile advance.
+            return bool(_argnames(off_id) - _2d_strides)
+
+        def _batch_term_in_tensor_offset(off_id):
+            # An idiomatic batched matmul broadcast-ADDS the batch advance
+            # (``pid * stride_batch``) INTO the 2-D tile offset, producing ONE addptr
+            # whose offset is a TENSOR (so the scalar-offset check below misses it).
+            # Flatten the additive terms: a term that depends on a program_id but has
+            # NO make_range/expand_dims factor is a UNIFORM (per-tile-constant) batch
+            # advance the simdgroup template drops -> refuse.
+            terms = []
+            _flatten_add(op_by_id.get(off_id), terms)
+            for t in terms:
+                if t is None:
+                    continue
+                if (_depends_on_pid(t.id) and not _term_has_range(t)
+                        and _refs_non_2d_stride(t.id)):
+                    return True
+            return False
+
+        for o in op_by_id.values():
+            if o.op != "tt.addptr" or len(o.operand_ids) < 2:
+                continue
+            base = self._trace_ptr_source(o.operand_ids[0], op_by_id)
+            if base is None or base.name not in ptr_names:
+                continue
+            off = op_by_id.get(o.operand_ids[1])
+            if off is None:
+                continue
+            # The matmul's modeled offset is the 2-D row+col tensor (built from
+            # make_range/expand_dims). A program_id-derived advance is a BATCH offset
+            # the simdgroup template drops. It appears two ways, BOTH refused here:
+            #   (1) a separate SCALAR addptr ``a += pid*stride_batch`` (off not a tensor)
+            #   (2) the batch term broadcast-ADDED into the 2-D tile offset (off IS a
+            #       tensor, but carries a uniform pid term with no range factor).
+            _is_batch = False
+            if not off.is_tensor:
+                # A scalar base advance is a BATCH advance only if it is pid-derived AND
+                # references a non-2-D stride (a real batch dim). A pid-derived advance by a
+                # 2-D stride (pid_m*BM*stride_row) is the canonical TILE-base advance — allow.
+                _is_batch = (_depends_on_pid(o.operand_ids[1])
+                             and _refs_non_2d_stride(o.operand_ids[1]))
+            else:
+                _is_batch = _batch_term_in_tensor_offset(o.operand_ids[1])
+            if _is_batch:
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "batched matmul (an A/B/C base pointer advanced by a "
+                    "program_id-derived batch offset, e.g. a += pid*stride_batch on "
+                    "a 3-D grid, whether a separate addptr or broadcast-added into the "
+                    "tile offset) is not supported by the simdgroup matmul template, "
+                    "which maps only program_id(0/1) to the M/N output tile and would "
+                    "compute batch 0's region for every batch. Batched MMA is not "
+                    "implemented. Refusing rather than mis-compute. Loop the batch "
+                    "dimension on the host, or use a separate kernel per batch.",
+                    op_name="tt.dot")
+
     def _detect_simple_dot(self):
         """Detect a simple dot kernel: load→local_alloc→local_load→dot→store.
 
@@ -327,12 +505,57 @@ class _DetectionMixin:
            Returns extra fields: has_k_loop=True, BLOCK_K, BLOCK_M, BLOCK_N,
            and scalar_args for M/N/K runtime values.
 
-        Rejects kernels with stride args (those go through the strided template).
+        Naming-independent: a kernel whose stride args are literally named
+        ``stride_*`` is NOT blanket-rejected (BLOCKER 2). The old code did
+        ``if has_strides: return None`` for any "stride"-substring arg name, so a
+        canonical Triton-tutorial matmul (standard ``stride_am, stride_ak, ...``
+        names) NEVER reached the address-traced ``infer_dot_strides`` /
+        ``_matmul_stride_decision`` safety path — it routed to
+        ``_lower_dot_via_prebuilt_template``, whose name-match ``stride_map``
+        + row-major assumption silently mis-computed a transposed operand
+        (x @ w.t() → err 86). Now the matmul lowering is naming-independent: the
+        address-traced stride decision (downstream in ``_lower_simple_dot_inline``)
+        routes any non-contiguous-inner operand to the correct scalar matmul and
+        refuses when un-inferable, regardless of arg naming.
+
+        Still defers to ``_lower_dot_via_prebuilt_template`` (returns None) for the
+        forms that path models and the address-traced single-dot decision does NOT:
+        a CHAIN-dot (>1 tt.dot, e.g. a fused 2-matmul kernel with a W operand) and
+        a 3-D batched-via-strides dot (rank>=3 tt.dot result). Those are recognized
+        below before any stride-based routing.
         """
         scalar_args = [a for a in self.graph.args if not a.is_ptr]
-        has_strides = any("stride" in a.name.lower() for a in scalar_args)
-        if has_strides:
-            return None
+
+        # A "simple dot" is exactly ONE 2-D tt.dot. A MULTI-dot kernel is NOT this
+        # pattern and must NOT be processed here (the old ``has_strides`` early-return
+        # happened to shield these stride-named shapes; this restores that without the
+        # naming dependency that was BLOCKER 2):
+        #   - pure chain-dot ``(A@B)@W`` (no reduce) → the prebuilt strided template.
+        #   - multi-dot WITH a reduce → FlashAttention (Q@Kᵀ + softmax + P@V), handled by
+        #     the generic / FA path (with its own gates). Returning a partial single-dot
+        #     info would mis-tile / wrongly refuse it (e.g. a head_dim 32/64 FA refused
+        #     via the simple-dot epilogue gate).
+        #   - 3-D batched-via-strides dot → the prebuilt strided template.
+        # A SINGLE-dot kernel that carries a reduce epilogue (``acc - sum(acc, axis=1)``)
+        # is NOT short-circuited here — it must still reach the epilogue/softmax refusal
+        # logic below (no correct simple-dot lowering exists; it must refuse loudly —
+        # test_matmul_rowreduce_epilogue_refuses).
+        def _all_ops(ops):
+            for s in ops:
+                yield s
+                if s.region_ops:
+                    yield from _all_ops(s.region_ops)
+                if s.else_ops:
+                    yield from _all_ops(s.else_ops)
+        _all = list(_all_ops(self.graph.ops))
+        _dots = [s for s in _all if s.op == "tt.dot"]
+        if len(_dots) > 1:
+            return None                       # chain-dot / FA → not a simple dot
+        if _dots:
+            _dshape = _extract_shape(self._find_op_type_str(_dots[0].id)
+                                     or _dots[0].type_str or "")
+            if _dshape and len(_dshape) >= 3:
+                return None                   # 3-D batched-via-strides → prebuilt
 
         # A single-dot matmul with a trailing compute epilogue the fused template
         # didn't claim (looped dot-in-K-loop, etc.) must REFUSE — the inline simdgroup
@@ -344,6 +567,12 @@ class _DetectionMixin:
             from triton_msl.codegen.generic_lowerer import _MATMUL_EPILOGUE_REFUSE_MSG
             from triton_msl.errors import MetalNonRecoverableError
             raise MetalNonRecoverableError(_MATMUL_EPILOGUE_REFUSE_MSG, op_name="tt.dot")
+
+        # BLOCKER 4: refuse a batched matmul (program_id-derived batch offset on an
+        # A/B/C base pointer) for BOTH the K-loop and non-K-loop branches, BEFORE either
+        # returns its info dict. Batched MMA is not implemented; the templates drop the
+        # batch offset and would compute batch 0's region for every batch.
+        self._refuse_batched_matmul_base_offset()
 
         # Find scf.for and check if it contains tt.dot (K-loop pattern)
         scf_for_ssa = None
@@ -872,34 +1101,24 @@ class _DetectionMixin:
         b_ptr = ptr_args[1]
         c_ptr = ptr_args[-1]
 
-        # ADDRESS-TRACED strides first (same fix as _detect_matmul_epilogue): the
-        # positional index+1/+2 reader below lands on the M/N dim args for a
-        # `(a,b,c,M,N,K,strides...)` signature and silently mis-addresses a
-        # transposed operand. infer_dot_strides() reads the real addptr offset
-        # arithmetic, so a fused-softmax matmul over a transposed operand is read
-        # correctly. Fall back to the positional reader only when the tracer
-        # cannot resolve the kernel (preserving back-compat for any softmax shape
-        # it doesn't model) — never a guess that's known-wrong.
+        # ADDRESS-TRACED strides ONLY (mechanism A — same contract as
+        # _detect_matmul_epilogue, which already refuses on un-inferable strides).
+        # The old positional ``_strides_after`` reader (mechanism B) GUESSED the row/col
+        # stride from arg ORDER: ``stride[ptr.index + 1/+2]``. For a canonical
+        # ``(a, b, c, M, N, K, stride...)`` signature that landed on the M/N DIM args
+        # and silently mis-addressed a transposed/strided operand (the same BLOCKER-2
+        # class the matmul path was hardened against). infer_dot_strides() reads the
+        # real tt.addptr offset arithmetic, so a transposed-operand fused-softmax matmul
+        # is read correctly; when ANY operand stride is un-inferable the tracer returns
+        # None and we REFUSE here (return None -> the kernel falls through to the loud
+        # #157 catch-all) rather than emit a row-major guess. Mechanism B is DELETED:
+        # an instrumented full-suite + audit-repro run (TRIPWIRE_B) hit the positional
+        # fallback ZERO times, while a forced positive control proved the tripwire fires
+        # when it IS reached.
         descriptors = self._inferred_stride_descriptors()
-        if descriptors is not None:
-            a_row_s, a_col_s, b_row_s, b_col_s, c_row_s, c_col_s = descriptors
-        else:
-            # Read the two stride args immediately following each pointer in
-            # the kernel signature (positional fallback).
-            def _strides_after(ptr_arg):
-                idx = ptr_arg.index
-                row = None
-                col = None
-                for a in scalar_args:
-                    if a.index == idx + 1:
-                        row = a.name
-                    elif a.index == idx + 2:
-                        col = a.name
-                return row, col
-
-            a_row_s, a_col_s = _strides_after(a_ptr)
-            b_row_s, b_col_s = _strides_after(b_ptr)
-            c_row_s, c_col_s = _strides_after(c_ptr)
+        if descriptors is None:
+            return None
+        a_row_s, a_col_s, b_row_s, b_col_s, c_row_s, c_col_s = descriptors
 
         return {
             "M": M, "N": N, "K": K,

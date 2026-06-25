@@ -400,6 +400,57 @@ class _ReduceScanMixin:
             scalar_ops = [op for op in phase_ops if self._is_scalar_op(op)]
             tensor_ops = [op for op in phase_ops if not self._is_scalar_op(op)]
 
+            # A SCALAR (per-program) atomic / store consuming a reduce RESULT must
+            # execute EXACTLY ONCE — NOT once per wrap-loop iteration. Emitting it
+            # inside the per-element ``for (_loop_e ...)`` loop made thread 0's
+            # ``lid==0``-guarded RMW fire once per iteration, over-counting by
+            # BLOCK/num_threads (the audit's B3: tl.atomic_add(out, tl.sum(x)) over
+            # 1024 ones returned 8192 with 128 threads). These ops are NOT per-element
+            # (the value is a SCALAR reduce result, and the pointer is a scalar !tt.ptr),
+            # so split them out of ``tensor_ops`` and emit them ONCE after the loop.
+            # A PER-ELEMENT store/atomic (the value is a tensor — e.g. the softmax
+            # ``result`` written one element per lane) stays in ``tensor_ops`` and is
+            # correctly wrapped. NOTE: a tt.store op's own ``is_tensor`` is False (it
+            # produces no value), so the discriminator is the VALUE OPERAND's shape, not
+            # the op's result flag (the bug that mis-hoisted the softmax tensor store).
+            def _is_scalar_terminal(op):
+                if op.op not in ("tt.atomic_rmw", "tt.atomic_cas", "tt.store"):
+                    return False
+                if len(op.operand_ids or []) < 2:
+                    return False
+                val_id = op.operand_ids[1]
+                vshape = self.env_shapes.get(val_id)
+                if vshape is not None:
+                    # A 0-D / 1-element value is scalar; a multi-element tensor is
+                    # per-lane.
+                    nel = 1
+                    for d in vshape:
+                        nel *= d
+                    return nel <= 1
+                # No recorded shape: fall back to the producing op's tensor flag
+                # (a reduce result / scalar arithmetic is not a tensor). Index ALL
+                # ops (including scf.for/if region bodies), not just the top level, so
+                # a value produced inside a region is still classified — otherwise it
+                # defaults to per-element and the op stays wrapped (the B3 backstop
+                # would then refuse rather than over-count, so this is safe either way,
+                # but indexing regions classifies it correctly).
+                def _index_all(ops, acc):
+                    for s in ops:
+                        acc[s.id] = s
+                        if getattr(s, "region_ops", None):
+                            _index_all(s.region_ops, acc)
+                        if getattr(s, "else_ops", None):
+                            _index_all(s.else_ops, acc)
+                _all_by_id = {}
+                _index_all(self.graph.ops, _all_by_id)
+                vop = _all_by_id.get(val_id)
+                return bool(vop is not None and not vop.is_tensor)
+
+            scalar_terminal_ops = [op for op in tensor_ops if _is_scalar_terminal(op)]
+            if scalar_terminal_ops:
+                _term_ids = {op.id for op in scalar_terminal_ops}
+                tensor_ops = [op for op in tensor_ops if op.id not in _term_ids]
+
             # Check if this phase has any tensor ops that need a loop
             has_tensor_ops = len(tensor_ops) > 0
 
@@ -410,7 +461,10 @@ class _ReduceScanMixin:
                     lowered_scalar_ids.add(ssa.id)
 
             if not has_tensor_ops and next_reduce is None:
-                # Pure scalar phase — no loop needed
+                # Pure scalar phase — no per-element loop needed. Emit any scalar
+                # terminal write (atomic/store of a reduce result) exactly once.
+                for ssa in scalar_terminal_ops:
+                    self._lower_op(ssa)
                 all_preceding_ops.extend(phase_ops)
                 continue
 
@@ -498,12 +552,42 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"    }}")
             self._needs_wrapping = False
 
+            # Emit any scalar terminal write (atomic/store of a reduce result)
+            # ONCE, AFTER the per-element loop — never inside it (B3 over-count fix).
+            for ssa in scalar_terminal_ops:
+                self._lower_op(ssa)
+
             # Override the reduce's input to point to the accumulator, and
             # record the accumulator's dtype so the downstream reduce dispatch
             # picks the matching (e.g. 64-bit) path even when the original
             # operand's type was dropped by a preceding reshape.
             if next_reduce and acc_var:
                 reduce_input_id = next_reduce.operand_ids[0]
+                # GUARD (re-audit silent-wrong #3): if this exact input SSA feeds MORE THAN
+                # ONE tt.reduce (two INDEPENDENT reductions of the SAME loaded tile, e.g.
+                # sum(x) and max(x)), the env rebind below aliases the shared input to THIS
+                # phase's accumulator, so the other reduce would silently reduce over this
+                # accumulator (wrong whenever BLOCK > num_threads). The multipass path cannot
+                # model that — refuse loudly rather than silently mis-compute. (Softmax /
+                # layernorm are unaffected: their 2nd reduce consumes a DIFFERENT value, not
+                # the same loaded tile.)
+                def _all_reduce_ops(ops):
+                    for s in ops:
+                        if s.op == "tt.reduce":
+                            yield s
+                        if s.region_ops:
+                            yield from _all_reduce_ops(s.region_ops)
+                        if s.else_ops:
+                            yield from _all_reduce_ops(s.else_ops)
+                _sharers = [r for r in _all_reduce_ops(self.graph.ops)
+                            if r.operand_ids and r.operand_ids[0] == reduce_input_id]
+                if len(_sharers) > 1:
+                    from triton_msl.errors import MetalNonRecoverableError
+                    raise MetalNonRecoverableError(
+                        "two or more reductions of the SAME loaded tile (e.g. tl.sum(x) and "
+                        "tl.max(x) of the same x) are not supported by the multipass reduce "
+                        "lowering: the second silently reduces over the first's accumulator. "
+                        "Load the tile separately for each reduction.", op_name="tt.reduce")
                 self.env[reduce_input_id] = acc_var
                 _acc_dtype = {"long": "i64", "ulong": "u64",
                               "int": "i32", "float": "fp32"}.get(acc_msl_type)

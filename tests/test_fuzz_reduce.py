@@ -297,3 +297,52 @@ def test_combined_2d_reduce_correct_or_refuse(M, N):
     err = (o.cpu() - exp).abs().max().item()
     assert err <= 3e-3 + 3e-3 * max(exp.abs().max().item(), 1e-6), \
         f"SILENT-WRONG combined 2D reduce {M}x{N}: err {err}"
+
+
+# --- atomic-of-reduce form (BLOCKER 3) --------------------------------------------
+# tl.atomic_<op>(ptr, tl.<reduce>(block)): a SCALAR post-reduce atomic emitted inside
+# the multi-element wrap loop (BLOCK > num_threads) fired once PER iteration on thread 0,
+# over-counting a non-idempotent RMW by BLOCK/num_threads (audit B3: atomic_add of 1024
+# ones returned 8192). With the default num_warps the wrap loop is active for BLOCK>=256,
+# so this sweep exercises the exact over-count regime. The atomic must run EXACTLY ONCE
+# (correct) or refuse loudly — never over-count.
+@triton.jit
+def _k_atomic_add_sum(x, out, n, BLOCK: tl.constexpr):
+    i = tl.arange(0, BLOCK); m = i < n
+    tl.atomic_add(out, tl.sum(tl.load(x + i, mask=m, other=0.0), axis=0))
+
+
+@triton.jit
+def _k_atomic_xor_sum(x, out, n, BLOCK: tl.constexpr):
+    i = tl.arange(0, BLOCK); m = i < n
+    tl.atomic_xor(out, tl.sum(tl.load(x + i, mask=m, other=0), axis=0))
+
+
+@requires
+@pytest.mark.parametrize("BLOCK", [64, 128, 256, 512, 1024])
+@pytest.mark.parametrize("op", ["add", "xor"])
+def test_atomic_of_reduce_correct_or_refuse(BLOCK, op):
+    _clear_cache()
+    torch.manual_seed(0)
+    if op == "add":
+        x = torch.ones(BLOCK, device="mps", dtype=torch.float32)
+        out = torch.zeros(1, device="mps", dtype=torch.float32)
+        want = float(x.sum().item())
+        try:
+            _k_atomic_add_sum[(1,)](x, out, BLOCK, BLOCK=BLOCK); torch.mps.synchronize()
+        except MetalNonRecoverableError:
+            return  # loud refusal is acceptable
+        got = out.item()
+        assert abs(got - want) <= 1e-2 * max(want, 1.0), \
+            f"SILENT-WRONG atomic_add(sum) BLOCK={BLOCK}: got {got} want {want}"
+    else:
+        x = torch.arange(1, BLOCK + 1, device="mps", dtype=torch.int32)
+        out = torch.zeros(1, device="mps", dtype=torch.int32)
+        want = int(x.sum().item())   # a single xor of the scalar reduce result
+        try:
+            _k_atomic_xor_sum[(1,)](x, out, BLOCK, BLOCK=BLOCK); torch.mps.synchronize()
+        except MetalNonRecoverableError:
+            return
+        got = int(out.item())
+        assert got == want, \
+            f"SILENT-WRONG atomic_xor(sum) BLOCK={BLOCK}: got {got} want {want}"

@@ -732,6 +732,63 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                     "attention lowering (fp32/fp16 only) silently mis-computes for "
                     "bf16 at any head_dim. Refusing to emit silently-wrong output. "
                     "Use fp16 or fp32 for Q/K/V in attention.")
+            # FUSED-SCALE-ON-DOT-RESULT GATE (naming-independence follow-up): the generic
+            # attention lowering silently mis-computes when a tt.dot RESULT feeds an
+            # elementwise scale/bias before the softmax — e.g. the scores scaled INSIDE
+            # the loop ``qk = tl.dot(q, kᵀ); qk = qk * (1/√d)`` (rel_err ~1.1: the scale
+            # is dropped/mis-applied). The validated form scales Q BEFORE the dot
+            # (``q = q * scale; qk = tl.dot(q, kᵀ)``) — no compute op on the dot result —
+            # so this gate doesn't touch it. (A general dot-result compute epilogue in a
+            # K-loop is a known unhandled case for single-dot matmuls too; FA is the
+            # multi-dot instance.) This was previously masked by the name-match
+            # ``has_strides`` gate in _detect_simple_dot; guard it HERE for any naming.
+            _fa_by_id = {s.id: s for s in _fa_ops}
+
+            def _is_scalar_splat(_id):
+                # True if SSA _id is a scalar broadcast into the tile — a splat of a
+                # constant/scalar (the scale/bias factor), NOT a per-element tensor
+                # (like the loop-carried accumulator). Walks layout-only wrappers.
+                _o = _fa_by_id.get(_id); _seen = set()
+                while _o is not None and _o.id not in _seen:
+                    _seen.add(_o.id)
+                    if _o.op in ("tt.splat",):
+                        return True
+                    if _o.op in ("tt.broadcast", "ttg.convert_layout", "tt.reshape",
+                                 "tt.expand_dims", "arith.constant"):
+                        if _o.op == "arith.constant":
+                            return True
+                        _o = _fa_by_id.get(_o.operand_ids[0]) if _o.operand_ids else None
+                        continue
+                    break
+                return False
+
+            def _dot_result_scaled(_dot):
+                # True only when the dot's result is multiplied/divided (always a scale),
+                # or added/subtracted with a SCALAR-SPLAT other operand (a fused bias).
+                # The standard FA accumulation ``acc += tt.dot(p, v)`` adds the dot to a
+                # loop-carried TENSOR accumulator (not a scalar splat) -> NOT flagged, so
+                # the validated FA is unaffected; only a true scale/bias on the scores is.
+                for _s in _fa_ops:
+                    if _dot.id not in (_s.operand_ids or []):
+                        continue
+                    if _s.op in ("arith.mulf", "arith.divf", "arith.muli"):
+                        return True
+                    if _s.op in ("arith.addf", "arith.subf", "arith.addi"):
+                        # the operand that is NOT the dot must be a scalar splat (bias);
+                        # a tensor accumulator (acc += dot) is the valid FA form.
+                        _others = [o for o in (_s.operand_ids or []) if o != _dot.id]
+                        if any(_is_scalar_splat(o) for o in _others):
+                            return True
+                return False
+            if any(_dot_result_scaled(_d) for _d in _fa_dots):
+                raise MetalNonRecoverableError(
+                    "FlashAttention that applies an elementwise scale/bias to a tt.dot "
+                    "RESULT (e.g. scores scaled inside the loop: qk = tl.dot(q, kᵀ); "
+                    "qk = qk * (1/√d)) is not supported by the generic attention "
+                    "lowering — the fused op on the dot result is silently dropped / "
+                    "mis-applied. Refusing to emit silently-wrong output. Scale Q "
+                    "BEFORE the dot instead (q = q * (1/√d); qk = tl.dot(q, kᵀ)).",
+                    op_name="tt.dot")
             # Empirically mapped failure boundary (2026-06-17): the attention
             # lowering is validated only at BLOCK_M = BLOCK_N = 32, head_dim in
             # {32, 64}. Two distinct out-of-range failure modes — only ONE was

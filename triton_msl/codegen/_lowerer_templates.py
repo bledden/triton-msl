@@ -58,6 +58,30 @@ class _TemplateMixin:
     but never define new state — that belongs in ``GenericLowerer.__init__``.
     """
 
+    def _simdgroup_leading_dims_are_dense(self, info, descriptors):
+        """True iff every operand's inferred ROW stride is a compile-time literal
+        equal to the matrix dim the NON-K-loop simdgroup template hard-codes as that
+        operand's leading dim (A leading = K, B leading = N, C leading = N).
+
+        Returns False for a runtime-arg row stride (can't be threaded into the 3-buffer
+        simple-dot template) or a literal that differs from the dim (a sliced/padded
+        row) — the caller then routes to the stride-aware scalar matmul. Used only for
+        the non-K-loop single-tile form; the K-loop form threads strides directly.
+        """
+        a_row, a_col, b_row, b_col, c_row, c_col = descriptors
+        M = info.get("M"); N = info.get("N"); K = info.get("K")
+
+        def _is_lit_eq(stride, dim):
+            if dim is None:
+                return False
+            try:
+                return int(str(stride)) == int(dim)
+            except (TypeError, ValueError):
+                return False   # a runtime arg NAME (not an int literal) → not dense
+
+        return (_is_lit_eq(a_row, K) and _is_lit_eq(b_row, N)
+                and _is_lit_eq(c_row, N))
+
     def _matmul_stride_decision(self, info):
         """Decide the stride-aware lowering route for a bare-matmul ``info``.
 
@@ -233,6 +257,43 @@ class _TemplateMixin:
         lines.append("}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _simdgroup_frag_for(elem_type):
+        """SINGLE source of truth for simdgroup MMA fragment selection (Step 5
+        de-duplication — the documented root cause of recurring silent-wrongs).
+
+        Given a Triton/MLIR input element type, return the tuple
+        ``(acc_frag, in_frag, tg_type, stage_cast, pad)`` describing how to stage
+        and multiply that dtype on the Apple simdgroup matrix unit:
+          - ``acc_frag``   : accumulator fragment type (ALWAYS ``simdgroup_float8x8``;
+                             half/bfloat inputs accumulate in float).
+          - ``in_frag``    : input fragment type fed to
+                             ``simdgroup_matrix_multiply_accumulate``.
+          - ``tg_type``    : threadgroup staging element type for A/B tiles.
+          - ``stage_cast`` : MSL cast applied when staging into ``tg_type``
+                             (``""`` = no cast; the load is already that type).
+          - ``pad``        : the zero-pad literal for partial tiles.
+
+        fp16 -> half MMA (Apple ~2x fp16 throughput, no float upcast).
+        bf16 -> the M-series ``simdgroup_bfloat8x8`` matrix unit (verified on M4),
+                staged as bfloat (no upcast).
+        everything else -> the exact float path (stage+cast to float).
+
+        This block used to be copy-pasted byte-identically in
+        ``_lower_simple_dot_inline`` and ``_lower_k_loop_dot_inline``, with a THIRD
+        divergent copy in ``_lower_matmul_softmax_template`` that LACKED the bf16
+        branch (bf16 silently took the float-upcast path). Collapsing to one helper
+        makes a fix land in one place; the softmax template now also gets the bf16
+        MMA branch through this shared selector.
+        """
+        input_msl_type = triton_type_to_msl(elem_type)
+        acc_frag = "simdgroup_float8x8"
+        if input_msl_type == "half":
+            return (acc_frag, "simdgroup_half8x8", "half", "", "half(0.0h)")
+        if input_msl_type == "bfloat":
+            return (acc_frag, "simdgroup_bfloat8x8", "bfloat", "", "bfloat(0.0)")
+        return (acc_frag, "simdgroup_float8x8", "float", "float", "0.0f")
+
     def _lower_simple_dot_inline(self, info):
         """Generate MSL for a simple dot kernel using simdgroup MMA.
 
@@ -260,11 +321,31 @@ class _TemplateMixin:
         if decision is not None and decision[0] == "scalar":
             return self._lower_strided_scalar_matmul(info, decision[1])
 
+        # BLOCKER 1: the NON-K-loop simple-dot simdgroup template loads each operand row
+        # cooperatively with the MATRIX DIM as the leading stride (A: gr*K+gc, B: gr*N+gc,
+        # C: gr*N+gc) and declares ONLY the 3 A/B/C buffers — the runtime stride args are
+        # not available in-kernel. That addressing is correct ONLY when the inferred row
+        # stride literally equals that dim — a DENSE row-major operand. A row-SLICED /
+        # padded operand (e.g. A=randn(M,K+pad)[:, :K], whose row stride is a RUNTIME arg
+        # != K, inner contiguous) was routed to "simdgroup" (col stride == "1") yet
+        # addressed with the wrong leading dim → wrong values (err 24, the audit's B1).
+        # Since the runtime row-stride arg can't be threaded into this template, route any
+        # non-dense operand to the fully stride-aware scalar matmul (which declares + uses
+        # all 6 inferred strides). The common DENSE case stays on the fast path. (The
+        # K-loop variant DOES declare all args, so it threads the inferred row strides as
+        # leading dims directly — see _lower_k_loop_dot_inline.)
+        if (decision is not None and decision[0] == "simdgroup"
+                and not info.get("has_k_loop")):
+            descriptors = decision[1]
+            if not self._simdgroup_leading_dims_are_dense(info, descriptors):
+                return self._lower_strided_scalar_matmul(info, descriptors)
+
         # Phase 4: record the runtime fast-matmul dispatch descriptor (additive;
         # the generic inline kernel below is still emitted + returned).
         self._fast_matmul = self._maybe_fast_matmul_descriptor()
         if info.get("has_k_loop"):
-            return self._lower_k_loop_dot_inline(info)
+            return self._lower_k_loop_dot_inline(info, decision[1] if (
+                decision is not None and decision[0] == "simdgroup") else None)
 
         M = info["M"]
         N = info["N"]
@@ -296,20 +377,9 @@ class _TemplateMixin:
         # Genuine fp16 (WS1 Phase C): half INPUT fragments + float ACCUMULATOR;
         # fp16 staged as half (no upcast) so the half MMA is actually used. bf16
         # uses the bfloat MMA (simdgroup_bfloat8x8); other types stay on the float
-        # path (exact). Accumulator always float.
-        acc_frag = "simdgroup_float8x8"
-        if input_msl_type == "half":
-            in_frag, tg_type, stage_cast, pad = (
-                "simdgroup_half8x8", "half", "", "half(0.0h)")
-        elif input_msl_type == "bfloat":
-            # M-series simdgroup_bfloat8x8 matrix unit (verified on M4): bfloat
-            # input fragments + float accumulator, staged as bfloat (no upcast),
-            # so the direct-device-load path loads bfloat into a bfloat fragment.
-            in_frag, tg_type, stage_cast, pad = (
-                "simdgroup_bfloat8x8", "bfloat", "", "bfloat(0.0)")
-        else:
-            in_frag, tg_type, stage_cast, pad = (
-                "simdgroup_float8x8", "float", "float", "0.0f")
+        # path (exact). Accumulator always float. Fragment selection is the SHARED
+        # ``_simdgroup_frag_for`` helper (Step 5 de-dup — was copy-pasted here).
+        acc_frag, in_frag, tg_type, stage_cast, pad = self._simdgroup_frag_for(a_elem)
         frag_type = acc_frag
 
         safe_name = _sanitize_msl_name(self.graph.func_name)
@@ -448,7 +518,7 @@ class _TemplateMixin:
         return "\n".join(lines)
 
 
-    def _lower_k_loop_dot_inline(self, info):
+    def _lower_k_loop_dot_inline(self, info, descriptors=None):
         """Generate MSL for a K-loop dot kernel using simdgroup MMA.
 
         Each threadgroup computes one BLOCK_M x BLOCK_N output tile, iterating
@@ -458,6 +528,12 @@ class _TemplateMixin:
         128 threads = 4 SIMD groups x 32 threads per threadgroup.
         Each SIMD group handles an 8-column slice of the 32-wide output tile.
         The inner MMA loop iterates BLOCK_K in steps of 8.
+
+        ``descriptors`` (a_row,a_col,b_row,b_col,c_row,c_col), when provided by the
+        address-traced stride gate, supplies the per-operand ROW strides used as the
+        simdgroup leading dims — correct for a row-SLICED / padded operand whose row
+        stride is a runtime arg != the matrix dim (BLOCKER 1). When None (legacy /
+        un-traced) the template falls back to the matrix dims (dense row-major).
         """
         BLOCK_M = info["BLOCK_M"]
         BLOCK_N = info["BLOCK_N"]
@@ -489,19 +565,9 @@ class _TemplateMixin:
         # upcast, so Apple's ~2x fp16 matrix throughput is actually used. bf16
         # uses simdgroup_bfloat8x8 (the M-series bfloat matrix unit, verified on
         # M4); other types stay on the float path. The accumulator is always float.
-        acc_frag = "simdgroup_float8x8"
-        if input_msl_type == "half":
-            in_frag, tg_type, stage_cast, pad = (
-                "simdgroup_half8x8", "half", "", "half(0.0h)")
-        elif input_msl_type == "bfloat":
-            # M-series simdgroup_bfloat8x8 matrix unit (verified on M4): bfloat
-            # input fragments + float accumulator, staged as bfloat (no upcast),
-            # so the direct-device-load path loads bfloat into a bfloat fragment.
-            in_frag, tg_type, stage_cast, pad = (
-                "simdgroup_bfloat8x8", "bfloat", "", "bfloat(0.0)")
-        else:
-            in_frag, tg_type, stage_cast, pad = (
-                "simdgroup_float8x8", "float", "float", "0.0f")
+        # Fragment selection is the SHARED ``_simdgroup_frag_for`` helper (Step 5
+        # de-dup — this block was the byte-identical twin of the simple-dot copy).
+        acc_frag, in_frag, tg_type, stage_cast, pad = self._simdgroup_frag_for(a_elem)
         frag_type = acc_frag  # accumulators
 
         safe_name = _sanitize_msl_name(self.graph.func_name)
@@ -600,16 +666,38 @@ class _TemplateMixin:
         else:
             lines.append(f"    uint _K = {BLOCK_K}u;  // no K arg, single tile")
 
-        # Leading dims for the simdgroup loads/stores = the DENSE row-major row
-        # stride. This path only handles contiguous-INNER operands (the
-        # stride-aware gate routed any strided inner dim to the scalar template),
-        # and the Metal driver materializes each operand DENSE row-major before
-        # dispatch (a non-contiguous host tensor is memmove'd as contiguous
-        # bytes), so the in-kernel row stride is always the matrix dim: A leading
-        # = K, B/C leading = N. (A passed runtime stride that differs from the
-        # dim describes the HOST layout, not the materialized device buffer, so
-        # using it here would mis-address — the dim is correct.)
-        a_ld, b_ld, c_ld = "_K", "_N", "_N"
+        # Leading dims for the simdgroup loads/stores = each operand's ROW stride.
+        # This path only handles contiguous-INNER operands (the stride-aware gate routed
+        # any strided inner dim to the scalar template), so the inner (col) stride is 1
+        # and the row stride is the leading dim. The runtime device buffer carries the
+        # HOST strides (the driver copies the operand's storage VERBATIM — it does NOT
+        # materialize a dense row-major copy; an earlier comment here claimed it did and
+        # was wrong, which is BLOCKER 1: a row-SLICED A whose row stride is a runtime arg
+        # != K was addressed with the K dim → wrong values). So use the ADDRESS-TRACED
+        # row stride: a runtime stride arg (unpacked as ``int <name>``) when traced, else
+        # the matrix dim (a dense row-major operand whose stride Triton folded to a
+        # constexpr == the dim). All scalar args are declared/unpacked above, so a stride
+        # arg name is referenceable here.
+        scalar_names = {a.name for a in self.graph.args if not a.is_ptr}
+
+        def _ld(row_desc, dim_default):
+            # row_desc is a stride func-arg NAME, an int-literal string, or None.
+            if row_desc is None:
+                return dim_default
+            if row_desc in scalar_names:
+                return f"(uint){row_desc}"   # runtime row stride (sliced/padded rows)
+            try:
+                return f"{int(str(row_desc))}u"   # compile-time literal row stride
+            except (TypeError, ValueError):
+                return dim_default
+
+        if descriptors is not None:
+            a_row, a_col, b_row, b_col, c_row, c_col = descriptors
+            a_ld = _ld(a_row, "_K")
+            b_ld = _ld(b_row, "_N")
+            c_ld = _ld(c_row, "_N")
+        else:
+            a_ld, b_ld, c_ld = "_K", "_N", "_N"
 
         lines.append(f"")
         lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
@@ -2172,6 +2260,38 @@ class _TemplateMixin:
         For simple 3-pointer kernels (A, B, C with no strides), falls back
         to the optimized simdgroup_matrix template.
         """
+        # STRUCTURAL REFUSAL (matmul unification): this template models EXACTLY ONE 2-D
+        # matmul. A multi-tt.dot kernel (chain-dot (A@B)@W) or a rank>=3 (batched/3-D) dot
+        # has no correct lowering here — the simple-template branch silently computes a
+        # single 2-D GEMM and drops the rest (confirmed silent-wrong, both abbreviated and
+        # stride_* naming). FlashAttention, matmul-softmax, and matmul-epilogue are all
+        # routed BEFORE this method, so a multi-dot / 3-D dot reaching here is genuinely
+        # unmodeled: refuse loudly rather than mis-emit. (Split into separate kernels.)
+        from triton_msl.errors import MetalNonRecoverableError as _MNR
+        def _all_dot_ops(ops):
+            for s in ops:
+                if s.op == "tt.dot":
+                    yield s
+                if s.region_ops:
+                    yield from _all_dot_ops(s.region_ops)
+                if s.else_ops:
+                    yield from _all_dot_ops(s.else_ops)
+        _all_dots = list(_all_dot_ops(self.graph.ops))
+        if len(_all_dots) > 1:
+            raise _MNR(
+                "chain-dot / multiple tt.dot in one kernel (e.g. z = (x@y)@w) is not "
+                "supported: the matmul template models a single 2-D matmul and would "
+                "silently drop the later dot(s). Split into separate matmul kernels.",
+                op_name="tt.dot")
+        if _all_dots:
+            _rshape = _extract_shape(_all_dots[0].type_str or "")
+            if _rshape and len(_rshape) >= 3:
+                raise _MNR(
+                    "batched / 3-D tt.dot (rank>=3 result) is not supported: the matmul "
+                    "template models a single 2-D matmul and would drop the batch axis. "
+                    "Loop the batch on the host or use a per-batch 2-D kernel.",
+                    op_name="tt.dot")
+
         # Extract tile dimensions from tt.make_range ops (for simple template fallback)
         tile_dims = []
         for ssa in self.graph.ops:
@@ -2246,402 +2366,25 @@ class _TemplateMixin:
         if ptr_args:
             dtype = _mlir_to_triton_dtype(ptr_args[0].elem_type)
 
-        # Check if this is a strided kernel (has stride args) vs simple kernel
-        has_strides = any("stride" in a.name.lower() for a in scalar_args)
-        # If the kernel uses program_id, it's a pid-tiled kernel that
-        # needs the simdgroup matmul template with block selection.
-        has_pid = any(ssa.op == "tt.get_program_id" for ssa in self.graph.ops)
-
-        # Detect 3D batched dot (e.g. test_dot3d): tt.dot on tensor<BxMxNxT>
-        # 3D dot has both strides AND pids — strides for batch/row/col access,
-        # pids for spatial tiling over M and N. Use strided template, not simdgroup.
-        is_3d_dot = False
-        for ssa in self.graph.ops:
-            if ssa.op == "tt.dot":
-                dot_shape = _extract_shape(ssa.type_str)
-                if len(dot_shape) >= 3:
-                    is_3d_dot = True
-                break
-
-        if not has_strides or (has_pid and not is_3d_dot):
-            # Check for constant-input dot (e.g., test_dot_without_load)
-            const_info = self._detect_dot_constant_inputs()
-            if const_info:
-                return self._lower_dot_constant_template(const_info, ptr_args)
-            # Fall back to optimized simdgroup template for pid-tiled kernels
-            return self._lower_dot_simple_template(tile_dims, ptr_args, dtype)
-
-        # --- Strided dot kernel generation ---
-        # Extract M, N, K from tt.dot operand type shapes (reliable).
-        # 2D: tensor<MxKxT> * tensor<KxNxT> -> tensor<MxNxT>
-        # 3D: tensor<BxMxKxT> * tensor<BxKxNxT> -> tensor<BxMxNxT>
-        M, N, K = 32, 32, 32  # fallback
-        B_batch = 1
-        for ssa in self.graph.ops:
-            if ssa.op == "tt.dot":
-                dot_shape = _extract_shape(ssa.type_str)
-                if len(dot_shape) >= 3:
-                    B_batch = dot_shape[0]
-                    M, N = dot_shape[1], dot_shape[2]
-                elif len(dot_shape) >= 2:
-                    M, N = dot_shape[0], dot_shape[1]
-                # Get K from first operand shape
-                # 2D: [M, K], 3D: [B, M, K]
-                if ssa.operand_ids:
-                    for ssa2 in self.graph.ops:
-                        if ssa2.id == ssa.operand_ids[0]:
-                            op_shape = _extract_shape(ssa2.type_str)
-                            if len(op_shape) >= 3:
-                                K = op_shape[2]
-                            elif len(op_shape) >= 2:
-                                K = op_shape[1]
-                            break
-                break
-
-        # Detect accumulator initialization from the IR
-        has_accumulator_load = False
-        for ssa in self.graph.ops:
-            if ssa.op == "arith.addf" and any(
-                self.graph.ops[i].op == "tt.dot"
-                for i, op in enumerate(self.graph.ops)
-                if op.id in (ssa.operand_ids or [])
-            ):
-                has_accumulator_load = True
-
-        # MSL type mapping
-        from triton_msl.codegen.msl_builtins import is_fp8_type
-        is_fp8_dot = is_fp8_type(dtype)
-        if is_fp8_dot:
-            msl_type = "uchar"  # FP8 stored as uchar
-            compute_type = "float"
-        elif dtype in ("fp16", "f16"):
-            msl_type = "half"
-            compute_type = "float"
-        elif dtype in ("bf16",):
-            msl_type = "bfloat"
-            compute_type = "float"
-        else:
-            msl_type = "float"
-            compute_type = "float"
-
-        # Determine output type from tt.dot result
-        out_msl_type = "float"  # tt.dot typically outputs f32
-        for ssa in self.graph.ops:
-            if ssa.op == "tt.dot":
-                dot_out_type = ssa.elem_type
-                if dot_out_type in ("f16",):
-                    out_msl_type = "half"
-                elif dot_out_type in ("bf16",):
-                    out_msl_type = "bfloat"
-                break
-
-        num_warps = self.graph.num_warps
-        block_size = min(num_warps * 32, 1024)
-        self._matmul_block_size = block_size
-
-        # For 3D dot, signal that the kernel needs 2D grid dispatch
-        if is_3d_dot:
-            self._used_pid_axes = {0, 1}
-
-        safe_name = _sanitize_msl_name(self.graph.func_name)
-
-        # Build argument list from IR
-        arg_decls = []
-        for i, arg in enumerate(self.graph.args):
-            if arg.is_ptr:
-                arg_triton_dtype = _mlir_to_triton_dtype(arg.elem_type)
-                arg_msl_type = triton_type_to_msl(arg_triton_dtype)
-                arg_decls.append(
-                    f"    volatile device {arg_msl_type}* {arg.name} [[buffer({i})]]")
-            else:
-                arg_decls.append(
-                    f"    volatile device int* {arg.name}_buf [[buffer({i})]]")
-
-        # Generate the kernel
-        lines = []
-        lines.append("#include <metal_stdlib>")
-        lines.append("using namespace metal;")
-        lines.append("")
-        lines.append(f"kernel void {safe_name}(")
-        lines.append(",\n".join(arg_decls) + ",")
-        # Use uint3 for grid position when multi-axis dispatch is needed
-        used_axes = getattr(self.kb, '_used_pid_axes', {0}) if self.kb else {0}
-        if is_3d_dot:
-            used_axes = {0, 1}  # 3D dot needs pid3.x and pid3.y for spatial tiling
-        if max(used_axes) > 0:
-            # Metal requires all thread-index attributes to use the same
-            # type (all uint or all uint3). Use uint3 for all when multi-axis.
-            lines.append("    uint3 pid3 [[threadgroup_position_in_grid]],")
-            lines.append("    uint3 _lid3 [[thread_position_in_threadgroup]],")
-            lines.append("    uint3 _tid3 [[thread_position_in_grid]]")
-            lines.append(") {")
-            lines.append("    uint lid = _lid3.x;")
-            lines.append("    uint pid = pid3.x;")
-            if 1 in used_axes:
-                lines.append("    uint pid_y = pid3.y;")
-            if 2 in used_axes:
-                lines.append("    uint pid_z = pid3.z;")
-        else:
-            lines.append("    uint pid [[threadgroup_position_in_grid]],")
-            lines.append("    uint lid [[thread_position_in_threadgroup]],")
-            lines.append("    uint tid [[thread_position_in_grid]]")
-            lines.append(") {")
-
-        # Unpack scalar args from buffers
-        for arg in self.graph.args:
-            if not arg.is_ptr:
-                lines.append(f"    int {arg.name} = {arg.name}_buf[0];")
-
-        # Map scalar stride args to their pointer by name prefix.
-        # Triton TTGIR folds stride=1 args to constants, so we may have
-        # fewer scalars than expected. Name matching is robust to this.
-        #
-        # Convention: stride_{ptrbase}{dim} where ptrbase is derived from
-        # the pointer name (e.g. "x" from "x_ptr", "x_ptr" → "x").
-        # 2D: Each pointer gets [dim0_stride, dim1_stride], default "1".
-        # 3D: Each pointer gets [batch_stride, dim0_stride, dim1_stride].
-        #
-        # IMPORTANT: When one stride is folded (e.g. stride_xm=1 for col_a),
-        # the remaining stride must go in the CORRECT slot based on its
-        # dimension suffix, not just the first empty slot.
-        # For dot A[M,K] @ B[K,N] → C[M,N]:
-        #   A: 'k'/'1' suffix → dim1, everything else → dim0
-        #   B: 'n'/'1' suffix → dim1, everything else → dim0
-        #   C: 'n'/'1' suffix → dim1, everything else → dim0
-        #   W: 'l'/'1' suffix → dim1, everything else → dim0
-        # For 3D dot A[B,M,K] @ B[B,K,N] → C[B,M,N]:
-        #   'b' suffix → batch slot (slot 0), dim suffixes → slots 1,2
-        if is_3d_dot:
-            stride_map = {p.name: ["1", "1", "1"] for p in ptr_args}
-        else:
-            stride_map = {p.name: ["1", "1"] for p in ptr_args}
-
-        # Define which suffix characters map to dim1 for each pointer position
-        _dim1_suffixes = {
-            0: {'k', '1'},    # A (MxK): K-stride is dim1
-            1: {'n', '1'},    # B (KxN): N-stride is dim1
-        }
-        # Last pointer (C/Z) and chain-dot W
-        _dim1_last = {'n', '1'}   # C (MxN): N-stride is dim1
-        if len(ptr_args) >= 4:
-            _dim1_suffixes[2] = {'l', '1'}  # W (NxL): L-stride is dim1
-
-        matched_strides = set()
-        for sarg in scalar_args:
-            sname = sarg.name.lower()
-            if "stride" not in sname:
-                continue
-            # Match to pointer by name prefix (case-insensitive)
-            for pi, p in enumerate(ptr_args):
-                base = p.name
-                if base.endswith("_ptr"):
-                    base = base[:-4]
-                base_lower = base.lower()
-                prefix = f"stride_{base_lower}"
-                alt_prefix = f"s_{base_lower}"
-                # Also try reverse pattern: {base}_stride (e.g., "in_stride" for "in1_ptr")
-                rev_prefix = f"{base_lower}_stride"
-                # Try without trailing digits: "in_stride" matches "in1_ptr"
-                base_nodigit = base_lower.rstrip("0123456789")
-                rev_prefix_nodigit = f"{base_nodigit}_stride" if base_nodigit != base_lower else ""
-                # Try prefix match: "out_stride" matches "output_ptr" (stride base is prefix of ptr base)
-                stride_base = sname.replace("_stride", "").replace("stride_", "").replace("s_", "")
-                if sname.startswith(prefix):
-                    suffix = sname[len(prefix):]
-                elif sname.startswith(alt_prefix):
-                    suffix = sname[len(alt_prefix):]
-                elif sname == rev_prefix or sname.startswith(rev_prefix + "_"):
-                    suffix = sname[len(rev_prefix):]
-                elif rev_prefix_nodigit and (sname == rev_prefix_nodigit or sname.startswith(rev_prefix_nodigit + "_")):
-                    suffix = sname[len(rev_prefix_nodigit):]
-                elif stride_base and base_lower.startswith(stride_base) and sname.endswith("_stride"):
-                    suffix = ""
-                else:
-                    continue
-
-                dims = stride_map[p.name]
-                # Determine correct dim slot from suffix
-                is_last = (pi == len(ptr_args) - 1)
-                dim1_chars = _dim1_last if is_last else _dim1_suffixes.get(pi, {'1'})
-                if is_3d_dot and suffix and suffix[0] == 'b':
-                    # Batch stride → slot 0
-                    dims[0] = sarg.name
-                elif suffix and suffix[0] in dim1_chars:
-                    # Inner dimension (K for A, N for B/C)
-                    dims[-1] = sarg.name
-                else:
-                    # Outer dimension (M for A, K for B, M for C)
-                    dims[1 if is_3d_dot else 0] = sarg.name
-                matched_strides.add(sarg.name)
-                break
-
-        # Positional fallback: if stride args remain unmatched and pointers
-        # have default strides, assign remaining strides positionally to dim0
-        if has_strides and len(matched_strides) == 0:
-            unmatched = [s for s in scalar_args if "stride" in s.name.lower()]
-            for si, sarg in enumerate(unmatched):
-                if si < len(ptr_args):
-                    stride_map[ptr_args[si].name][0] = sarg.name
-
-        if len(ptr_args) < 3:
-            return self._lower_dot_simple_template(tile_dims, ptr_args, dtype)
-
-        a_ptr = ptr_args[0]
-        b_ptr = ptr_args[1]
-        c_ptr = ptr_args[-1]
-
-        if is_3d_dot:
-            a_sb, a_s0, a_s1 = stride_map[a_ptr.name]
-            b_sb, b_s0, b_s1 = stride_map[b_ptr.name]
-            c_sb, c_s0, c_s1 = stride_map[c_ptr.name]
-        else:
-            a_sb = b_sb = c_sb = "0"
-            a_s0, a_s1 = stride_map[a_ptr.name]
-            b_s0, b_s1 = stride_map[b_ptr.name]
-            c_s0, c_s1 = stride_map[c_ptr.name]
-
-        c_type = triton_type_to_msl(_mlir_to_triton_dtype(c_ptr.elem_type))
-
-        # Detect epilogue from IR ops after tt.dot
-        epilogue = self._detect_dot_epilogue()
-
-        # For chain-dot, we need W pointer and strides
-        w_ptr = None
-        w_s0 = "1"
-        w_s1 = "1"
-        if epilogue == "chain-dot" and len(ptr_args) >= 4 and not is_3d_dot:
-            w_ptr = ptr_args[2]
-            w_s0, w_s1 = stride_map[w_ptr.name]
-
-        # Shared memory for epilogues that need staging
-        total = M * N
-        if epilogue in ("softmax", "chain-dot"):
-            lines.append(f"    threadgroup {compute_type} _shared_c[{total}];")
-        elif epilogue == "add-matrix":
-            # Stage Z bias into shared memory to avoid aliasing (Z is both source and output)
-            lines.append(f"    threadgroup {compute_type} _bias[{total}];")
-            lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u) {{")
-            lines.append(f"        uint _i = _e / {N}u;")
-            lines.append(f"        uint _j = _e % {N}u;")
-            lines.append(f"        _bias[_e] = ({compute_type}){c_ptr.name}[_i * {c_s0} + _j * {c_s1}];")
-            lines.append(f"    }}")
-            lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-        elif epilogue == "add-rows":
-            lines.append(f"    threadgroup {compute_type} _bias[{M}];")
-            lines.append(f"    if (lid < {M}u) _bias[lid] = ({compute_type}){c_ptr.name}[lid * {c_s0}];")
-            lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-        elif epilogue == "add-cols":
-            lines.append(f"    threadgroup {compute_type} _bias[{N}];")
-            lines.append(f"    if (lid < {N}u) _bias[lid] = ({compute_type}){c_ptr.name}[lid * {c_s1}];")
-            lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-
-        # FP8 dot: inject conversion functions and use them for A/B loads
-        if is_fp8_dot:
-            from triton_msl.codegen.msl_builtins import fp8_to_float_func, fp8_device_functions
-            a_dtype = _mlir_to_triton_dtype(a_ptr.elem_type)
-            b_dtype = _mlir_to_triton_dtype(b_ptr.elem_type)
-            fp8_funcs_added = set()
-            for dt in (a_dtype, b_dtype):
-                if is_fp8_type(dt) and dt not in fp8_funcs_added:
-                    fp8_funcs_added.add(dt)
-                    for fn_src in fp8_device_functions(dt):
-                        lines.insert(2, fn_src)  # Insert after "using namespace metal;"
-                        lines.insert(3, "")
-            a_load = lambda idx: f"{fp8_to_float_func(a_dtype)}({a_ptr.name}[{idx}])" if is_fp8_type(a_dtype) else f"({compute_type}){a_ptr.name}[{idx}]"
-            b_load = lambda idx: f"{fp8_to_float_func(b_dtype)}({b_ptr.name}[{idx}])" if is_fp8_type(b_dtype) else f"({compute_type}){b_ptr.name}[{idx}]"
-        else:
-            a_load = lambda idx: f"({compute_type}){a_ptr.name}[{idx}]"
-            b_load = lambda idx: f"({compute_type}){b_ptr.name}[{idx}]"
-
-        # Emit the matmul loop
-        if is_3d_dot:
-            total = B_batch * M * N
-            lines.append(f"    // 3D strided dot: [{B_batch}x{M}x{K}] @ [{B_batch}x{K}x{N}] -> [{B_batch}x{M}x{N}]")
-            lines.append(f"    uint _pid_m_off = pid3.x * {M}u;")
-            lines.append(f"    uint _pid_n_off = pid3.y * {N}u;")
-            lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u) {{")
-            lines.append(f"        uint _b = _e / {M * N}u;")
-            lines.append(f"        uint _i = (_e % {M * N}u) / {N}u;")
-            lines.append(f"        uint _j = _e % {N}u;")
-            lines.append(f"        {compute_type} _sum = 0.0f;")
-            lines.append(f"        for (uint _k = 0; _k < {K}u; _k++) {{")
-            a_idx = f"_b * {a_sb} + (_pid_m_off + _i) * {a_s0} + _k * {a_s1}"
-            b_idx = f"_b * {b_sb} + _k * {b_s0} + (_pid_n_off + _j) * {b_s1}"
-            lines.append(f"            _sum += {a_load(a_idx)}")
-            lines.append(f"                  * {b_load(b_idx)};")
-            lines.append(f"        }}")
-            lines.append(f"        {c_ptr.name}[_b * {c_sb} + (_pid_m_off + _i) * {c_s0} + (_pid_n_off + _j) * {c_s1}] = ({c_type})_sum;")
-            lines.append(f"    }}")
-        else:
-            lines.append(f"    // Strided dot: [{M}x{K}] @ [{K}x{N}] -> [{M}x{N}], epilogue={epilogue}")
-            lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u) {{")
-            lines.append(f"        uint _i = _e / {N}u;")
-            lines.append(f"        uint _j = _e % {N}u;")
-
-            # Initialize accumulator from staged bias or zero
-            if epilogue == "add-matrix":
-                lines.append(f"        {compute_type} _sum = _bias[_e];")
-            elif epilogue == "add-rows":
-                lines.append(f"        {compute_type} _sum = _bias[_i];")
-            elif epilogue == "add-cols":
-                lines.append(f"        {compute_type} _sum = _bias[_j];")
-            else:
-                lines.append(f"        {compute_type} _sum = 0.0f;")
-
-            lines.append(f"        for (uint _k = 0; _k < {K}u; _k++) {{")
-            a_idx_2d = f"_i * {a_s0} + _k * {a_s1}"
-            b_idx_2d = f"_k * {b_s0} + _j * {b_s1}"
-            lines.append(f"            _sum += {a_load(a_idx_2d)}")
-            lines.append(f"                  * {b_load(b_idx_2d)};")
-            lines.append(f"        }}")
-
-        # Epilogue handling (2D only — 3D dot loop already includes store)
-        if not is_3d_dot:
-            if epilogue == "softmax":
-                # Store dot result to shared memory for row-wise softmax
-                lines.append(f"        _shared_c[_e] = _sum;")
-                lines.append(f"    }}")
-                lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-                # Row-wise softmax via shared memory
-                lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u) {{")
-                lines.append(f"        uint _i = _e / {N}u;")
-                lines.append(f"        uint _j = _e % {N}u;")
-                lines.append(f"        // Row-wise max")
-                lines.append(f"        {compute_type} _row_max = -INFINITY;")
-                lines.append(f"        for (uint _c = 0; _c < {N}u; _c++)")
-                lines.append(f"            _row_max = fmax(_row_max, _shared_c[_i * {N}u + _c]);")
-                lines.append(f"        {compute_type} _exp_val = exp(_shared_c[_e] - _row_max);")
-                lines.append(f"        // Row-wise sum of exp")
-                lines.append(f"        {compute_type} _row_sum = 0.0f;")
-                lines.append(f"        for (uint _c = 0; _c < {N}u; _c++)")
-                lines.append(f"            _row_sum += exp(_shared_c[_i * {N}u + _c] - _row_max);")
-                lines.append(f"        {c_ptr.name}[_i * {c_s0} + _j * {c_s1}] = ({c_type})(_exp_val / _row_sum);")
-                lines.append(f"    }}")
-            elif epilogue == "chain-dot" and w_ptr:
-                # Store first dot to shared, then second matmul with W
-                lines.append(f"        _shared_c[_e] = _sum;")
-                lines.append(f"    }}")  # end first matmul loop
-                lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
-                # Second matmul: shared_c[M,N] @ W[N,N] → result[M,N]
-                lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u) {{")
-                lines.append(f"        uint _i = _e / {N}u;")
-                lines.append(f"        uint _j = _e % {N}u;")
-                lines.append(f"        {compute_type} _sum2 = 0.0f;")
-                lines.append(f"        for (uint _k2 = 0; _k2 < {N}u; _k2++) {{")
-                lines.append(f"            _sum2 += _shared_c[_i * {N}u + _k2]")
-                lines.append(f"                   * ({compute_type}){w_ptr.name}[_k2 * {w_s0} + _j * {w_s1}];")
-                lines.append(f"        }}")
-                lines.append(f"        {c_ptr.name}[_i * {c_s0} + _j * {c_s1}] = ({c_type})_sum2;")
-                lines.append(f"    }}")
-            else:
-                # Default store (none, trans, add-*)
-                lines.append(f"        {c_ptr.name}[_i * {c_s0} + _j * {c_s1}] = ({c_type})_sum;")
-                lines.append(f"    }}")
-
-        lines.append("}")
-        lines.append("")
-
-        return "\n".join(lines)
+        # Every single-2-D dot reaching this method routes through the simdgroup
+        # matmul template (or the constant-input variant). The address-traced stride
+        # decision (mechanism A, in _lower_simple_dot_inline / _lower_k_loop_dot_inline)
+        # and _detect_simple_dot now claim EVERY computable single-2-D matmul — incl.
+        # the canonical stride_*-named / transposed cases that the old name-match
+        # ``stride_map`` strided body (mechanism C) used to GUESS row-major for and
+        # silently mis-compute. Chain-dot (>1 tt.dot) and 3-D dots already refused at
+        # the top of this method. Mechanism C is therefore DEAD for every reachable
+        # correct path: an instrumented full-suite + audit-repro run (TRIPWIRE_C) hit
+        # its strided body ZERO times, while a forced positive control proved the
+        # tripwire fires when the body IS reached. Deleted; this method now ONLY routes
+        # to the validated simdgroup template (the ~11 TFLOP/s contiguous fast path is
+        # selected there via _maybe_fast_matmul_descriptor) or to the constant-dot
+        # variant — there is no longer a name-match / row-major-guess code path.
+        # Check for constant-input dot (e.g., test_dot_without_load).
+        const_info = self._detect_dot_constant_inputs()
+        if const_info:
+            return self._lower_dot_constant_template(const_info, ptr_args)
+        return self._lower_dot_simple_template(tile_dims, ptr_args, dtype)
 
 
     def _lower_dot_constant_template(self, const_info, ptr_args):

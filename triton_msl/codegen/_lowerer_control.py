@@ -824,6 +824,77 @@ class _ControlFlowMixin:
                 f"silently drop the rest. Launch with num_warps = BLOCK/32 "
                 f"(so num_threads == BLOCK), or reduce BLOCK.")
 
+        # Backstop (B3): a SCALAR (per-program) NON-IDEMPOTENT atomic RMW
+        # (add/sub/fadd/xor — value-accumulating) emitted while a wrap loop is
+        # ACTIVE would fire once per wrap iteration on thread 0 (lid==0 holds every
+        # iteration), over-counting by BLOCK/num_threads. The multipass reduce path
+        # now hoists such a post-reduce atomic OUT of the loop (so this is never hit
+        # there); this guard refuses any OTHER path that would reach a scalar
+        # non-idempotent atomic inside a live wrap loop, rather than silently
+        # over-count. (max/min/exch/and/or are idempotent — repeating them is a
+        # no-op — so they are exempt.)
+        _non_idempotent = rmw_op in ("add", "fadd", "sub", "xor")
+        if is_scalar and _non_idempotent and self._needs_wrapping:
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"Refusing a scalar non-idempotent atomic_{rmw_op} emitted inside a "
+                f"multi-element wrap loop (BLOCK > num_threads): thread 0 would apply "
+                f"the RMW once per wrap iteration, over-counting by BLOCK/num_threads "
+                f"(e.g. tl.atomic_add(out, tl.sum(x)) returned 8x). Launch with "
+                f"num_warps = BLOCK/32 so num_threads == BLOCK (no wrap loop), or "
+                f"reduce BLOCK.", op_name="tt.atomic_rmw")
+
+        # Backstop (re-audit silent-wrong #4): a scalar non-idempotent atomic whose value is
+        # accumulated by an IN-LOOP reduce (a tt.reduce inside an scf.for, e.g.
+        #   acc=0; for j in range(ITER): acc += tl.sum(load(...)); atomic_add(out, sum(acc)))
+        # over-counts by BLOCK/num_threads in the wrapping regime: the per-program scalar
+        # accumulation is replayed once per wrap iteration. The B3 hoist above only covers a
+        # single NON-looped reduce; this looped form re-adds. Refuse loudly until the scalar
+        # accumulation is threaded out of the wrap loop. The single-pass / num_threads==BLOCK
+        # regime (_mept_single_pass) has no wrap, so it is exempt (the suggested workaround).
+        if (is_scalar and _non_idempotent and not self._mept_single_pass
+                and val_id is not None):
+            _byid_c = {}
+            def _coll(ops):
+                for s in ops:
+                    _byid_c[s.id] = s
+                    if s.region_ops:
+                        _coll(s.region_ops)
+                    if s.else_ops:
+                        _coll(s.else_ops)
+            _coll(self.graph.ops)
+            def _region_has_reduce(ops):
+                for s in ops:
+                    if s.op == "tt.reduce":
+                        return True
+                    if s.region_ops and _region_has_reduce(s.region_ops):
+                        return True
+                    if s.else_ops and _region_has_reduce(s.else_ops):
+                        return True
+                return False
+            def _traces_to_inloop_reduce(vid, depth=0, seen=None):
+                if seen is None:
+                    seen = set()
+                if vid in seen or depth > 48:
+                    return False
+                seen.add(vid)
+                o = _byid_c.get(vid)
+                if o is None:
+                    return False
+                if o.op == "scf.for" and o.region_ops and _region_has_reduce(o.region_ops):
+                    return True
+                return any(_traces_to_inloop_reduce(oid, depth + 1, seen)
+                           for oid in (o.operand_ids or []))
+            if _traces_to_inloop_reduce(val_id):
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    f"scalar non-idempotent atomic_{rmw_op} whose value is accumulated by "
+                    f"an IN-LOOP reduce (a tt.reduce inside an scf.for) over-counts by "
+                    f"BLOCK/num_threads in the wrap regime (the per-program accumulation is "
+                    f"replayed once per wrap iteration). Launch with num_warps = BLOCK/32 "
+                    f"(num_threads == BLOCK, no wrap), or accumulate without an in-loop "
+                    f"reduce.", op_name="tt.atomic_rmw")
+
         # Always declare result variable first (needed for mask or not)
         self.kb.raw_line(f"    {result_msl_type} {result_var} = {result_zero};")
 

@@ -39,6 +39,37 @@ def ty_to_cpp(ty):
 _MM_DIRECT_PIPELINES = {}
 
 
+def _strided_storage_reach(t):
+    """Number of elements from a tensor's storage_offset to its last addressable
+    element + 1 — i.e. how many elements a stride-faithful device buffer must hold.
+
+    For a contiguous tensor this equals ``numel``. For a non-contiguous view (a
+    column slice / transpose / dilation) the last element lives at
+    ``sum((dim-1) * stride)``, which can EXCEED numel — a numel-sized buffer would
+    truncate it. Used so the metallib copy path mirrors the full strided extent
+    (the kernel addresses with the user's runtime strides). Returns ``numel`` on any
+    error (the safe contiguous default).
+    """
+    try:
+        shape = list(t.shape)
+        strides = list(t.stride())
+        if not shape:
+            return 1
+        reach = 1
+        for dim, st in zip(shape, strides):
+            if dim > 0:
+                reach += (dim - 1) * abs(int(st))
+        numel = 1
+        for d in shape:
+            numel *= d
+        return max(reach, numel)
+    except Exception:
+        try:
+            return t.numel()
+        except Exception:
+            return 0
+
+
 class MetalUtils:
     """Manages Metal device, command queue, and kernel dispatch.
 
@@ -764,17 +795,76 @@ class MetalLauncher:
                     # ctypes.memmove corruption of MPS buffer tracking.
                     import torch
                     torch.mps.synchronize()
+                    # A kernel addresses each operand with the user-passed RUNTIME
+                    # stride args, which describe the tensor's actual (possibly
+                    # NON-contiguous) storage layout. ``arg.cpu()`` may DENSIFY a
+                    # non-contiguous view (e.g. a column slice randn(K,N+pad)[:, :N]
+                    # comes back contiguous with stride N, not N+pad), so a buffer of
+                    # just ``numel`` dense bytes no longer matches the kernel's
+                    # stride-N+pad addressing -> silently wrong / OOB (audit sliced-B).
+                    # Faithfully mirror the storage instead: copy the FULL strided
+                    # extent (storage_offset .. storage_offset + reach) verbatim, so
+                    # ``buf[i*row_stride + j*col_stride]`` lands on the same element
+                    # the user's strides select. Contiguous tensors keep the fast
+                    # numel-sized copy (reach == numel).
                     cpu_tensor = arg.cpu()
-                    # Use buffer pool for page-aligned zero-copy
-                    metal_buf, aligned_mem, size_class = pool.acquire(nbytes)
-                    src = (ctypes.c_char * nbytes).from_address(cpu_tensor.data_ptr())
-                    dst_view = metal_buf.contents().as_buffer(nbytes)
-                    dst = (ctypes.c_char * nbytes).from_buffer(dst_view)
-                    ctypes.memmove(dst, src, nbytes)
-                    buffers.append((metal_buf, 0))
-                    pool_releases.append((metal_buf, aligned_mem, size_class))
-                    if is_output:
-                        tensor_copies.append((metal_buf, arg, nbytes, cpu_tensor, None))
+                    reach_elems = _strided_storage_reach(arg)
+                    copy_bytes = max(nbytes, reach_elems * arg.element_size())
+                    # Try to build the FULL-strided faithful source buffer. ``arg.cpu()``
+                    # densifies a non-contiguous view (losing the original row stride),
+                    # so re-read the underlying storage via an as_strided flat view over
+                    # [storage_offset, +reach), which keeps ``buf[i*row_stride +
+                    # j*col_stride]`` pointing at the right element. Done on the MPS
+                    # tensor (then .cpu()) so the strided storage is mirrored, not the
+                    # densified copy. Only take the faithful path if it actually
+                    # produced a reach-sized contiguous source — otherwise fall through
+                    # to the dense numel copy (never memmove copy_bytes from a smaller
+                    # source, which would over-read the heap).
+                    _faithful_src = None
+                    if (not arg.is_contiguous()) and copy_bytes > nbytes:
+                        try:
+                            flat = arg.as_strided((reach_elems,), (1,),
+                                                  arg.storage_offset())
+                            _cand = flat.cpu().contiguous()
+                            if _cand.numel() * _cand.element_size() >= copy_bytes:
+                                _faithful_src = _cand
+                        except Exception:
+                            _faithful_src = None
+                    if _faithful_src is not None:
+                        src_t = _faithful_src
+                        metal_buf, aligned_mem, size_class = pool.acquire(copy_bytes)
+                        src = (ctypes.c_char * copy_bytes).from_address(src_t.data_ptr())
+                        dst_view = metal_buf.contents().as_buffer(copy_bytes)
+                        dst = (ctypes.c_char * copy_bytes).from_buffer(dst_view)
+                        ctypes.memmove(dst, src, copy_bytes)
+                        buffers.append((metal_buf, 0))
+                        pool_releases.append((metal_buf, aligned_mem, size_class))
+                        if is_output:
+                            # The copy-back must mirror the FULL strided extent back
+                            # through the tensor's own layout — NOT memmove the dense
+                            # numel-prefix over the storage, which would densify and
+                            # CORRUPT a strided operand (e.g. overwrite a column-sliced
+                            # input's rows). The 6th tuple element flags a faithful
+                            # strided round-trip (carrying reach + the device-elem
+                            # count); the copy-back below scatters via as_strided.
+                            # (Inputs are restored byte-identical; a strided output
+                            # is written correctly. Most callers pass output indices
+                            # so inputs never reach here at all.)
+                            tensor_copies.append(
+                                (metal_buf, arg, nbytes, cpu_tensor,
+                                 ("faithful_strided", reach_elems,
+                                  arg.element_size())))
+                    else:
+                        # Use buffer pool for page-aligned zero-copy
+                        metal_buf, aligned_mem, size_class = pool.acquire(nbytes)
+                        src = (ctypes.c_char * nbytes).from_address(cpu_tensor.data_ptr())
+                        dst_view = metal_buf.contents().as_buffer(nbytes)
+                        dst = (ctypes.c_char * nbytes).from_buffer(dst_view)
+                        ctypes.memmove(dst, src, nbytes)
+                        buffers.append((metal_buf, 0))
+                        pool_releases.append((metal_buf, aligned_mem, size_class))
+                        if is_output:
+                            tensor_copies.append((metal_buf, arg, nbytes, cpu_tensor, None))
                 else:
                     ptr = arg.data_ptr()
                     page_aligned = (ptr % PAGE_SIZE == 0) and (nbytes % PAGE_SIZE == 0)
@@ -912,8 +1002,38 @@ class MetalLauncher:
             for entry in tensor_copies:
                 metal_buf, tensor, nbytes = entry[0], entry[1], entry[2]
                 cpu_tensor = entry[3] if len(entry) > 3 else None
+                _marker = entry[4] if len(entry) > 4 else None
 
                 import torch as _torch
+
+                # Faithful strided round-trip: the device buffer mirrors the full
+                # strided storage (reach >= numel). Read it ALL back into a flat CPU
+                # buffer, then write the values into the tensor through an as_strided
+                # view that maps each logical element to its strided storage slot —
+                # so a strided operand is restored/written WITHOUT densifying (the
+                # numel-prefix memmove below would corrupt a column-sliced layout).
+                if isinstance(_marker, tuple) and _marker[0] == "faithful_strided":
+                    _reach, _esz = _marker[1], _marker[2]
+                    _rbytes = _reach * _esz
+                    src_view = metal_buf.contents().as_buffer(_rbytes)
+                    flat_cpu = _torch.empty(_reach, dtype=tensor.dtype)
+                    ctypes.memmove(
+                        (ctypes.c_char * _rbytes).from_address(flat_cpu.data_ptr()),
+                        (ctypes.c_char * _rbytes).from_buffer(src_view), _rbytes)
+                    # Index the flat buffer by the tensor's own strides so each logical
+                    # [i,j,...] reads flat[i*s0 + j*s1 + ...]. ``flat_cpu`` was built from
+                    # ``arg.as_strided((reach,),(1,),storage_offset)`` (dispatch), so it is
+                    # ALREADY re-based to the storage offset — index it from 0, NOT from
+                    # tensor.storage_offset() again (double-applying the offset would push
+                    # the view out of bounds for any non-zero-offset output and silently
+                    # drop the write). Failure here is a silent-wrong (output not written),
+                    # so do NOT swallow it — raise loudly.
+                    strided_logical = flat_cpu.as_strided(
+                        tuple(tensor.shape), tuple(tensor.stride()), 0)
+                    tensor.copy_(strided_logical.to(tensor.device))
+                    _torch.mps.synchronize()
+                    continue
+
                 is_f64_downcast = (
                     cpu_tensor is not None
                     and hasattr(tensor, "dtype")
