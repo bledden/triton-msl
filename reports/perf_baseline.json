@@ -65,18 +65,19 @@
   },
   "matmul_2048_fp32": {
     "name": "matmul_2048_fp32",
-    "min_ms": 1.9045,
-    "tflops": 9.02
+    "min_ms": 1.8583,
+    "tflops": 9.24,
+    "_note": "THERMALLY SENSITIVE: this is a min-of-3 from a heat-soaked run (re-measured 2026-06-24 after a long sustained-benchmark session). On a fully-idle M4 Max the fast fp32 matmul reaches ~11 TFLOP/s (the README perf-table peak; verified cold 2026-06-24 at 11.18 and in the Phase-5 audit at 11.4). fp32 throttles more than fp16 under thermal load (fp16/fp16out here measured cold at 12.29/12.21). Re-run test_fast_matmul_perf on a cold machine to refresh."
   },
   "matmul_2048_fp16": {
     "name": "matmul_2048_fp16",
-    "min_ms": 1.8028,
-    "tflops": 9.53
+    "min_ms": 1.3977,
+    "tflops": 12.29
   },
   "matmul_2048_fp16out": {
     "name": "matmul_2048_fp16out",
-    "min_ms": 1.7451,
-    "tflops": 9.84
+    "min_ms": 1.4069,
+    "tflops": 12.21
   },
   "flash_attention_simdgroup_fp32": {
     "name": "flash_attention_simdgroup_fp32",

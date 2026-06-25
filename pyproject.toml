@@ -40,7 +40,9 @@ dependencies = [
 [project.optional-dependencies]
 triton = [
     "triton==3.7.0",
-    "torch>=2.1.0",
+    # torch.mps.compile_shader (the zero-copy MPS fast path) needs >=2.5; the
+    # torch.compile / inductor integration is developed + tested against 2.12.
+    "torch>=2.12.0",
 ]
 dev = [
     "pytest>=7.0",

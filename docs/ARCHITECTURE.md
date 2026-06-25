@@ -249,42 +249,49 @@ a real workload. Full design + history:
 
 ## MPS Tensor Integration
 
-### The copy overhead
+### Zero-copy MPS dispatch (the default)
 
-MPS tensors require a CPU intermediate for Metal kernel dispatch:
+MPS tensors are dispatched **zero-copy** by default via `torch.mps.compile_shader`
+(`TRITON_MSL_COMPILE_SHADER=1`, the default). The kernel's MSL runs inside the
+active PyTorch MPS stream, operating directly on the tensor's GPU memory — no
+`.cpu()` round-trip and no intermediate copy. On M4 Max this reaches ~315–408
+GB/s on large memory-bound kernels (≈57–100% of the ~546 GB/s peak) and ~11–12
+TFLOP/s on the fast-matmul path, and it composes with surrounding `torch` ops and
+`torch.compile` graphs because it shares the MPS command queue.
 
-```
-MPS tensor → .cpu() → Metal buffer (newBufferWithBytes) → kernel
-    → Metal buffer → numpy → torch.from_numpy → tensor.copy_() → MPS
-```
-
-### Why zero-copy isn't available for MPS
-
-- PyTorch's MPS backend does not expose `MTLBuffer` handles
-- Direct `ctypes.memmove` to MPS `data_ptr()` corrupts MPS buffer tracking (segfault)
-- MPS tensor allocations are not page-aligned (ARM64 requires 16KB alignment for `newBufferWithBytesNoCopy`)
-
-### CPU tensor path (recommended)
-
-CPU tensors on Apple Silicon share UMA with the GPU. When page-aligned, they use `newBufferWithBytesNoCopy` for true zero-copy — the Metal kernel operates directly on the tensor's memory without any data movement.
-
-For best performance, use CPU tensors with Triton kernels:
 ```python
-x = torch.randn(n, device="cpu")  # Not "mps"
-out = torch.empty(n, device="cpu")
+x = torch.randn(n, device="mps")   # MPS tensors are the fast, default path
+out = torch.empty(n, device="mps")
 kernel[grid](x, out, n, BLOCK_SIZE=256)
 ```
 
-### Copy overhead (measured on M4 Max)
+### CPU tensor fallback (UMA `newBufferWithBytesNoCopy`)
+
+For CPU tensors — or when `TRITON_MSL_COMPILE_SHADER=0` / the compile_shader
+runtime is unavailable — the driver uses Apple's unified memory: a **page-aligned**
+CPU tensor is wrapped with `newBufferWithBytesNoCopy` for true zero-copy; a
+non-aligned one is staged through a pre-allocated page-aligned buffer pool (one
+`memmove` in).
+
+### Why the old "CPU intermediate required" caveat is gone
+
+Earlier versions could not dispatch MPS tensors directly (PyTorch's MPS backend
+does not expose `MTLBuffer` handles, and a raw `memmove` to `data_ptr()` corrupts
+MPS buffer tracking). `torch.mps.compile_shader` (PyTorch ≥ 2.5) removed that
+limitation by running the kernel inside the MPS stream itself, so MPS tensors no
+longer need a host intermediate.
+
+### Throughput (measured on M4 Max, 546 GB/s peak)
 
 | Path | Bandwidth | Notes |
 |------|-----------|-------|
-| Zero-copy (page-aligned CPU) | N/A (55x faster than copy) | `newBufferWithBytesNoCopy` wraps pointer |
-| Copy-based (non-aligned CPU) | ~15 GB/s copy-in | `newBufferWithBytes`, single copy |
-| Copy-back | ~70-80 GB/s | `memmove` from Metal buffer |
-| MPS tensor | 2 copies each way | CPU intermediate required |
+| MPS zero-copy (`compile_shader`, default) | ~315–408 GB/s, large kernels | runs on MPS tensor memory directly |
+| CPU zero-copy (page-aligned, `newBufferWithBytesNoCopy`) | wraps the pointer, no copy | UMA fallback |
+| CPU copy-based (non-aligned) | ~15 GB/s in / ~70–80 GB/s back | buffer-pool `memmove` |
 
-The `output_arg_indices` optimization (propagated from `GenericLowerer._prescan_stores()` through metadata) skips copy-back for read-only inputs, saving ~10% of total copy overhead.
+The `output_arg_indices` optimization (propagated from
+`GenericLowerer._prescan_stores()` through metadata) skips copy-back for
+read-only inputs on the CPU copy path.
 
 Run `python benchmarks/bench_copy_overhead.py` for full numbers.
 

@@ -29,8 +29,8 @@ Metal (Apple Silicon) backend for [OpenAI Triton](https://github.com/triton-lang
   built.)
 - **`torch.compile` routes through triton-msl** on Python 3.10–3.14 (PyTorch
   Inductor [\[12\]](REFERENCES.md)) — inference and training (AOTAutograd
-  backward), static and `dynamic=True`; **33 / 33** `torch.compile` model tests
-  plus the training suite pass.
+  backward), static and `dynamic=True`; **32 / 32** `torch.compile` model tests
+  (plus 1 inductor-config regression test = 33 total) and the training suite pass.
 - Triton tutorials 01–03, 05 passing.
 - Built against Triton's `TRITON_EXT_ENABLED=1` plugin architecture
   (upstream PR [#9783](https://github.com/triton-lang/triton/pull/9783)).
@@ -51,6 +51,7 @@ for the active pre-1.0 roadmap.
 - macOS 14 (Sonoma) or later
 - Xcode Command Line Tools: `xcode-select --install`
 - Python 3.10+
+- PyTorch 2.12+ (2.5+ for the zero-copy MPS fast path; `torch.compile` is developed + tested against 2.12) and Triton 3.7.0
 
 ## Install
 
@@ -235,6 +236,7 @@ All default-on; set to `0` to disable (an escape hatch for bisecting a regressio
 |------|----------------------|
 | `TRITON_MSL_COMPILE_SHADER=0` | Use the host-copy driver instead of the zero-copy `compile_shader` dispatch |
 | `TRITON_MSL_FAST_MATMUL=0` | Use the generic matmul instead of the fast simdgroup-matrix path |
+| `TRITON_MSL_MATMUL_AUTOTUNE=0` | Pin matmul tile selection to the fixed `(4,4)` blocking (unaligned-M shapes drop to the generic path instead of the finer-tile fast path) |
 | `TRITON_MSL_MEPT=0` | Disable the multi-element-per-thread register-array model |
 | `TRITON_MSL_LEGACY=1` | Opt **in** to the heuristic legacy text parser (off by default — it can be silent-wrong) |
 
@@ -277,16 +279,16 @@ fp32 / fp16.
 | Elementwise | 16M | 315 GB/s | 58% | 13.4× |
 | Softmax | 8192×1024 | 232 GB/s | 42% | **17.8×** |
 | Reduction | 16M | 235 GB/s | 43% | 8.2× |
-| Matmul (fp32) | 2048³ | 11.4 TFLOP/s | 62% of fp32 peak | ~4× generic |
-| Matmul (fp16 in / fp32 out) | 2048³ | 12.4 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
+| Matmul (fp32) | 2048³ | 11.2 TFLOP/s§ | 61% of fp32 peak | ~4× generic |
+| Matmul (fp16 in / fp32 out) | 2048³ | 12.3 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
 | Matmul (fp16 in / fp16 out) | 2048³ | 12.2 TFLOP/s | ≈ fp32 rate\* | ~4× generic |
-| Matmul (bf16 in / fp32 out) | 2048³ | 12.0 TFLOP/s | ≈ fp32 rate\* | **~4.9× generic** |
-| Matmul (bf16 in / bf16 out) | 2048³ | 11.9 TFLOP/s | ≈ fp32 rate\* | **~4.9× generic** |
+| Matmul (bf16 in / fp32 out)◊ | 2048³ | 12.0 TFLOP/s | ≈ fp32 rate\* | **~4.9× generic** |
+| Matmul (bf16 in / bf16 out)◊ | 2048³ | 11.9 TFLOP/s | ≈ fp32 rate\* | **~4.9× generic** |
 | FlashAttention (fp32, head_dim=128)‡ | Z=1,H=8,N=1024 | 5.1 TFLOP/s | ~28% of fp32 peak | **~5.2× scalar FA** |
 | FlashAttention (fp16, head_dim=128)‡ | Z=1,H=8,N=1024 | 6.3 TFLOP/s | †| **~6.4× scalar FA** |
 
 \* fp16 matmul uses fp16 inputs with a **float32 accumulator** (for precision). The
-12.4 figure is the default **fp32-output** path; the true **fp16→fp16** path
+12.3 figure is the default **fp32-output** path; the true **fp16→fp16** path
 (`out_dtype=fp16`) measures **12.2 TFLOP/s** — essentially identical, since both do
 the same MACs and the output-cast cost is negligible. Either way it runs at roughly
 the fp32 matrix-unit rate: Apple's simdgroup-matrix unit isn't faster for half
@@ -297,8 +299,18 @@ compute) — see the Phase-5 readiness audit (`docs/audits/`).
 
 † FA fp16 accumulates in fp32 (correct); % of the 36.9 fp16 vector-ALU peak is not a
 useful comparison — the practical reference is the in-repo matmul peak, of which fp32
-FA reaches ~45% (5.1 / 11.4) and fp16 ~51% (6.3 / 12.4). The FA numbers are **not
+FA reaches ~46% (5.1 / 11.2) and fp16 ~51% (6.3 / 12.3). The FA numbers are **not
 competitive with Apple metal-flash-attention or MLX in absolute terms**.
+
+§ The fp32 matmul figure is the cold-machine peak (~11 TFLOP/s, verified 2026-06-24).
+It is **thermally sensitive**: under sustained GPU load an M4 Max throttles the fp32
+path to ~9 TFLOP/s, so `reports/perf_baseline.json` — re-measured after a long
+benchmark session — currently records ~9.2; re-run `test_fast_matmul_perf` on an idle
+machine to see the cold peak. fp16/fp16out throttle less (measured ~12.3/12.2 cold).
+
+◊ bf16 matmul uses Apple's `simdgroup_bfloat8x8` matrix unit (float32 accumulate),
+**verified on M4**; on a part without a bfloat matrix unit it falls back to the
+(correct) generic float-compute path — never silently wrong.
 
 ‡ FA rows are **measured** on M4 Max (integration microbenchmark of the shipped
 `make_flash_attention_kernel_simdgroup`: warmup + median over 50 iters), not yet a
