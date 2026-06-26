@@ -468,7 +468,24 @@ class _ControlFlowMixin:
                                 "array (block > num_threads) is not supported. Refusing "
                                 "rather than emit a cryptic MSL compile error. Use "
                                 "BLOCK <= num_threads or restructure.", op_name="scf.if")
-                        yt = self.env_types.get(yid, "fp32")
+                        # A value yielded from INSIDE the then/else body (e.g. an inner
+                        # scf.for accumulator) is not in env_types yet — the bodies are
+                        # lowered AFTER this type-inference pass. Defaulting to fp32 here
+                        # silently turns an integer accumulation into float (precision loss
+                        # >2^24, i64 truncation). Fall back to the scf.if's IR result
+                        # element type; refuse if even that is unknown rather than guess
+                        # float. (Triton-lens audit 2026-06-25.)
+                        yt = self.env_types.get(yid)
+                        if yt is None:
+                            _et = getattr(ssa, "elem_type", None)
+                            yt = _mlir_to_triton_dtype(_et) if _et else None
+                        if yt is None:
+                            from triton_msl.errors import MetalNonRecoverableError
+                            raise MetalNonRecoverableError(
+                                "scf.if result dtype is undeterminable (a value yielded "
+                                "from inside the branch with no inferable type). Refusing "
+                                "rather than default to float, which would silently "
+                                "corrupt an integer result.", op_name="scf.if")
                         yield_types.append(yt)
                     break
 
@@ -478,6 +495,10 @@ class _ControlFlowMixin:
                 yt = yield_types[i] if i < len(yield_types) else "fp32"
                 if yt.startswith("fp") or yt.startswith("bf") or yt.startswith("f"):
                     msl_type = "float"
+                elif yt == "i64":
+                    msl_type = "long"
+                elif yt == "u64":
+                    msl_type = "ulong"
                 elif yt.startswith("u"):
                     msl_type = "uint"
                 else:

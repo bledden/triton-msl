@@ -252,46 +252,75 @@ class _ReduceScanMixin:
 
         return acc
 
+    @staticmethod
+    def _reduce_combine_has_foreign_op(region_ops):
+        """True if a tt.reduce combine body contains a compute op that is NOT part of a
+        supported sum / max / min / bitwise combine — a foreign op (arith.mulf/muli ->
+        product, arith.subf, arith.divf, math.absf -> max-by-magnitude, ...) means a
+        CUSTOM associative combine the reduction paths cannot honor and would SILENTLY
+        mis-compute (default-to-sum, or a plain max ignoring the abs/select structure).
+        The caller refuses on True. (Triton-lens audit 2026-06-25: a product combine
+        returned the SUM; a max-by-magnitude combine returned a plain MAX.)
+        """
+        _OK = ("arith.addf", "arith.addi", "arith.xori", "arith.andi", "arith.ori",
+               "arith.cmpf", "arith.cmpi", "arith.select", "arith.constant",
+               "arith.extf", "arith.truncf", "arith.extsi", "arith.extui",
+               "arith.sitofp", "arith.fptosi", "arith.uitofp", "arith.fptoui",
+               "arith.trunci")
+        for b in (region_ops or []):
+            nm = b.op or ""
+            if not (nm.startswith("arith.") or nm.startswith("math.")):
+                continue   # structural (the reduce.return terminator, block args, ...)
+            if "max" in nm or "min" in nm:
+                continue   # arith.maximumf / maxsi / minimumf / ... = the max/min combine
+            if nm not in _OK:
+                return True
+        return False
+
     def _get_reduce_combine_info(self, ssa):
         """Extract combine op and identity from a tt.reduce's body region.
 
         Returns (combine_op, identity_literal) where combine_op is one of
         'sum', 'max', 'min' and identity_literal is the MSL identity value.
+        A custom combine this multipass path cannot honor REFUSES (never defaults
+        to sum) — the prime directive.
         """
         combine_op = "sum"
         if ssa.region_ops:
             has_cmpf_gt = False
             has_cmpf_lt = False
+            has_real = False
             for body_op in ssa.region_ops:
                 op_name = body_op.op
                 if "addf" in op_name or "addi" in op_name:
-                    combine_op = "sum"
+                    combine_op = "sum"; has_real = True
                 elif "max" in op_name:
-                    combine_op = "max"
+                    combine_op = "max"; has_real = True
                 elif "min" in op_name:
-                    combine_op = "min"
+                    combine_op = "min"; has_real = True
                 elif op_name == "arith.cmpf":
                     pred = body_op.attrs.get("predicate_name", "")
                     if "gt" in pred:
                         has_cmpf_gt = True
                     elif "lt" in pred:
                         has_cmpf_lt = True
-            if combine_op == "sum" and has_cmpf_gt:
-                combine_op = "max"
-            elif combine_op == "sum" and has_cmpf_lt:
-                combine_op = "min"
-            # An xor combine (a standalone tl.reduce(xor) that didn't match the
-            # tl.flip/tl.sort detectors) is NOT sum/max/min — the multipass path
-            # has no xor branch and would SILENTLY compute it as a float SUM
-            # (2026-06-21 audit sibling-divergence: the scalar _lower_reduce DOES
-            # handle xor; this multipass helper did not). Refuse rather than
-            # mis-compute.
-            if combine_op == "sum" and any("xor" in (b.op or "") for b in ssa.region_ops):
+            if not has_real and has_cmpf_gt:
+                combine_op = "max"; has_real = True
+            elif not has_real and has_cmpf_lt:
+                combine_op = "min"; has_real = True
+            # A custom combine this multipass path cannot honor — a product (arith.mulf)
+            # that would DEFAULT to sum, a max-by-magnitude (absf+select) that would reduce
+            # to a plain max, an xor, or any other foreign compute op — must REFUSE, never
+            # silently mis-compute. (Triton-lens audit 2026-06-25; subsumes the earlier
+            # xor refuse — the multipass path supports only sum/max/min.)
+            if not has_real or self._reduce_combine_has_foreign_op(ssa.region_ops):
                 from triton_msl.errors import MetalNonRecoverableError
                 raise MetalNonRecoverableError(
-                    "Reduce with an xor combine is not supported on the multipass "
-                    "reduction path (it would be silently computed as a sum). "
-                    "Refusing to emit silently-wrong output.")
+                    "tl.reduce with a custom associative combine that is not a plain "
+                    "sum / max / min is not supported on the multipass reduction path "
+                    "(it would be silently mis-computed — e.g. a product combine returned "
+                    "as a sum, or a max-by-magnitude as a plain max). Refusing to emit "
+                    "silently-wrong output.")
 
         identities = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY"}
         return combine_op, identities.get(combine_op, "0.0f")
@@ -671,6 +700,21 @@ class _ReduceScanMixin:
                     combine_op = "and"
                 elif has_ori:
                     combine_op = "or"
+
+            # A custom combine this path cannot honor must REFUSE, never silently default
+            # to SUM (a product / arith.mulf) or a plain MAX (a max-by-magnitude
+            # absf+select). Supported combines here are sum/max/min/xor/and/or; a foreign
+            # compute op, or no definitive combine match at all, refuses loudly.
+            # (Triton-lens audit 2026-06-25.)
+            if (self._reduce_combine_has_foreign_op(ssa.region_ops)
+                    or not (has_real_combine or has_andi or has_ori)):
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "tl.reduce with a custom associative combine that is not a plain "
+                    "sum / max / min / and / or / xor is not supported (it would be "
+                    "silently mis-computed — e.g. a product combine returned as a sum, or "
+                    "a max-by-magnitude as a plain max). Refusing to emit silently-wrong "
+                    "output.")
 
         # Determine type from input operand. After a multipass wrap-loop the
         # operand is rebound to a freshly-typed accumulator whose env_type is
