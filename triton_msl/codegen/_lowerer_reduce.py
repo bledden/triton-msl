@@ -316,6 +316,21 @@ class _ReduceScanMixin:
                 return "min" if is_gt else "max" if is_lt else None
         return None
 
+    @staticmethod
+    def _reduce_is_unsigned_minmax(region_ops):
+        """True if a reduce combine is an UNSIGNED max/min: arith.maxui/minui, or a cmp+select
+        whose cmpi predicate is unsigned (ugt/ult/uge/ule). Triton types uint32 as i32 but
+        emits the unsigned op, so the reduction must compare UNSIGNED — a signed compare reads
+        0xFFFFFFFF as -1 and returns the wrong element (Triton-lens re-audit 2026-06-25).
+        """
+        for b in (region_ops or []):
+            nm = b.op or ""
+            if "maxui" in nm or "minui" in nm:
+                return True
+            if nm == "arith.cmpi" and (b.attrs.get("predicate_name", "") or "").startswith("u"):
+                return True
+        return False
+
     def _get_reduce_combine_info(self, ssa):
         """Extract combine op and identity from a tt.reduce's body region.
 
@@ -333,16 +348,30 @@ class _ReduceScanMixin:
                 op_name = body_op.op
                 if "addf" in op_name or "addi" in op_name:
                     combine_op = "sum"; has_real = True
+                elif "maximumf" in op_name or "minimumf" in op_name:
+                    # NaN-propagating max/min -> would lower to NaN-quiet fmax/min. Refuse.
+                    from triton_msl.errors import MetalNonRecoverableError
+                    raise MetalNonRecoverableError(
+                        "tl.reduce with a NaN-propagating max/min (propagate_nan=ALL) is "
+                        "not supported on the multipass reduction path (it would lower to "
+                        "NaN-quiet fmax/min and silently suppress NaN). Refusing.")
                 elif "max" in op_name:
                     combine_op = "max"; has_real = True
                 elif "min" in op_name:
                     combine_op = "min"; has_real = True
                 elif op_name == "arith.cmpf":
                     pred = body_op.attrs.get("predicate_name", "")
-                    if "gt" in pred:
+                    if "gt" in pred or "ge" in pred:
                         has_cmpf_gt = True
-                    elif "lt" in pred:
+                    elif "lt" in pred or "le" in pred:
                         has_cmpf_lt = True
+                elif op_name == "arith.cmpi":
+                    # integer cmp+select min/max — reach the operand-mapping classifier.
+                    if not has_real:
+                        has_cmpf_gt = has_cmpf_gt or "gt" in (
+                            body_op.attrs.get("predicate_name", "") or "")
+                        has_cmpf_lt = has_cmpf_lt or "lt" in (
+                            body_op.attrs.get("predicate_name", "") or "")
             if not has_real and (has_cmpf_gt or has_cmpf_lt):
                 # cmp + select max/min: classify by the select operand mapping, not the
                 # predicate alone (which inverts min<->max for the reversed select).
@@ -390,6 +419,7 @@ class _ReduceScanMixin:
                 "float": "(-INFINITY)",
                 "long": "LONG_MIN",
                 "ulong": "0",
+                "uint": "0",
                 "int": "INT_MIN",
             }.get(msl_type, "INT_MIN")
             combine_expr = "fmax(acc, val)" if is_float else "max(acc, val)"
@@ -398,6 +428,7 @@ class _ReduceScanMixin:
                 "float": "INFINITY",
                 "long": "LONG_MAX",
                 "ulong": "ULONG_MAX",
+                "uint": "UINT_MAX",
                 "int": "INT_MAX",
             }.get(msl_type, "INT_MAX")
             combine_expr = "fmin(acc, val)" if is_float else "min(acc, val)"
@@ -583,9 +614,17 @@ class _ReduceScanMixin:
                                           "min": "LONG_MAX"}
                     identity = i64_identities.get(combine_op, "0")
                 elif is_int_reduce:
-                    acc_msl_type = "int"
-                    int_identities = {"sum": "0", "max": "INT_MIN", "min": "INT_MAX"}
-                    identity = int_identities.get(combine_op, "0")
+                    if (combine_op in ("max", "min")
+                            and self._reduce_is_unsigned_minmax(ssa.region_ops)):
+                        # unsigned 32-bit max/min: compare UNSIGNED (Triton-lens re-audit
+                        # 2026-06-25; mirrors the is_i64->ulong branch above). The final
+                        # cross-thread simd reduce casts to reduce_ty in threadgroup_reduce.
+                        acc_msl_type = "uint"
+                        identity = "0" if combine_op == "max" else "UINT_MAX"
+                    else:
+                        acc_msl_type = "int"
+                        int_identities = {"sum": "0", "max": "INT_MIN", "min": "INT_MAX"}
+                        identity = int_identities.get(combine_op, "0")
                 else:
                     acc_msl_type = "float"
                 self.kb.raw_line(f"    {acc_msl_type} {acc_var} = {identity};")
@@ -691,6 +730,8 @@ class _ReduceScanMixin:
 
         # Determine combine op from body region
         combine_op = "sum"  # default
+        has_unsigned_minmax = False   # maxui/minui or unsigned cmpi -> unsigned max/min
+        has_nanprop_minmax = False    # arith.maximumf/minimumf (propagate_nan=ALL)
         if ssa.region_ops:
             has_cmpf_gt = False
             has_cmpf_lt = False
@@ -702,10 +743,20 @@ class _ReduceScanMixin:
                 op_name = body_op.op
                 if "addf" in op_name or "addi" in op_name:
                     combine_op = "sum"; has_real_combine = True
+                elif "maximumf" in op_name or "minimumf" in op_name:
+                    # IEEE-754 maximum/minimum (propagate_nan=ALL) propagates NaN; our
+                    # fmax/simd_max are NaN-quiet and would silently SUPPRESS NaN. Flag for a
+                    # loud refuse (Triton-lens re-audit 2026-06-25). Checked before the generic
+                    # 'max'/'min' substring so it is not bucketed as a NaN-quiet max.
+                    has_nanprop_minmax = True
                 elif "max" in op_name:
                     combine_op = "max"; has_real_combine = True
+                    if "maxui" in op_name:
+                        has_unsigned_minmax = True
                 elif "min" in op_name:
                     combine_op = "min"; has_real_combine = True
+                    if "minui" in op_name:
+                        has_unsigned_minmax = True
                 elif "xor" in op_name:
                     combine_op = "xor"; has_real_combine = True
                 elif op_name == "arith.andi":
@@ -714,16 +765,19 @@ class _ReduceScanMixin:
                     has_ori = True
                 elif op_name == "arith.cmpf":
                     pred = body_op.attrs.get("predicate_name", "")
-                    if "gt" in pred:
+                    if "gt" in pred or "ge" in pred:
                         has_cmpf_gt = True
-                    elif "lt" in pred:
+                    elif "lt" in pred or "le" in pred:
                         has_cmpf_lt = True
                 elif op_name == "arith.cmpi":
                     # int comparison combine (not pure bitwise). has_cmpi feeds the cmp+select
                     # classifier below; has_real_combine keeps an incidental select-mask andi
-                    # in a sum/cmpi reduce from mis-routing to and/or.
+                    # in a sum/cmpi reduce from mis-routing to and/or. An UNSIGNED predicate
+                    # (ugt/ult/uge/ule) marks an unsigned min/max.
                     has_real_combine = True
                     has_cmpi = True
+                    if (body_op.attrs.get("predicate_name", "") or "").startswith("u"):
+                        has_unsigned_minmax = True
             # cmp + select combine (NaN-propagating max2/min2 OR a custom where(a>b,b,a)),
             # INTEGER (cmpi) or float (cmpf): classify by the SELECT OPERAND MAPPING, not the
             # predicate alone (which inverts min<->max for the reversed select). An integer
@@ -752,6 +806,17 @@ class _ReduceScanMixin:
                     combine_op = "and"
                 elif has_ori:
                     combine_op = "or"
+
+            # A NaN-PROPAGATING max/min (arith.maximumf/minimumf, propagate_nan=ALL) would be
+            # silently lowered to NaN-quiet fmax/simd_max -> NaN suppressed. Refuse rather than
+            # mis-compute (Triton-lens re-audit 2026-06-25).
+            if has_nanprop_minmax:
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "tl.reduce with a NaN-propagating max/min (propagate_nan=ALL -> "
+                    "arith.maximumf/minimumf) is not supported — the reduction lowers to "
+                    "NaN-quiet fmax/min and would silently suppress NaN. Refusing. Use the "
+                    "default (NaN-quiet) tl.max/tl.min, or split the NaN handling out.")
 
             # A custom combine this path cannot honor must REFUSE, never silently default
             # to SUM (a product / arith.mulf) or a plain MAX (a max-by-magnitude
@@ -786,8 +851,15 @@ class _ReduceScanMixin:
             shared_dtype = "u64" if is_u64 else "i64"
             msl_type = "ulong" if is_u64 else "long"
         elif is_int_reduce:
-            shared_dtype = "i32"
-            msl_type = "int"
+            if has_unsigned_minmax and combine_op in ("max", "min"):
+                # unsigned 32-bit max/min: a signed int reduce gives the wrong answer
+                # (0xFFFFFFFF read as -1) -> route through uint (Triton-lens re-audit
+                # 2026-06-25; mirrors the u64->ulong branch above).
+                shared_dtype = "u32"
+                msl_type = "uint"
+            else:
+                shared_dtype = "i32"
+                msl_type = "int"
         else:
             shared_dtype = "fp32"
             msl_type = "float"

@@ -354,8 +354,13 @@ class KernelBuilder:
         simd_var = f"simd_{out_var}"
         read_var = f"shared_{out_var}"
 
-        # Step 1: SIMD-level reduction
-        self._var(simd_var, f"{intrinsic}({val_var})", ty=reduce_ty)
+        # Step 1: SIMD-level reduction. Cast val_var to reduce_ty BEFORE the simd op so the
+        # comparison runs in the reduce type — for an UNSIGNED max/min (reduce_ty='uint',
+        # val_var typed 'int' because Triton types uint32 as i32), simd_max(int) would compare
+        # SIGNED and return the wrong element; (uint)val_var reinterprets to compare unsigned.
+        # A no-op when val_var already matches reduce_ty (the normal int/float/long cases).
+        # (Triton-lens re-audit 2026-06-25.)
+        self._var(simd_var, f"{intrinsic}(({reduce_ty}){val_var})", ty=reduce_ty)
 
         n_simd_groups = (self.block_size + 31) // 32
 

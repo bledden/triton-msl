@@ -10,6 +10,7 @@ on core language semantics the matmul/reduce campaign never touched:
       Now derives the dtype from the IR result type + has a long/ulong branch.
 """
 import pytest
+import numpy as np
 import torch
 
 try:
@@ -314,3 +315,62 @@ def test_custom_3tuple_reduce_refuses_not_welford():
     O = [torch.zeros(1, device="mps") for _ in range(3)]
     with pytest.raises(MetalNonRecoverableError):
         _k_3tuple[(1,)](X, Y, Z, *O, N=N); torch.mps.synchronize()
+
+
+# --- round 4: unsigned max/min, NaN-propagate, ge/le predicate (re-audit 2026-06-25) ---
+if _HAS:
+    @triton.jit
+    def _k_umax(X, O, N: tl.constexpr):
+        tl.store(O, tl.max(tl.load(X + tl.arange(0, N)), 0))
+
+    @triton.jit
+    def _k_umin(X, O, N: tl.constexpr):
+        tl.store(O, tl.min(tl.load(X + tl.arange(0, N)), 0))
+
+    @triton.jit
+    def _nanprop(a, b):
+        return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
+
+    @triton.jit
+    def _k_nanprop(X, O, N: tl.constexpr):
+        tl.store(O, tl.reduce(tl.load(X + tl.arange(0, N)), 0, _nanprop))
+
+    @triton.jit
+    def _ge(a, b):
+        return tl.where(a >= b, a, b)
+
+    @triton.jit
+    def _k_ge(X, O, N: tl.constexpr):
+        tl.store(O, tl.reduce(tl.load(X + tl.arange(0, N)), 0, _ge))
+
+
+@requires
+@pytest.mark.parametrize("N", [64, 2048])   # small-N simd path + large-N multipass path
+def test_uint32_max_min_unsigned_not_signed(N):
+    _clear()
+    vals = np.arange(N, dtype=np.uint32); vals[0] = 0xFFFFFFFF; vals[1] = 0x80000000
+    X = torch.tensor(vals, dtype=torch.uint32, device="mps")
+    Omax = torch.zeros(1, dtype=torch.uint32, device="mps")
+    _k_umax[(1,)](X, Omax, N=N); torch.mps.synchronize()
+    assert Omax.item() == int(vals.max()), (N, Omax.item(), int(vals.max()))
+    Omin = torch.zeros(1, dtype=torch.uint32, device="mps")
+    _k_umin[(1,)](X, Omin, N=N); torch.mps.synchronize()
+    assert Omin.item() == int(vals.min()), (N, Omin.item(), int(vals.min()))
+
+
+@requires
+def test_nan_propagating_max_refuses():
+    _clear()
+    x = torch.randn(128); x[40] = float("nan")
+    O = torch.zeros(1, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _k_nanprop[(1,)](x.to("mps"), O, N=128); torch.mps.synchronize()
+
+
+@requires
+def test_float_ge_max_not_over_refused():
+    _clear()
+    x = torch.randn(128)
+    O = torch.zeros(1, device="mps")
+    _k_ge[(1,)](x.to("mps"), O, N=128); torch.mps.synchronize()   # ge/le must compute, not refuse
+    assert abs(O.item() - x.max().item()) < 1e-3, (O.item(), x.max().item())
