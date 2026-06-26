@@ -109,6 +109,20 @@ x = torch.randn(32, 256)
 out = compiled(x)
 ```
 
+**Performance.** The compiled kernels dispatch zero-copy through the same `compile_shader`
+fast path as the hand-written kernels. On an M4 Max, GPT-2 small (6 layers, 384-dim, 64
+tokens) runs in **~2.1 ms compiled vs ~7.3 ms eager — and ~4.6 ms through PyTorch's *own*
+native MPS Inductor backend**, i.e. triton-msl's path is faster than what PyTorch ships
+natively. Other architectures over eager (M4 Max, measured): BERT encoder ~1.4×, LSTM ~2.3×,
+LayerNorm/GroupNorm/RMSNorm ~2.2×, reduction-heavy modules ~1.6×.
+
+**Coverage.** Transformer/attention, RNN, normalization, and the common reductions (sum, mean,
+max/min incl. NaN-propagating, var/std, argmax/argmin, softmax, logsumexp, cumsum) compile and
+match eager. A few patterns are **refused loudly rather than mis-computed** (never silent-wrong):
+**product** reductions (`torch.prod`/`cumprod` — no `simd_product`) and **small persistent
+reductions** that under-fill a SIMD group (some CNN BatchNorm shapes). Those raise
+`MetalNonRecoverableError`; the rest of the graph is unaffected.
+
 ### MLX
 
 ```python
