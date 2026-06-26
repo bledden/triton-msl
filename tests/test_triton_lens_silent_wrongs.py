@@ -359,12 +359,24 @@ def test_uint32_max_min_unsigned_not_signed(N):
 
 
 @requires
-def test_nan_propagating_max_refuses():
+@pytest.mark.parametrize("N", [128, 2048])   # single-pass + multipass
+def test_nan_propagating_max_computes_and_propagates(N):
+    # A NaN-PROPAGATING max (tl.maximum propagate_nan=ALL, == inductor triton_helpers.maximum)
+    # now COMPUTES correctly (was refused): finite inputs -> the true max; a NaN anywhere ->
+    # NaN (propagates, matching numpy/torch). The cross-thread simd step (NaN-quiet) carries
+    # an any-NaN side-channel so propagation survives the threadgroup reduction.
+    import math
     _clear()
-    x = torch.randn(128); x[40] = float("nan")
+    x = torch.randn(N)
     O = torch.zeros(1, device="mps")
-    with pytest.raises(MetalNonRecoverableError):
-        _k_nanprop[(1,)](x.to("mps"), O, N=128); torch.mps.synchronize()
+    _k_nanprop[(1,)](x.to("mps"), O, N=N); torch.mps.synchronize()
+    assert abs(O.item() - x.max().item()) < 1e-3, (N, O.item(), x.max().item())
+    # a NaN present anywhere must propagate to the result
+    _clear()
+    x2 = torch.randn(N); x2[40] = float("nan")
+    O2 = torch.zeros(1, device="mps")
+    _k_nanprop[(1,)](x2.to("mps"), O2, N=N); torch.mps.synchronize()
+    assert math.isnan(O2.item()), (N, O2.item())
 
 
 @requires

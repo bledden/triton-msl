@@ -45,6 +45,27 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _fresh_inductor_cache():
+    """Clear PyTorch Inductor's persistent kernel cache ONCE at session start.
+
+    Inductor caches compiled kernels in /var/folders/.../torchinductor_* keyed by ITS own
+    hash (Triton source + config) — NOT by triton-msl's CODEGEN_VERSION. So a triton-msl
+    lowering change does NOT invalidate inductor's cache, and a torch.compile test can
+    silently run kernels a PRIOR session compiled before the change. That masked a
+    reduce-classifier regression (it refused inductor's NaN-propagating max -> broke
+    softmax/training) behind a green suite. Clearing once per session makes the
+    torch.compile tests exercise the CURRENT codegen rather than stale cached kernels.
+    """
+    try:
+        import shutil
+        import torch._inductor.runtime.cache_dir_utils as _cdu
+        shutil.rmtree(_cdu.cache_dir(), ignore_errors=True)
+    except Exception:
+        pass
+    yield
+
+
 class MetalKernelRunner:
     """Compile MSL, load metallib, run kernel, read results."""
 

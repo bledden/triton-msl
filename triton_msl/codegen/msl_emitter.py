@@ -341,8 +341,12 @@ class KernelBuilder:
         # natively. float-family (fp16/bf16/fp32) stays "float" — that's deliberately
         # MORE precise than reducing in half/bfloat.
         _is_float = reduce_ty in ("float", "half", "bfloat")
+        # NaN-PROPAGATING max/min (inductor maximum/minimum): the simd intrinsic is
+        # NaN-quiet, so carry an any-NaN flag through both reduction levels below.
+        _nan_prop = op in ("nanmax", "nanmin")
         if _is_float:
-            identity = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY"}[op]
+            identity = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY",
+                        "nanmax": "-INFINITY", "nanmin": "INFINITY"}[op]
         else:
             identity = {
                 "sum": f"({reduce_ty})0",
@@ -365,7 +369,15 @@ class KernelBuilder:
         # SIGNED and return the wrong element; (uint)val_var reinterprets to compare unsigned.
         # A no-op when val_var already matches reduce_ty (the normal int/float/long cases).
         # (Triton-lens re-audit 2026-06-25.)
-        self._var(simd_var, f"{intrinsic}(({reduce_ty}){val_var})", ty=reduce_ty)
+        if _nan_prop:
+            # simd_max/min is NaN-quiet (returns the non-NaN). For NaN-PROPAGATING max/min,
+            # force this group's partial result to NaN if ANY lane is NaN (`v != v`).
+            _v = f"(({reduce_ty}){val_var})"
+            self._var(simd_var,
+                      f"(simd_max(({_v} != {_v}) ? 1.0f : 0.0f) > 0.0f) "
+                      f"? ({reduce_ty})NAN : {intrinsic}({_v})", ty=reduce_ty)
+        else:
+            self._var(simd_var, f"{intrinsic}(({reduce_ty}){val_var})", ty=reduce_ty)
 
         n_simd_groups = (self.block_size + 31) // 32
 
@@ -390,7 +402,14 @@ class KernelBuilder:
 
         # Step 4: SIMD group 0 reads back and does final reduction (bounds-guarded)
         self._var(read_var, f"(tiisg < {n_simd_groups}u) ? {shared_var}[tiisg] : {identity}", ty=reduce_ty)
-        self._var(out_var, f"{intrinsic}({read_var})", ty=reduce_ty)
+        if _nan_prop:
+            # Final cross-group level: same NaN-quiet caveat — a per-group partial that is
+            # NaN (set above) must make the whole-tile result NaN.
+            self._var(out_var,
+                      f"(simd_max(({read_var} != {read_var}) ? 1.0f : 0.0f) > 0.0f) "
+                      f"? ({reduce_ty})NAN : {intrinsic}({read_var})", ty=reduce_ty)
+        else:
+            self._var(out_var, f"{intrinsic}({read_var})", ty=reduce_ty)
         return out_var
 
     # -- Build the MSL source --

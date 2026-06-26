@@ -322,9 +322,11 @@ class _ReduceScanMixin:
                 "arith.maxui": ("max", False), "arith.minui": ("min", False),
                 "arith.xori": ("xor", True), "arith.andi": ("and", True),
                 "arith.ori": ("or", True),
+                # NaN-PROPAGATING max/min as a direct op — lowered correctly (with NaN
+                # propagation) via the nanmax/nanmin path, not as NaN-quiet fmax.
+                "arith.maximumf": ("nanmax", True), "arith.minimumf": ("nanmin", True),
             }
-            # arith.maximumf/minimumf (NaN-PROPAGATING) and everything else fall through
-            # to None -> refuse (would lower to NaN-quiet fmax / would be silently wrong).
+            # everything else falls through to None -> refuse.
             return _DIRECT.get(nm)
         # (2) a cmp+select max/min: yielded select picking between the two block args,
         #     whose cmp compares exactly those block args. Sign + direction come from the
@@ -336,16 +338,36 @@ class _ReduceScanMixin:
     @staticmethod
     def _classify_cmp_select(ops, sel, a, b):
         """(kind, signed) for a cmp+select max/min, or None. The select must pick between the
-        two block args, and its condition must be a cmp of exactly those block args."""
+        two block args, and its condition must be a cmp of exactly those block args — OR an
+        ``ori(cmp, isnan)`` mask (inductor's NaN-propagating triton_helpers.maximum/minimum),
+        in which case the kind is the NaN-propagating ``nanmax``/``nanmin``."""
         t, f = sel.operand_ids[1], sel.operand_ids[2]
         if {t, f} != {a, b}:
             return None   # picks value-vs-mask / a derived value -> not a plain max/min
         cond = sel.operand_ids[0]
+        by_id = {o.id: o for o in ops}
+        cond_op = by_id.get(cond)
         cmp = None
-        for o in ops:
-            if o.id == cond and o.op in ("arith.cmpf", "arith.cmpi"):
-                cmp = o
-                break
+        nan_prop = False
+        if cond_op is not None and cond_op.op in ("arith.cmpf", "arith.cmpi"):
+            cmp = cond_op
+        elif (cond_op is not None and cond_op.op == "arith.ori"
+              and len(cond_op.operand_ids or []) == 2):
+            # NaN-propagating max/min: mask = (a CMP b) | (x != x), select(mask, a, b),
+            # where `x != x` (cmpf une, same operand twice) is isnan(x). Triton inductor's
+            # triton_helpers.maximum/minimum emit exactly this.
+            parts = [by_id.get(i) for i in cond_op.operand_ids]
+            cmp = next((o for o in parts if o is not None
+                        and o.op in ("arith.cmpf", "arith.cmpi")
+                        and set(o.operand_ids or []) == {a, b}), None)
+            isnan = next((o for o in parts if o is not None and o.op == "arith.cmpf"
+                          and len(o.operand_ids or []) >= 2
+                          and o.operand_ids[0] == o.operand_ids[1]
+                          and o.operand_ids[0] in (a, b)
+                          and "une" in (o.attrs.get("predicate_name", "") or "")), None)
+            if cmp is None or isnan is None:
+                return None
+            nan_prop = True
         if cmp is None or len(cmp.operand_ids or []) < 2:
             return None
         lhs, rhs = cmp.operand_ids[0], cmp.operand_ids[1]
@@ -361,6 +383,8 @@ class _ReduceScanMixin:
             kind = "min" if is_gt else "max" if is_lt else None
         else:
             kind = None
+        if kind and nan_prop:
+            kind = "nan" + kind   # nanmax / nanmin
         return (kind, signed) if kind else None
 
     def _get_reduce_combine_info(self, ssa):
@@ -382,7 +406,8 @@ class _ReduceScanMixin:
                 "refused rather than silently mis-computed.")
         combine_op = _res[0]
         identities = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY",
-                      "and": "(~0)", "or": "0", "xor": "0"}
+                      "and": "(~0)", "or": "0", "xor": "0",
+                      "nanmax": "-INFINITY", "nanmin": "INFINITY"}
         return combine_op, identities.get(combine_op, "0.0f")
 
     def _reduce_identity_combine(self, combine_op, msl_type):
@@ -422,6 +447,14 @@ class _ReduceScanMixin:
                 "int": "INT_MAX",
             }.get(msl_type, "INT_MAX")
             combine_expr = "fmin(acc, val)" if is_float else "min(acc, val)"
+        elif combine_op in ("nanmax", "nanmin"):
+            # NaN-PROPAGATING max/min (float-only; inductor maximum/minimum). Unlike
+            # fmax/fmin (NaN-quiet), a NaN in EITHER operand must propagate: return acc when
+            # acc beats val OR acc is NaN, else val (a val=NaN flows through the else since
+            # acc>val / acc<val is false for a NaN val). Identity -INF/INF can't mask a NaN.
+            cmp = ">" if combine_op == "nanmax" else "<"
+            identity = "(-INFINITY)" if combine_op == "nanmax" else "INFINITY"
+            combine_expr = f"((acc {cmp} val) || (acc != acc)) ? acc : val"
         elif combine_op == "xor":
             identity = "0"
             combine_expr = "acc ^ val"
@@ -650,6 +683,13 @@ class _ReduceScanMixin:
                     self.kb.raw_line(f"        {acc_var} |= {cast_input};")
                 elif combine_op == "xor":
                     self.kb.raw_line(f"        {acc_var} ^= {cast_input};")
+                elif combine_op in ("nanmax", "nanmin"):
+                    # NaN-PROPAGATING max/min: a NaN in acc OR the element must propagate
+                    # (max()/min() are NaN-quiet). The cross-thread simd step propagates too.
+                    _c = ">" if combine_op == "nanmax" else "<"
+                    self.kb.raw_line(
+                        f"        {acc_var} = (({acc_var} {_c} {cast_input}) || "
+                        f"({acc_var} != {acc_var})) ? {acc_var} : {cast_input};")
 
             # Close the loop
             self.kb.raw_line(f"    }}")
@@ -881,6 +921,10 @@ class _ReduceScanMixin:
                 _ident = "-INFINITY"
             elif combine_op == "min" and _is_float:
                 _ident = "INFINITY"
+            elif combine_op in ("nanmax", "nanmin"):
+                # NaN-prop max/min are float-only; -INF/INF tail-pad never spuriously
+                # introduces a NaN (so masked lanes don't poison the result).
+                _ident = "-INFINITY" if combine_op == "nanmax" else "INFINITY"
             elif combine_op == "max":
                 # integer max identity (reduce-probe over-refusal fix: int max/min over a
                 # splat was wrongly refused).

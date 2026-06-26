@@ -25,6 +25,11 @@ SIMD_REDUCTIONS = {
     "and": "simd_and",
     "or": "simd_or",
     "xor": "simd_xor",
+    # NaN-PROPAGATING max/min (inductor triton_helpers.maximum/minimum). The simd
+    # intrinsic itself is NaN-quiet; threadgroup_reduce adds an any-NaN side-channel
+    # so the result is NaN when any element is NaN.
+    "nanmax": "simd_max",
+    "nanmin": "simd_min",
 }
 
 # Metal memory barrier functions.
