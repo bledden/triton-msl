@@ -120,3 +120,28 @@ def test_scf_if_i64_accumulator_not_truncated():
     except MetalNonRecoverableError:
         return   # refusing is acceptable (correct-or-refuse); silently truncating is not
     assert OUT.item() == 1 + 10 * 1600000003   # 16000000031 exactly, no i64->i32/float loss
+
+
+# --- gather i64 truncation (Triton-lens re-audit 2026-06-25; the systematic-lead sibling) ---
+if _HAS:
+    @triton.jit
+    def _k_gather1d(SRC, IDX, OUT, S: tl.constexpr, I: tl.constexpr):
+        src = tl.load(SRC + tl.arange(0, S))
+        idx = tl.load(IDX + tl.arange(0, I))
+        tl.store(OUT + tl.arange(0, I), tl.gather(src, idx, axis=0))
+
+
+@requires
+def test_gather_i64_not_truncated_to_i32():
+    # gather of an int64 source whose values exceed 2^31 must NOT collapse to int32
+    # (3_000_000_000 truncated to int32 reads back -1_294_967_296). NB: torch-MPS's own
+    # gather is buggy for int64, so the reference is computed by direct indexing.
+    _clear()
+    S = I = 8
+    base = 3_000_000_000
+    SRC = torch.arange(S, dtype=torch.int64, device="mps") + base
+    IDX = torch.tensor([7, 0, 3, 5, 1, 6, 2, 4], dtype=torch.int32, device="mps")
+    OUT = torch.zeros(I, dtype=torch.int64, device="mps")
+    _k_gather1d[(1,)](SRC, IDX, OUT, S=S, I=I); torch.mps.synchronize()
+    expected = [base + j for j in IDX.tolist()]           # src[idx], i64-exact
+    assert OUT.tolist() == expected, (OUT.tolist(), expected)

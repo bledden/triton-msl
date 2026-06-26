@@ -5767,6 +5767,21 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         return None
 
+    @staticmethod
+    def _gather_stage_types(src_dtype):
+        """(msl_type, shared_dtype) for staging a value of ``src_dtype`` into the gather
+        threadgroup array. SINGLE source of truth for both the 1-D and 2-D gather paths.
+        64-bit ints MUST stage as long/ulong (shared_dtype i64/u64) — a 32-bit staging
+        array silently truncates the high word (Triton-lens re-audit 2026-06-25: a gather
+        of int64 source value 3_000_000_000 read back -1_294_967_296). Mirrors the
+        i64/u64 -> long/ulong branch the select/scan siblings already carry.
+        """
+        if src_dtype.startswith("fp") or src_dtype.startswith("bf"):
+            return "float", "fp32"
+        if src_dtype in ("i64", "u64", "ui64"):
+            return ("long", "i64") if src_dtype == "i64" else ("ulong", "u64")
+        return "int", "i32"
+
     def _lower_tt_gather(self, ssa: SSAValue):
         """tt.gather → shared memory indexed lookup.
 
@@ -5818,9 +5833,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         # Determine types
         src_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
-        is_float = src_dtype.startswith("fp") or src_dtype.startswith("bf")
-        msl_type = "float" if is_float else "int"
-        shared_dtype = "fp32" if is_float else "i32"
+        msl_type, shared_dtype = self._gather_stage_types(src_dtype)
 
         # Allocate shared memory for source
         shared_name = f"gather_shared_{self._shared_counter}"
@@ -5920,8 +5933,7 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
         src_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
         is_float = src_dtype.startswith("fp") or src_dtype.startswith("bf")
-        msl_type = "float" if is_float else "int"
-        shared_dtype = "fp32" if is_float else "i32"
+        msl_type, shared_dtype = self._gather_stage_types(src_dtype)
         zero = "0.0f" if is_float else "0"
 
         lid = self._lid_expr
