@@ -1570,18 +1570,12 @@ class _TemplateMixin:
 
         c_msl_type = triton_type_to_msl(c_elem)
 
-        # Genuine fp16 (WS1 Phase C): half INPUT fragments + float ACCUMULATOR
-        # (the matmul output tg_C stays float for the softmax epilogue). fp16 A/B
-        # are staged as half and fed to simdgroup_half8x8 — no float upcast — so
-        # the half MMA is actually used. bf16 here stays on the float-upcast path
-        # (staged+cast to float — exact and correct); unlike the plain-matmul
-        # lowering it does NOT yet use simdgroup_bfloat8x8 in this fused template
-        # (a future optimization — would need its own coverage). Other types: float.
-        input_msl_type = triton_type_to_msl(a_elem)
-        if input_msl_type == "half":
-            in_frag, in_stage_t, in_cast = "simdgroup_half8x8", "half", ""
-        else:
-            in_frag, in_stage_t, in_cast = "simdgroup_float8x8", "float", "float"
+        # Fragment selection via the SHARED _simdgroup_frag_for selector (no longer a
+        # divergent inline copy): half INPUT fragments + float ACCUMULATOR (the matmul
+        # output tg_C stays float for the softmax epilogue). fp16 -> half MMA (no float
+        # upcast); bf16 -> the M-series simdgroup_bfloat8x8 MMA (staged as bfloat, float
+        # accumulate -> the float softmax epilogue is unchanged); other types -> float.
+        _af, in_frag, in_stage_t, in_cast, _pad = self._simdgroup_frag_for(a_elem)
 
         # Each SIMD group owns ``N / 4`` columns of the output, which must
         # split evenly into 8-wide simdgroup tiles.
@@ -2327,25 +2321,6 @@ class _TemplateMixin:
                 if _dot_shape is not None:
                     break
 
-        def _init_is_bias(_id):
-            _op = _by.get(_id); _seen = set()
-            while _op is not None and _op.id not in _seen:
-                _seen.add(_op.id)
-                if _op.op in ("tt.splat", "tt.broadcast", "ttg.convert_layout",
-                              "tt.reshape", "tt.expand_dims"):
-                    _op = _by.get(_op.operand_ids[0]) if _op.operand_ids else None
-                    continue
-                break
-            if _op is None:
-                return False
-            # Only the accumulator (2-D tile matching the dot output) is the risk.
-            if _extract_shape(_op.type_str) != _dot_shape:
-                return False
-            if _op.op == "tt.load":
-                return True
-            if _op.op == "arith.constant":
-                return any(ch in "123456789" for ch in str(_op.attrs.get("value", "")))
-            return False
         _init_ids = []
         for _s in self.graph.ops:
             if _s.op == "scf.for" and len(_s.operand_ids) > 3:
@@ -2354,7 +2329,8 @@ class _TemplateMixin:
             for _s in self.graph.ops:
                 if _s.op == "tt.dot" and len(_s.operand_ids) >= 3:
                     _init_ids.append(_s.operand_ids[2]); break
-        if _dot_shape and any(_init_is_bias(_i) for _i in _init_ids):
+        if _dot_shape and any(
+                self._acc_init_is_bias(_i, _by, dot_shape=_dot_shape) for _i in _init_ids):
             from triton_msl.errors import MetalNonRecoverableError
             raise MetalNonRecoverableError(
                 "strided matmul with a non-zero accumulator init (fused bias / tl.full) "

@@ -144,11 +144,13 @@ if HAS:
 
 
 @requires_metal
-@pytest.mark.parametrize("dt", [torch.float32, torch.float16])
+@pytest.mark.parametrize("dt", [torch.float32, torch.float16, torch.bfloat16])
 def test_matmul_softmax_not_dropped(dt):
     # A simple matmul->row-softmax kernel once routed to _detect_simple_dot,
     # which emitted a BARE matmul and silently dropped the softmax (output ==
-    # A@B, row sums != 1). matmul_softmax is now checked first.
+    # A@B, row sums != 1). matmul_softmax is now checked first. bf16 was added
+    # when the softmax template's fragment selection was routed through the shared
+    # _simdgroup_frag_for (bf16 -> simdgroup_bfloat8x8 MMA instead of float-upcast).
     M = N = K = 32
     a = (torch.randn(M, K) * 0.3).to(dt)
     b = (torch.randn(K, N) * 0.3).to(dt)

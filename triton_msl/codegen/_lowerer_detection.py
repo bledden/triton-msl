@@ -109,6 +109,37 @@ class _DetectionMixin:
         extras = [p for p in all_ptr_args if p.name not in {q.name for q in ptrs}]
         return ptrs + extras
 
+    def _acc_init_is_bias(self, init_id, by_id, dot_shape=None):
+        """True iff a tt.dot accumulator init is CLEARLY a fused bias the inline matmul
+        template would SILENTLY DROP: a loaded value (traced through
+        splat/broadcast/convert_layout/reshape/expand_dims) or a NON-ZERO constant.
+        ``tl.zeros`` and unrecognized inits return False — never over-refuse a normal
+        matmul. When ``dot_shape`` is given (the strided-template path), only an init whose
+        shape matches the dot-output tile (the accumulator) counts; a load/const of a
+        different shape is not the accumulator bias. Single source of truth for the three
+        bias-init guards (K-loop iter-arg, non-looped dot-operand, strided template) — was
+        3 near-identical closures whose divergence is exactly the twin-drift silent-wrong
+        risk the campaign warns about.
+        """
+        _op = by_id.get(init_id)
+        _seen = set()
+        while _op is not None and _op.id not in _seen:
+            _seen.add(_op.id)
+            if _op.op in ("tt.splat", "tt.broadcast", "ttg.convert_layout",
+                          "tt.reshape", "tt.expand_dims"):
+                _op = by_id.get(_op.operand_ids[0]) if _op.operand_ids else None
+                continue
+            break
+        if _op is None:
+            return False
+        if dot_shape is not None and _extract_shape(_op.type_str) != dot_shape:
+            return False
+        if _op.op == "tt.load":
+            return True
+        if _op.op == "arith.constant":
+            return any(ch in "123456789" for ch in str(_op.attrs.get("value", "")))
+        return False
+
     def infer_dot_strides(self):
         """General ADDRESS-TRACED stride inference for a single-dot matmul.
 
@@ -675,31 +706,9 @@ class _DetectionMixin:
             # or a non-constant load/broadcast bias).
             by_id_all = {s.id: s for s in self.graph.ops}
 
-            def _init_is_bias(_id):
-                # True only when the loop-carried init is CLEARLY a fused bias the inline
-                # template drops: a loaded value (tt.load through splat/broadcast) or a
-                # NON-ZERO constant. A zero init (the standard tl.zeros accumulator, in
-                # whatever lowered form) or an unrecognized form returns False so we never
-                # over-refuse a normal matmul.
-                _op = by_id_all.get(_id); _seen = set()
-                while _op is not None and _op.id not in _seen:
-                    _seen.add(_op.id)
-                    if _op.op in ("tt.splat", "tt.broadcast", "ttg.convert_layout",
-                                  "tt.reshape", "tt.expand_dims"):
-                        _op = by_id_all.get(_op.operand_ids[0]) if _op.operand_ids else None
-                        continue
-                    break
-                if _op is None:
-                    return False
-                if _op.op == "tt.load":
-                    return True
-                if _op.op == "arith.constant":
-                    return any(ch in "123456789"
-                               for ch in str(_op.attrs.get("value", "")))
-                return False
             for _init_id in (scf_for_ssa.operand_ids[3:]
                              if len(scf_for_ssa.operand_ids) > 3 else []):
-                if _init_is_bias(_init_id):
+                if self._acc_init_is_bias(_init_id, by_id_all):
                     from triton_msl.errors import MetalNonRecoverableError
                     raise MetalNonRecoverableError(
                         "K-loop matmul with a non-zero loop-carried accumulator init "
@@ -764,26 +773,7 @@ class _DetectionMixin:
         # graph.ops (no scf.for iter-arg). Refuse if it is not a zero constant.
         _by0 = {s.id: s for s in self.graph.ops}
 
-        def _init_is_bias0(_id):
-            # True only when the dot's accumulator init is CLEARLY a fused bias (a loaded
-            # value or a non-zero constant); zero/unrecognized inits return False so a
-            # normal matmul (tl.zeros accumulator) is never over-refused.
-            _op = _by0.get(_id); _seen = set()
-            while _op is not None and _op.id not in _seen:
-                _seen.add(_op.id)
-                if _op.op in ("tt.splat", "tt.broadcast", "ttg.convert_layout",
-                              "tt.reshape", "tt.expand_dims"):
-                    _op = _by0.get(_op.operand_ids[0]) if _op.operand_ids else None
-                    continue
-                break
-            if _op is None:
-                return False
-            if _op.op == "tt.load":
-                return True
-            if _op.op == "arith.constant":
-                return any(ch in "123456789" for ch in str(_op.attrs.get("value", "")))
-            return False
-        if _init_is_bias0(dot_ssa.operand_ids[2]):
+        if self._acc_init_is_bias(dot_ssa.operand_ids[2], _by0):
             from triton_msl.errors import MetalNonRecoverableError
             raise MetalNonRecoverableError(
                 "non-looped matmul with a non-zero accumulator init (fused bias / "
