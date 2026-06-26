@@ -374,3 +374,50 @@ def test_float_ge_max_not_over_refused():
     O = torch.zeros(1, device="mps")
     _k_ge[(1,)](x.to("mps"), O, N=128); torch.mps.synchronize()   # ge/le must compute, not refuse
     assert abs(O.item() - x.max().item()) < 1e-3, (O.item(), x.max().item())
+
+
+# --- Phase-1 structural classifier: custom combine refuses, 1-D bitwise computes (2026-06-25) ---
+if _HAS:
+    @triton.jit
+    def _relusum(a, b):
+        return a + tl.where(b > 0, b, 0.0)
+
+    @triton.jit
+    def _k_relusum(X, O, N: tl.constexpr):
+        tl.store(O, tl.reduce(tl.load(X + tl.arange(0, N)), 0, _relusum))
+
+    @triton.jit
+    def _and2(a, b):
+        return a & b
+
+    @triton.jit
+    def _k_and(X, O, N: tl.constexpr):
+        tl.store(O, tl.reduce(tl.load(X + tl.arange(0, N)), 0, _and2))
+
+    @triton.jit
+    def _k_xor(X, O, N: tl.constexpr):
+        tl.store(O, tl.xor_sum(tl.load(X + tl.arange(0, N)), 0))
+
+
+@requires
+def test_sum_of_relu_custom_combine_refuses():
+    # a + relu(b) is a custom (non-canonical) combine — the structural classifier refuses it
+    # (the yielded addf's operands are not the two block args). Sniffing flipped it to MAX.
+    _clear()
+    x = torch.randn(64, device="mps"); O = torch.zeros(1, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _k_relusum[(1,)](x, O, N=64); torch.mps.synchronize()
+
+
+@requires
+def test_1d_bitwise_and_xor_compute():
+    # 1-D all()/any()/xor must COMPUTE (was over-refused via a KeyError in threadgroup_reduce).
+    _clear()
+    import numpy as _np
+    x = torch.randint(0, 255, (64,), dtype=torch.int32, device="mps")
+    OA = torch.zeros(1, dtype=torch.int32, device="mps")
+    _k_and[(1,)](x, OA, N=64); torch.mps.synchronize()
+    assert OA.item() == int(_np.bitwise_and.reduce(x.cpu().numpy()))
+    OX = torch.zeros(1, dtype=torch.int32, device="mps")
+    _k_xor[(1,)](x, OX, N=64); torch.mps.synchronize()
+    assert OX.item() == int(_np.bitwise_xor.reduce(x.cpu().numpy()))

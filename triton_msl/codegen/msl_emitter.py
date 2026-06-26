@@ -348,6 +348,11 @@ class KernelBuilder:
                 "sum": f"({reduce_ty})0",
                 "max": f"metal::numeric_limits<{reduce_ty}>::lowest()",
                 "min": f"metal::numeric_limits<{reduce_ty}>::max()",
+                # bitwise reductions (all()/any()/xor) — identities so a 1-D and/or/xor
+                # reduce computes instead of hitting a KeyError -> generic-fallback refusal.
+                "and": f"(~({reduce_ty})0)",
+                "or": f"({reduce_ty})0",
+                "xor": f"({reduce_ty})0",
             }[op]
 
         # Unique intermediate variable names

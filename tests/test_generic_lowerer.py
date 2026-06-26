@@ -3115,12 +3115,13 @@ def test_mept_reduce_uses_fold_when_operand_is_array():
         lowerer.env_array[50] = ("vals", 4, "float")
         lowerer.env_types[50] = "fp32"
 
-        # tt.reduce with a sum body.
+        # tt.reduce with a sum body: the combine returns addf(a, b) of the two block args
+        # (60, 61) — the structural classifier matches the yielded op against block_arg_ids.
         add_body = SSAValue(id=51, name="b51", op="arith.addf",
-                            operand_ids=[], attrs={}, type_str="f32",
+                            operand_ids=[60, 61], attrs={}, type_str="f32",
                             elem_type="f32", is_tensor=False)
         red = SSAValue(id=52, name="r52", op="tt.reduce",
-                       operand_ids=[50], attrs={"axis": 0},
+                       operand_ids=[50], attrs={"axis": 0, "block_arg_ids": [60, 61]},
                        type_str="f32", elem_type="f32", is_tensor=False,
                        region_ops=[add_body])
         lowerer._lower_reduce(red)

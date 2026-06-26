@@ -253,70 +253,6 @@ class _ReduceScanMixin:
         return acc
 
     @staticmethod
-    def _reduce_combine_has_foreign_op(region_ops):
-        """True if a tt.reduce combine body contains a compute op that is NOT part of a
-        supported sum / max / min / bitwise combine — a foreign op (arith.mulf/muli ->
-        product, arith.subf, arith.divf, math.absf -> max-by-magnitude, ...) means a
-        CUSTOM associative combine the reduction paths cannot honor and would SILENTLY
-        mis-compute (default-to-sum, or a plain max ignoring the abs/select structure).
-        The caller refuses on True. (Triton-lens audit 2026-06-25: a product combine
-        returned the SUM; a max-by-magnitude combine returned a plain MAX.)
-        """
-        _OK = ("arith.addf", "arith.addi", "arith.xori", "arith.andi", "arith.ori",
-               "arith.cmpf", "arith.cmpi", "arith.select", "arith.constant",
-               "arith.extf", "arith.truncf", "arith.extsi", "arith.extui",
-               "arith.sitofp", "arith.fptosi", "arith.uitofp", "arith.fptoui",
-               "arith.trunci")
-        for b in (region_ops or []):
-            nm = b.op or ""
-            if not (nm.startswith("arith.") or nm.startswith("math.")):
-                continue   # structural (the reduce.return terminator, block args, ...)
-            if "max" in nm or "min" in nm:
-                continue   # arith.maximumf / maxsi / minimumf / ... = the max/min combine
-            if nm not in _OK:
-                return True
-        return False
-
-    @staticmethod
-    def _cmp_select_reduce_kind(region_ops):
-        """For a reduce combine body that is a cmp + select (no arith.max/min op), return
-        'max' or 'min' from the SELECT OPERAND MAPPING — NOT the cmpf predicate alone. The
-        magnitude comparison is the cmp whose two operands are exactly the two values the
-        select chooses between (so an isnan/ordered check cmp is ignored):
-            select(a>b, a, b) = max   select(a>b, b, a) = min
-            select(a<b, b, a) = max   select(a<b, a, b) = min
-        Returns None if the mapping cannot be verified (the caller then refuses). Reading the
-        predicate direction alone (gt->max, lt->min) silently inverts min<->max for the
-        reversed select — Triton-lens re-audit 2026-06-25: where(a>b,b,a) (a MIN) was emitted
-        as MAX.
-        """
-        sel = None
-        cmps = []
-        for b in (region_ops or []):
-            nm = b.op or ""
-            if nm in ("arith.cmpf", "arith.cmpi"):
-                cmps.append(b)
-            elif nm == "arith.select":
-                sel = b
-        if sel is None or len(sel.operand_ids) < 3:
-            return None
-        t, f = sel.operand_ids[1], sel.operand_ids[2]
-        for c in cmps:
-            if len(c.operand_ids) < 2:
-                continue
-            lhs, rhs = c.operand_ids[0], c.operand_ids[1]
-            if {lhs, rhs} != {t, f}:
-                continue   # not the value comparison (e.g. an isnan / ordered check)
-            pred = c.attrs.get("predicate_name", "") or ""
-            is_gt = "gt" in pred or "ge" in pred
-            is_lt = "lt" in pred or "le" in pred
-            if t == lhs:
-                return "max" if is_gt else "min" if is_lt else None
-            if t == rhs:
-                return "min" if is_gt else "max" if is_lt else None
-        return None
-
-    @staticmethod
     def _reduce_is_unsigned_minmax(region_ops):
         """True if a reduce combine is an UNSIGNED max/min: arith.maxui/minui, or a cmp+select
         whose cmpi predicate is unsigned (ugt/ult/uge/ule). Triton types uint32 as i32 but
@@ -331,6 +267,87 @@ class _ReduceScanMixin:
                 return True
         return False
 
+    # ------------------------------------------------------------------ #
+    # Structural reduce-combine classifier (single source of truth).
+    #
+    # Classifies a 1-input tt.reduce's combine by EXACT STRUCTURE — the
+    # yielded op matched against the combine's block arguments — rather than
+    # by sniffing op-name substrings across the whole region. This is what
+    # lets it distinguish a pure sum (yielded `addf(a,b)`) from a custom
+    # `a + relu(b)` (yielded `addf(a, select(...))`, whose operands are NOT
+    # the block args): the latter REFUSES. An UNRECOGNISED / custom combine
+    # always returns None so the caller refuses loudly — never a silent
+    # default-to-sum / plain-max. Replaces the prior twin substring loops +
+    # _cmp_select_reduce_kind + _reduce_combine_has_foreign_op +
+    # _reduce_is_unsigned_minmax.
+    # ------------------------------------------------------------------ #
+    def classify_reduce_combine(self, ssa):
+        """Return (kind, signed) for a 1-input tt.reduce combine, or None to refuse.
+
+        kind in {'sum','max','min','and','or','xor'}; `signed` is meaningful only for
+        max/min (False = unsigned). None means the combine is not a provably-canonical
+        reduction (a product, max-by-magnitude, NaN-propagating max/min, custom a+relu(b),
+        an identity/first/last pick, ...) — the caller must refuse.
+        """
+        ops = ssa.region_ops or []
+        ba = (ssa.attrs or {}).get("block_arg_ids") or []
+        if not ops or len(ba) != 2:
+            return None   # tuple combines (argmax/argmin/Welford) use the multi-value path
+        a, b = ba[0], ba[1]
+        bargs = {a, b}
+        top = ops[-1]                          # yielded op (the reduce.return terminator is parsed out)
+        nm = top.op or ""
+        # (1) a DIRECT binary op of exactly the two block args.
+        if set(top.operand_ids or []) == bargs:
+            _DIRECT = {
+                "arith.addf": ("sum", True), "arith.addi": ("sum", True),
+                "arith.maxnumf": ("max", True), "arith.maxf": ("max", True),
+                "arith.minnumf": ("min", True), "arith.minf": ("min", True),
+                "arith.maxsi": ("max", True), "arith.minsi": ("min", True),
+                "arith.maxui": ("max", False), "arith.minui": ("min", False),
+                "arith.xori": ("xor", True), "arith.andi": ("and", True),
+                "arith.ori": ("or", True),
+            }
+            # arith.maximumf/minimumf (NaN-PROPAGATING) and everything else fall through
+            # to None -> refuse (would lower to NaN-quiet fmax / would be silently wrong).
+            return _DIRECT.get(nm)
+        # (2) a cmp+select max/min: yielded select picking between the two block args,
+        #     whose cmp compares exactly those block args. Sign + direction come from the
+        #     cmp predicate AND the select operand mapping (where(a>b,b,a) is a MIN).
+        if nm == "arith.select" and len(top.operand_ids or []) >= 3:
+            return self._classify_cmp_select(ops, top, a, b)
+        return None
+
+    @staticmethod
+    def _classify_cmp_select(ops, sel, a, b):
+        """(kind, signed) for a cmp+select max/min, or None. The select must pick between the
+        two block args, and its condition must be a cmp of exactly those block args."""
+        t, f = sel.operand_ids[1], sel.operand_ids[2]
+        if {t, f} != {a, b}:
+            return None   # picks value-vs-mask / a derived value -> not a plain max/min
+        cond = sel.operand_ids[0]
+        cmp = None
+        for o in ops:
+            if o.id == cond and o.op in ("arith.cmpf", "arith.cmpi"):
+                cmp = o
+                break
+        if cmp is None or len(cmp.operand_ids or []) < 2:
+            return None
+        lhs, rhs = cmp.operand_ids[0], cmp.operand_ids[1]
+        if {lhs, rhs} != {a, b}:
+            return None
+        pred = (cmp.attrs.get("predicate_name", "") or "")
+        is_gt = "gt" in pred or "ge" in pred
+        is_lt = "lt" in pred or "le" in pred
+        signed = not (cmp.op == "arith.cmpi" and pred.startswith("u"))
+        if t == lhs:
+            kind = "max" if is_gt else "min" if is_lt else None
+        elif t == rhs:
+            kind = "min" if is_gt else "max" if is_lt else None
+        else:
+            kind = None
+        return (kind, signed) if kind else None
+
     def _get_reduce_combine_info(self, ssa):
         """Extract combine op and identity from a tt.reduce's body region.
 
@@ -339,59 +356,16 @@ class _ReduceScanMixin:
         A custom combine this multipass path cannot honor REFUSES (never defaults
         to sum) — the prime directive.
         """
-        combine_op = "sum"
-        if ssa.region_ops:
-            has_cmpf_gt = False
-            has_cmpf_lt = False
-            has_real = False
-            for body_op in ssa.region_ops:
-                op_name = body_op.op
-                if "addf" in op_name or "addi" in op_name:
-                    combine_op = "sum"; has_real = True
-                elif "maximumf" in op_name or "minimumf" in op_name:
-                    # NaN-propagating max/min -> would lower to NaN-quiet fmax/min. Refuse.
-                    from triton_msl.errors import MetalNonRecoverableError
-                    raise MetalNonRecoverableError(
-                        "tl.reduce with a NaN-propagating max/min (propagate_nan=ALL) is "
-                        "not supported on the multipass reduction path (it would lower to "
-                        "NaN-quiet fmax/min and silently suppress NaN). Refusing.")
-                elif "max" in op_name:
-                    combine_op = "max"; has_real = True
-                elif "min" in op_name:
-                    combine_op = "min"; has_real = True
-                elif op_name == "arith.cmpf":
-                    pred = body_op.attrs.get("predicate_name", "")
-                    if "gt" in pred or "ge" in pred:
-                        has_cmpf_gt = True
-                    elif "lt" in pred or "le" in pred:
-                        has_cmpf_lt = True
-                elif op_name == "arith.cmpi":
-                    # integer cmp+select min/max — reach the operand-mapping classifier.
-                    if not has_real:
-                        has_cmpf_gt = has_cmpf_gt or "gt" in (
-                            body_op.attrs.get("predicate_name", "") or "")
-                        has_cmpf_lt = has_cmpf_lt or "lt" in (
-                            body_op.attrs.get("predicate_name", "") or "")
-            if not has_real and (has_cmpf_gt or has_cmpf_lt):
-                # cmp + select max/min: classify by the select operand mapping, not the
-                # predicate alone (which inverts min<->max for the reversed select).
-                _k = self._cmp_select_reduce_kind(ssa.region_ops)
-                if _k is not None:
-                    combine_op = _k; has_real = True
-            # A custom combine this multipass path cannot honor — a product (arith.mulf)
-            # that would DEFAULT to sum, a max-by-magnitude (absf+select) that would reduce
-            # to a plain max, an xor, or any other foreign compute op — must REFUSE, never
-            # silently mis-compute. (Triton-lens audit 2026-06-25; subsumes the earlier
-            # xor refuse — the multipass path supports only sum/max/min.)
-            if not has_real or self._reduce_combine_has_foreign_op(ssa.region_ops):
-                from triton_msl.errors import MetalNonRecoverableError
-                raise MetalNonRecoverableError(
-                    "tl.reduce with a custom associative combine that is not a plain "
-                    "sum / max / min is not supported on the multipass reduction path "
-                    "(it would be silently mis-computed — e.g. a product combine returned "
-                    "as a sum, or a max-by-magnitude as a plain max). Refusing to emit "
-                    "silently-wrong output.")
-
+        _res = self.classify_reduce_combine(ssa)
+        # The multipass path supports only sum/max/min (and/or/xor/custom refuse here —
+        # the prior twin substring loop never grew an and/or/xor branch on this path).
+        if _res is None or _res[0] not in ("sum", "max", "min"):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "tl.reduce on the multipass reduction path supports only sum / max / min; "
+                "a custom / NaN-propagating / and / or / xor combine is refused rather than "
+                "silently mis-computed.")
+        combine_op = _res[0]
         identities = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY"}
         return combine_op, identities.get(combine_op, "0.0f")
 
@@ -728,110 +702,23 @@ class _ReduceScanMixin:
         input_var = self._lookup(ssa.operand_ids[0])
         axis = ssa.attrs.get("axis", 0)
 
-        # Determine combine op from body region
-        combine_op = "sum"  # default
-        has_unsigned_minmax = False   # maxui/minui or unsigned cmpi -> unsigned max/min
-        has_nanprop_minmax = False    # arith.maximumf/minimumf (propagate_nan=ALL)
-        if ssa.region_ops:
-            has_cmpf_gt = False
-            has_cmpf_lt = False
-            has_real_combine = False
-            has_andi = False
-            has_ori = False
-            has_cmpi = False
-            for body_op in ssa.region_ops:
-                op_name = body_op.op
-                if "addf" in op_name or "addi" in op_name:
-                    combine_op = "sum"; has_real_combine = True
-                elif "maximumf" in op_name or "minimumf" in op_name:
-                    # IEEE-754 maximum/minimum (propagate_nan=ALL) propagates NaN; our
-                    # fmax/simd_max are NaN-quiet and would silently SUPPRESS NaN. Flag for a
-                    # loud refuse (Triton-lens re-audit 2026-06-25). Checked before the generic
-                    # 'max'/'min' substring so it is not bucketed as a NaN-quiet max.
-                    has_nanprop_minmax = True
-                elif "max" in op_name:
-                    combine_op = "max"; has_real_combine = True
-                    if "maxui" in op_name:
-                        has_unsigned_minmax = True
-                elif "min" in op_name:
-                    combine_op = "min"; has_real_combine = True
-                    if "minui" in op_name:
-                        has_unsigned_minmax = True
-                elif "xor" in op_name:
-                    combine_op = "xor"; has_real_combine = True
-                elif op_name == "arith.andi":
-                    has_andi = True
-                elif op_name == "arith.ori":
-                    has_ori = True
-                elif op_name == "arith.cmpf":
-                    pred = body_op.attrs.get("predicate_name", "")
-                    if "gt" in pred or "ge" in pred:
-                        has_cmpf_gt = True
-                    elif "lt" in pred or "le" in pred:
-                        has_cmpf_lt = True
-                elif op_name == "arith.cmpi":
-                    # int comparison combine (not pure bitwise). has_cmpi feeds the cmp+select
-                    # classifier below; has_real_combine keeps an incidental select-mask andi
-                    # in a sum/cmpi reduce from mis-routing to and/or. An UNSIGNED predicate
-                    # (ugt/ult/uge/ule) marks an unsigned min/max.
-                    has_real_combine = True
-                    has_cmpi = True
-                    if (body_op.attrs.get("predicate_name", "") or "").startswith("u"):
-                        has_unsigned_minmax = True
-            # cmp + select combine (NaN-propagating max2/min2 OR a custom where(a>b,b,a)),
-            # INTEGER (cmpi) or float (cmpf): classify by the SELECT OPERAND MAPPING, not the
-            # predicate alone (which inverts min<->max for the reversed select). An integer
-            # cmp+select used to fall through to combine_op='sum' and silently compute a SUM
-            # (Triton-lens re-audit 2026-06-25). If the mapping is a masked-sum (the select
-            # picks value-vs-mask, not the two operands) _cmp_select_reduce_kind returns None
-            # and combine_op correctly stays 'sum'.
-            if combine_op == "sum" and (has_cmpf_gt or has_cmpf_lt or has_cmpi):
-                _k = self._cmp_select_reduce_kind(ssa.region_ops)
-                if _k is not None:
-                    combine_op = _k; has_real_combine = True
-            # A PURE bitwise reduce (andi/ori as the ONLY combine — all()/any()) was
-            # silently defaulting to SUM (reduce-probe finding). Compute it as and/or
-            # (threadgroup_reduce routes to simd_and/simd_or). Only override when NO
-            # arithmetic/comparison combine matched, so an incidental andi (e.g. a select
-            # mask inside a sum/cmpi reduce — which broke training) does NOT mis-route.
-            # A pure bitwise reduce (andi/ori as the ONLY combine — all()/any()) was
-            # silently a SUM (reduce-probe). Compute it as and/or (threadgroup_reduce
-            # routes to simd_and/simd_or; identities in _reduce_identity_combine). Only
-            # when NO arithmetic/comparison combine matched, so an incidental andi (e.g.
-            # a select mask in a sum/cmpi reduce — which broke training) is NOT
-            # mis-routed. Where a particular and/or route can't lower it refuses loudly
-            # (never a silent SUM).
-            if not has_real_combine:
-                if has_andi:
-                    combine_op = "and"
-                elif has_ori:
-                    combine_op = "or"
-
-            # A NaN-PROPAGATING max/min (arith.maximumf/minimumf, propagate_nan=ALL) would be
-            # silently lowered to NaN-quiet fmax/simd_max -> NaN suppressed. Refuse rather than
-            # mis-compute (Triton-lens re-audit 2026-06-25).
-            if has_nanprop_minmax:
-                from triton_msl.errors import MetalNonRecoverableError
-                raise MetalNonRecoverableError(
-                    "tl.reduce with a NaN-propagating max/min (propagate_nan=ALL -> "
-                    "arith.maximumf/minimumf) is not supported — the reduction lowers to "
-                    "NaN-quiet fmax/min and would silently suppress NaN. Refusing. Use the "
-                    "default (NaN-quiet) tl.max/tl.min, or split the NaN handling out.")
-
-            # A custom combine this path cannot honor must REFUSE, never silently default
-            # to SUM (a product / arith.mulf) or a plain MAX (a max-by-magnitude
-            # absf+select). Supported combines here are sum/max/min/xor/and/or; a foreign
-            # compute op, or no definitive combine match at all, refuses loudly.
-            # (Triton-lens audit 2026-06-25.)
-            if (self._reduce_combine_has_foreign_op(ssa.region_ops)
-                    or not (has_real_combine or has_andi or has_ori)):
-                from triton_msl.errors import MetalNonRecoverableError
-                raise MetalNonRecoverableError(
-                    "tl.reduce with a custom associative combine that is not a plain "
-                    "sum / max / min / and / or / xor is not supported (it would be "
-                    "silently mis-computed — e.g. a product combine returned as a sum, or "
-                    "a max-by-magnitude as a plain max). Refusing to emit silently-wrong "
-                    "output.")
+        # Determine the combine via the structural classifier (single source of truth).
+        # The 1-D path supports sum/max/min (signed+unsigned) + and/or/xor; a custom /
+        # NaN-propagating / unrecognised combine returns None -> refuse loudly.
+        _res = self.classify_reduce_combine(ssa)
+        if _res is not None:
+            combine_op, _signed = _res
+            has_unsigned_minmax = combine_op in ("max", "min") and not _signed
+        elif ssa.region_ops:
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "tl.reduce with a combine that is not a canonical sum / max / min / and / "
+                "or / xor reduction is not supported — a product, max-by-magnitude, NaN-"
+                "propagating max/min, a + relu(b), or other custom combine is refused rather "
+                "than silently mis-computed.")
+        else:
+            combine_op = "sum"            # no combine region (degenerate) — historical default
+            has_unsigned_minmax = False
 
         # Determine type from input operand. After a multipass wrap-loop the
         # operand is rebound to a freshly-typed accumulator whose env_type is
