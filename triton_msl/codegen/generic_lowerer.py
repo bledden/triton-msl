@@ -5330,6 +5330,10 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             msl_type = "half"
         elif input_dtype == "bf16":
             msl_type = "bfloat"
+        elif input_dtype in ("i64", "u64", "ui64"):
+            # 64-bit ints must keep full width — int/i32 silently drops the high word
+            # (Triton-lens re-audit 2026-06-25, the join/cat dtype-default sibling).
+            msl_type = "long" if input_dtype == "i64" else "ulong"
 
         result_var = self._next_var("cat")
 
@@ -5354,7 +5358,9 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             shared_a = f"join_shared_a_{self._shared_counter}"
             shared_b = f"join_shared_b_{self._shared_counter}"
             self._shared_counter += 1
-            shared_dtype = "fp32" if is_float else "i32"
+            shared_dtype = ("i64" if input_dtype == "i64"
+                            else "u64" if input_dtype in ("u64", "ui64")
+                            else "fp32" if is_float else "i32")
             self.kb.declare_threadgroup_array(shared_a, dtype=shared_dtype, size=N)
             self.kb.declare_threadgroup_array(shared_b, dtype=shared_dtype, size=N)
 
@@ -5424,6 +5430,11 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         elif input_dtype == "bf16":
             msl_type = "bfloat"
             shared_dtype = "bf16"
+        elif input_dtype in ("i64", "u64", "ui64"):
+            # 64-bit ints must keep full width — int/i32 silently drops the high word
+            # (Triton-lens re-audit 2026-06-25, the join/cat dtype-default sibling).
+            msl_type = "long" if input_dtype == "i64" else "ulong"
+            shared_dtype = "i64" if input_dtype == "i64" else "u64"
 
         # Allocate shared memory for both halves
         shared_a = f"cat_shared_a_{self._shared_counter}"

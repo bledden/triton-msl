@@ -145,3 +145,107 @@ def test_gather_i64_not_truncated_to_i32():
     _k_gather1d[(1,)](SRC, IDX, OUT, S=S, I=I); torch.mps.synchronize()
     expected = [base + j for j in IDX.tolist()]           # src[idx], i64-exact
     assert OUT.tolist() == expected, (OUT.tolist(), expected)
+
+
+# --- join/cat i64 truncation + cmp+select reduce inversion (re-audit round 2, 2026-06-25) ---
+if _HAS:
+    @triton.jit
+    def _k_join(A, B, OUT, N: tl.constexpr):
+        a = tl.load(A + tl.arange(0, N)); b = tl.load(B + tl.arange(0, N))
+        tl.store(OUT + tl.arange(0, 2 * N), tl.reshape(tl.join(a, b), (2 * N,)))
+
+    @triton.jit
+    def _k_cat(A, B, OUT, N: tl.constexpr):
+        a = tl.load(A + tl.arange(0, N)); b = tl.load(B + tl.arange(0, N))
+        tl.store(OUT + tl.arange(0, 2 * N), tl.cat(a, b, can_reorder=True))
+
+    @triton.jit
+    def _min_via_gt(a, b):
+        return tl.where(a > b, b, a)        # semantic MIN (predicate says gt)
+
+    @triton.jit
+    def _max_via_lt(a, b):
+        return tl.where(a < b, b, a)        # semantic MAX (predicate says lt)
+
+    @triton.jit
+    def _k_reduce_cmbsel(X, OUT, N: tl.constexpr, which: tl.constexpr):
+        v = tl.load(X + tl.arange(0, N))
+        r = tl.reduce(v, 0, _min_via_gt) if which == 0 else tl.reduce(v, 0, _max_via_lt)
+        tl.store(OUT, r)
+
+
+@requires
+def test_join_i64_not_truncated():
+    _clear()
+    N, base = 8, 3_000_000_001
+    A = torch.arange(N, dtype=torch.int64, device="mps") + base
+    B = torch.arange(N, dtype=torch.int64, device="mps") + base + 100
+    OUT = torch.zeros(2 * N, dtype=torch.int64, device="mps")
+    _k_join[(1,)](A, B, OUT, N=N); torch.mps.synchronize()
+    exp = torch.stack([A.cpu(), B.cpu()], dim=1).reshape(2 * N)   # CPU reference
+    assert (OUT.cpu() == exp).all(), (OUT[:4].tolist(), exp[:4].tolist())
+
+
+@requires
+def test_cat_i64_not_truncated():
+    _clear()
+    N, base = 8, (2 ** 40) + 7
+    A = torch.arange(N, dtype=torch.int64, device="mps") + base
+    B = torch.arange(N, dtype=torch.int64, device="mps") + base + 100
+    OUT = torch.zeros(2 * N, dtype=torch.int64, device="mps")
+    _k_cat[(1,)](A, B, OUT, N=N); torch.mps.synchronize()
+    exp = torch.cat([A.cpu(), B.cpu()])
+    assert (OUT.cpu() == exp).all(), (OUT[:4].tolist(), exp[:4].tolist())
+
+
+@requires
+def test_reduce_cmp_select_not_inverted():
+    # where(a>b,b,a) is a MIN and where(a<b,b,a) is a MAX — classifying by the cmpf
+    # predicate alone inverted them (MIN computed as MAX). Must compute correctly (or refuse).
+    _clear()
+    X = torch.tensor([1., -5., 3., -2., 4., -9., 0.5, 2.])
+    for which, ref in ((0, X.min().item()), (1, X.max().item())):
+        OUT = torch.zeros(1, device="mps")
+        try:
+            _k_reduce_cmbsel[(1,)](X.to("mps"), OUT, N=8, which=which); torch.mps.synchronize()
+        except MetalNonRecoverableError:
+            continue   # refusing is acceptable (correct-or-refuse)
+        assert abs(OUT.item() - ref) < 1e-3, (which, OUT.item(), ref)
+
+
+# --- argmax/argmin i64 (re-audit round 2 sibling: SIMD-shuffle value staging truncated i64) ---
+if _HAS:
+    @triton.jit
+    def _k_argmax1d(X, OUT, N: tl.constexpr):
+        tl.store(OUT, tl.argmax(tl.load(X + tl.arange(0, N)), 0))
+
+    @triton.jit
+    def _k_argmax2d(X, OUT, M: tl.constexpr, N: tl.constexpr):
+        om = tl.arange(0, M); on = tl.arange(0, N)
+        tl.store(OUT + om, tl.argmax(tl.load(X + om[:, None] * N + on[None, :]), 1))
+
+
+@requires
+def test_argmax_i64_1d_refuses_not_wrong_index():
+    # 1-D argmax over i64 must REFUSE (the SIMD-shuffle reduction has no 64-bit path; a
+    # 32-bit staging silently truncated and returned the wrong index). i32 must still work.
+    _clear()
+    X = torch.tensor([3_000_000_005, 1, 3_000_000_009, 2, 3_000_000_001, 0, 7, 3],
+                     dtype=torch.int64, device="mps")
+    OUT = torch.zeros(1, dtype=torch.int32, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _k_argmax1d[(1,)](X, OUT, N=8); torch.mps.synchronize()
+    Xi = X.to(torch.int32); OUT2 = torch.zeros(1, dtype=torch.int32, device="mps")
+    _k_argmax1d[(1,)](Xi, OUT2, N=8); torch.mps.synchronize()   # i32 still computes
+    assert OUT2.item() == int(Xi.cpu().argmax())
+
+
+@requires
+def test_argmax_i64_2d_correct_index():
+    # 2-D argmax (shared-memory path) handles i64 at full width -> correct index.
+    _clear()
+    M, N = 4, 32
+    X = (torch.arange(M * N, dtype=torch.int64, device="mps") + 3_000_000_000).reshape(M, N)
+    OUT = torch.zeros(M, dtype=torch.int32, device="mps")
+    _k_argmax2d[(1,)](X, OUT, M=M, N=N); torch.mps.synchronize()
+    assert OUT.cpu().tolist() == X.cpu().argmax(1).tolist()

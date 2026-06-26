@@ -277,6 +277,45 @@ class _ReduceScanMixin:
                 return True
         return False
 
+    @staticmethod
+    def _cmp_select_reduce_kind(region_ops):
+        """For a reduce combine body that is a cmp + select (no arith.max/min op), return
+        'max' or 'min' from the SELECT OPERAND MAPPING — NOT the cmpf predicate alone. The
+        magnitude comparison is the cmp whose two operands are exactly the two values the
+        select chooses between (so an isnan/ordered check cmp is ignored):
+            select(a>b, a, b) = max   select(a>b, b, a) = min
+            select(a<b, b, a) = max   select(a<b, a, b) = min
+        Returns None if the mapping cannot be verified (the caller then refuses). Reading the
+        predicate direction alone (gt->max, lt->min) silently inverts min<->max for the
+        reversed select — Triton-lens re-audit 2026-06-25: where(a>b,b,a) (a MIN) was emitted
+        as MAX.
+        """
+        sel = None
+        cmps = []
+        for b in (region_ops or []):
+            nm = b.op or ""
+            if nm in ("arith.cmpf", "arith.cmpi"):
+                cmps.append(b)
+            elif nm == "arith.select":
+                sel = b
+        if sel is None or len(sel.operand_ids) < 3:
+            return None
+        t, f = sel.operand_ids[1], sel.operand_ids[2]
+        for c in cmps:
+            if len(c.operand_ids) < 2:
+                continue
+            lhs, rhs = c.operand_ids[0], c.operand_ids[1]
+            if {lhs, rhs} != {t, f}:
+                continue   # not the value comparison (e.g. an isnan / ordered check)
+            pred = c.attrs.get("predicate_name", "") or ""
+            is_gt = "gt" in pred or "ge" in pred
+            is_lt = "lt" in pred or "le" in pred
+            if t == lhs:
+                return "max" if is_gt else "min" if is_lt else None
+            if t == rhs:
+                return "min" if is_gt else "max" if is_lt else None
+        return None
+
     def _get_reduce_combine_info(self, ssa):
         """Extract combine op and identity from a tt.reduce's body region.
 
@@ -304,10 +343,12 @@ class _ReduceScanMixin:
                         has_cmpf_gt = True
                     elif "lt" in pred:
                         has_cmpf_lt = True
-            if not has_real and has_cmpf_gt:
-                combine_op = "max"; has_real = True
-            elif not has_real and has_cmpf_lt:
-                combine_op = "min"; has_real = True
+            if not has_real and (has_cmpf_gt or has_cmpf_lt):
+                # cmp + select max/min: classify by the select operand mapping, not the
+                # predicate alone (which inverts min<->max for the reversed select).
+                _k = self._cmp_select_reduce_kind(ssa.region_ops)
+                if _k is not None:
+                    combine_op = _k; has_real = True
             # A custom combine this multipass path cannot honor — a product (arith.mulf)
             # that would DEFAULT to sum, a max-by-magnitude (absf+select) that would reduce
             # to a plain max, an xor, or any other foreign compute op — must REFUSE, never
@@ -678,11 +719,14 @@ class _ReduceScanMixin:
                         has_cmpf_lt = True
                 elif op_name == "arith.cmpi":
                     has_real_combine = True   # int comparison combine (not pure bitwise)
-            # cmpf ogt + select = NaN-propagating max (triton_helpers.max2)
-            if combine_op == "sum" and has_cmpf_gt:
-                combine_op = "max"; has_real_combine = True
-            elif combine_op == "sum" and has_cmpf_lt:
-                combine_op = "min"; has_real_combine = True
+            # cmp + select combine (NaN-propagating max2/min2 OR a custom where(a>b,b,a)):
+            # classify by the SELECT OPERAND MAPPING, not the predicate alone (which inverts
+            # min<->max for the reversed select). Unverifiable -> stays not-real and the
+            # custom-combine refuse guard below fires.
+            if combine_op == "sum" and (has_cmpf_gt or has_cmpf_lt):
+                _k = self._cmp_select_reduce_kind(ssa.region_ops)
+                if _k is not None:
+                    combine_op = _k; has_real_combine = True
             # A PURE bitwise reduce (andi/ori as the ONLY combine — all()/any()) was
             # silently defaulting to SUM (reduce-probe finding). Compute it as and/or
             # (threadgroup_reduce routes to simd_and/simd_or). Only override when NO
@@ -1116,6 +1160,18 @@ class _ReduceScanMixin:
         # Determine value type
         val_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
         is_int = not (val_dtype.startswith("fp") or val_dtype.startswith("bf"))
+        # A 64-bit int value cannot go through this SIMD-shuffle reduction — simd_shuffle_down
+        # has NO 64-bit overload, and staging as 32-bit would silently truncate the high word
+        # and pick the WRONG index (Triton-lens re-audit 2026-06-25: argmax over i64 values
+        # > 2^31 returned a wrong index). Refuse cleanly rather than truncate or emit a cryptic
+        # 'no matching simd_shuffle_down' compile error.
+        if val_dtype in ("i64", "u64", "ui64"):
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "argmax/argmin over a 64-bit integer value is not supported (the SIMD-shuffle "
+                "reduction has no 64-bit path; a 32-bit staging would silently truncate the "
+                "high word and return the wrong index). Refusing. Cast the values to int32 or "
+                "float first.", op_name="tt.reduce")
         msl_val_type = "int" if is_int else "float"
         val_shared_dtype = "i32" if is_int else "fp32"
 
@@ -1236,14 +1292,27 @@ class _ReduceScanMixin:
 
         val_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
         is_int = not (val_dtype.startswith("fp") or val_dtype.startswith("bf"))
-        msl_val_type = "int" if is_int else "float"
-        val_shared_dtype = "i32" if is_int else "fp32"
+        is_i64 = val_dtype in ("i64", "u64", "ui64")
+        # 64-bit int values compare at full width (else the high word truncates and the
+        # arg index is wrong) — Triton-lens re-audit 2026-06-25.
+        if not is_int:
+            msl_val_type, val_shared_dtype = "float", "fp32"
+        elif is_i64:
+            msl_val_type = "long" if val_dtype == "i64" else "ulong"
+            val_shared_dtype = "i64" if val_dtype == "i64" else "u64"
+        else:
+            msl_val_type, val_shared_dtype = "int", "i32"
 
         is_max = self._detect_reduce_direction(ssa)
         cmp_op = ">" if is_max else "<"
         identity = "(-INFINITY)" if is_max and not is_int else "INFINITY"
         if is_int:
-            identity = "INT_MIN" if is_max else "INT_MAX"
+            if val_dtype == "i64":
+                identity = "LONG_MIN" if is_max else "LONG_MAX"
+            elif is_i64:                                   # u64/ui64
+                identity = "0" if is_max else "ULONG_MAX"
+            else:
+                identity = "INT_MIN" if is_max else "INT_MAX"
 
         # Shared memory for values and indices
         shared_val = f"shared_{self._shared_counter}"
