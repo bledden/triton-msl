@@ -249,3 +249,68 @@ def test_argmax_i64_2d_correct_index():
     OUT = torch.zeros(M, dtype=torch.int32, device="mps")
     _k_argmax2d[(1,)](X, OUT, M=M, N=N); torch.mps.synchronize()
     assert OUT.cpu().tolist() == X.cpu().argmax(1).tolist()
+
+
+# --- round 3: convert_layout i64 / integer cmp+select / Welford-misroute (2026-06-25) ---
+if _HAS:
+    @triton.jit
+    def _k_2dsum(X, OUT, M: tl.constexpr, N: tl.constexpr):
+        om = tl.arange(0, M); on = tl.arange(0, N)
+        tl.store(OUT + on, tl.sum(tl.load(X + om[:, None] * N + on[None, :]), 0))
+
+    @triton.jit
+    def _imax(a, b):
+        return tl.where(a > b, a, b)
+
+    @triton.jit
+    def _imin(a, b):
+        return tl.where(a > b, b, a)
+
+    @triton.jit
+    def _k_int_cmpsel(X, OUT, N: tl.constexpr, w: tl.constexpr):
+        v = tl.load(X + tl.arange(0, N))
+        tl.store(OUT, tl.reduce(v, 0, _imax) if w == 0 else tl.reduce(v, 0, _imin))
+
+    @triton.jit
+    def _tmax(a1, b1, c1, a2, b2, c2):
+        return tl.maximum(a1, a2), tl.maximum(b1, b2), tl.maximum(c1, c2)
+
+    @triton.jit
+    def _k_3tuple(X, Y, Z, OA, OB, OC, N: tl.constexpr):
+        x = tl.load(X + tl.arange(0, N)); y = tl.load(Y + tl.arange(0, N)); z = tl.load(Z + tl.arange(0, N))
+        a, b, c = tl.reduce((x, y, z), 0, _tmax)
+        tl.store(OA, a); tl.store(OB, b); tl.store(OC, c)
+
+
+@requires
+def test_2d_int64_reduce_not_truncated_by_convert_layout():
+    _clear()
+    M = N = 16
+    X = ((1 << 34) + torch.arange(M * N, dtype=torch.int64, device="mps")).reshape(M, N)
+    OUT = torch.zeros(N, dtype=torch.int64, device="mps")
+    _k_2dsum[(1,)](X, OUT, M=M, N=N); torch.mps.synchronize()
+    assert (OUT.cpu() == X.cpu().sum(0)).all(), (OUT[0].item(), X.cpu().sum(0)[0].item())
+
+
+@requires
+def test_integer_cmp_select_reduce_not_sum():
+    _clear()
+    torch.manual_seed(0)
+    X = torch.randint(-100000, 100000, (128,), dtype=torch.int32, device="mps")
+    for w, ref in ((0, int(X.cpu().max())), (1, int(X.cpu().min()))):
+        OUT = torch.zeros(1, dtype=torch.int32, device="mps")
+        try:
+            _k_int_cmpsel[(1,)](X, OUT, N=128, w=w); torch.mps.synchronize()
+        except MetalNonRecoverableError:
+            continue   # refuse is acceptable; silently summing is not
+        assert OUT.item() == ref, (w, OUT.item(), ref)
+
+
+@requires
+def test_custom_3tuple_reduce_refuses_not_welford():
+    _clear()
+    N = 128
+    X = torch.randn(N, device="mps"); Y = torch.randn(N, device="mps"); Z = torch.randn(N, device="mps")
+    O = [torch.zeros(1, device="mps") for _ in range(3)]
+    with pytest.raises(MetalNonRecoverableError):
+        _k_3tuple[(1,)](X, Y, Z, *O, N=N); torch.mps.synchronize()

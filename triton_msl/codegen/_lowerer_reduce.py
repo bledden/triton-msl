@@ -697,6 +697,7 @@ class _ReduceScanMixin:
             has_real_combine = False
             has_andi = False
             has_ori = False
+            has_cmpi = False
             for body_op in ssa.region_ops:
                 op_name = body_op.op
                 if "addf" in op_name or "addi" in op_name:
@@ -718,12 +719,19 @@ class _ReduceScanMixin:
                     elif "lt" in pred:
                         has_cmpf_lt = True
                 elif op_name == "arith.cmpi":
-                    has_real_combine = True   # int comparison combine (not pure bitwise)
-            # cmp + select combine (NaN-propagating max2/min2 OR a custom where(a>b,b,a)):
-            # classify by the SELECT OPERAND MAPPING, not the predicate alone (which inverts
-            # min<->max for the reversed select). Unverifiable -> stays not-real and the
-            # custom-combine refuse guard below fires.
-            if combine_op == "sum" and (has_cmpf_gt or has_cmpf_lt):
+                    # int comparison combine (not pure bitwise). has_cmpi feeds the cmp+select
+                    # classifier below; has_real_combine keeps an incidental select-mask andi
+                    # in a sum/cmpi reduce from mis-routing to and/or.
+                    has_real_combine = True
+                    has_cmpi = True
+            # cmp + select combine (NaN-propagating max2/min2 OR a custom where(a>b,b,a)),
+            # INTEGER (cmpi) or float (cmpf): classify by the SELECT OPERAND MAPPING, not the
+            # predicate alone (which inverts min<->max for the reversed select). An integer
+            # cmp+select used to fall through to combine_op='sum' and silently compute a SUM
+            # (Triton-lens re-audit 2026-06-25). If the mapping is a masked-sum (the select
+            # picks value-vs-mask, not the two operands) _cmp_select_reduce_kind returns None
+            # and combine_op correctly stays 'sum'.
+            if combine_op == "sum" and (has_cmpf_gt or has_cmpf_lt or has_cmpi):
                 _k = self._cmp_select_reduce_kind(ssa.region_ops)
                 if _k is not None:
                     combine_op = _k; has_real_combine = True
@@ -1030,6 +1038,22 @@ class _ReduceScanMixin:
 
         # Dispatch Welford (3-value) vs argmax/argmin (2-value)
         if len(ssa.operand_ids) >= 3 and ssa.result_ids and len(ssa.result_ids) >= 3:
+            # Route to Welford ONLY if the body is the online-variance recurrence (it divides
+            # by the running count — arith.divf). A custom 3-tuple combine (triple-max,
+            # triple-sum, ...) has no division and would be SILENTLY computed as the Welford
+            # mean/m2/weight math (Triton-lens re-audit 2026-06-25: a triple-max returned
+            # Welford output). Refuse it rather than mis-compute, mirroring the 2-value
+            # comparison-presence guard below.
+            _has_div = any((bop.op or "").startswith("arith.div")
+                           for bop in (ssa.region_ops or []))
+            if not _has_div:
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    "multi-value tl.reduce with a 3+ element tuple body that is not the "
+                    "Welford online-variance recurrence (it does not divide by a running "
+                    "count) is not supported — it would be silently computed as variance. "
+                    "Refusing. Only tl.var/tl.std (Welford) 3-tuples and value+index "
+                    "argmax/argmin 2-tuples are handled.", op_name="tt.reduce")
             self._lower_reduce_welford(ssa)
             return
 

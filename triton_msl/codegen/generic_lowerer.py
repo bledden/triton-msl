@@ -6805,11 +6805,18 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             return False
         n_dst = dst_ll.num_registers_per_thread
 
-        # Shared buffer holds the whole tile in compute form (float for
-        # fp/bf, int for integer), matching the existing convert_layout path.
+        # Shared buffer holds the whole tile in compute form (float for fp/bf, int for
+        # integer). 64-bit ints must stage at full width — the register array (arr_ty) is
+        # already long/ulong, so an i32 buffer would truncate src_arr[i] on the store
+        # (Triton-lens re-audit 2026-06-25: latent twin of the convert_layout i64 defect).
         src_dtype = self.env_types.get(src_id, "fp32")
         is_int = not (src_dtype.startswith("fp") or src_dtype.startswith("bf"))
-        shared_dtype = "i32" if is_int else "fp32"
+        if not is_int:
+            shared_dtype = "fp32"
+        elif src_dtype in ("i64", "u64", "ui64"):
+            shared_dtype = "i64" if src_dtype == "i64" else "u64"
+        else:
+            shared_dtype = "i32"
         shared_name = f"shuf_{self._shared_counter}"
         self._shared_counter += 1
         self.kb.declare_threadgroup_array(shared_name, dtype=shared_dtype,
@@ -6944,11 +6951,19 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
             self._emit_passthrough(ssa)
             return
 
-        # Determine source element type
+        # Determine source element type. 64-bit ints must re-stage at full width — an i32
+        # buffer silently truncates the high word (Triton-lens re-audit 2026-06-25: a 2-D
+        # int64 reduce accumulates correctly in long but convert_layout re-staged the
+        # result through i32 and truncated it).
         src_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
         is_int = not (src_dtype.startswith("fp") or src_dtype.startswith("bf"))
-        msl_type = "int" if is_int else "float"
-        shared_dtype = "i32" if is_int else "fp32"
+        if not is_int:
+            msl_type, shared_dtype = "float", "fp32"
+        elif src_dtype in ("i64", "u64", "ui64"):
+            msl_type = "long" if src_dtype == "i64" else "ulong"
+            shared_dtype = "i64" if src_dtype == "i64" else "u64"
+        else:
+            msl_type, shared_dtype = "int", "i32"
 
         # Allocate shared memory for the redistribution
         shared_name = f"shared_{self._shared_counter}"
