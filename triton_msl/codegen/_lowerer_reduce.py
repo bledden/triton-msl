@@ -615,7 +615,7 @@ class _ReduceScanMixin:
                     identity = i64_identities.get(combine_op, "0")
                 elif is_int_reduce:
                     if (combine_op in ("max", "min")
-                            and self._reduce_is_unsigned_minmax(ssa.region_ops)):
+                            and self._reduce_is_unsigned_minmax(next_reduce.region_ops)):
                         # unsigned 32-bit max/min: compare UNSIGNED (Triton-lens re-audit
                         # 2026-06-25; mirrors the is_i64->ulong branch above). The final
                         # cross-thread simd reduce casts to reduce_ty in threadgroup_reduce.
