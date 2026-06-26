@@ -267,6 +267,21 @@ class _ReduceScanMixin:
                 return True
         return False
 
+    @staticmethod
+    def _reduce_acc_msl_type(dtype, unsigned=False):
+        """(msl_type, shared_dtype) for a reduce accumulator/staging of `dtype`. Single
+        source of truth for the reduce-accumulator type selection (was duplicated across the
+        1-D, multipass, and scan paths). `unsigned=True` routes a 32-bit max/min through uint
+        — Triton types uint32 as i32, so a signed compare reads 0xFFFFFFFF as -1.
+        """
+        if dtype.startswith("fp") or dtype.startswith("bf"):
+            return "float", "fp32"
+        if dtype in ("i64", "u64", "ui64"):
+            return ("ulong", "u64") if dtype in ("u64", "ui64") else ("long", "i64")
+        if unsigned:
+            return "uint", "u32"
+        return "int", "i32"
+
     # ------------------------------------------------------------------ #
     # Structural reduce-combine classifier (single source of truth).
     #
@@ -577,30 +592,24 @@ class _ReduceScanMixin:
                 )
                 is_i64_reduce = reduce_input_dtype in ("i64", "u64", "ui64")
                 is_u64_reduce = reduce_input_dtype in ("u64", "ui64")
+                # unsigned 32-bit max/min compares UNSIGNED; the final cross-thread simd
+                # reduce casts to reduce_ty in threadgroup_reduce.
+                _unsigned = (combine_op in ("max", "min")
+                             and self._reduce_is_unsigned_minmax(next_reduce.region_ops))
+                acc_msl_type, _ = self._reduce_acc_msl_type(reduce_input_dtype, _unsigned)
                 if is_i64_reduce:
-                    acc_msl_type = "ulong" if is_u64_reduce else "long"
                     # 64-bit identities (LONG_MIN/MAX); ulong min identity is 0.
-                    if is_u64_reduce:
-                        i64_identities = {"sum": "0", "max": "0",
-                                          "min": "ULONG_MAX"}
-                    else:
-                        i64_identities = {"sum": "0", "max": "LONG_MIN",
-                                          "min": "LONG_MAX"}
+                    i64_identities = ({"sum": "0", "max": "0", "min": "ULONG_MAX"}
+                                      if is_u64_reduce
+                                      else {"sum": "0", "max": "LONG_MIN", "min": "LONG_MAX"})
                     identity = i64_identities.get(combine_op, "0")
                 elif is_int_reduce:
-                    if (combine_op in ("max", "min")
-                            and self._reduce_is_unsigned_minmax(next_reduce.region_ops)):
-                        # unsigned 32-bit max/min: compare UNSIGNED (Triton-lens re-audit
-                        # 2026-06-25; mirrors the is_i64->ulong branch above). The final
-                        # cross-thread simd reduce casts to reduce_ty in threadgroup_reduce.
-                        acc_msl_type = "uint"
+                    if _unsigned:
                         identity = "0" if combine_op == "max" else "UINT_MAX"
                     else:
-                        acc_msl_type = "int"
-                        int_identities = {"sum": "0", "max": "INT_MIN", "min": "INT_MAX"}
-                        identity = int_identities.get(combine_op, "0")
-                else:
-                    acc_msl_type = "float"
+                        identity = {"sum": "0", "max": "INT_MIN",
+                                    "min": "INT_MAX"}.get(combine_op, "0")
+                # else float: identity preserved from above
                 self.kb.raw_line(f"    {acc_msl_type} {acc_var} = {identity};")
 
             # Open the per-element loop
@@ -734,22 +743,8 @@ class _ReduceScanMixin:
         )
         is_i64 = input_dtype in ("i64", "u64", "ui64")
         is_u64 = input_dtype in ("u64", "ui64")
-        if is_i64:
-            shared_dtype = "u64" if is_u64 else "i64"
-            msl_type = "ulong" if is_u64 else "long"
-        elif is_int_reduce:
-            if has_unsigned_minmax and combine_op in ("max", "min"):
-                # unsigned 32-bit max/min: a signed int reduce gives the wrong answer
-                # (0xFFFFFFFF read as -1) -> route through uint (Triton-lens re-audit
-                # 2026-06-25; mirrors the u64->ulong branch above).
-                shared_dtype = "u32"
-                msl_type = "uint"
-            else:
-                shared_dtype = "i32"
-                msl_type = "int"
-        else:
-            shared_dtype = "fp32"
-            msl_type = "float"
+        msl_type, shared_dtype = self._reduce_acc_msl_type(
+            input_dtype, has_unsigned_minmax and combine_op in ("max", "min"))
 
         # Check if this is a 2D axis-specific reduction
         input_shape = self.env_shapes.get(ssa.operand_ids[0])
@@ -2006,20 +2001,9 @@ class _ReduceScanMixin:
         is_int = not (input_dtype.startswith("fp") or input_dtype.startswith("bf"))
         is_i64 = input_dtype in ("i64", "u64", "ui64")
         is_u64 = input_dtype in ("u64", "ui64")
-        if input_dtype == "bf16":
-            msl_type = "float"
-            shared_dtype = "fp32"
-        elif is_i64:
-            # 64-bit ints must NOT be truncated to i32 — cumsum/associative_scan wrapped
-            # at 2^31 (re-audit #13). Mirror the i64-aware _lower_reduce sibling.
-            msl_type = "ulong" if is_u64 else "long"
-            shared_dtype = "u64" if is_u64 else "i64"
-        elif is_int:
-            msl_type = "int"
-            shared_dtype = "i32"
-        else:
-            msl_type = "float"
-            shared_dtype = "fp32"
+        # 64-bit ints must NOT truncate to i32 (cumsum/scan wrapped at 2^31, re-audit #13);
+        # the shared accumulator-type helper handles it (scan has no unsigned max/min).
+        msl_type, shared_dtype = self._reduce_acc_msl_type(input_dtype)
 
         # A multi-value scan stages EVERY slot with operand-0's dtype (single
         # shared_dtype), so a mixed-dtype scan (e.g. i32 count + fp32 sum) silently
