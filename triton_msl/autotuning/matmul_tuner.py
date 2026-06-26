@@ -27,7 +27,11 @@ import os
 # valid_candidates completeness/symmetry; it is never *selected*.
 CANDIDATES = [(4, 4), (4, 2), (4, 8),
               (2, 8), (2, 4), (2, 2),
-              (1, 8), (1, 4), (1, 2)]
+              (1, 8), (1, 4), (1, 2),
+              # rc=1 (per-simdgroup strip width 8) — serve N % 8 == 0 but N % 16 != 0,
+              # the finest column tiling; tried last (smallest tile) so an N%16-aligned
+              # shape still prefers a wider rc.
+              (4, 1), (2, 1), (1, 1)]
 
 _CORES = None
 
@@ -51,13 +55,22 @@ def _enabled():
 
 def valid_candidates(M, N, K):
     """Candidates whose size contract this shape satisfies. The fast template needs
-    M % (8*rr) == 0 (row tile) and N % (32*rc) == 0 (col tile; the col-guard only
-    protects whole simdgroup strips, so N must align to the FULL 32*rc tile, not
-    just 32) and K % 8 == 0 (8-deep K fragments)."""
+    M % (8*rr) == 0 (row tile), N % (8*rc) == 0 (the per-simdgroup STRIP width — each of
+    the 4 simdgroups owns an 8*rc-wide strip and the kernel's ``if (col0 >= N) return``
+    guard skips whole strips beyond N, so N need only align to the strip, NOT the full
+    32*rc threadgroup tile), and K % 8 == 0 (8-deep K fragments).
+
+    Relaxed from N % (32*rc) (the matmul N%32 perf cliff, 2026-06-26): the dispatch already
+    gates on exactly N % sel_strip (= N % (8*rc)) and the fast template is verified byte-
+    exact there, but the tuner's stricter 32*rc gate was returning None for any N%32!=0
+    shape — forcing it to the ~1.2-1.8 TF generic path (BELOW the ~2.4 generic floor) even
+    when N%8==0. With the strip-width gate + the rc=1 candidates, N%8==0 shapes (odd
+    vocab/hidden dims) now reach the fast path. N%8!=0 still routes to generic (a partial
+    strip would write past N)."""
     if K % 8 != 0:
         return []
     return [(rr, rc) for (rr, rc) in CANDIDATES
-            if M % (8 * rr) == 0 and N % (32 * rc) == 0]
+            if M % (8 * rr) == 0 and N % (8 * rc) == 0]
 
 
 def _occupancy_ok(M, N, rr, rc):

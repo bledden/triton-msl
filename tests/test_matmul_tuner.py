@@ -23,12 +23,18 @@ def test_candidates_default_first_register_safe_includes_rr1():
     assert any(rr == 1 for rr, rc in CANDIDATES)         # rr=1 -> M%8 coverage
 
 
-def test_valid_candidates_N_contract_is_32rc_not_32():
-    # N=2048 (%256==0): every rc valid; M=2048 (%64==0): every rr -> all candidates.
+def test_valid_candidates_N_contract_is_strip_width_8rc():
+    # N=2048 (%64==0): every rc valid; M=2048 (%64==0): every rr -> all candidates.
     assert set(valid_candidates(2048, 2048, 2048)) == set(CANDIDATES)
-    # N=2080: 2080%64==32, %128==32, %256==32 -> NO rc aligns to 32*rc -> empty
-    # regardless of M (this is the N-contract bug class: N%32 is NOT sufficient).
-    assert valid_candidates(256, 2080, 256) == []
+    # N must align to the per-simdgroup STRIP width (8*rc), NOT the full 32*rc tile — the
+    # kernel's `col0 >= N` guard masks the overshoot (verified byte-exact in the dispatch).
+    # So N=2080 (%32==0, %128!=0), which the old 32*rc gate WRONGLY excluded (the matmul
+    # N%32 perf cliff), is valid via every rc whose strip 8*rc divides it.
+    v = valid_candidates(256, 2080, 256)
+    assert v and all(2080 % (8 * rc) == 0 for rr, rc in v)
+    # A genuinely strip-unaligned N (N % 8 != 0) stays empty — a partial strip would write
+    # past N, so it correctly routes to the generic path.
+    assert valid_candidates(256, 2050, 256) == []
     # M=48 (%16==0, %32!=0): only rr in {2,1}; (4,4) excluded.
     v = valid_candidates(48, 2048, 2048)
     assert (4, 4) not in v and all(rr in (1, 2) for rr, rc in v)
@@ -52,9 +58,13 @@ def test_unaligned_large_M8_uses_rr1():
     assert cfg is not None and cfg[0] == 1 and 2040 % 8 == 0
 
 
-def test_unaligned_small_M_routes_to_generic():
-    # M=48: rr=2/1 valid but n_groups tiny (< 320) -> gate fails -> None (generic).
-    assert best_rrrc("fp32", "fp32", 48, 2048, 2048) is None
+def test_low_parallelism_routes_to_generic():
+    # A genuinely low-parallelism shape (small M AND small N) has too few threadgroups to
+    # beat generic, so the occupancy gate returns None. NB: small M with LARGE N now uses
+    # the fast rc=1 path (measured ~14x faster than generic, byte-exact) — so M alone no
+    # longer routes to generic; only true low total parallelism does.
+    assert best_rrrc("fp32", "fp32", 48, 48, 2048) is None
+    assert best_rrrc("fp32", "fp32", 48, 2048, 2048) is not None   # large N -> fast (rc=1)
 
 
 def test_killswitch_pins_default_or_none(monkeypatch):

@@ -65,8 +65,8 @@
   },
   "matmul_2048_fp32": {
     "name": "matmul_2048_fp32",
-    "min_ms": 1.7872,
-    "tflops": 9.61
+    "min_ms": 1.4892,
+    "tflops": 11.54
   },
   "matmul_2048_fp16": {
     "name": "matmul_2048_fp16",
@@ -125,7 +125,7 @@
     ]
   },
   "matmul_fast_path_unaligned_M": {
-    "_note": "Deterministic, occupancy-gated tile selection extends the fast simdgroup matmul to UNALIGNED M (TRITON_MSL_MATMUL_AUTOTUNE=1, default; =0 pins fixed (4,4)). NOT a GPU-timed autotuner (the earlier timed/disk-cached version measured within-noise AND introduced an N-contract silent-wrong; removed). The fixed (4,4) needs M%32==0, so M%32!=0 drops to the ~2.4 TFLOP/s generic path; a smaller tile (rr=2 tile_m=16 for M%16, rr=1 tile_m=8 for M%8) keeps LARGE unaligned-M matmuls on the fast path. Occupancy gate (n_groups >= 8*cores) so only enough-parallelism shapes use the fine tile; below it -> generic (never-regress). All configs provably correct (selection is perf-only). Measured 2026-06-20, M4 Max, @triton.jit fp32 (BM=BN=BK=32) through production dispatch_fast_matmul, ON vs OFF, 20 reps median.",
+    "_note": "Deterministic, occupancy-gated tile selection extends the fast simdgroup matmul to UNALIGNED M AND N (TRITON_MSL_MATMUL_AUTOTUNE=1, default; =0 pins fixed (4,4)). NOT a GPU-timed autotuner (the earlier timed/disk-cached version measured within-noise AND introduced an N-contract silent-wrong; removed). The fixed (4,4) needs M%32==0 and N%32==0; a smaller tile (rr=2/tile_m=16 for M%16, rr=1/tile_m=8 for M%8; rc=2/strip=16 for N%16, rc=1/strip=8 for N%8) keeps unaligned M OR N matmuls on the fast path. The tuner gates on the per-simdgroup STRIP width (M%(8*rr), N%(8*rc)) -- the kernel's col0>=N guard masks the overshoot (verified byte-exact) -- NOT the full 32*rr/32*rc tile; the prior 32*rc N-gate forced N%32!=0 shapes (odd vocab/hidden dims) to ~1.2-1.8 TF generic (N%32 perf cliff, fixed 2026-06-26: N%16->~11 TF, N%8->~5.7 TF, both byte-exact). M%8!=0 OR N%8!=0 still routes to generic (a partial strip would write past the matrix). Occupancy gate (n_groups >= 8*cores) so only enough-parallelism shapes use the fine tile; below it -> generic (never-regress; e.g. M=48 small-N). All configs provably correct (selection is perf-only). Measured 2026-06-20/26, M4 Max, @triton.jit fp32 (BM=BN=BK=32) through production dispatch_fast_matmul.",
     "platform": "M4 Max",
     "candidates": [
       [

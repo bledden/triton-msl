@@ -1234,21 +1234,33 @@ class _DetectionMixin:
                     if bptr is None:
                         return None
                     acc_bias_ptr = bptr.name
-                    acc_bias_dim = "col" if str(axis) in ("0",) else "row"
-                    # A fused ROW bias (M-length, broadcast over N as the dot accumulator
-                    # init) is mis-computed: re-audit #8 found M=64 row 40 grossly wrong
-                    # (strip-local bias index), and a direct repro shows even M=32 wrong
-                    # (the simdgroup matmul mis-handles a non-zero fused-bias accumulator).
-                    # The mechanism isn't reliably fixable here, so REFUSE the row-bias
-                    # case loudly for all M. COL bias (the common per-output-feature bias)
-                    # is strip-independent and verified correct — unaffected.
-                    if acc_bias_dim == "row":
-                        from triton_msl.errors import MetalNonRecoverableError
+                    # Distinguish the three accumulator shapes by the expand_dims axis the
+                    # trace recorded (a 1-D bias is loaded then broadcast via expand_dims; a
+                    # full 2-D accumulator has NO expand_dims, so axis stays None):
+                    #   axis==0  -> COL bias (per-output-feature, broadcast over rows):
+                    #               strip-independent, verified correct -> COMPUTE.
+                    #   axis==1  -> ROW bias (per-row, M-length, broadcast over N): the
+                    #               simdgroup matmul's per-strip output indexing mis-handles
+                    #               it (re-audit #8, even M=32) -> REFUSE.
+                    #   axis None -> a FULL 2-D accumulator C = A@B + C: the simdgroup epilogue
+                    #               adds only a 1-D row/col bias, not a per-element M×N tile.
+                    #               (Was previously mislabeled a 'row bias' -> REFUSE accurately.)
+                    from triton_msl.errors import MetalNonRecoverableError
+                    if str(axis) in ("0",):
+                        acc_bias_dim = "col"
+                    elif str(axis) in ("1",):
                         raise MetalNonRecoverableError(
                             "fused ROW-bias matmul (per-row bias as the dot accumulator) "
                             "is mis-computed and not reliably lowerable. Refusing rather "
                             "than mis-compute. Use a column bias, or add the row bias in a "
                             "separate kernel after the matmul.", op_name="tt.dot")
+                    else:
+                        raise MetalNonRecoverableError(
+                            "fused 2-D accumulator matmul (C = A@B + C, a full M×N tile as "
+                            "the dot's 3rd operand) is not supported: the simdgroup matmul "
+                            "epilogue adds only a 1-D row/col bias, not a per-element "
+                            "accumulator. Add C in a separate elementwise kernel after the "
+                            "matmul (out = A @ B; out += C).", op_name="tt.dot")
                 else:
                     return None   # non-zero, non-bias accumulator: unsupported
 

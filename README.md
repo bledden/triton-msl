@@ -148,8 +148,12 @@ add_kernel[(n + 255) // 256,](x, y, out, n, BLOCK=256)  # runs on the GPU, no co
 
 ### Matmul (`tl.dot`)
 
-Aligned fp16/fp32 matmuls (M%32, N%32, K%8) on MPS tensors take a direct
-simdgroup-matrix path (~11–12 TFLOP/s on M4 Max), dispatched zero-copy:
+fp16/fp32 matmuls (K%8) on MPS tensors take a direct simdgroup-matrix path, dispatched
+zero-copy. A deterministic, occupancy-gated tile selector picks the coarsest blocking the
+shape's M and N alignment allow — **M%32 + N%32** runs the `(4,4)` tile at ~11–12 TFLOP/s on
+M4 Max; **M%8 or N%8** (not %32) runs a finer rescue tile (lower, but still far above the
+generic path). **M%8 ≠ 0 or N%8 ≠ 0** (e.g. an odd vocab/hidden dim) falls to the ~2.4 TFLOP/s
+generic path — a partial simdgroup strip can't be masked without writing past the matrix.
 
 ```python
 @triton.jit
@@ -236,7 +240,7 @@ All default-on; set to `0` to disable (an escape hatch for bisecting a regressio
 |------|----------------------|
 | `TRITON_MSL_COMPILE_SHADER=0` | Use the host-copy driver instead of the zero-copy `compile_shader` dispatch |
 | `TRITON_MSL_FAST_MATMUL=0` | Use the generic matmul instead of the fast simdgroup-matrix path |
-| `TRITON_MSL_MATMUL_AUTOTUNE=0` | Pin matmul tile selection to the fixed `(4,4)` blocking (unaligned-M shapes drop to the generic path instead of the finer-tile fast path) |
+| `TRITON_MSL_MATMUL_AUTOTUNE=0` | Pin matmul tile selection to the fixed `(4,4)` blocking (M%32≠0 / N%32≠0 shapes drop to the generic path instead of the finer M%8/N%8 rescue tiles) |
 | `TRITON_MSL_MEPT=0` | Disable the multi-element-per-thread register-array model |
 | `TRITON_MSL_LEGACY=1` | Opt **in** to the heuristic legacy text parser (off by default — it can be silent-wrong) |
 

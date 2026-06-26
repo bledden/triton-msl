@@ -191,3 +191,38 @@ def test_matmul_nonsoftmax_epilogue_computed_not_dropped():
     _mm_scale[(1,)](a, b, c, M=32, N=32, K=32)
     np.testing.assert_allclose(c.numpy(), (a @ b).numpy() * 3.0 + 1.0,
                                atol=2e-2, rtol=2e-2)
+
+
+# --- follow-ups (2026-06-26): N%8/N%16 fast-path rescue + accurate 2-D accumulator refusal ---
+if HAS:
+    @triton.jit
+    def _mm_2dacc(A, B, C, Out, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+        om = tl.arange(0, M); on = tl.arange(0, N); ok = tl.arange(0, K)
+        a = tl.load(A + om[:, None] * K + ok[None, :])
+        b = tl.load(B + ok[:, None] * N + on[None, :])
+        c = tl.load(C + om[:, None] * N + on[None, :])
+        tl.store(Out + om[:, None] * N + on[None, :], tl.dot(a, b, c))
+
+
+@requires_metal
+@pytest.mark.parametrize("N", [520, 528, 544])   # %8-not-%16, %16-not-%32, %32 (all unaligned vs (4,4))
+def test_matmul_unaligned_N_rescue_byte_exact(N):
+    # The N%32 perf-cliff fix: N%8==0 shapes now reach the fast path (finer rc tile). Must be
+    # byte-exact regardless of which tile the selector picks (a partial strip would OOB).
+    M = K = 512
+    a = torch.randn(M, K, dtype=torch.float32) * 0.1
+    b = torch.randn(K, N, dtype=torch.float32) * 0.1
+    c = torch.zeros(M, N, dtype=torch.float32)
+    _mm[(triton.cdiv(M, 32), triton.cdiv(N, 32))](a, b, c, M, N, K, BM=32, BN=32, BK=32)
+    np.testing.assert_allclose(c.numpy(), (a @ b).numpy(), atol=2e-2, rtol=2e-2)
+
+
+@requires_metal
+def test_2d_accumulator_refuses_with_accurate_message():
+    # C = A@B + C with a FULL 2-D accumulator is refused with an ACCURATE message (was
+    # mislabeled a 'row bias'); the simdgroup epilogue only adds a 1-D bias.
+    M = N = K = 32
+    a = torch.randn(M, K); b = torch.randn(K, N); c = torch.randn(M, N); out = torch.zeros(M, N)
+    from triton_msl.errors import MetalNonRecoverableError
+    with pytest.raises(MetalNonRecoverableError, match="2-D accumulator"):
+        _mm_2dacc[(1,)](a, b, c, out, M=M, N=N, K=K)
