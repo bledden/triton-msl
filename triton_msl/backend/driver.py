@@ -574,13 +574,18 @@ class MetalLauncher:
         # stashed (MEPT) MSL here.
         self._msl_block_size = None
         try:
-            from triton_msl.backend.compiler import _MSL_BY_KEY
+            # In-memory stash first, then the persistent disk stash — the latter
+            # is what keeps the zero-copy fast-path alive when inductor restores a
+            # compiled kernel from its own cache without re-running make_msl (which
+            # is the only thing that fills the in-memory _MSL_BY_KEY). Keyed by the
+            # content-unique cache_key, so a hit is the exact MSL for this kernel.
+            from triton_msl.backend.compiler import _load_stashed_msl
             msl_key = getattr(metadata, "msl_hash", None)
-            _stashed = _MSL_BY_KEY.get(msl_key) if msl_key else None
-            if isinstance(_stashed, tuple):
+            _stashed = _load_stashed_msl(msl_key)
+            if _stashed is not None:
                 self._msl, self._msl_block_size = _stashed
             else:
-                self._msl = _stashed
+                self._msl = None
         except Exception:
             self._msl = None
 

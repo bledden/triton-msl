@@ -51,8 +51,58 @@ def _stash_msl(msl_src, key, block_size=None):
     so it must use this size — using the clobbered metadata size silently
     mis-launches MEPT kernels (MSL sizePerThread>1 uses fewer threads).
     """
-    if key:
-        _MSL_BY_KEY[key] = (msl_src, block_size)
+    if not key:
+        return
+    _MSL_BY_KEY[key] = (msl_src, block_size)
+    # Persist the stash to disk keyed by the content-unique cache_key. Inductor
+    # caches compiled kernels in ITS OWN cache; on every torch.compile run after
+    # the first it RESTORES them without re-running make_msl — the only thing
+    # that populates the in-memory _MSL_BY_KEY. Without a persistent copy the
+    # launcher then finds an empty stash, self._msl is None, and EVERY kernel
+    # takes the slow host-round-trip path (measured ~23x slower than the zero-copy
+    # compile_shader fast-path on GPT-2). The key is a content hash (incl.
+    # CODEGEN_VERSION + the MEPT flag), so a later hit is the EXACT MSL for this
+    # kernel — never stale, never a collision.
+    try:
+        import json
+        path = os.path.join(_get_cache_dir(), f"{key}.mslstash")
+        if not os.path.exists(path):
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w") as f:
+                json.dump({"msl": msl_src, "block_size": block_size}, f)
+            os.replace(tmp, path)
+    except Exception:
+        pass  # disk-stash is a perf optimization; never fail compilation over it
+
+
+def _load_stashed_msl(key):
+    """Resolve a stashed ``(msl_src, block_size)`` by content-key for the
+    launcher's compile_shader fast-path: in-memory ``_MSL_BY_KEY`` first, then the
+    persistent disk stash written by ``_stash_msl``. Returns ``None`` if neither
+    has it (-> the launcher uses the always-correct host path).
+
+    The disk fallback is what lets the zero-copy fast-path engage after inductor
+    restores a compiled kernel from its own cache (bypassing make_msl, so the
+    in-memory stash is empty this process). The key is a content hash, so a hit is
+    the exact MSL for this kernel.
+    """
+    if not key:
+        return None
+    hit = _MSL_BY_KEY.get(key)
+    if hit is not None:
+        return hit
+    try:
+        import json
+        path = os.path.join(_get_cache_dir(), f"{key}.mslstash")
+        if os.path.exists(path):
+            with open(path) as f:
+                d = json.load(f)
+            val = (d["msl"], d.get("block_size"))
+            _MSL_BY_KEY[key] = val  # repopulate in-memory; later launches skip the disk read
+            return val
+    except Exception:
+        pass
+    return None
 
 
 def _get_cache_dir():
