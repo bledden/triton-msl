@@ -372,16 +372,17 @@ class _ReduceScanMixin:
         to sum) — the prime directive.
         """
         _res = self.classify_reduce_combine(ssa)
-        # The multipass path supports only sum/max/min (and/or/xor/custom refuse here —
-        # the prior twin substring loop never grew an and/or/xor branch on this path).
-        if _res is None or _res[0] not in ("sum", "max", "min"):
+        # The multipass path supports the canonical kinds (sum/max/min/and/or/xor — the
+        # same set the single-pass path does); a custom / NaN-propagating combine refuses.
+        if _res is None:
             from triton_msl.errors import MetalNonRecoverableError
             raise MetalNonRecoverableError(
-                "tl.reduce on the multipass reduction path supports only sum / max / min; "
-                "a custom / NaN-propagating / and / or / xor combine is refused rather than "
-                "silently mis-computed.")
+                "tl.reduce on the multipass reduction path supports only canonical "
+                "sum / max / min / and / or / xor; a custom or NaN-propagating combine is "
+                "refused rather than silently mis-computed.")
         combine_op = _res[0]
-        identities = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY"}
+        identities = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY",
+                      "and": "(~0)", "or": "0", "xor": "0"}
         return combine_op, identities.get(combine_op, "0.0f")
 
     def _reduce_identity_combine(self, combine_op, msl_type):
@@ -597,18 +598,22 @@ class _ReduceScanMixin:
                 _unsigned = (combine_op in ("max", "min")
                              and self._reduce_is_unsigned_minmax(next_reduce.region_ops))
                 acc_msl_type, _ = self._reduce_acc_msl_type(reduce_input_dtype, _unsigned)
+                # bitwise (and/or/xor) identities are width-independent: and = all-ones,
+                # or/xor = 0.
+                _bitwise_ident = {"and": "(~0)", "or": "0", "xor": "0"}
                 if is_i64_reduce:
                     # 64-bit identities (LONG_MIN/MAX); ulong min identity is 0.
                     i64_identities = ({"sum": "0", "max": "0", "min": "ULONG_MAX"}
                                       if is_u64_reduce
                                       else {"sum": "0", "max": "LONG_MIN", "min": "LONG_MAX"})
+                    i64_identities.update(_bitwise_ident)
                     identity = i64_identities.get(combine_op, "0")
                 elif is_int_reduce:
                     if _unsigned:
                         identity = "0" if combine_op == "max" else "UINT_MAX"
                     else:
-                        identity = {"sum": "0", "max": "INT_MIN",
-                                    "min": "INT_MAX"}.get(combine_op, "0")
+                        identity = {"sum": "0", "max": "INT_MIN", "min": "INT_MAX",
+                                    **_bitwise_ident}.get(combine_op, "0")
                 # else float: identity preserved from above
                 self.kb.raw_line(f"    {acc_msl_type} {acc_var} = {identity};")
 
@@ -639,6 +644,12 @@ class _ReduceScanMixin:
                     self.kb.raw_line(f"        {acc_var} = max({acc_var}, {cast_input});")
                 elif combine_op == "min":
                     self.kb.raw_line(f"        {acc_var} = min({acc_var}, {cast_input});")
+                elif combine_op == "and":
+                    self.kb.raw_line(f"        {acc_var} &= {cast_input};")
+                elif combine_op == "or":
+                    self.kb.raw_line(f"        {acc_var} |= {cast_input};")
+                elif combine_op == "xor":
+                    self.kb.raw_line(f"        {acc_var} ^= {cast_input};")
 
             # Close the loop
             self.kb.raw_line(f"    }}")

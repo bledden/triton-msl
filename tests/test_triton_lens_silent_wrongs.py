@@ -464,3 +464,28 @@ def test_i64_and_reduce_computes():
     O = torch.zeros(1, dtype=torch.int64, device="mps")
     _k_and_i64[(1,)](X, O, N=64); torch.mps.synchronize()
     assert O.item() == int(_np.bitwise_and.reduce(vals))
+
+
+# --- multipass and/or/xor consistency (final validation re-audit, 2026-06-25) ---
+if _HAS:
+    @triton.jit
+    def _xorc(a, b):
+        return a ^ b
+
+    @triton.jit
+    def _k_xor_big(X, O, N: tl.constexpr):
+        tl.store(O, tl.reduce(tl.load(X + tl.arange(0, N)), 0, _xorc))
+
+
+@requires
+@pytest.mark.parametrize("N", [64, 2048])   # single-pass + multipass must AGREE
+def test_xor_reduce_both_paths_compute(N):
+    # and/or/xor must compute on BOTH the single-pass and multipass paths (the multipass
+    # whitelist used to refuse them at N>=1024 while single-pass computed — inconsistent).
+    _clear()
+    import numpy as _np
+    vals = _np.random.RandomState(0).randint(0, 2 ** 28, N).astype(_np.int32)
+    X = torch.tensor(vals, dtype=torch.int32, device="mps")
+    O = torch.zeros(1, dtype=torch.int32, device="mps")
+    _k_xor_big[(1,)](X, O, N=N); torch.mps.synchronize()
+    assert O.item() == int(_np.bitwise_xor.reduce(vals))
