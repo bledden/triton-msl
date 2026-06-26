@@ -715,19 +715,20 @@ class _ReduceScanMixin:
         # The 1-D path supports sum/max/min (signed+unsigned) + and/or/xor; a custom /
         # NaN-propagating / unrecognised combine returns None -> refuse loudly.
         _res = self.classify_reduce_combine(ssa)
-        if _res is not None:
-            combine_op, _signed = _res
-            has_unsigned_minmax = combine_op in ("max", "min") and not _signed
-        elif ssa.region_ops:
+        if _res is None:
+            # None covers a custom combine AND an EMPTY region — a block-arg pick
+            # (first/last/identity, `return a`) leaves region_ops empty after the
+            # tt.reduce.return terminator is stripped, and must REFUSE (not silently sum,
+            # the prior historical default — matches the multipass path). A real
+            # single-input reduce always carries a combine with >=1 op.
             from triton_msl.errors import MetalNonRecoverableError
             raise MetalNonRecoverableError(
                 "tl.reduce with a combine that is not a canonical sum / max / min / and / "
                 "or / xor reduction is not supported — a product, max-by-magnitude, NaN-"
-                "propagating max/min, a + relu(b), or other custom combine is refused rather "
-                "than silently mis-computed.")
-        else:
-            combine_op = "sum"            # no combine region (degenerate) — historical default
-            has_unsigned_minmax = False
+                "propagating max/min, a + relu(b), a first/last/identity pick, or other "
+                "custom combine is refused rather than silently mis-computed.")
+        combine_op, _signed = _res
+        has_unsigned_minmax = combine_op in ("max", "min") and not _signed
 
         # Determine type from input operand. After a multipass wrap-loop the
         # operand is rebound to a freshly-typed accumulator whose env_type is
@@ -940,6 +941,8 @@ class _ReduceScanMixin:
             "umax": lambda a, b: f"max({a}, {b})",
             "umin": lambda a, b: f"min({a}, {b})",
             "xor": lambda a, b: f"({a} ^ {b})",
+            "and": lambda a, b: f"({a} & {b})",
+            "or": lambda a, b: f"({a} | {b})",
         }.get(combine_op)
         if combine is None:
             from triton_msl.errors import MetalNonRecoverableError

@@ -421,3 +421,46 @@ def test_1d_bitwise_and_xor_compute():
     OX = torch.zeros(1, dtype=torch.int32, device="mps")
     _k_xor[(1,)](x, OX, N=64); torch.mps.synchronize()
     assert OX.item() == int(_np.bitwise_xor.reduce(x.cpu().numpy()))
+
+
+# --- structural-classifier validation: block-arg pick refuses, i64 and/or computes (2026-06-25) ---
+if _HAS:
+    @triton.jit
+    def _first(a, b):
+        return a
+
+    @triton.jit
+    def _k_first(X, O, N: tl.constexpr):
+        tl.store(O, tl.reduce(tl.load(X + tl.arange(0, N)), 0, _first))
+
+    @triton.jit
+    def _andc(a, b):
+        return a & b
+
+    @triton.jit
+    def _k_and_i64(X, O, N: tl.constexpr):
+        tl.store(O, tl.reduce(tl.load(X + tl.arange(0, N)), 0, _andc))
+
+
+@requires
+@pytest.mark.parametrize("N", [64, 1024])   # single-pass simd + multipass
+def test_first_pick_combine_refuses_not_sum(N):
+    # `return a` (a first/last/identity pick) is a non-canonical combine — must REFUSE
+    # (an empty combine region after terminator-strip used to default to SUM).
+    _clear()
+    x = torch.arange(1, N + 1, dtype=torch.float32, device="mps")
+    O = torch.zeros(1, device="mps")
+    with pytest.raises(MetalNonRecoverableError):
+        _k_first[(1,)](x, O, N=N); torch.mps.synchronize()
+
+
+@requires
+def test_i64_and_reduce_computes():
+    # i64 bitwise-and reduce computes (was over-refused — combine table lacked and/or).
+    _clear()
+    import numpy as _np
+    vals = (_np.random.RandomState(0).randint(0, 2 ** 40, 64)).astype(_np.int64)
+    X = torch.tensor(vals, dtype=torch.int64, device="mps")
+    O = torch.zeros(1, dtype=torch.int64, device="mps")
+    _k_and_i64[(1,)](X, O, N=64); torch.mps.synchronize()
+    assert O.item() == int(_np.bitwise_and.reduce(vals))
