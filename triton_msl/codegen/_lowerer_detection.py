@@ -1038,15 +1038,11 @@ class _DetectionMixin:
             return None
 
         def _reduce_op(ssa):
-            """Inspect a tt.reduce\'s region to identify maxnumf / addf."""
-            if not ssa.region_ops:
+            """max / add for the softmax pattern, via the shared structural classifier."""
+            _k = self.classify_reduce_combine(ssa)
+            if _k is None:
                 return None
-            for body in ssa.region_ops:
-                if body.op in ("arith.maxnumf", "arith.maximumf"):
-                    return "max"
-                if body.op in ("arith.addf",):
-                    return "add"
-            return None
+            return "max" if _k[0] == "max" else "add" if _k[0] == "sum" else None
 
         max_reduce = _consumer_of(dot_ssa.id, "tt.reduce")
         if max_reduce is None or _reduce_op(max_reduce) != "max":
@@ -1396,14 +1392,8 @@ class _DetectionMixin:
         def _is_sum_reduce(r):
             if r.op != "tt.reduce" or not r.operand_ids:
                 return False
-            if r.result_ids and len(r.result_ids) >= 2:
-                return False  # argmin/argmax
-            body_ops = r.region_ops or []
-            adds = [b for b in body_ops
-                    if b.op in ("arith.addi", "arith.addf")]
-            return len(adds) >= 1 and all(
-                b.op in ("arith.addi", "arith.addf", "tt.reduce.return")
-                for b in body_ops)
+            _k = self.classify_reduce_combine(r)
+            return _k is not None and _k[0] == "sum"
 
         # Skip dtype/layout passthroughs (e.g. the i32->i64 arith.extsi that
         # an int sum promotes to, or a ttg.convert_layout / reshape) between
@@ -1626,26 +1616,23 @@ class _DetectionMixin:
                         axis = ssa.attrs.get("axis", 0)
                         # Detect argmin/argmax: 2 operands (values, indices)
                         is_argminmax = len(ssa.operand_ids) >= 2
-                        # Determine combine op
-                        combine_op = "sum"
-                        if ssa.region_ops:
-                            for body_op in ssa.region_ops:
-                                if "max" in body_op.op:
-                                    combine_op = "max"
-                                elif "min" in body_op.op:
-                                    combine_op = "min"
-                                elif "addf" in body_op.op or "addi" in body_op.op:
-                                    combine_op = "sum"
-                                elif body_op.op == "arith.cmpf":
+                        # Determine combine op. Single-value reductions go through the shared
+                        # structural classifier; argmin/argmax (2-operand tuple) is determined
+                        # by its compare direction (the classifier handles only 1-input combines).
+                        if is_argminmax:
+                            combine_op = "sum"
+                            for body_op in (ssa.region_ops or []):
+                                if body_op.op == "arith.cmpf":
                                     pred = body_op.attrs.get("predicate_name", "")
                                     if "gt" in pred:
                                         combine_op = "max"
                                     elif "lt" in pred:
                                         combine_op = "min"
-                        if is_argminmax:
-                            # argmin uses cmpf(olt) → detected as "min"
-                            # argmax uses cmpf(ogt) → detected as "max"
+                            # argmin uses cmpf(olt) → "min"; argmax uses cmpf(ogt) → "max"
                             combine_op = "argmin" if combine_op == "min" else "argmax"
+                        else:
+                            _k = self.classify_reduce_combine(ssa)
+                            combine_op = _k[0] if _k is not None else "sum"
                         M, N, K = input_shape
                         # 64-bit integer 3-D reduce / argminmax is not correctly lowered
                         # by ANY path: the TEMPLATE computes in float32 (its dtype switch
