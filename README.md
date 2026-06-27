@@ -117,12 +117,12 @@ natively. Other architectures over eager (M4 Max, measured): BERT encoder ~1.4×
 LayerNorm/GroupNorm/RMSNorm ~2.2×, reduction-heavy modules ~1.6×.
 
 **Coverage.** Transformer/attention, RNN, **CNN (incl. BatchNorm)**, normalization, and the
-reductions (sum, **product**, mean, max/min incl. NaN-propagating, var/std, argmax/argmin,
-softmax, logsumexp, cumsum/cumprod) compile and match eager — including small under-filling
-reductions. The remaining patterns are **refused loudly rather than mis-computed** (never
-silent-wrong): a 2-D reduction combined with a 2-D scan in the *same* kernel (e.g.
-`x.sum(1) + x.cumprod(1)[:,-1]`, a layout-conversion limitation). Those raise
-`MetalNonRecoverableError`; the rest of the graph is unaffected.
+reductions (sum, product, mean, max/min incl. NaN-propagating, var/std, argmax/argmin, softmax,
+logsumexp, cumsum/cumprod) — including small under-filling reductions **and a 2-D reduction
+fused with a 2-D scan in one kernel** (e.g. `x.sum(1) + x.cumprod(1)[:,-1]`) — compile and match
+eager. Anything genuinely beyond the hardware (a reduction/scan tile exceeding Metal's 1024
+threads/threadgroup) is **refused loudly rather than mis-computed** (`MetalNonRecoverableError`,
+never silent-wrong); the rest of the graph is unaffected.
 
 ### MLX
 

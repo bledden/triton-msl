@@ -1652,6 +1652,11 @@ class _ReduceScanMixin:
             # All threads read their row's result.
             # Row-major: threads [0..N-1] in row 0, [N..2N-1] in row 1.
             self.kb.raw_line(f"    {result_var} = {result_shared}[lid / {N}u];")
+            # Barrier AFTER the broadcast read: result_shared may alias the input shared
+            # array (existing_shared reuse), and a following op that re-stages it (e.g. a
+            # fused tt.scan's `shared[lid] = ...`) would otherwise race this read and a tail
+            # subset of lanes would read the scan's data instead of the reduce result.
+            self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
         else:
             # Reduce along rows: each column reduces M values → N results
             result_size = N
@@ -1668,6 +1673,9 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
             # All threads read their column's result
             self.kb.raw_line(f"    {result_var} = {result_shared}[lid % {N}u];")
+            # Barrier after the broadcast read — see the axis==1 branch (guards the
+            # result_shared/input-shared alias against a following re-stage, e.g. a scan).
+            self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         self.env[ssa.id] = result_var
         self.env_types[ssa.id] = shared_dtype
@@ -2028,33 +2036,6 @@ class _ReduceScanMixin:
                                                 f"({result_read_idx})")
 
 
-    def _kernel_has_2d_reduce_and_scan(self):
-        """True if this kernel contains BOTH a 2-D tt.reduce AND a 2-D tt.scan.
-
-        Inductor fuses e.g. ``x.sum(1) + x.cumprod(1)[:,-1]`` into one kernel that computes
-        a reduction AND a scan over the same axis. The reduce result is staged into
-        threadgroup memory and convert_layout-ed back to a per-row [M] layout; the scan
-        stages the full [M,N] separately. When both coexist, a tail subset of rows is
-        silently mis-computed (order-dependent — the same unconverted-layout root cause as
-        two combined reduces). Refuse rather than mis-compute. (A reduce alone, a scan
-        alone, and a reduce combined with a 1-D value are all fine.)
-        """
-        all_ops = list(self.graph.ops)
-        for s in self.graph.ops:
-            if getattr(s, "region_ops", None):
-                all_ops.extend(s.region_ops)
-        has_reduce = has_scan = False
-        for s in all_ops:
-            if s.op in ("tt.reduce", "tt.scan") and s.operand_ids:
-                _it = self._find_op_type_str(s.operand_ids[0])
-                _ish = _extract_shape(_it) if _it else None
-                if _ish and len(_ish) == 2:
-                    if s.op == "tt.reduce":
-                        has_reduce = True
-                    else:
-                        has_scan = True
-        return has_reduce and has_scan
-
     def _lower_scan(self, ssa: SSAValue):
         """tt.scan → prefix scan via shared memory.
 
@@ -2062,16 +2043,13 @@ class _ReduceScanMixin:
             axis=1 on (M, N): each row gets an independent prefix scan along N
             axis=0 on (M, N): each column gets an independent prefix scan along M
         Supports forward and reverse scans, single and multi-value combines.
+
+        NB: a fused reduce + scan in one kernel (inductor's `x.sum(1) + x.cumprod(1)[:,-1]`)
+        used to silently mis-compute a tail of rows because the reduce's broadcast read of
+        the (aliased) shared array raced this scan's re-stage of it. That is now fixed by a
+        barrier after the reduce broadcast read (_lower_reduce_2d), so reduce+scan computes
+        correctly and is no longer refused.
         """
-        if self._kernel_has_2d_reduce_and_scan():
-            from triton_msl.errors import MetalNonRecoverableError
-            raise MetalNonRecoverableError(
-                "a 2-D reduction and a 2-D scan in the same kernel (e.g. "
-                "x.sum(1) + x.cumprod(1)[:,-1]) mis-compute a tail subset of rows — the "
-                "reduce result and the scan share the threadgroup-staging / convert-layout "
-                "path and one is stored under the wrong (broadcast) layout. Refusing rather "
-                "than silently mis-compute. Use separate kernels (reduce and scan to "
-                "different ops), or reduce/scan to 1-D first.", op_name="tt.scan")
         axis = ssa.attrs.get("axis", 0)
         reverse = ssa.attrs.get("reverse", False)
         n_values = len(ssa.operand_ids)

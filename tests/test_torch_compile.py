@@ -321,3 +321,22 @@ def test_underfilling_persistent_reduction_computes(shape):
     torch.mps.synchronize()
     ref = t.cpu().sum(-1)
     np.testing.assert_allclose(got.cpu().numpy(), ref.numpy(), atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.parametrize("fn", [
+    lambda x: x.sum(-1) + x.cumprod(-1)[:, -1],     # reduce + scan-slice, both orders
+    lambda x: x.cumprod(-1)[:, -1] + x.sum(-1),
+    lambda x: x.prod(-1) + x.cumsum(-1)[:, -1],
+    lambda x: x.amax(-1) + x.cumprod(-1)[:, -1],
+])
+def test_fused_reduce_plus_scan_computes(fn):
+    """A 2-D reduction and a 2-D scan fused into one inductor kernel (e.g.
+    x.sum(1) + x.cumprod(1)[:,-1]) now COMPUTES correctly — a barrier after the reduce's
+    broadcast read fixes the shared-memory race with the scan's re-stage that used to
+    silently mis-compute a tail subset of rows (relerr ~0.5). Was refused; now exact."""
+    import numpy as np
+    x = (torch.rand(8, 64, device=DEVICE) * 0.4 + 0.85)
+    got = torch.compile(fn, backend="inductor")(x)
+    torch.mps.synchronize()
+    ref = fn(x.cpu())
+    np.testing.assert_allclose(got.cpu().numpy(), ref.numpy(), atol=1e-3, rtol=1e-3)
