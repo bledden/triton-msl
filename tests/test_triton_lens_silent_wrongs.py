@@ -583,3 +583,37 @@ def test_fused_2d_argmin_argmax_no_race():
         _k_dual_argminmax[(1,)](X, Omin, Omax, M=8, N=128); torch.mps.synchronize()
         np.testing.assert_array_equal(Omin.cpu().numpy(), xv.argmin(1), err_msg=f"argmin seed {seed}")
         np.testing.assert_array_equal(Omax.cpu().numpy(), xv.argmax(1), err_msg=f"argmax seed {seed}")
+
+
+# --- exhaust re-audit 2026-06-27: 2-D uint64 argminmax (64-bit twin) ---
+if _HAS:
+    @triton.jit
+    def _k_argmax2d(X, O, M: tl.constexpr, N: tl.constexpr):
+        rm = tl.arange(0, M); rn = tl.arange(0, N)
+        tl.store(O + rm, tl.argmax(tl.load(X + rm[:, None] * N + rn[None, :]), axis=1))
+
+    @triton.jit
+    def _k_argmin2d(X, O, M: tl.constexpr, N: tl.constexpr):
+        rm = tl.arange(0, M); rn = tl.arange(0, N)
+        tl.store(O + rm, tl.argmin(tl.load(X + rm[:, None] * N + rn[None, :]), axis=1))
+
+
+@requires
+def test_uint64_2d_argminmax_not_signed():
+    # 2-D argmax/argmin over uint64 must compare UNSIGNED. uint64 is the signless i64, so a
+    # signed `long` reads 2^63+ as negative and picks the wrong index (the 64-bit twin of the
+    # uint8/16/32 fix; the 1-D path refuses i64 so only the 2-D path was exposed). Exhaust
+    # re-audit 2026-06-27 BLOCKER.
+    _clear()
+    M, N = 4, 8
+    vals = np.zeros((M, N), dtype=np.uint64)
+    for r in range(M):
+        vals[r] = [10, 20, 30, 40, 50, 60, 70, 80]
+        vals[r][1 + r] = 2 ** 63 + 100 + r          # the true UNSIGNED max for that row
+    X = torch.tensor(vals, dtype=torch.uint64, device="mps")
+    Omax = torch.zeros(M, dtype=torch.int32, device="mps")
+    _k_argmax2d[(1,)](X, Omax, M=M, N=N); torch.mps.synchronize()
+    np.testing.assert_array_equal(Omax.cpu().numpy(), vals.argmax(1))
+    Omin = torch.zeros(M, dtype=torch.int32, device="mps")
+    _k_argmin2d[(1,)](X, Omin, M=M, N=N); torch.mps.synchronize()
+    np.testing.assert_array_equal(Omin.cpu().numpy(), vals.argmin(1))

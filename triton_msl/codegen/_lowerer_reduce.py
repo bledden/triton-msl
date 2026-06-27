@@ -1369,18 +1369,20 @@ class _ReduceScanMixin:
         val_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
         is_int = not (val_dtype.startswith("fp") or val_dtype.startswith("bf"))
         is_i64 = val_dtype in ("i64", "u64", "ui64")
-        # uint8/16/32 are the SIGNLESS i8/i16/i32 in Triton, so a signed compare picks the
-        # wrong arg index above the sign bit — stage + compare the value as uint when the
-        # combine is unsigned (arith.cmpi ugt/ult). Mirrors the plain-reduce u32 fix; the
-        # 64-bit unsigned case already routes through the is_i64 ulong branch.
-        _unsigned = is_int and not is_i64 and self._reduce_is_unsigned_minmax(ssa.region_ops)
+        # uint8/16/32/64 are the SIGNLESS i8/i16/i32/i64 in Triton — a signed compare picks the
+        # wrong arg index above the sign bit. The unsigned signal is the combine's arith.cmpi
+        # ugt/ult (NOT the dtype name, which is signless i64 even for uint64). Detect it for
+        # ALL widths incl. 64-bit (the earlier `not is_i64` gate here was itself the un-fixed
+        # 64-bit twin: uint64 argmax/argmin computed signed). The `or val_dtype in (u64,ui64)`
+        # keeps any literal-name path unsigned too.
+        _unsigned = is_int and self._reduce_is_unsigned_minmax(ssa.region_ops)
+        _u64 = is_i64 and (_unsigned or val_dtype in ("u64", "ui64"))
         # 64-bit int values compare at full width (else the high word truncates and the
         # arg index is wrong) — Triton-lens re-audit 2026-06-25.
         if not is_int:
             msl_val_type, val_shared_dtype = "float", "fp32"
         elif is_i64:
-            msl_val_type = "long" if val_dtype == "i64" else "ulong"
-            val_shared_dtype = "i64" if val_dtype == "i64" else "u64"
+            msl_val_type, val_shared_dtype = ("ulong", "u64") if _u64 else ("long", "i64")
         elif _unsigned:
             msl_val_type, val_shared_dtype = "uint", "u32"   # uint8/16/32 widen to uint
         else:
@@ -1390,10 +1392,10 @@ class _ReduceScanMixin:
         cmp_op = ">" if is_max else "<"
         identity = "(-INFINITY)" if is_max and not is_int else "INFINITY"
         if is_int:
-            if val_dtype == "i64":
-                identity = "LONG_MIN" if is_max else "LONG_MAX"
-            elif is_i64:                                   # u64/ui64
+            if _u64:                                       # unsigned 64-bit (incl signless i64)
                 identity = "0" if is_max else "ULONG_MAX"
+            elif is_i64:                                   # signed 64-bit
+                identity = "LONG_MIN" if is_max else "LONG_MAX"
             elif _unsigned:                                # uint8/16/32
                 identity = "0" if is_max else "UINT_MAX"
             else:
