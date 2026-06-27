@@ -617,3 +617,41 @@ def test_uint64_2d_argminmax_not_signed():
     Omin = torch.zeros(M, dtype=torch.int32, device="mps")
     _k_argmin2d[(1,)](X, Omin, M=M, N=N); torch.mps.synchronize()
     np.testing.assert_array_equal(Omin.cpu().numpy(), vals.argmin(1))
+
+
+# --- confirm-4 re-audit 2026-06-27: fp32->fp8 RTNE rounding (third class) ---
+if _HAS:
+    @triton.jit
+    def _k_fp8e4_rt(X, O, N: tl.constexpr):
+        tl.store(O + tl.arange(0, N), tl.load(X + tl.arange(0, N)).to(tl.float8e4nv).to(tl.float32))
+
+    @triton.jit
+    def _k_fp8e5_rt(X, O, N: tl.constexpr):
+        tl.store(O + tl.arange(0, N), tl.load(X + tl.arange(0, N)).to(tl.float8e5).to(tl.float32))
+
+
+@requires
+@pytest.mark.parametrize("kern,tdt,name", [
+    ("_k_fp8e4_rt", torch.float8_e4m3fn, "e4m3"),
+    ("_k_fp8e5_rt", torch.float8_e5m2, "e5m2"),
+])
+def test_fp8_downcast_round_to_nearest_even(kern, tdt, name):
+    # fp32->fp8 must round-to-nearest-EVEN at exact midpoints (the IR carries rounding=rtne),
+    # not round-half-away-from-zero (which biased quantization upward). confirm-4 audit MINOR.
+    _clear()
+    k = globals()[kern]
+    # exact fp8 midpoints where rtne (down-to-even) != half-up
+    mids = np.array([100.0, 1.0625, 1.5625, 8.5, 3.0625, 5.5, 10.5, 1.125], dtype=np.float32)
+    Np = 16
+    padded = np.zeros(Np, dtype=np.float32); padded[:len(mids)] = mids
+    X = torch.tensor(padded, device="mps"); O = torch.zeros(Np, device="mps")
+    k[(1,)](X, O, N=Np); torch.mps.synchronize()
+    got = O.cpu().numpy()[:len(mids)]
+    ref = torch.tensor(mids).cpu().to(tdt).float().numpy()    # CPU torch = RTNE, never torch-mps
+    np.testing.assert_allclose(got, ref, rtol=0, atol=0,
+                               err_msg=f"{name} fp8 downcast not RTNE: got {got} ref {ref}")
+    # broad random sweep must also match CPU exactly (no regression on non-midpoints)
+    v = (np.random.RandomState(0).randn(256) * 8).astype(np.float32)
+    Xs = torch.tensor(v, device="mps"); Os = torch.zeros(256, device="mps")
+    k[(1,)](Xs, Os, N=256); torch.mps.synchronize()
+    np.testing.assert_allclose(Os.cpu().numpy(), torch.tensor(v).cpu().to(tdt).float().numpy(), rtol=0, atol=0)

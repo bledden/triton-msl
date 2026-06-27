@@ -80,14 +80,14 @@ inline uchar float_to_fp8e4m3(float x) {
     if (x < exp2(-9.0f)) return uchar(sign << 7);
     // Subnormal range: x < 2^-6
     if (x < exp2(-6.0f)) {
-        uint mant = uint(x * exp2(6.0f) * 8.0f + 0.5f);
+        uint mant = uint(rint(x * exp2(6.0f) * 8.0f));   // rtne, not half-up
         if (mant > 7u) mant = 7u;
         return uchar((sign << 7) | mant);
     }
     float e_f = floor(log2(x));
     int e = int(e_f);
     float frac = x / exp2(float(e)) - 1.0f;
-    uint mant = uint(frac * 8.0f + 0.5f);
+    uint mant = uint(rint(frac * 8.0f));   // round-to-nearest-EVEN (rtne), not half-up
     if (mant > 7u) { mant = 0u; e += 1; }
     // Clamp: biased exponent must be in [1, 14] (15 with mant=7 is NaN)
     int biased = e + 7;
@@ -133,14 +133,14 @@ inline uchar float_to_fp8e5m2(float x) {
     // aggressive and missed the (2^-17, 2^-16) bucket that should round
     // to the smallest subnormal.
     if (x < exp2(-14.0f)) {
-        uint mant = uint(x * exp2(14.0f) * 4.0f + 0.5f);
+        uint mant = uint(rint(x * exp2(14.0f) * 4.0f));   // rtne, not half-up
         if (mant > 3u) mant = 3u;
         return uchar((sign << 7) | mant);
     }
     float e_f = floor(log2(x));
     int e = int(e_f);
     float frac = x / exp2(float(e)) - 1.0f;
-    uint mant = uint(frac * 4.0f + 0.5f);
+    uint mant = uint(rint(frac * 4.0f));   // round-to-nearest-EVEN (rtne), not half-up
     if (mant > 3u) { mant = 0u; e += 1; }
     int biased = e + 15;
     // exp=31 is inf/NaN, cap at exp=30 mant=3 (max finite)
@@ -173,14 +173,14 @@ inline uchar float_to_fp8e4m3b15(float x) {
     if (x > max_val) x = max_val;
     if (x < exp2(-17.0f)) return uchar(sign << 7);
     if (x < exp2(-14.0f)) {
-        uint mant = uint(x * exp2(14.0f) * 8.0f + 0.5f);
+        uint mant = uint(rint(x * exp2(14.0f) * 8.0f));   // rtne, not half-up
         if (mant > 7u) mant = 7u;
         return uchar((sign << 7) | mant);
     }
     float e_f = floor(log2(x));
     int e = int(e_f);
     float frac = x / exp2(float(e)) - 1.0f;
-    uint mant = uint(frac * 8.0f + 0.5f);
+    uint mant = uint(rint(frac * 8.0f));   // round-to-nearest-EVEN (rtne), not half-up
     if (mant > 7u) { mant = 0u; e += 1; }
     int biased = e + 15;
     if (biased > 15) { biased = 15; mant = 6u; }
@@ -213,14 +213,14 @@ inline uchar float_to_fp8e4m3b8(float x) {
     if (x > max_val) x = max_val;
     if (x < exp2(-10.0f)) return uchar(sign << 7);
     if (x < exp2(-7.0f)) {
-        uint mant = uint(x * exp2(7.0f) * 8.0f + 0.5f);
+        uint mant = uint(rint(x * exp2(7.0f) * 8.0f));   // rtne, not half-up
         if (mant > 7u) mant = 7u;
         return uchar((sign << 7) | mant);
     }
     float e_f = floor(log2(x));
     int e = int(e_f);
     float frac = x / exp2(float(e)) - 1.0f;
-    uint mant = uint(frac * 8.0f + 0.5f);
+    uint mant = uint(rint(frac * 8.0f));   // round-to-nearest-EVEN (rtne), not half-up
     if (mant > 7u) { mant = 0u; e += 1; }
     int biased = e + 8;
     if (biased > 15) { biased = 15; mant = 6u; }
@@ -257,14 +257,14 @@ inline uchar float_to_fp8e5m2b16(float x) {
     if (x > max_val) return uchar((sign << 7) | 0x7Bu);
     if (x < exp2(-17.0f)) return uchar(sign << 7);
     if (x < exp2(-15.0f)) {
-        uint mant = uint(x * exp2(15.0f) * 4.0f + 0.5f);
+        uint mant = uint(rint(x * exp2(15.0f) * 4.0f));   // rtne, not half-up
         if (mant > 3u) mant = 3u;
         return uchar((sign << 7) | mant);
     }
     float e_f = floor(log2(x));
     int e = int(e_f);
     float frac = x / exp2(float(e)) - 1.0f;
-    uint mant = uint(frac * 4.0f + 0.5f);
+    uint mant = uint(rint(frac * 4.0f));   // round-to-nearest-EVEN (rtne), not half-up
     if (mant > 3u) { mant = 0u; e += 1; }
     int biased = e + 16;
     if (biased >= 31) { biased = 30; mant = 3u; }
