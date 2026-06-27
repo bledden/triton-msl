@@ -1848,6 +1848,10 @@ class _ReduceScanMixin:
         else:  # axis == 2
             read_idx = f"(({lid_input} / {N * K}u) * {N}u + (({lid_input} % {N * K}u) / {K}u))"
         self.kb.raw_line(f"    {msl_type} {result_var} = {result_shared}[{read_idx}];")
+        # Barrier after the broadcast read — a following op that re-stages this (possibly
+        # existing_shared-aliased) result array would otherwise race the read (the recurring
+        # shared-memory-race class; cf. _lower_reduce_2d 1ddac9b + the argminmax fix).
+        self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         self.env[ssa.id] = result_var
         self.env_types[ssa.id] = shared_dtype
@@ -2056,6 +2060,10 @@ class _ReduceScanMixin:
             self.kb.raw_line(
                 f"    {msl_type} {result_var} = {result_shared}[{read_idx}];")
             result_read_idx = read_idx
+        # Barrier after the broadcast read — guards the result array against a following op's
+        # re-stage (the recurring shared-memory-race class; cf. _lower_reduce_2d / _3d / the
+        # argminmax fix).
+        self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         self.env[ssa.id] = result_var
         self.env_types[ssa.id] = shared_dtype
