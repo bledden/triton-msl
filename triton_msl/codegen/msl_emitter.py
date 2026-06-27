@@ -345,11 +345,12 @@ class KernelBuilder:
         # NaN-quiet, so carry an any-NaN flag through both reduction levels below.
         _nan_prop = op in ("nanmax", "nanmin")
         if _is_float:
-            identity = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY",
+            identity = {"sum": "0.0f", "prod": "1.0f", "max": "-INFINITY", "min": "INFINITY",
                         "nanmax": "-INFINITY", "nanmin": "INFINITY"}[op]
         else:
             identity = {
                 "sum": f"({reduce_ty})0",
+                "prod": f"({reduce_ty})1",
                 "max": f"metal::numeric_limits<{reduce_ty}>::lowest()",
                 "min": f"metal::numeric_limits<{reduce_ty}>::max()",
                 # bitwise reductions (all()/any()/xor) — identities so a 1-D and/or/xor

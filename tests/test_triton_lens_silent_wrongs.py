@@ -74,12 +74,20 @@ def _clear():
 
 
 @requires
-def test_product_reduce_refuses_not_sum():
+@pytest.mark.parametrize("N", [8, 2048])   # single-pass + multipass
+def test_product_reduce_computes_not_sum(N):
+    # A product reduce (a * b combine) now COMPUTES correctly (via simd_product); it was
+    # previously refused. Must be the PRODUCT, never silently folded as a sum.
     _clear()
-    X = torch.tensor([1., 2., 3., 4., 1., 1., 1., 1.], device="mps")
+    import numpy as _np
+    # values very close to 1 so the product stays finite even over 2048 elements
+    vals = (_np.random.RandomState(0).rand(N) * 0.02 + 0.99).astype(_np.float32)
+    X = torch.tensor(vals, device="mps")
     OUT = torch.zeros(1, device="mps")
-    with pytest.raises(MetalNonRecoverableError):
-        _k_prod[(1,)](X, OUT, N=8); torch.mps.synchronize()
+    _k_prod[(1,)](X, OUT, N=N); torch.mps.synchronize()
+    ref = float(_np.prod(vals))
+    assert abs(OUT.item() - ref) / abs(ref) < 1e-3, (N, OUT.item(), ref)
+    assert abs(OUT.item() - float(vals.sum())) > 1e-2   # definitely not the sum
 
 
 @requires

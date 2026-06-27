@@ -20,6 +20,7 @@ THREAD_QUALIFIERS = {
 # SIMD-group reduction intrinsics (Metal built-ins).
 SIMD_REDUCTIONS = {
     "sum": "simd_sum",
+    "prod": "simd_product",
     "max": "simd_max",
     "min": "simd_min",
     "and": "simd_and",

@@ -39,12 +39,24 @@ class _ReduceScanMixin:
         """
         combine = {
             "sum": lambda a, b: f"{a} + {b}",
+            "prod": lambda a, b: f"{a} * {b}",
             "max": lambda a, b: f"max({a}, {b})",
             "min": lambda a, b: f"min({a}, {b})",
             "xor": lambda a, b: f"{a} ^ {b}",
             "and": lambda a, b: f"{a} & {b}",
             "or":  lambda a, b: f"{a} | {b}",
-        }.get(combine_op, lambda a, b: f"{a} + {b}")
+            # NaN-PROPAGATING max/min: a NaN in either operand must propagate (max()/min()
+            # are NaN-quiet); the cross-thread threadgroup_reduce propagates too.
+            "nanmax": lambda a, b: f"(({a} > {b}) || ({a} != {a})) ? {a} : {b}",
+            "nanmin": lambda a, b: f"(({a} < {b}) || ({a} != {a})) ? {a} : {b}",
+        }.get(combine_op)
+        if combine is None:
+            # Never default to sum — that would SILENTLY mis-compute an unrecognised combine
+            # on the register-array path. Refuse loudly (matches the rest of the surface).
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                f"register-array reduce: unsupported combine op '{combine_op}' — refusing "
+                f"rather than silently folding as a sum.", op_name="tt.reduce")
         # Cast each array read to ``msl_type`` so both combine operands have
         # the same type. Without this, an unsigned array (uint8/uint16) mixed
         # with an int ``fold_var`` makes MSL's max/min overload resolution
@@ -316,6 +328,7 @@ class _ReduceScanMixin:
         if set(top.operand_ids or []) == bargs:
             _DIRECT = {
                 "arith.addf": ("sum", True), "arith.addi": ("sum", True),
+                "arith.mulf": ("prod", True), "arith.muli": ("prod", True),
                 "arith.maxnumf": ("max", True), "arith.maxf": ("max", True),
                 "arith.minnumf": ("min", True), "arith.minf": ("min", True),
                 "arith.maxsi": ("max", True), "arith.minsi": ("min", True),
@@ -405,7 +418,7 @@ class _ReduceScanMixin:
                 "sum / max / min / and / or / xor; a custom or NaN-propagating combine is "
                 "refused rather than silently mis-computed.")
         combine_op = _res[0]
-        identities = {"sum": "0.0f", "max": "-INFINITY", "min": "INFINITY",
+        identities = {"sum": "0.0f", "prod": "1.0f", "max": "-INFINITY", "min": "INFINITY",
                       "and": "(~0)", "or": "0", "xor": "0",
                       "nanmax": "-INFINITY", "nanmin": "INFINITY"}
         return combine_op, identities.get(combine_op, "0.0f")
@@ -429,6 +442,9 @@ class _ReduceScanMixin:
         if combine_op == "sum":
             identity = "0.0f" if is_float else "0"
             combine_expr = "acc + val"
+        elif combine_op == "prod":
+            identity = "1.0f" if is_float else "1"
+            combine_expr = "acc * val"
         elif combine_op == "max":
             identity = {
                 "float": "(-INFINITY)",
@@ -632,8 +648,8 @@ class _ReduceScanMixin:
                              and self._reduce_is_unsigned_minmax(next_reduce.region_ops))
                 acc_msl_type, _ = self._reduce_acc_msl_type(reduce_input_dtype, _unsigned)
                 # bitwise (and/or/xor) identities are width-independent: and = all-ones,
-                # or/xor = 0.
-                _bitwise_ident = {"and": "(~0)", "or": "0", "xor": "0"}
+                # or/xor = 0; product identity = 1.
+                _bitwise_ident = {"and": "(~0)", "or": "0", "xor": "0", "prod": "1"}
                 if is_i64_reduce:
                     # 64-bit identities (LONG_MIN/MAX); ulong min identity is 0.
                     i64_identities = ({"sum": "0", "max": "0", "min": "ULONG_MAX"}
@@ -673,6 +689,8 @@ class _ReduceScanMixin:
                 cast_input = f"({acc_msl_type}){input_var}"
                 if combine_op == "sum":
                     self.kb.raw_line(f"        {acc_var} += {cast_input};")
+                elif combine_op == "prod":
+                    self.kb.raw_line(f"        {acc_var} *= {cast_input};")
                 elif combine_op == "max":
                     self.kb.raw_line(f"        {acc_var} = max({acc_var}, {cast_input});")
                 elif combine_op == "min":
@@ -917,6 +935,8 @@ class _ReduceScanMixin:
             _is_float = msl_type in ("float", "half", "bfloat")
             if combine_op == "sum":
                 _ident = "0"
+            elif combine_op == "prod":
+                _ident = "1.0f" if _is_float else "1"
             elif combine_op == "max" and _is_float:
                 _ident = "-INFINITY"
             elif combine_op == "min" and _is_float:
@@ -991,6 +1011,7 @@ class _ReduceScanMixin:
         self.kb.declare_threadgroup_array(sh, dtype=shared_dtype, size=bs)
         combine = {
             "sum": lambda a, b: f"({a} + {b})",
+            "prod": lambda a, b: f"({a} * {b})",
             "max": lambda a, b: f"max({a}, {b})",
             "min": lambda a, b: f"min({a}, {b})",
             "umax": lambda a, b: f"max({a}, {b})",
@@ -2007,6 +2028,33 @@ class _ReduceScanMixin:
                                                 f"({result_read_idx})")
 
 
+    def _kernel_has_2d_reduce_and_scan(self):
+        """True if this kernel contains BOTH a 2-D tt.reduce AND a 2-D tt.scan.
+
+        Inductor fuses e.g. ``x.sum(1) + x.cumprod(1)[:,-1]`` into one kernel that computes
+        a reduction AND a scan over the same axis. The reduce result is staged into
+        threadgroup memory and convert_layout-ed back to a per-row [M] layout; the scan
+        stages the full [M,N] separately. When both coexist, a tail subset of rows is
+        silently mis-computed (order-dependent — the same unconverted-layout root cause as
+        two combined reduces). Refuse rather than mis-compute. (A reduce alone, a scan
+        alone, and a reduce combined with a 1-D value are all fine.)
+        """
+        all_ops = list(self.graph.ops)
+        for s in self.graph.ops:
+            if getattr(s, "region_ops", None):
+                all_ops.extend(s.region_ops)
+        has_reduce = has_scan = False
+        for s in all_ops:
+            if s.op in ("tt.reduce", "tt.scan") and s.operand_ids:
+                _it = self._find_op_type_str(s.operand_ids[0])
+                _ish = _extract_shape(_it) if _it else None
+                if _ish and len(_ish) == 2:
+                    if s.op == "tt.reduce":
+                        has_reduce = True
+                    else:
+                        has_scan = True
+        return has_reduce and has_scan
+
     def _lower_scan(self, ssa: SSAValue):
         """tt.scan → prefix scan via shared memory.
 
@@ -2015,6 +2063,15 @@ class _ReduceScanMixin:
             axis=0 on (M, N): each column gets an independent prefix scan along M
         Supports forward and reverse scans, single and multi-value combines.
         """
+        if self._kernel_has_2d_reduce_and_scan():
+            from triton_msl.errors import MetalNonRecoverableError
+            raise MetalNonRecoverableError(
+                "a 2-D reduction and a 2-D scan in the same kernel (e.g. "
+                "x.sum(1) + x.cumprod(1)[:,-1]) mis-compute a tail subset of rows — the "
+                "reduce result and the scan share the threadgroup-staging / convert-layout "
+                "path and one is stored under the wrong (broadcast) layout. Refusing rather "
+                "than silently mis-compute. Use separate kernels (reduce and scan to "
+                "different ops), or reduce/scan to 1-D first.", op_name="tt.scan")
         axis = ssa.attrs.get("axis", 0)
         reverse = ssa.attrs.get("reverse", False)
         n_values = len(ssa.operand_ids)
