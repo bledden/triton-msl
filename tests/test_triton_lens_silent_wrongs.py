@@ -367,6 +367,26 @@ def test_uint32_max_min_unsigned_not_signed(N):
 
 
 @requires
+@pytest.mark.parametrize("N", [64, 2048])   # single-pass simd + multipass
+def test_uint64_max_min_unsigned_not_signed(N):
+    # uint64 is the SIGNLESS i64 in Triton; a signed `long` reduce reads 2^64-1 as -1 and
+    # silently loses the max (and 2^63 wins the min). Must compute UNSIGNED (audit 2026-06-27
+    # BLOCKER). The 32-bit twin already worked; this is the missed 64-bit case.
+    _clear()
+    vals = np.full(N, 5, dtype=np.uint64)
+    vals[0] = 2 ** 64 - 1          # all-ones: max if unsigned, -1 (loses) if signed
+    vals[1] = 2 ** 63              # high bit: would wrongly win a signed min
+    vals[2] = 1                    # the true unsigned min
+    X = torch.tensor(vals, dtype=torch.uint64, device="mps")
+    Omax = torch.zeros(1, dtype=torch.uint64, device="mps")
+    _k_umax[(1,)](X, Omax, N=N); torch.mps.synchronize()
+    assert int(Omax.item()) == int(vals.max()) == 2 ** 64 - 1, (N, int(Omax.item()))
+    Omin = torch.zeros(1, dtype=torch.uint64, device="mps")
+    _k_umin[(1,)](X, Omin, N=N); torch.mps.synchronize()
+    assert int(Omin.item()) == int(vals.min()) == 1, (N, int(Omin.item()))
+
+
+@requires
 @pytest.mark.parametrize("N", [128, 2048])   # single-pass + multipass
 def test_nan_propagating_max_computes_and_propagates(N):
     # A NaN-PROPAGATING max (tl.maximum propagate_nan=ALL, == inductor triton_helpers.maximum)

@@ -289,7 +289,14 @@ class _ReduceScanMixin:
         if dtype.startswith("fp") or dtype.startswith("bf"):
             return "float", "fp32"
         if dtype in ("i64", "u64", "ui64"):
-            return ("ulong", "u64") if dtype in ("u64", "ui64") else ("long", "i64")
+            # Triton types uint64 as the SIGNLESS i64, so an unsigned 64-bit max/min
+            # (arith.maxui/minui -> unsigned=True) arrives here as dtype 'i64'. Route it to
+            # ulong exactly like the explicit u64/ui64 names — else a signed `long` compare
+            # reads 2^64-1 as -1 and silently loses the max (wrong above 2^63). This mirrors
+            # the 32-bit `unsigned -> uint` branch below.
+            if unsigned or dtype in ("u64", "ui64"):
+                return "ulong", "u64"
+            return "long", "i64"
         if unsigned:
             return "uint", "u32"
         return "int", "i32"
@@ -641,11 +648,15 @@ class _ReduceScanMixin:
                     reduce_input_dtype.startswith("fp") or reduce_input_dtype.startswith("bf")
                 )
                 is_i64_reduce = reduce_input_dtype in ("i64", "u64", "ui64")
-                is_u64_reduce = reduce_input_dtype in ("u64", "ui64")
                 # unsigned 32-bit max/min compares UNSIGNED; the final cross-thread simd
                 # reduce casts to reduce_ty in threadgroup_reduce.
                 _unsigned = (combine_op in ("max", "min")
                              and self._reduce_is_unsigned_minmax(next_reduce.region_ops))
+                # uint64 is the SIGNLESS i64 in Triton, so an unsigned 64-bit max/min arrives
+                # as dtype 'i64' + _unsigned — treat it as u64 for the ulong/ULONG_MAX path,
+                # not just the explicit u64/ui64 names (else signed LONG_MIN/MAX identities
+                # mismatch the ulong accumulator and silently mis-reduce above 2^63).
+                is_u64_reduce = reduce_input_dtype in ("u64", "ui64") or (is_i64_reduce and _unsigned)
                 acc_msl_type, _ = self._reduce_acc_msl_type(reduce_input_dtype, _unsigned)
                 # bitwise (and/or/xor) identities are width-independent: and = all-ones,
                 # or/xor = 0; product identity = 1.
