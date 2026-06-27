@@ -116,11 +116,12 @@ native MPS Inductor backend**, i.e. triton-msl's path is faster than what PyTorc
 natively. Other architectures over eager (M4 Max, measured): BERT encoder ~1.4×, LSTM ~2.3×,
 LayerNorm/GroupNorm/RMSNorm ~2.2×, reduction-heavy modules ~1.6×.
 
-**Coverage.** Transformer/attention, RNN, normalization, and the common reductions (sum, mean,
-max/min incl. NaN-propagating, var/std, argmax/argmin, softmax, logsumexp, cumsum) compile and
-match eager. A few patterns are **refused loudly rather than mis-computed** (never silent-wrong):
-**product** reductions (`torch.prod`/`cumprod` — no `simd_product`) and **small persistent
-reductions** that under-fill a SIMD group (some CNN BatchNorm shapes). Those raise
+**Coverage.** Transformer/attention, RNN, **CNN (incl. BatchNorm)**, normalization, and the
+reductions (sum, **product**, mean, max/min incl. NaN-propagating, var/std, argmax/argmin,
+softmax, logsumexp, cumsum/cumprod) compile and match eager — including small under-filling
+reductions. The remaining patterns are **refused loudly rather than mis-computed** (never
+silent-wrong): a 2-D reduction combined with a 2-D scan in the *same* kernel (e.g.
+`x.sum(1) + x.cumprod(1)[:,-1]`, a layout-conversion limitation). Those raise
 `MetalNonRecoverableError`; the rest of the graph is unaffected.
 
 ### MLX
