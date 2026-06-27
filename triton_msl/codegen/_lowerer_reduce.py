@@ -1240,8 +1240,12 @@ class _ReduceScanMixin:
                 "reduction has no 64-bit path; a 32-bit staging would silently truncate the "
                 "high word and return the wrong index). Refusing. Cast the values to int32 or "
                 "float first.", op_name="tt.reduce")
-        msl_val_type = "int" if is_int else "float"
-        val_shared_dtype = "i32" if is_int else "fp32"
+        # uint8/16/32 are the SIGNLESS i8/i16/i32 in Triton — a signed compare picks the
+        # wrong arg index above the sign bit. Stage + compare as uint when the combine is
+        # unsigned (arith.cmpi ugt/ult). 64-bit already refused above.
+        _unsigned = is_int and self._reduce_is_unsigned_minmax(ssa.region_ops)
+        msl_val_type = "uint" if _unsigned else ("int" if is_int else "float")
+        val_shared_dtype = "u32" if _unsigned else ("i32" if is_int else "fp32")
 
         # Detect argmax vs argmin from body ops
         is_max = self._detect_reduce_direction(ssa)
@@ -1312,6 +1316,10 @@ class _ReduceScanMixin:
         # All threads read the final result
         self.kb.raw_line(f"    {msl_val_type} {result_val} = {shared_val}[0];")
         self.kb.raw_line(f"    int {result_idx} = {shared_idx}[0];")
+        # Barrier after the broadcast read — a SECOND argminmax in the same kernel re-stages
+        # these pooled shared arrays and would otherwise race this read (twin of the 2-D
+        # argminmax + the 1ddac9b reduce fixes).
+        self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         # Store both results in env
         self.env[ssa.id] = result_val
@@ -1361,6 +1369,11 @@ class _ReduceScanMixin:
         val_dtype = self.env_types.get(ssa.operand_ids[0], "fp32")
         is_int = not (val_dtype.startswith("fp") or val_dtype.startswith("bf"))
         is_i64 = val_dtype in ("i64", "u64", "ui64")
+        # uint8/16/32 are the SIGNLESS i8/i16/i32 in Triton, so a signed compare picks the
+        # wrong arg index above the sign bit — stage + compare the value as uint when the
+        # combine is unsigned (arith.cmpi ugt/ult). Mirrors the plain-reduce u32 fix; the
+        # 64-bit unsigned case already routes through the is_i64 ulong branch.
+        _unsigned = is_int and not is_i64 and self._reduce_is_unsigned_minmax(ssa.region_ops)
         # 64-bit int values compare at full width (else the high word truncates and the
         # arg index is wrong) — Triton-lens re-audit 2026-06-25.
         if not is_int:
@@ -1368,6 +1381,8 @@ class _ReduceScanMixin:
         elif is_i64:
             msl_val_type = "long" if val_dtype == "i64" else "ulong"
             val_shared_dtype = "i64" if val_dtype == "i64" else "u64"
+        elif _unsigned:
+            msl_val_type, val_shared_dtype = "uint", "u32"   # uint8/16/32 widen to uint
         else:
             msl_val_type, val_shared_dtype = "int", "i32"
 
@@ -1379,6 +1394,8 @@ class _ReduceScanMixin:
                 identity = "LONG_MIN" if is_max else "LONG_MAX"
             elif is_i64:                                   # u64/ui64
                 identity = "0" if is_max else "ULONG_MAX"
+            elif _unsigned:                                # uint8/16/32
+                identity = "0" if is_max else "UINT_MAX"
             else:
                 identity = "INT_MIN" if is_max else "INT_MAX"
 
@@ -1460,6 +1477,11 @@ class _ReduceScanMixin:
         else:
             self.kb.raw_line(f"    {result_val_var} = {result_val_shared}[lid % {N}u];")
             self.kb.raw_line(f"    {result_idx_var} = {result_idx_shared}[lid % {N}u];")
+        # Barrier AFTER the broadcast read of the pooled result arrays — without it a SECOND
+        # argminmax in the same kernel re-stages those (declare_threadgroup_array-pooled)
+        # arrays and races this read, so a tail of rows return their own index. Twin of the
+        # 1ddac9b _lower_reduce_2d barrier fix (this argminmax path was missed).
+        self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         # Store results
         self.env[ssa.id] = result_val_var

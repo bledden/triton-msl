@@ -529,3 +529,57 @@ def test_xor_reduce_both_paths_compute(N):
     O = torch.zeros(1, dtype=torch.int32, device="mps")
     _k_xor_big[(1,)](X, O, N=N); torch.mps.synchronize()
     assert O.item() == int(_np.bitwise_xor.reduce(vals))
+
+
+# --- confirming re-audit 2026-06-27: unsigned argminmax + fused-argminmax barrier ---
+if _HAS:
+    @triton.jit
+    def _k_argmax(X, O, N: tl.constexpr):
+        tl.store(O, tl.argmax(tl.load(X + tl.arange(0, N)), 0))
+
+    @triton.jit
+    def _k_argmin(X, O, N: tl.constexpr):
+        tl.store(O, tl.argmin(tl.load(X + tl.arange(0, N)), 0))
+
+    @triton.jit
+    def _k_dual_argminmax(X, Omin, Omax, M: tl.constexpr, N: tl.constexpr):
+        rm = tl.arange(0, M); rn = tl.arange(0, N)
+        x = tl.load(X + rm[:, None] * N + rn[None, :])
+        tl.store(Omin + rm, tl.argmin(x, axis=1))
+        tl.store(Omax + rm, tl.argmax(x, axis=1))
+
+
+@requires
+@pytest.mark.parametrize("dt,np_dt,hi", [
+    (torch.uint32, np.uint32, 0xFFFFFFFF),
+    (torch.uint16, np.uint16, 0xFFFF),
+    (torch.uint8, np.uint8, 0xFF),
+])
+def test_unsigned_argminmax_not_signed(dt, np_dt, hi):
+    # argmax/argmin over unsigned ints must compare UNSIGNED — uintN is the signless iN, so a
+    # signed compare reads the high-bit value as negative and picks the wrong index (audit
+    # 2026-06-27 BLOCKER, twin of the uint64 max/min one).
+    _clear()
+    vals = np.array([10, 20, 30, 40, hi, 5, 60, 70], dtype=np_dt)   # argmax=4 (hi), argmin=5 (5)
+    X = torch.tensor(vals, dtype=dt, device="mps")
+    Omax = torch.zeros(1, dtype=torch.int32, device="mps")
+    _k_argmax[(1,)](X, Omax, N=8); torch.mps.synchronize()
+    assert int(Omax.item()) == int(np.argmax(vals)) == 4, (np_dt, int(Omax.item()))
+    Omin = torch.zeros(1, dtype=torch.int32, device="mps")
+    _k_argmin[(1,)](X, Omin, N=8); torch.mps.synchronize()
+    assert int(Omin.item()) == int(np.argmin(vals)) == 5, (np_dt, int(Omin.item()))
+
+
+@requires
+def test_fused_2d_argmin_argmax_no_race():
+    # Two 2-D argminmax in one kernel: the first op's result arrays must NOT be clobbered by
+    # the second op's re-stage (missing-barrier race, twin of the 1ddac9b reduce barrier).
+    _clear()
+    for seed in range(8):
+        xv = np.random.RandomState(seed).randn(8, 128).astype(np.float32)
+        X = torch.tensor(xv, device="mps")
+        Omin = torch.zeros(8, dtype=torch.int32, device="mps")
+        Omax = torch.zeros(8, dtype=torch.int32, device="mps")
+        _k_dual_argminmax[(1,)](X, Omin, Omax, M=8, N=128); torch.mps.synchronize()
+        np.testing.assert_array_equal(Omin.cpu().numpy(), xv.argmin(1), err_msg=f"argmin seed {seed}")
+        np.testing.assert_array_equal(Omax.cpu().numpy(), xv.argmax(1), err_msg=f"argmax seed {seed}")
