@@ -175,43 +175,33 @@ def _patch_mps_device_interface():
 
 
 def _filter_metal_persistent_configs(configs, rnumel):
-    """Keep only persistent-reduction configs the MSL lowering maps correctly.
+    """Keep persistent-reduction configs whose tile fits Metal's 1024 thread/threadgroup limit.
 
-    The persistent reduction maps the XBLOCK*rnumel elements onto lid via
-    (lid / rnumel, lid % rnumel). Two ways a config goes wrong on Metal:
-      (1) XBLOCK*rnumel > 1024 — exceeds Metal's max threads/threadgroup.
-      (2) XBLOCK*rnumel < num_warps*32 — the launch has MORE threads than
-          elements, so surplus lanes wrap `lid % rnumel` back over the same
-          columns UNMASKED (the validity mask only checks `lid % rnumel <
-          rnumel`, always true). A simd_sum then over-counts the reduction
-          denominator and the cross-simd-group combine buffer is written out of
-          bounds. Observed: __safe_softmax XBLOCK=1/rnumel=16/num_warps=2 (64
-          threads) returned all-zeros, which reached torch.compile via
-          autotuning and corrupted a transformer's gradients.
+    Earlier this ALSO dropped UNDER-FILLING configs (XBLOCK*rnumel < num_warps*32 — more
+    threads than elements): the old simd_sum reduction let surplus lanes wrap `lid % rnumel`
+    back over the columns and over-count (observed: __safe_softmax XBLOCK=1/rnumel=16 returned
+    all-zeros, which corrupted a transformer gradient through autotuning, which picks configs
+    nondeterministically). That over-refused small-reduction CNNs (BatchNorm) entirely.
 
-    Drop both. If NOTHING fills the threadgroup, REFUSE loudly — never return a
-    rejected config (the old `configs[:1]` fallback re-admitted exactly the
-    gradient-corrupting config this filter exists to remove). The MSL lowering
-    can't mask surplus lanes, so a reduction with no thread-filling config is
-    genuinely unsupported.
+    The current 2-D reduce lowering is a shared-memory TREE that MASKS surplus lanes — it
+    stages `if (lid < total)` and reduces `if (lid < rows)`, so threads beyond the element
+    count contribute nothing. Under-filling configs therefore now compute EXACTLY and are
+    KEPT (verified: XBLOCK=1 sum/mean at rnumel=16, BatchNorm CNNs cosine=1.0, and the
+    transformer gradient + training-convergence tests). Autotuning is also disabled here
+    (register_metal_triton_backend pins a single deterministic config), removing the
+    intermittency that surfaced the original bug. Only the hard 1024-thread Metal limit
+    remains a drop.
+
+    If every config exceeds 1024 threads, refuse loudly — Metal cannot launch it.
     """
-    filtered = []
-    for c in configs:
-        xblock = c.kwargs.get("XBLOCK", 1)
-        if xblock * rnumel > 1024:            # (1) too many threads
-            continue
-        if xblock * rnumel < c.num_warps * 32:  # (2) under-filling -> surplus-lane over-count
-            continue
-        filtered.append(c)
+    filtered = [c for c in configs if c.kwargs.get("XBLOCK", 1) * rnumel <= 1024]
     if filtered:
         return filtered
     from triton_msl.errors import MetalNonRecoverableError
     raise MetalNonRecoverableError(
-        f"No Metal-safe persistent-reduction config for rnumel={rnumel}: every "
-        f"candidate is under-filling (XBLOCK*rnumel < num_warps*32, causing "
-        f"surplus-lane over-count) or exceeds 1024 threads. The MSL lowering "
-        f"cannot mask surplus lanes; refusing rather than emit a silently-wrong "
-        f"reduction.")
+        f"No Metal-safe persistent-reduction config for rnumel={rnumel}: every candidate "
+        f"exceeds Metal's 1024 threads/threadgroup limit (XBLOCK*rnumel > 1024). Refusing "
+        f"rather than emit a config Metal cannot launch.")
 
 
 def _patch_persistent_reduction_configs():

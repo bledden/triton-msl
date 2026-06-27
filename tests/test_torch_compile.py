@@ -280,13 +280,12 @@ class TestModels:
         _check(EmbBag(), torch.randint(0, 10000, (8, 32)).to(DEVICE))
 
 
-def test_persistent_reduction_filter_refuses_underfilling():
-    """Regression: the Metal persistent-reduction config filter must NEVER return
-    an under-filling config — surplus lanes wrap `lid % rnumel` unmasked and
-    over-count the reduction denominator (the documented transformer-gradient
-    corruption). When no config fills the threadgroup it must refuse loudly, not
-    fall back to a rejected config (the old `configs[:1]` re-admitted exactly the
-    config the filter exists to remove)."""
+def test_persistent_reduction_filter_keeps_underfilling_drops_oversize():
+    """The Metal persistent-reduction config filter KEEPS under-filling configs (XBLOCK*rnumel
+    < num_warps*32): the 2-D shared-memory-tree reduce lowering masks surplus lanes
+    (`stage if lid<total; reduce if lid<rows`), so they compute exactly — this restores
+    torch.compile for small-reduction CNNs (BatchNorm). It drops only configs that exceed
+    Metal's 1024-thread/threadgroup limit, and refuses loudly if every config is oversize."""
     from triton_msl.inductor import _filter_metal_persistent_configs
     from triton_msl.errors import MetalNonRecoverableError
 
@@ -296,17 +295,29 @@ def test_persistent_reduction_filter_refuses_underfilling():
             self.num_warps = num_warps
 
     rnumel = 16
-    filled = FakeConfig(xblock=2, num_warps=1)     # 32 elems >= 32 threads -> keep
-    underfill = FakeConfig(xblock=1, num_warps=2)  # 16 elems < 64 threads  -> drop
+    filled = FakeConfig(xblock=2, num_warps=1)      # 32 elems
+    underfill = FakeConfig(xblock=1, num_warps=2)   # 16 elems < 64 threads -> now KEPT (masked)
+    over = FakeConfig(xblock=128, num_warps=1)      # 128*16 = 2048 > 1024 -> dropped
 
-    # Mixed input: keep only the thread-filling config, drop the under-filling one.
-    assert _filter_metal_persistent_configs([underfill, filled], rnumel) == [filled]
-
-    # Every config under-fills -> refuse loudly (never re-admit a rejected config).
+    # Under-filling configs are kept (the lowering masks surplus lanes); both fit 1024.
+    assert _filter_metal_persistent_configs([underfill, filled], rnumel) == [underfill, filled]
+    # An under-filling-only set is kept too (it computes correctly).
+    assert _filter_metal_persistent_configs([underfill], rnumel) == [underfill]
+    # Oversize configs are dropped; a mix keeps the in-limit one.
+    assert _filter_metal_persistent_configs([underfill, over], rnumel) == [underfill]
+    # Every config exceeds 1024 threads -> refuse loudly.
     with pytest.raises(MetalNonRecoverableError):
-        _filter_metal_persistent_configs(
-            [underfill, FakeConfig(xblock=1, num_warps=4)], rnumel)
+        _filter_metal_persistent_configs([over], rnumel)
 
-    # Every config exceeds 1024 threads -> refuse loudly too.
-    with pytest.raises(MetalNonRecoverableError):
-        _filter_metal_persistent_configs([FakeConfig(xblock=128, num_warps=1)], rnumel)
+
+@pytest.mark.parametrize("shape", [(16,), (32, 16), (1, 16), (8, 12)])
+def test_underfilling_persistent_reduction_computes(shape):
+    """A small reduction (rnumel < a SIMD group) that under-fills the threadgroup now
+    COMPUTES correctly through torch.compile — the 2-D shared-tree lowering masks surplus
+    lanes (was refused; restores small-reduction CNNs / BatchNorm)."""
+    import numpy as np
+    t = torch.randn(*shape, device=DEVICE)
+    got = torch.compile(lambda x: x.sum(-1), backend="inductor")(t)
+    torch.mps.synchronize()
+    ref = t.cpu().sum(-1)
+    np.testing.assert_allclose(got.cpu().numpy(), ref.numpy(), atol=2e-4, rtol=2e-4)
