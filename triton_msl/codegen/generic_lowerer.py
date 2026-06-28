@@ -6120,6 +6120,196 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
 
     # -- Prefix scan (tt.scan) --
 
+    def _rebuild_staged_fill_offset(self, addptr_id, op_by_id, base_ptr, M, N):
+        """Per-load structural rebuild of a shared-memory-staged tt.dot
+        operand's global address as a function of (_fill_row, _fill_col).
+
+        ``ttg.local_alloc`` stages a 2-D tile (M x N) into threadgroup memory
+        for a downstream ``tt.dot``.  The cooperative fill loop walks element
+        ``_sa`` over ``[0, M*N)`` with ``_fill_row = _sa / N`` and
+        ``_fill_col = _sa % N``.  To stage each element from the correct global
+        address we rebuild the load's offset in terms of those.
+
+        We do this STRUCTURALLY and PER-LOAD by walking THIS load's
+        ``addptr -> (broadcast) -> expand_dims -> make_range`` chain.  Each
+        additive offset term reduces to either a 2-D index (row = dim 0 /
+        col = dim 1, decided by the ``tt.expand_dims`` ``axis`` attribute:
+        axis=1 => make_range sits at dim 0 = row; axis=0 => dim 1 = col) with
+        an optional stride coefficient, or a block-constant scalar.  BOTH the
+        bare and the strided term are rebuilt symmetrically -- we never assume
+        "row == strided term, col == bare index".  That heuristic silently
+        mis-stages a pre-transposed K operand
+        (``K + offs_d[:,None] + offs_n[None,:]*HD``) whose bare stride-1 term
+        is the row and whose strided term is the column.
+
+        Correct-or-refuse: if any term of a staged dot operand cannot be
+        resolved to (dim, stride) | constant, raise ``MetalNonRecoverableError``
+        rather than emit a guessed -- possibly transposed -- staging.
+        """
+        _PASS = (
+            "arith.index_cast", "arith.index_castui",
+            "arith.extsi", "arith.extui", "arith.trunci",
+        )
+
+        def _const_str(tid):
+            """MSL string for a compile-time / block-constant coefficient
+            operand (dense constant or splat of a scalar arg / induction
+            var), else None.  An index expression (idx_*/r_* derived) is NOT
+            a constant coefficient."""
+            op = op_by_id.get(tid)
+            ev = self.env.get(tid)
+            if op is None:
+                if (isinstance(ev, str) and ev
+                        and not ev.startswith("idx_")
+                        and not ev.startswith("r_")):
+                    return ev
+                return None
+            if op.op in ("arith.constant", "tt.splat"):
+                return ev if (isinstance(ev, str) and ev) else None
+            return None
+
+        def _mul_coeff(coeff, c):
+            return c if coeff is None else f"({coeff} * {c})"
+
+        def _neg_coeff(coeff):
+            return "-1" if coeff is None else f"(-({coeff}))"
+
+        def _apply_coeff(expr, coeff):
+            return expr if coeff is None else f"({expr} * {coeff})"
+
+        # ``_terms`` decomposes one (sub-)offset into a flat list of additive
+        # contributions, distributing any enclosing stride coefficient over
+        # sums.  Each contribution is either:
+        #   ("range", dim, coeff_str, extent, start)  -- a make_range index, or
+        #   ("const", expr_str)                       -- a block-constant.
+        # Returns None if any part cannot be reduced (caller refuses).
+        # ``coeff`` is the accumulated outer stride; ``axis_dim`` is the
+        # row/col position fixed by an enclosing tt.expand_dims.
+        def _terms(nid, coeff, axis_dim, depth=0):
+            if depth > 64:
+                return None
+            op = op_by_id.get(nid)
+            if op is None:
+                ev = self.env.get(nid)
+                if isinstance(ev, str) and ev:
+                    return [("const", _apply_coeff(ev, coeff))]
+                return None
+            name = op.op
+            if name == "tt.make_range":
+                if axis_dim is None:
+                    return None
+                start = int(op.attrs.get("start", 0))
+                end = int(op.attrs.get("end", 0))
+                return [("range", axis_dim, coeff, end - start, start)]
+            if name == "tt.expand_dims":
+                # 2-D staged tile: a single expand_dims places the make_range
+                # at the non-inserted axis. axis=1 -> dim 0 (row);
+                # axis=0 -> dim 1 (col).
+                axis = int(op.attrs.get("axis", 0))
+                d = 1 - axis
+                if d not in (0, 1):
+                    return None
+                if axis_dim is not None and axis_dim != d:
+                    return None
+                if not op.operand_ids:
+                    return None
+                return _terms(op.operand_ids[0], coeff, d, depth + 1)
+            if name == "tt.broadcast" or name in _PASS:
+                if not op.operand_ids:
+                    return None
+                return _terms(op.operand_ids[0], coeff, axis_dim, depth + 1)
+            if name in ("tt.splat", "arith.constant"):
+                ev = self.env.get(nid)
+                if isinstance(ev, str) and ev:
+                    return [("const", _apply_coeff(ev, coeff))]
+                return None
+            if name in ("arith.addi", "arith.subi"):
+                if len(op.operand_ids) < 2:
+                    return None
+                left = _terms(op.operand_ids[0], coeff, axis_dim, depth + 1)
+                if left is None:
+                    return None
+                rc = coeff if name == "arith.addi" else _neg_coeff(coeff)
+                right = _terms(op.operand_ids[1], rc, axis_dim, depth + 1)
+                if right is None:
+                    return None
+                return left + right
+            if name == "arith.muli":
+                if len(op.operand_ids) < 2:
+                    return None
+                a, b = op.operand_ids[0], op.operand_ids[1]
+                ca, cb = _const_str(a), _const_str(b)
+                if cb is not None and ca is None:
+                    return _terms(a, _mul_coeff(coeff, cb), axis_dim, depth + 1)
+                if ca is not None and cb is None:
+                    return _terms(b, _mul_coeff(coeff, ca), axis_dim, depth + 1)
+                return None
+            # Any other op breaks structural resolution.
+            return None
+
+        # Walk the addptr chain, collecting every additive offset term plus any
+        # block-constant offset folded onto the base pointer (a scalar
+        # program-id / batch-stride addptr applied before the splat).
+        parts = []        # row/col index contributions
+        const_terms = []  # block-constant contributions (same for all _sa)
+
+        def _refuse():
+            raise MetalNonRecoverableError(
+                "triton-msl: cannot structurally resolve an offset term of a "
+                "shared-memory-staged tt.dot operand to a (row/col, stride) "
+                "index or a block-constant. Refusing to emit a "
+                "possibly-transposed staging rather than risk a silent "
+                "miscompute (correct-or-refuse).")
+
+        def _add(sub):
+            if sub is None:
+                _refuse()
+            for r in sub:
+                if r[0] == "range":
+                    _, dim, coeff, extent, start = r
+                    want = M if dim == 0 else N
+                    if extent != want:
+                        raise MetalNonRecoverableError(
+                            "triton-msl: shared-memory-staged tt.dot operand "
+                            f"has a make_range extent ({extent}) that does not "
+                            f"match the staged tile dimension ({want}); the "
+                            "(_sa/N, _sa%N) fill decomposition would mis-stage "
+                            "it. Refusing (correct-or-refuse).")
+                    idx = "(int)_fill_row" if dim == 0 else "(int)_fill_col"
+                    if start != 0:
+                        idx = f"({start} + {idx})"
+                    parts.append(idx if coeff is None else f"{idx} * {coeff}")
+                else:
+                    const_terms.append(r[1])
+
+        cur = addptr_id
+        for _ in range(64):
+            op = op_by_id.get(cur)
+            if op is None:
+                break
+            if op.op == "tt.addptr":
+                if len(op.operand_ids) < 2:
+                    break
+                _add(_terms(op.operand_ids[1], None, None))
+                cur = op.operand_ids[0]
+                continue
+            if op.op == "tt.broadcast" and op.operand_ids:
+                cur = op.operand_ids[0]
+                continue
+            if op.op == "tt.splat":
+                # Reached the splatted base pointer. If that base pointer
+                # carries a scalar (block-constant, program-id/batch-stride)
+                # addptr offset, fold it in as a constant term.
+                if op.operand_ids:
+                    sp = self.env_is_ptr.get(op.operand_ids[0])
+                    if sp and isinstance(sp[1], str) and sp[1] not in ("", "0"):
+                        const_terms.append(sp[1])
+                break
+            break
+
+        all_parts = parts + const_terms
+        return " + ".join(all_parts) if all_parts else "0"
+
     def _lower_local_alloc(self, ssa: SSAValue):
         """ttg.local_alloc -> write tensor to threadgroup shared memory.
 
@@ -6183,146 +6373,77 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
         # (for lid), so we re-load from global memory directly into shared
         # memory with corrected row/col addressing for each _sa position.
         #
-        # Strategy: trace back to the tt.load's base pointer and strides,
-        # then generate a simple cooperative loop:
+        # Strategy: trace back to the tt.load that produced the staged tile,
+        # collect any post-load transform (e.g. * scale), then rebuild the
+        # load's GLOBAL address as a function of (_fill_row, _fill_col) by
+        # walking THIS load's addptr -> (broadcast) -> expand_dims ->
+        # make_range chain structurally (see _rebuild_staged_fill_offset).
+        # The structural, per-load analysis is correct even when a make_range
+        # plays opposite (row/col) roles in two different loads -- e.g. a
+        # pre-transposed K operand -- which the old global-_make_range_dim
+        # string heuristic silently mis-staged.
+        #
         #   for (_sa = lid; _sa < total; _sa += bs) {
         #       row = _sa / N; col = _sa % N;
-        #       shared[_sa] = ptr[row * stride_row + col * stride_col];
+        #       shared[_sa] = ptr[<rebuilt offset(row, col)>];
         #   }
+
+        # Build a flat op list / lookup that crosses scf.for + if regions so
+        # the source trace can span scopes.
+        def _all_ops(ops):
+            for o in ops:
+                yield o
+                if o.region_ops:
+                    yield from _all_ops(o.region_ops)
+                if o.else_ops:
+                    yield from _all_ops(o.else_ops)
+        all_ops = list(_all_ops(self.graph.ops))
+        op_by_id = {o.id: o for o in all_ops}
+
+        # Trace the local_alloc's source back to its tt.load, recording the
+        # load's pointer/addptr id and any post-load transforms applied
+        # between the load and the local_alloc (e.g. arith.mulf by a scale).
+        load_ptr_info = None
+        load_addptr_id = None
+        post_load_ops = []  # (op_type, extra_operand_var) chain, in load order
+        cur_id = ssa.operand_ids[0]
+        for _depth in range(10):
+            op = op_by_id.get(cur_id)
+            if op is None:
+                break
+            if op.op == "tt.load" and op.operand_ids:
+                load_addptr_id = op.operand_ids[0]
+                load_ptr_info = self.env_is_ptr.get(load_addptr_id)
+                break
+            if op.operand_ids:
+                if len(op.operand_ids) >= 2:
+                    post_load_ops.insert(
+                        0, (op.op, self._lookup(op.operand_ids[1])))
+                cur_id = op.operand_ids[0]
+            else:
+                break
+
+        def _apply_post_load(expr):
+            for op_type, other_var in post_load_ops:
+                if "mul" in op_type:
+                    expr = f"({expr} * {other_var})"
+                elif "sub" in op_type:
+                    expr = f"({expr} - {other_var})"
+                elif "add" in op_type:
+                    expr = f"({expr} + {other_var})"
+            return expr
+
         if total > bs and self._is_2d:
-            # Trace the source chain to find the original tt.load and
-            # its pointer info. Also collect any transformations applied
-            # between the load and local_alloc (e.g., multiply by scale).
-            load_ptr_info = None
-            load_mask_op_id = None
-            post_load_ops = []  # (op_type, extra_operand_var) chain
-
-            # Build flat list of all ops including those inside scf.for bodies
-            def _all_ops(ops):
-                for o in ops:
-                    yield o
-                    if o.region_ops:
-                        yield from _all_ops(o.region_ops)
-                    if o.else_ops:
-                        yield from _all_ops(o.else_ops)
-            all_ops = list(_all_ops(self.graph.ops))
-
-            cur_id = ssa.operand_ids[0]
-            for _depth in range(10):
-                for op in all_ops:
-                    if op.id == cur_id:
-                        if op.op == "tt.load" and op.operand_ids:
-                            ptr_id = op.operand_ids[0]
-                            load_ptr_info = self.env_is_ptr.get(ptr_id)
-                            # Find mask
-                            for oid in op.operand_ids[1:]:
-                                if oid in self.env_is_mask or self._is_mask(oid):
-                                    load_mask_op_id = oid
-                        elif op.operand_ids:
-                            # Record transformation op (e.g., arith.mulf)
-                            if len(op.operand_ids) >= 2:
-                                other_id = op.operand_ids[1]
-                                other_var = self._lookup(other_id)
-                                post_load_ops.insert(0, (op.op, other_var))
-                            cur_id = op.operand_ids[0]
-                        break
-                if load_ptr_info is not None:
-                    break
-
-            if load_ptr_info:
-                base_ptr, offset_expr = load_ptr_info
-                # Find which idx variables are used in THIS offset expression.
-                # Different loads may use different idx vars for the same dim.
-                row_var = None
-                col_var = None
-                for mr_id, dim in self._make_range_dim.items():
-                    v = self.env.get(mr_id, "")
-                    if not isinstance(v, str) or not v.startswith("idx_"):
-                        continue
-                    # Direct: idx appears in offset expression
-                    if v in offset_expr:
-                        if dim == 1 and col_var is None:
-                            col_var = v
-                        elif dim == 0 and row_var is None:
-                            row_var = v
-                        continue
-                    # Indirect: a TRANSITIVELY dependent variable appears
-                    # in offset.  Build the set of all variable names that
-                    # depend (directly or indirectly) on this make_range idx
-                    # and check if any of them appear in offset_expr.
-                    if dim == 0 and row_var is None:
-                        dep_names = {v}
-                        changed = True
-                        while changed:
-                            changed = False
-                            for dop in all_ops:
-                                dv = self.env.get(dop.id, "")
-                                if not isinstance(dv, str) or dv in dep_names:
-                                    continue
-                                if not dop.operand_ids:
-                                    continue
-                                if any(self.env.get(oid, "") in dep_names
-                                       for oid in dop.operand_ids):
-                                    dep_names.add(dv)
-                                    changed = True
-                        if any(dn in offset_expr for dn in dep_names):
-                            row_var = v
-
+            if load_ptr_info is not None:
+                base_ptr = load_ptr_info[0]
+                # Per-load structural rebuild of each staged element's global
+                # address (correct-or-refuse for transposed/strided operands).
+                new_offset = self._rebuild_staged_fill_offset(
+                    load_addptr_id, op_by_id, base_ptr, M, N)
                 self.kb.raw_line(f"    for (uint _sa = lid; _sa < {total}u; _sa += {bs}u) {{")
                 self.kb.raw_line(f"        uint _fill_row = _sa / {N}u;")
                 self.kb.raw_line(f"        uint _fill_col = _sa % {N}u;")
-
-                # Rebuild the offset expression by substituting row/col vars.
-                new_offset = offset_expr
-                emitted = set()
-                if col_var:
-                    new_offset = new_offset.replace(col_var, "_fill_col")
-                if row_var:
-                    # Find dependent variables and rebuild them
-                    for op in all_ops:
-                        v = self.env.get(op.id, "")
-                        if not isinstance(v, str) or not v.startswith("r_") or v in emitted:
-                            continue
-                        if not op.operand_ids:
-                            continue
-                        uses_row = any(self.env.get(oid, "") == row_var for oid in op.operand_ids)
-                        if not uses_row:
-                            continue
-                        emitted.add(v)
-                        a = self.env.get(op.operand_ids[0], "?") if len(op.operand_ids) > 0 else "?"
-                        b = self.env.get(op.operand_ids[1], "?") if len(op.operand_ids) > 1 else "0"
-                        a_sub = "(int)_fill_row" if a == row_var else a
-                        b_sub = "(int)_fill_row" if b == row_var else b
-                        op_sym = " + " if "add" in (op.op or "") else " * " if "mul" in (op.op or "") else " + "
-                        self.kb.raw_line(f"        int _fill_{v} = {a_sub}{op_sym}{b_sub};")
-                        new_offset = new_offset.replace(v, f"_fill_{v}")
-                        # 2nd-level deps
-                        for op2 in all_ops:
-                            v2 = self.env.get(op2.id, "")
-                            if not isinstance(v2, str) or not v2.startswith("r_") or v2 in emitted:
-                                continue
-                            if not op2.operand_ids:
-                                continue
-                            if not any(self.env.get(oid, "") == v for oid in op2.operand_ids):
-                                continue
-                            emitted.add(v2)
-                            a2 = self.env.get(op2.operand_ids[0], "?")
-                            b2 = self.env.get(op2.operand_ids[1], "?") if len(op2.operand_ids) > 1 else "0"
-                            a2_sub = f"_fill_{v}" if a2 == v else a2
-                            b2_sub = f"_fill_{v}" if b2 == v else b2
-                            op2_sym = " + " if "add" in (op2.op or "") else " * " if "mul" in (op2.op or "") else " + "
-                            self.kb.raw_line(f"        int _fill_{v2} = {a2_sub}{op2_sym}{b2_sub};")
-                            new_offset = new_offset.replace(v2, f"_fill_{v2}")
-                    new_offset = new_offset.replace(row_var, "(int)_fill_row")
-
-                # Load value from global memory
-                val_expr = f"{base_ptr}[{new_offset}]"
-                # Apply post-load transformations (e.g., * scale)
-                for op_type, other_var in post_load_ops:
-                    if "mul" in op_type:
-                        val_expr = f"({val_expr} * {other_var})"
-                    elif "add" in op_type:
-                        val_expr = f"({val_expr} + {other_var})"
+                val_expr = _apply_post_load(f"{base_ptr}[{new_offset}]")
                 self.kb.raw_line(f"        {shared_name}[_sa] = {val_expr};")
                 self.kb.raw_line(f"    }}")
             else:
@@ -6331,9 +6452,24 @@ class GenericLowerer(_ControlFlowMixin, _ReduceScanMixin, _EmissionMixin, _Detec
                 self.kb.raw_line(f"        {shared_name}[_sa] = {src_var};")
                 self.kb.raw_line(f"    }}")
         elif src_ptr_name:
-            self.kb.raw_line(f"    for (uint _sa = lid; _sa < {total}u; _sa += {bs}u) {{")
-            self.kb.raw_line(f"        {shared_name}[_sa] = {src_ptr_name}[_sa];")
-            self.kb.raw_line(f"    }}")
+            if self._is_2d and load_ptr_info is not None:
+                # 2-D tile staged for a tt.dot but small enough that
+                # total <= block_size. The flat base_ptr[_sa] copy assumes a
+                # contiguous row-major source; rebuild structurally so a
+                # transposed/strided source stages correctly (or refuses).
+                base_ptr = load_ptr_info[0]
+                new_offset = self._rebuild_staged_fill_offset(
+                    load_addptr_id, op_by_id, base_ptr, M, N)
+                self.kb.raw_line(f"    for (uint _sa = lid; _sa < {total}u; _sa += {bs}u) {{")
+                self.kb.raw_line(f"        uint _fill_row = _sa / {N}u;")
+                self.kb.raw_line(f"        uint _fill_col = _sa % {N}u;")
+                val_expr = _apply_post_load(f"{base_ptr}[{new_offset}]")
+                self.kb.raw_line(f"        {shared_name}[_sa] = {val_expr};")
+                self.kb.raw_line(f"    }}")
+            else:
+                self.kb.raw_line(f"    for (uint _sa = lid; _sa < {total}u; _sa += {bs}u) {{")
+                self.kb.raw_line(f"        {shared_name}[_sa] = {src_ptr_name}[_sa];")
+                self.kb.raw_line(f"    }}")
         else:
             # Fallback: use the value from the wrapping loop (only correct
             # when total == block_size or for a single element).

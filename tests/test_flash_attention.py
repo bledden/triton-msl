@@ -135,6 +135,33 @@ def _ref_attention(q, k, v, causal=False):
     return torch.matmul(attn, v)
 
 
+@triton.jit
+def _fa_pretransposed_k(Q, K, V, O, N: tl.constexpr, HD: tl.constexpr,
+                        sm: tl.constexpr):
+    """Single-block attention that stages K PRE-TRANSPOSED.
+
+    K is [N, HD] in memory but loaded as its [HD, N] transpose
+    (``K + offs_d[:, None] + offs_n[None, :] * HD``) so ``tl.dot(q, k)``
+    needs no ``tl.trans``.  Here ``offs_n`` is a COLUMN of the K tile yet a
+    ROW of the V tile (dual role), and K's bare stride-1 term (offs_d) is the
+    ROW while its strided ``*HD`` term (offs_n) is the COLUMN -- the inverse
+    of the usual row=strided / col=bare layout.  This is the case the old
+    global-make_range string heuristic silently mis-staged.
+    """
+    offs_m = tl.arange(0, N)
+    offs_n = tl.arange(0, N)
+    offs_d = tl.arange(0, HD)
+    q = tl.load(Q + offs_m[:, None] * HD + offs_d[None, :]) * sm
+    k = tl.load(K + offs_d[:, None] + offs_n[None, :] * HD)   # [HD, N] = Kᵀ
+    qk = tl.dot(q, k)
+    qk = qk - tl.max(qk, 1)[:, None]
+    p = tl.exp(qk)
+    p = p / tl.sum(p, 1)[:, None]
+    v = tl.load(V + offs_n[:, None] * HD + offs_d[None, :])
+    o = tl.dot(p.to(tl.float32), v)
+    tl.store(O + offs_m[:, None] * HD + offs_d[None, :], o)
+
+
 class TestFlashAttention:
     """Flash Attention tests via @triton.jit → Metal GPU."""
 
@@ -444,3 +471,41 @@ class TestFlashAttention:
                 BLOCK_M=BLOCK, BLOCK_N=BLOCK, HEAD_DIM=HEAD_DIM,
                 IS_CAUSAL=False,
             )
+
+    @requires_triton
+    @pytest.mark.parametrize("HEAD_DIM", [32, 64])
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_pretransposed_k_staging(self, seed, HEAD_DIM):
+        """K loaded pre-transposed must stage CORRECTLY, not silently-wrong.
+
+        Regression for shared-memory dot-operand staging: the cooperative fill
+        must rebuild EACH load's address per-element from that load's own
+        expand_dims(axis)/stride chain.  The old global-make_range string
+        heuristic assumed row=strided / col=bare and hoisted K's strided column
+        term, miscomputing the attention by ~1.0.  Reference is numpy float64
+        (never torch-on-mps).
+        """
+        import numpy as np
+        if not (hasattr(torch, "mps") and torch.backends.mps.is_available()):
+            pytest.skip("MPS not available")
+        N = 32
+        rng = np.random.RandomState(seed)
+        Qn = rng.randn(N, HEAD_DIM).astype(np.float32)
+        Kn = rng.randn(N, HEAD_DIM).astype(np.float32)
+        Vn = rng.randn(N, HEAD_DIM).astype(np.float32)
+        sm = 1.0 / (HEAD_DIM ** 0.5)
+
+        Q = torch.tensor(Qn, device='mps')
+        K = torch.tensor(Kn, device='mps')
+        V = torch.tensor(Vn, device='mps')
+        O = torch.zeros(N, HEAD_DIM, device='mps')
+        _fa_pretransposed_k[(1,)](Q, K, V, O, N=N, HD=HEAD_DIM, sm=float(sm))
+        torch.mps.synchronize()
+
+        qk = (Qn.astype(np.float64) @ Kn.astype(np.float64).T) * sm
+        qk -= qk.max(1, keepdims=True)
+        p = np.exp(qk)
+        p /= p.sum(1, keepdims=True)
+        ref = p @ Vn.astype(np.float64)
+        err = float(np.abs(O.cpu().numpy() - ref).max())
+        assert err < 1e-4, f"pre-transposed-K staging err={err} (silent-wrong)"
