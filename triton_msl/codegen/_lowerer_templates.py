@@ -87,6 +87,21 @@ class _TemplateMixin:
                 for s in iter_ops_recursive(self.graph.ops)
                 if s.op == "tt.get_program_id"}
         if axes - {0}:
+            # `_emit_tile_ids_body` maps exactly two tile axes -- pid_m <- pid3.x,
+            # pid_n <- pid3.y -- and has no branch for z. A kernel that also reads
+            # program_id(2), top-level or nested, would reach emission and have its
+            # third coordinate DROPPED silently: right shape, wrong tiles.
+            # (CodeRabbit on PR #6.) Refuse: a kernel emitted minus one of its grid
+            # axes is wrong, not smaller.
+            if axes - {0, 1}:
+                from triton_msl.errors import MetalNonRecoverableError
+                raise MetalNonRecoverableError(
+                    f"Refusing to emit silently-wrong output: program_id tile axes "
+                    f"{sorted(axes)} reached tile emission, but this template maps "
+                    f"only two (pid_m<-pid3.x, pid_n<-pid3.y); axis 2 would be "
+                    f"dropped, losing its coordinate. Refusing rather than emit a "
+                    f"kernel missing a grid axis (correct-or-refuse)."
+                )
             # The kernel really does use a multi-axis grid; take it as given.
             self._used_pid_axes = {0, 1}
             lines.append("    uint3 pid3 [[threadgroup_position_in_grid]],")
