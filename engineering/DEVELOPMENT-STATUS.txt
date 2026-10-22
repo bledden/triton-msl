@@ -25,11 +25,19 @@ Output patterns and clocks are synthetic; native construction is disabled.
 Initial ASCII conversion failure was retained and fixed to exact UTF-8 roundtrip
 without changing shader bytes. No device/compile/timing/lease or product edit.
 
-Combined bounded CPU handoff sent to Opus5.5 in verified Claude triton-msl;
-review pending at B/opus-fa512-isolated-gpu-adapter-preparation-review-20261022.
-Next: resolve its findings and implement actual native address/API/creator
-authentication, real oracle/readback, controller resource/cleanup and offline
-verification, with startup-inclusive qualification and a fresh reviewed binding.
+Opus completed the adapter review: B/opus-fa512-isolated-gpu-adapter-preparation-review-20261022/REVIEW.txt,
+SHA2569be8732d2be1689b09b6ee32f529a484ef2a95b0de6a5dc21edded53162c2f5f.
+Its arm-to-pipeline association finding is addressed in the unsealed successor
+B/fa512-isolated-gpu-native-preparation-20261022. CPU wave001 passes ten jobs:
+350 recording commands/60 adapter controls,23 native-method-body controls,
+22 altered-row refusals,34 private authority controls and eight real subprocess
+scenarios per proof label. Sources and raw results are retained; CHECKPOINT.txt
+names scope, failures and remaining work. Native construction remains disabled.
+The rehearsal found a normal-exit/identity-sample race, now closed by explicit
+parent-EOF shutdown, and a partial-constructor cleanup gap with a new red control.
+Next: complete native bootstrap/image authentication and final controller/evidence
+integration, then startup-inclusive qualification and a single complete reviewed
+binding. No additional partial handoff is needed. The CPU wave is not native proof.
 No device attempt may use this CPU packet. RG-02 and all59 obligations stay open;
 the isolated result cannot be subtracted from historical public-call excess.
 
