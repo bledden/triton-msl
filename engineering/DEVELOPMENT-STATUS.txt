@@ -1,16 +1,26 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
-Latest: separate B/fa512-isolated-gpu-instrument-20261022 candidate now contains
-the authority-gated executable path. No device authority has been issued. All28
-CPU jobs pass in cpu-wave-002, including cold missing-authority refusals; the
-qualification audit and16 altered-record controls pass in both proof labels.
-Its earlier fixture-relocation failure is retained. Parent preparation unchanged.
-Finalization/packet-verifier helpers are written, but the missing shared lease
-prevents a real final binding. ASIC has been asked about stale handles/restoration;
-no acknowledgment is yet recorded. No lease recreation, acquisition or GPU run.
-See the candidate CHECKPOINT.txt/HANDOFF-DRAFT.txt. Its readiness switch now
-permits authority validation, not execution without a review and clearance.
-The older disabled-switch statements below refer to the preparation root.
+Latest: B/fa512-isolated-gpu-instrument-20261022 is sealed and submitted to
+Opus5.5 in the verified Claude triton-msl session for one complete review.
+Binding391eb2802c7c078952a35b1a5cf2532f7c8832ad6fb147a2286df8cd504ae2ca;
+PACKET-SEAL63829c3086f9ce5703b4084acd0f36c27f2107fe0d270ea85a25fb8d65da7ac5.
+All4803 inputs and559 lane members are bound. All28 CPU wave jobs pass;
+16 qualification mutants and12 packet mutants pass per proof label. The final
+device-free preflight takes0.926s, with packet verification before and after.
+External final checks live in B/fa512-isolated-gpu-instrument-final-checks-20261022.
+No review disposition yet: Opus is reading source and preparing its own replays.
+Do not edit the sealed lane or mistake its CPU results for native qualification.
+
+The missing lease was exclusively restored at inode186832885 after Blake's
+continuation following the explicit restoration request. This interpretation
+was stated to Blake before creation. LEASE-COORDINATION.json records it exactly;
+O_EXCL/O_NOFOLLOW created an empty file, closed without flock. ASIC was asked
+and notified; acknowledgment is not claimed. Restoration is not a compute
+reservation. Fresh execution coordination, manual assessment, accepted review,
+fresh preflight and linked receipt/clearance remain required. No GPU, native
+compile, receipt, clearance or shared lease acquisition occurred. Parent roots
+and production/test bytes remain unchanged; all59 obligations stay open/HOLD.
+Older missing-lease and disabled-switch statements below are historical.
 
 Current manual continuation, after the overnight handoff
 Blake selected preparation of the narrow isolated FA512 GPU comparison. This
