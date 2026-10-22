@@ -24,6 +24,9 @@ except ModuleNotFoundError as exc:
 
 @pytest.fixture
 def build(monkeypatch, tmp_path):
+    from triton_msl.backend import _toolchain_contract as tc
+
+    monkeypatch.setattr(tc, "compiler_process_context", lambda: ("xcrun", str(tmp_path)))
     monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path))
     state = {"toolchain": "toolchain-one"}
     calls = []
@@ -32,6 +35,7 @@ def build(monkeypatch, tmp_path):
     monkeypatch.setattr(contract, "toolchain_identity", lambda: state["toolchain"], raising=False)
 
     def run(cmd, **kwargs):
+        assert kwargs["cwd"] == str(tmp_path)
         output = Path(cmd[cmd.index("-o") + 1])
         if "metal" in cmd:
             calls.append(tuple(cmd))

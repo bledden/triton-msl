@@ -47,7 +47,7 @@ class MetalBufferPool:
         self._free: dict[int, list[tuple]] = defaultdict(list)
         # Max buffers per size class to prevent unbounded growth
         self._max_per_class = 8
-        # Small scalar buffer pool (4 bytes, 8 bytes)
+        # Scalar payload pool, including declared packed-scalar arrays.
         self._scalar_free: dict[int, list] = defaultdict(list)
         self._max_scalars = 32
         # Buffer cache: maps (data_ptr, nbytes) → (metal_buf, aligned_mem, size_class)
@@ -113,7 +113,7 @@ class MetalBufferPool:
             aligned_mem.close()
 
     def acquire_scalar(self, nbytes):
-        """Acquire a small Metal buffer for scalar arguments (4 or 8 bytes).
+        """Acquire a size-keyed Metal buffer for captured scalar payload bytes.
 
         Returns: metal_buffer
         """

@@ -1,5 +1,7 @@
 """Each tt.trans consumer must use that operation's proved permutation."""
 
+from tests.source_identity import assert_candidate_source
+
 from pathlib import Path
 
 import pytest
@@ -29,7 +31,7 @@ def _two_orders(A, B, C, N: tl.constexpr):
 
 def _two_order_lowerer(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]
-    assert Path(triton_msl.__file__).resolve() == root / "triton_msl/__init__.py"
+    assert_candidate_source(root, triton_msl)
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path / "msl"))
     target = GPUTarget("metal", "apple-m4", 32)

@@ -1,5 +1,7 @@
 """Focused CPU compiler pins for cmp/select reduction exceptional semantics."""
 
+from tests.source_identity import assert_candidate_source
+
 from pathlib import Path
 import itertools
 import struct
@@ -174,8 +176,7 @@ def _full_msl(fn, tmp_path, monkeypatch, n=64):
 @requires
 def test_package_identity_is_the_checkout_under_test():
     root = Path(__file__).resolve().parents[1]
-    assert Path(triton_msl.__file__).resolve().is_relative_to(root)
-    assert Path(generic_lowerer.__file__).resolve() == (root / "triton_msl/codegen/generic_lowerer.py").resolve()
+    assert_candidate_source(root, triton_msl, generic_lowerer)
 
 
 @requires
@@ -482,8 +483,7 @@ def test_ordered_reduce_gpu_bits_canaries_and_live_source(kind, kernel, n, execu
     assert "for (uint _ord_group = 1u" in msl
     root = Path(__file__).resolve().parents[1]
     assert handle is not None and msl
-    assert Path(triton_msl.__file__).resolve().is_relative_to(root)
-    assert Path(generic_lowerer.__file__).resolve() == (root / "triton_msl/codegen/generic_lowerer.py").resolve()
+    assert_candidate_source(root, triton_msl, generic_lowerer)
 
 
 @requires_gpu

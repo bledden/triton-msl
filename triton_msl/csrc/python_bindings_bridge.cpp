@@ -31,6 +31,8 @@
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/IR/Verifier.h"
 
 #include <map>
 #include <set>
@@ -385,7 +387,7 @@ static void addAIRMetadata(llvm::Module &mod, llvm::Function &kernelFn,
 extern "C" const char* triton_msl_run_to_llvm(const char* mlir_text,
                                                  int air_major, int air_minor,
                                                  int lang_major, int lang_minor,
-                                                 int* out_success) {
+                                                 int optimize_scalar_cfg, int* out_success) {
     *out_success = 0;
 
     // Create a fresh context with all needed dialects.
@@ -765,6 +767,33 @@ extern "C" const char* triton_msl_run_to_llvm(const char* mlir_text,
     if (airImplicitArgs.empty()) {
         airImplicitArgs.push_back({"air.threadgroup_position_in_grid", "pid"});
         airImplicitArgs.push_back({"air.thread_position_in_threadgroup", "lid"});
+    }
+
+    if (optimize_scalar_cfg) {
+        // Experimental bounded scalar cleanup, before attaching AIR metadata.
+        // No target machine, fast-math flag or kernel signature transformation.
+        llvm::LoopAnalysisManager lam;
+        llvm::FunctionAnalysisManager fam;
+        llvm::CGSCCAnalysisManager cgam;
+        llvm::ModuleAnalysisManager mam;
+        llvm::PassBuilder pb;
+        pb.registerLoopAnalyses(lam);
+        pb.registerFunctionAnalyses(fam);
+        pb.registerCGSCCAnalyses(cgam);
+        pb.registerModuleAnalyses(mam);
+        pb.crossRegisterProxies(lam, fam, cgam, mam);
+        llvm::FunctionPassManager fpm;
+        if (auto error = pb.parsePassPipeline(fpm,
+                "instcombine,early-cse,jump-threading,simplifycfg,dce,simplifycfg")) {
+            static std::string errMsg;
+            errMsg = "LLVM scalar pipeline setup failed: " + llvm::toString(std::move(error));
+            return errMsg.c_str();
+        }
+        fpm.run(*kernelFn, fam);
+        if (llvm::verifyModule(*llvmMod, &llvm::errs())) {
+            static std::string errMsg = "LLVM scalar pipeline produced invalid IR";
+            return errMsg.c_str();
+        }
     }
 
     // Add AIR metadata for Metal compilation.

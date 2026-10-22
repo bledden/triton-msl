@@ -19,6 +19,7 @@ def _image(provider=None):
 
 @pytest.fixture
 def selection(tmp_path, monkeypatch):
+    monkeypatch.setattr(tc, "_compiler_context", None)
     bundle, sdk = tmp_path / "Toolchain.xctoolchain", tmp_path / "SDK.sdk"
     selectors, actual = bundle / "usr/bin", bundle / "usr/metal/current/bin"
     for path in (selectors, actual, sdk):

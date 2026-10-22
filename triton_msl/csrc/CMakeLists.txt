@@ -290,6 +290,7 @@ target_link_libraries(triton_msl_backend
     # TMAUtilities.cpp (pulled in for hasCGABroadcast) references LLVM cloning
     # utilities; this standalone target must link them explicitly (#144).
     LLVMTransformUtils
+    LLVMPasses
     # python_bindings_bridge.cpp's run-to-LLVM path parses MLIR text, runs
     # SCF/CF->LLVM lowering, and translates to LLVM IR; the standalone target
     # links those MLIR libraries explicitly (the plugin gets them at runtime
@@ -351,7 +352,7 @@ if(NOT DEFINED PYBIND11_FINDPYTHON)
 endif()
 find_package(pybind11 REQUIRED PATHS "${_pybind11_hint}")
 
-pybind11_add_module(_triton_msl_cpp NO_EXTRAS SHARED
+pybind11_add_module(_triton_msl_cpp NO_EXTRAS MODULE
     python_bindings.cpp
     python_bindings_bridge.cpp
     lib/Conversion/TritonMSLToLLVM.cpp
@@ -366,10 +367,11 @@ pybind11_add_module(_triton_msl_cpp NO_EXTRAS SHARED
 # dynamic_lookup (the mechanism we use to defer MLIR/LLVM symbol resolution
 # until libtriton.so is loaded into the same Python process).
 #
-# SHARED (not pybind11's default MODULE/-bundle) is required on macOS so
-# the linker accepts undefined references that resolve via libtriton.so at
-# runtime. -bundle's stricter symbol resolution rejects them. Python loads
-# .so files via dlopen regardless of whether they're -bundle or -dynamiclib.
+# MODULE selects Python::Module rather than pybind11's embedding linkage.
+# On macOS, the explicit -undefined dynamic_lookup option below permits
+# CPython symbols to resolve from the running interpreter without linking an
+# absolute libpython framework path. Compiler symbols still resolve through
+# the one matched libtriton dependency; no second LLVM/MLIR is embedded.
 # Derive the extension suffix from the building Python's ABI rather than
 # hardcoding a version (was ".cpython-314-darwin.so", which breaks on any
 # other Python). Falls back to the 3.14 tag if discovery fails.

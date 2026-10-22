@@ -27,6 +27,39 @@ def test_content_and_options_are_separate_key_fields():
     assert contract.source_key("ab", "c") != contract.source_key("a", "bc")
 
 
+@pytest.mark.parametrize("value", [None, "0", "1"])
+def test_effective_policy_uses_memoized_stamp_encoder(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("TRITON_MSL_CPP_SCALAR_CFG", raising=False)
+    else:
+        monkeypatch.setenv("TRITON_MSL_CPP_SCALAR_CFG", value)
+    policy = contract.effective_policy()
+    # Use the real producer, not a policy synthesized from the encoder's keys:
+    # adding a policy flag must not silently bypass the known-stamp fast path.
+    assert policy.keys() == contract._STAMP_POLICY_FIELDS
+    assert policy["CPP_SCALAR_CFG"] is (value == "1")
+    source = {
+        "schema": contract.SOURCE_SCHEMA,
+        "implementation": "controlled-package",
+        "frameworks": "controlled-framework",
+        "label": "controlled-label",
+        "policy": policy,
+    }
+    expected = json.dumps(
+        {"schema": 1, "source": source, "toolchain": "controlled-toolchain"},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    contract._encode_known_stamp.cache_clear()
+    try:
+        assert contract._encode_execution(source, "controlled-toolchain") == expected
+        assert contract._encode_execution(source, "controlled-toolchain") == expected
+        info = contract._encode_known_stamp.cache_info()
+        assert (info.misses, info.hits) == (1, 1)
+    finally:
+        contract._encode_known_stamp.cache_clear()
+
+
 @pytest.mark.parametrize("value", [None, "1", "true", "TRUE", "False"])
 def test_mept_truth_rule_matches_the_lowerer(monkeypatch, value):
     if value is None:

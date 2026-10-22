@@ -562,6 +562,7 @@ class MSLCodeGen:
         self.builder = builder
 
     def emit(self):
+        self.builder._argument_abi = None
         # Return prebuilt MSL if available (e.g., matmul kernels).
         # Substitute the kernel function name to match the TTGIR function name.
         if self.builder._prebuilt_msl is not None:
@@ -707,7 +708,12 @@ class MSLCodeGen:
         lines.append("}")
         lines.append("")
 
-        return "\n".join(lines)
+        source = "\n".join(lines)
+        if _pack_scalars is not None:
+            from triton_msl.backend._argument_abi import producer_record
+
+            self.builder._argument_abi = producer_record(_args, "generic-msl-v1", source)
+        return source
 
 
 # ---------------------------------------------------------------------------
@@ -769,11 +775,24 @@ def emit_msl(mod, metadata, options):
 
         from triton_msl.codegen.generic_lowerer import GenericLowerer
 
+        from triton_msl.codegen._source_program.entry import emit as emit_source_program
+
+        source_program = emit_source_program(mod, graph, options, metadata["name"], GenericLowerer)
+        if source_program is not None:
+            msl_src, source_metadata = source_program
+            metadata.update(source_metadata)
+            _mept_path_log("source-program-pending", metadata["name"])
+            return msl_src
+
         lowerer = GenericLowerer(graph, options)
         msl_src = lowerer.lower()
 
         # Use lowerer's effective block_size (may differ from graph for matmul templates)
         metadata["block_size"] = lowerer.effective_block_size
+        if type(lowerer._flash_attention) is dict and lowerer._flash_attention.get("kind") == "cooperative-row-v1":
+            # Preserve the public occupancy denominator convention. Actual
+            # per-entry static bytes (scalar0/sibling16384) live in the descriptor.
+            metadata["shared"] = max(1, lowerer._replay_shared_bytes)
 
         # Unresolved SSA references raise at lookup. Unsupported operations are
         # recorded by their lowering sites, including noinline callees. Searching
@@ -811,6 +830,7 @@ def emit_msl(mod, metadata, options):
                 else None
             )
             _mept_path_log("primary", metadata.get("name", "?"))
+            metadata["argument_abi"] = lowerer._argument_abi
             return msl_src
 
         if retained_asserts:
@@ -868,6 +888,8 @@ def _legacy_fallback(ir_text, metadata, options, reason):
     metadata["name"] = _sanitize_msl_name(kernel_name)
     kb = parse_ttgir(ir_text, options)
     metadata["block_size"] = kb.block_size
+    # The opt-in heuristic parser grants no new host ABI certificate.
+    metadata["argument_abi"] = None
     return kb.build()
 
 

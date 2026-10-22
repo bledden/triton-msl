@@ -117,9 +117,11 @@ def test_reduction_extent_correct_or_refuse(kernel):
 
 @requires
 def test_over_31_buffer_args_refuses_clearly(tmp_path):
-    """#7: a kernel with more arguments than Metal's 31 buffer slots must refuse with a
-    clear, actionable message -- not the wall of cryptic "'buffer' attribute parameter is
-    out of bounds" the Metal frontend emits (one line per overflowing arg, naming nothing).
+    """#7: certified packed arguments compute correctly beyond 31 logical slots.
+
+    Keep the historical node name for regression continuity. The host route now
+    supports producer-certified packing; unproved layouts still refuse in the
+    argument-ABI and host-packed control suites.
     """
     import importlib.util
 
@@ -137,12 +139,10 @@ def test_over_31_buffer_args_refuses_clearly(tmp_path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    # Host path (cpu tensors) can't bind the packed signature -> clean refuse.
+    # Host path binds the certified packed signature and publishes the exact result.
     out = torch.zeros(1, device="cpu", dtype=torch.int32)
-    with pytest.raises(MetalNonRecoverableError) as ei:
-        mod.big_kernel[(1,)](out, *range(n_scalars))
-    msg = str(ei.value).lower()
-    assert "31" in msg, f"refusal message not clear: {ei.value}"
+    mod.big_kernel[(1,)](out, *range(n_scalars))
+    assert int(out[0]) == sum(range(n_scalars)), "packed >31-arg kernel wrong on host"
 
     # MPS path packs the scalars into one argument buffer -> computes correctly (issue #4.7).
     if torch.backends.mps.is_available() and hasattr(torch.mps, "compile_shader"):

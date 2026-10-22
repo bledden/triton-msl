@@ -1,0 +1,10 @@
+{
+  "origin": "Reporter fork forward kernel at 92abd91978774f4a9d8355e5bbd83cb224d7c9b7",
+  "source_file": "src/trifast/triton.py",
+  "source_sha256": "11313cc660cc10c9da151692726798aa0240fe9915e694ea835e4a6247f0365d",
+  "copyright": "Copyright (c) 2025 Liam Atkinson",
+  "license": "MIT; full notice in third_party/trifast/LICENSE",
+  "derivation": "Exact _fwd AST with only the outer autotune decorator removed, reporter AOT f32/bool signature, DIM32 BLOCK_J32 BLOCK_K32 CLOSEST_N1024; PADDED true and false compiled to TTGIR in guarded red controls before the new emitter ran.",
+  "evidence": "trifast-production-package-20261009/red-native-001",
+  "scope": "Repository-only source-proof fixtures. Recognition uses graph semantics, never these file hashes or the function name. Not a general-input or runtime support claim."
+}

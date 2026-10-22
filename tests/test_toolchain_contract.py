@@ -14,6 +14,7 @@ def inputs(tmp_path, monkeypatch):
     for name in tc._EXTERNAL_SEARCH:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(tc, "_snapshot", None)
+    monkeypatch.setattr(tc, "_compiler_context", None)
     toolchain, sdk = tmp_path / "Toolchain.xctoolchain", tmp_path / "SDK.sdk"
     toolchain.mkdir()
     sdk.mkdir()
@@ -23,7 +24,7 @@ def inputs(tmp_path, monkeypatch):
     (sdk / "header.h").write_text("typedef float scalar;\n")
     metadata = {"schema": 1, "sdk_build": "A", "compiler_version": "B", "os_build": "C"}
     roots = {"metal": toolchain, "metallib": toolchain, "sdk": sdk}
-    monkeypatch.setattr(tc, "_resolve_toolchain", lambda: (roots, metadata))
+    monkeypatch.setattr(tc, "_resolve_toolchain", lambda **kwargs: (roots, metadata))
     return roots, metadata
 
 
@@ -145,6 +146,7 @@ def test_selection_change_during_hashing_does_not_publish_a_snapshot(inputs, mon
 
 
 def test_unavailable_resolver_has_no_shared_unknown_fallback(monkeypatch):
+    monkeypatch.setattr(tc, "_compiler_context", None)
     monkeypatch.setattr(tc.shutil, "which", lambda name: None)
     with pytest.raises(RuntimeError, match="xcrun is unavailable"):
         tc._resolve_toolchain()
@@ -152,6 +154,7 @@ def test_unavailable_resolver_has_no_shared_unknown_fallback(monkeypatch):
 
 @pytest.mark.parametrize("spelling", ["valid", "no_installed_dir", "external_compiler"])
 def test_resolver_proves_actual_compiler_is_in_the_inventory(tmp_path, monkeypatch, spelling):
+    monkeypatch.setattr(tc, "_compiler_context", None)
     # This fixture checks selector/InstalledDir containment using text stand-ins.
     # Actual Mach-O external-provider binding has its own pre-fix-biting fixture.
     monkeypatch.setattr(tc, "_toolchain_native_dependencies", lambda roots, entries: {})
@@ -195,3 +198,34 @@ def test_resolver_proves_actual_compiler_is_in_the_inventory(tmp_path, monkeypat
         assert roots == {"metal": bundle, "metallib": bundle, "sdk": sdk}
         assert metadata["compiler_version"] == "Metal build1"
         assert "InstalledDir" not in str(metadata)
+
+
+def test_relative_versioned_lookup_uses_installation_not_application_directory(inputs, monkeypatch, tmp_path):
+    """No per-reuse filesystem work: compiler CWD is explicitly the inventoried root."""
+    roots, metadata = inputs
+    entry = (1, "@rpath/comparison.dylib", ("absent-relative", "@rpath/comparison.dylib"))
+    row = ("digest", (("DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/../F", ("versioned-overrides", (entry,))),))
+    metadata["native_providers"] = {"metal-helper:usr/bin/tool": (row,)}
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    first = tc.toolchain_identity()
+    assert tc._working_directory_lookups(metadata) == ("@rpath/comparison.dylib",)
+    assert tc.toolchain_identity() == first
+    shadow = work / "@rpath" / "comparison.dylib"
+    shadow.parent.mkdir()
+    shadow.write_bytes(b"a newer comparison library dyld would now open")
+    assert tc.toolchain_identity() == first
+    shadow.unlink()
+    shadow.symlink_to(tmp_path / "gone.dylib")  # a dangling link is still an open() input
+    assert tc.toolchain_identity() == first
+    shadow.unlink()
+    shadow.parent.rmdir()
+    assert tc.toolchain_identity() == first
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)  # a clean different directory keeps the same proved identity
+    assert tc.toolchain_identity() == first
+    assert tc._working_directory_lookups({}) == ()
+    monkeypatch.setattr(tc.os.path, "lexists", lambda *args: pytest.fail("warm identity did filesystem work"))
+    assert tc.toolchain_identity() == first

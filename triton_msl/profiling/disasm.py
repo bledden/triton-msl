@@ -12,7 +12,7 @@ the same integrity failure as a silently-wrong kernel:
 
   BEST-EFFORT (reverse-engineered, partial on this GPU):
     - Native-AGX disassembly via the vendored ``applegpu`` decoder
-      (third_party/applegpu, dougallj — REFERENCES.md [11]). applegpu targets
+      (triton_msl._vendor.applegpu, dougallj — REFERENCES.md [11]). applegpu targets
       the M1-era AGX ISA; the M4 is AGX2, so a fraction of instructions
       decode as ``<disassembly failed>``. We therefore report a *decode
       coverage* and never present the instruction mix as complete.
@@ -48,12 +48,6 @@ _AGX_CPUTYPE = 16777235  # 0x01000013
 _FAT_MAGICS = (0xCAFEBABE, 0xCBFEBABE)
 _MH_MAGIC_64 = 0xFEEDFACF
 _MH_CIGAM_64 = 0xCFFAEDFE
-
-# Path to the vendored applegpu decoder.
-_APPLEGPU_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "third_party", "applegpu"
-)
-
 
 @dataclass
 class ReflectionMetrics:
@@ -206,15 +200,11 @@ def disassemble_archive(archive_path: str, *, max_sample: int = 40) -> DisasmRes
     Degrades gracefully: import/parse/decode failures return
     ``available=False`` with a reason.
     """
-    if not os.path.isdir(_APPLEGPU_DIR):
-        return DisasmResult(False, reason=f"applegpu not vendored at {_APPLEGPU_DIR}", archive_path=archive_path)
     agx = _extract_agx_slice(archive_path)
     if not agx:
         return DisasmResult(False, reason="could not extract native AGX slice", archive_path=archive_path)
-    if _APPLEGPU_DIR not in sys.path:
-        sys.path.insert(0, _APPLEGPU_DIR)
     try:
-        import applegpu  # vendored decoder
+        from .._vendor.applegpu import applegpu  # package-private vendored decoder
     except Exception as e:  # pragma: no cover - import guard
         return DisasmResult(False, reason=f"applegpu import failed: {e}", archive_path=archive_path)
 

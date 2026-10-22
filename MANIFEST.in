@@ -13,6 +13,8 @@ prune .github
 # Retain the notice while excluding repository-only tests and third-party code.
 # PEP 639 also carries it into the wheel's dist-info/licenses directory.
 include third_party/trifast/LICENSE
+# Installed static decoder, with its upstream provenance and license.
+recursive-include triton_msl/_vendor/applegpu *.py LICENSE VENDORED.md
 # Retain the optional accelerator SOURCE even when creating an sdist on Python
 # or a platform that deliberately builds the pure-Python fallback wheel.
 include triton_msl/backend/_validation_native.c

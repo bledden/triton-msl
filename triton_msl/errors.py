@@ -10,6 +10,15 @@ Provides clear, actionable error messages for common failure modes:
 """
 
 
+class MetalToolchainSelectionError(RuntimeError):
+    """The resolved compiler selection is unusable or changed within this process.
+
+    This refusal must propagate through device probes, not select a guessed
+    fallback. Missing executables and subprocess failures retain their existing
+    exception types; this class identifies explicit selection/layout refusals.
+    """
+
+
 class MetalCompilationError(RuntimeError):
     """MSL shader compilation failed (xcrun metal returned an error)."""
 

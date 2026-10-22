@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import struct
+import sys
 
 import pytest
 
@@ -9,16 +10,56 @@ ARM64 = 0x0100000C
 X86_64 = 0x01000007
 
 
-def _command(cmd, text):
-    fixed = 12 if cmd == 0x8000001C else 24
+MH_EXECUTE, MH_DYLIB = 2, 6
+LC_DYLD_ENVIRONMENT = 0x27
+
+
+def _command(cmd, text, version=0):
+    # LC_RPATH, LC_LOAD_DYLINKER and LC_DYLD_ENVIRONMENT share the 12-byte lc_str layout;
+    # dylib commands carry timestamp, current_version (packed X.Y.Z) and compatibility_version.
+    fixed = 12 if cmd in (0x8000001C, 0xE, LC_DYLD_ENVIRONMENT) else 24
     body = text.encode() + b"\0"
     size = (fixed + len(body) + 7) & ~7
-    return (struct.pack("<III", cmd, size, fixed) + bytes(fixed - 12) + body).ljust(size, b"\0")
+    tail = struct.pack("<III", 0, version, 0) if fixed == 24 else b""
+    return (struct.pack("<III", cmd, size, fixed) + tail + body).ljust(size, b"\0")
 
 
-def _image(*commands, cpu=ARM64):
+def _version(major, minor=0, patch=0):
+    return (major << 16) | (minor << 8) | patch
+
+
+LC_BUILD_VERSION, PLATFORM_MACOS = 0x32, 1
+
+
+def _image(*commands, cpu=ARM64, file_type=MH_DYLIB, platform=PLATFORM_MACOS):
+    # LC_BUILD_VERSION last, so byte-offset damage fixtures keep hitting the first command.
+    if platform is not None:
+        commands = (*commands, struct.pack("<6I", LC_BUILD_VERSION, 24, platform, 0, 0, 0))
     body = b"".join(commands)
-    return struct.pack("<8I", 0xFEEDFACF, cpu, 0, 6, len(commands), len(body), 0, 0) + body
+    return struct.pack("<8I", 0xFEEDFACF, cpu, 0, file_type, len(commands), len(body), 0, 0) + body
+
+
+def _framework(root, name, *commands, install_name=None, payload=b"", version=0):
+    """A real framework bundle layout: Versions/A binary, Current and top-level symlinks."""
+    versions = root / f"{name}.framework" / "Versions"
+    (versions / "A").mkdir(parents=True)
+    binary = versions / "A" / name
+    identity = _command(0xD, install_name or f"@rpath/{name}.framework/Versions/A/{name}", version)
+    binary.write_bytes(_image(identity, *commands) + payload)
+    (versions / "Current").symlink_to("A")
+    (root / f"{name}.framework" / name).symlink_to(f"Versions/Current/{name}")
+    return binary
+
+
+def _tool(root, *commands, versioned="@executable_path/../Frameworks", file_type=MH_EXECUTE):
+    """An executable whose LC_DYLD_ENVIRONMENT names the versioned framework directory."""
+    (root / "bin").mkdir(exist_ok=True)
+    tool = root / "bin" / "tool"
+    environment = (
+        () if versioned is None else (_command(LC_DYLD_ENVIRONMENT, f"DYLD_VERSIONED_FRAMEWORK_PATH={versioned}"),)
+    )
+    tool.write_bytes(_image(*commands, *environment, file_type=file_type))
+    return tool
 
 
 def test_parser_keeps_dependency_kinds_and_rpaths(tmp_path):
@@ -42,6 +83,9 @@ def test_parser_keeps_dependency_kinds_and_rpaths(tmp_path):
     )
     assert image.rpaths == ("@loader_path/lib",)
     assert image.install_name == "@rpath/this.dylib"
+    assert image.platforms == frozenset({PLATFORM_MACOS})
+    path.write_bytes(_image(platform=None))
+    assert parse_image(path, ARM64).platforms == frozenset()
     # There is no well-defined full-name binding with two LC_ID_DYLIBs.
     path.write_bytes(_image(_command(0xD, "@rpath/one.dylib"), _command(0xD, "@rpath/two.dylib")))
     with pytest.raises(ValueError, match="duplicate.*install name"):
@@ -267,3 +311,472 @@ def test_torch_explicit_ctypes_global_dependency_is_a_named_entrypoint(tmp_path)
     (package / "lib/not_an_entry.dylib").write_bytes(_image())
     roots = {"python-executable": (executable,), "torch": (package,)}
     assert set(_native_entrypoints(roots)) == {executable, library}
+
+
+def test_executable_versioned_framework_path_binds_selectable_providers(tmp_path, monkeypatch):
+    """Xcode 27's coreai-build layout: LC_DYLD_ENVIRONMENT=DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/..."""
+    from triton_msl.backend import _native_dependencies as native
+    from triton_msl.backend._native_dependencies import dependency_graph, parse_image
+
+    monkeypatch.setattr(native, "_shared_cache_canonical", lambda path: False)  # the host cache is not a fixture
+
+    frameworks = tmp_path / "Frameworks"
+    os_name = "/System/Library/SubFrameworks/Alpha.framework/Versions/A/Alpha"
+    _framework(frameworks, "Alpha", _command(0xC, "@rpath/Beta.framework/Versions/A/Beta"), install_name=os_name)
+    _framework(frameworks, "Beta", payload=b"beta")
+    _framework(frameworks, "Gamma", payload=b"never referenced statically")
+    tool = _tool(tmp_path, _command(0xC, os_name), _command(0x8000001C, "@executable_path/../Frameworks"))
+    image = parse_image(tool, ARM64)
+    assert image.file_type == MH_EXECUTE
+    assert image.environment == (("DYLD_VERSIONED_FRAMEWORK_PATH", "@executable_path/../Frameworks"),)
+
+    rows, providers = dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    alpha, beta, gamma = (
+        parse_image(frameworks / f"{n}.framework/{n}", ARM64).digest for n in ("Alpha", "Beta", "Gamma")
+    )
+    assert [row[0] for row in rows] == [image.digest, alpha, beta, gamma]
+    # The OS copy is bound by the OS-build contract, the override by its bytes: dyld's
+    # current_version comparison against the shared cache picks one at launch.
+    assert rows[0][1] == (
+        (os_name, ("versioned", (1,), "system-build")),
+        (
+            "DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/../Frameworks",
+            (
+                "versioned-overrides",
+                (
+                    (1, os_name, "absent"),
+                    (
+                        2,
+                        "@rpath/Beta.framework/Versions/A/Beta",
+                        ("absent-relative", "@rpath/Beta.framework/Versions/A/Beta"),
+                    ),
+                    (
+                        3,
+                        "@rpath/Gamma.framework/Versions/A/Gamma",
+                        ("absent-relative", "@rpath/Gamma.framework/Versions/A/Gamma"),
+                    ),
+                ),
+            ),
+        ),
+    )
+    # Transitive edges of an override are proved under the requesting RPATH context;
+    # an @rpath install name is also an override key (dyld strcmp on the request).
+    assert rows[1][1] == (("@rpath/Beta.framework/Versions/A/Beta", ("versioned", (2,), ("provider", 2))),)
+    assert rows[2][1] == () and rows[3][1] == ()
+    # Every candidate is a provider node, including one no static edge names.
+    assert {p.name for p in providers} == {"tool", "Alpha", "Beta", "Gamma"}
+    # Content binding: any candidate's bytes change the identity.
+    for name in ("Alpha", "Beta", "Gamma"):
+        binary = frameworks / f"{name}.framework/Versions/A/{name}"
+        binary.write_bytes(binary.read_bytes() + b"rebuilt")
+        assert dependency_graph([tool], cpu_type=ARM64, executable=tool)[0] != rows
+
+
+def test_versioned_override_serves_an_otherwise_missing_request(tmp_path):
+    from triton_msl.backend._native_dependencies import dependency_graph
+
+    frameworks = tmp_path / "Frameworks"
+    _framework(frameworks, "Delta", install_name="@rpath/Delta.framework/Versions/A/Delta")
+    # No LC_RPATH at all: without the override this @rpath request is unproved.
+    tool = _tool(tmp_path, _command(0xC, "@rpath/Delta.framework/Versions/A/Delta"))
+    rows, _ = dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    assert rows[0][1][0] == ("@rpath/Delta.framework/Versions/A/Delta", ("versioned", (1,), "absent"))
+    plain = _tool(tmp_path, _command(0xC, "@rpath/Delta.framework/Versions/A/Delta"), versioned=None)
+    with pytest.raises(ValueError, match="rpath"):
+        dependency_graph([plain], cpu_type=ARM64, executable=plain)
+
+
+def test_versioned_directory_scan_matches_dyld(tmp_path, monkeypatch):
+    """Missing directory and framework-without-binary contribute nothing; two directories both bind."""
+    from triton_msl.backend import _native_dependencies as native
+    from triton_msl.backend._native_dependencies import dependency_graph
+
+    monkeypatch.setattr(native, "_shared_cache_canonical", lambda path: False)
+
+    tool = _tool(tmp_path, versioned="@executable_path/../Missing")
+    rows, providers = dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    assert rows[0][1] == (("DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/../Missing", ("versioned-overrides", ())),)
+    assert providers == {tool.resolve()}
+
+    first, second = tmp_path / "First", tmp_path / "Second"
+    _framework(first, "Same", install_name="/System/Library/Frameworks/Same.framework/Versions/A/Same", payload=b"1")
+    _framework(second, "Same", install_name="/System/Library/Frameworks/Same.framework/Versions/A/Same", payload=b"2")
+    (first / "Empty.framework").mkdir()  # dyld: getDylibInfo fails, no override
+    (first / "loose.dylib").write_bytes(_image())  # not a framework entry
+    _framework(
+        tmp_path / "Elsewhere", "Linked", install_name="/System/Library/Frameworks/Linked.framework/Versions/A/Linked"
+    )
+    (first / "Linked.framework").symlink_to(
+        tmp_path / "Elsewhere" / "Linked.framework"
+    )  # dyld: VLNK, not VDIR: skipped
+    tool = _tool(
+        tmp_path,
+        _command(0xC, "/System/Library/Frameworks/Same.framework/Versions/A/Same"),
+        versioned=f"@loader_path/../First:{second}",
+    )
+    rows, _ = dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    assert rows[0][1][0] == (
+        "/System/Library/Frameworks/Same.framework/Versions/A/Same",
+        ("versioned", (1, 2), "system-build"),
+    )
+    assert rows[0][1][1][1] == (
+        "versioned-overrides",
+        (
+            (1, "/System/Library/Frameworks/Same.framework/Versions/A/Same", "absent"),
+            (2, "/System/Library/Frameworks/Same.framework/Versions/A/Same", "absent"),
+        ),
+    )
+    assert len(rows) == 3
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "DYLD_LIBRARY_PATH=@executable_path/../lib",
+        "DYLD_FRAMEWORK_PATH=@executable_path/../Frameworks",
+        "DYLD_FALLBACK_LIBRARY_PATH=/opt/lib",
+        "DYLD_INSERT_LIBRARIES=@executable_path/../lib/hook.dylib",
+        "DYLD_VERSIONED_LIBRARY_PATH=@executable_path/../lib",
+        "DYLD_IMAGE_SUFFIX=_debug",
+        "DYLD_VERSIONED_FRAMEWORK_PATH",
+        "PATH=/usr/bin",
+    ],
+)
+def test_other_embedded_environment_variables_refuse(tmp_path, variable):
+    from triton_msl.backend._native_dependencies import parse_image
+
+    path = tmp_path / "tool"
+    path.write_bytes(_image(_command(LC_DYLD_ENVIRONMENT, variable), file_type=MH_EXECUTE))
+    with pytest.raises(ValueError, match="unsupported native dyld environment"):
+        parse_image(path, ARM64)
+
+
+def test_embedded_environment_outside_an_executable_refuses(tmp_path):
+    from triton_msl.backend._native_dependencies import parse_image
+
+    for file_type in (MH_DYLIB, 8):  # dyld reads only the main executable's command
+        path = tmp_path / "image"
+        path.write_bytes(
+            _image(
+                _command(LC_DYLD_ENVIRONMENT, "DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/../F"),
+                file_type=file_type,
+            )
+        )
+        with pytest.raises(ValueError, match="outside a main executable"):
+            parse_image(path, ARM64)
+
+
+@pytest.mark.parametrize(
+    "setting", ["Frameworks", "@unknown/Frameworks", "", "@executable_path/../A:", "/abs:@rpath/x"]
+)
+def test_unproved_versioned_directory_entries_refuse(tmp_path, setting):
+    from triton_msl.backend._native_dependencies import dependency_graph
+
+    tool = _tool(tmp_path, versioned=setting)
+    with pytest.raises(ValueError, match="native|provider|entry"):
+        dependency_graph([tool], cpu_type=ARM64, executable=tool)
+
+
+def test_unproved_versioned_candidates_refuse(tmp_path):
+    from triton_msl.backend._native_dependencies import dependency_graph
+
+    frameworks = tmp_path / "Frameworks"
+    tool = _tool(tmp_path)
+    (frameworks / "Text.framework").mkdir(parents=True)
+    (frameworks / "Text.framework" / "Text").write_bytes(b"not a Mach-O image")
+    with pytest.raises(ValueError, match="Mach-O"):
+        dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    (frameworks / "Text.framework" / "Text").write_bytes(_image(file_type=MH_EXECUTE))  # no LC_ID_DYLIB
+    with pytest.raises(ValueError, match="unproved native versioned framework candidate"):
+        dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    (frameworks / "Text.framework" / "Text").unlink()
+    (frameworks / "Text.framework" / "Text").symlink_to("Versions/Current/Text")  # dangling
+    with pytest.raises(ValueError, match="broken native versioned framework candidate"):
+        dependency_graph([tool], cpu_type=ARM64, executable=tool)
+
+
+def test_rpath_search_skips_an_os_directory_without_the_image(tmp_path, monkeypatch):
+    """coreai-build's LC_RPATH order is /usr/lib/swift then its own directory (dyld: try each, skip absent)."""
+    from triton_msl.backend import _native_dependencies as native
+
+    libs = tmp_path / "lib"
+    libs.mkdir()
+    (libs / "own.dylib").write_bytes(_image())
+    root = tmp_path / "root.so"
+    root.write_bytes(
+        _image(
+            _command(0xC, "@rpath/own.dylib"),
+            _command(0x80000018, "@rpath/weak.dylib"),
+            _command(0x8000001C, "/usr/lib/swift"),
+            _command(0x8000001C, "@loader_path/lib"),
+        )
+    )
+    asked = []
+
+    def cache(path):
+        asked.append(str(path))
+        return False
+
+    monkeypatch.setattr(native, "_shared_cache_contains", cache)
+    rows = native.dependency_manifest([root], cpu_type=ARM64, executable=root)
+    assert rows[0][1] == (("@rpath/own.dylib", ("provider", 1)), ("@rpath/weak.dylib", "weak-absent"))
+    assert asked == ["/usr/lib/swift/own.dylib", "/usr/lib/swift/weak.dylib"]
+    # An OS image the shared cache does hold keeps the ambiguity refusal.
+    monkeypatch.setattr(native, "_shared_cache_contains", lambda path: True)
+    with pytest.raises(ValueError, match="ambiguous"):
+        native.dependency_manifest([root], cpu_type=ARM64, executable=root)
+    # Without the cache query (None) the conservative by-prefix classification stands.
+    monkeypatch.setattr(native, "_shared_cache_contains", lambda path: None)
+    with pytest.raises(ValueError, match="ambiguous"):
+        native.dependency_manifest([root], cpu_type=ARM64, executable=root)
+    # A strong dependency whose only RPATH directory is an absent OS path refuses.
+    root.write_bytes(_image(_command(0xC, "@rpath/gone.dylib"), _command(0x8000001C, "/usr/lib/swift")))
+    monkeypatch.setattr(native, "_shared_cache_contains", lambda path: False)
+    with pytest.raises(ValueError, match="missing native dependency provider"):
+        native.dependency_manifest([root], cpu_type=ARM64, executable=root)
+    # A direct absolute OS reference is never existence-checked: it is OS-build bound.
+    root.write_bytes(_image(_command(0xC, "/usr/lib/swift/gone.dylib")))
+    assert native.dependency_manifest([root], cpu_type=ARM64, executable=root)[0][1] == (
+        ("/usr/lib/swift/gone.dylib", "system-build"),
+    )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="dyld shared cache query is Darwin-only")
+def test_shared_cache_query_answers_for_real_os_images():
+    from triton_msl.backend._native_dependencies import _shared_cache_contains
+
+    assert _shared_cache_contains("/usr/lib/libSystem.B.dylib") is True
+    assert _shared_cache_contains("/usr/lib/swift/definitely-not-shipped.dylib") is False
+
+
+def _witness(tmp_path, comparison_version):
+    """The primary's executable witness in fixture form (primary_xcode27_alias_witness.py)."""
+    ordinary, comparison = tmp_path / "ordinary.dylib", tmp_path / "comparison.dylib"
+    ordinary.write_bytes(_image(_command(0xD, str(ordinary), _version(1))) + b"returns 1")
+    comparison.write_bytes(_image(_command(0xD, str(ordinary), _version(comparison_version))) + b"header only")
+    frameworks = tmp_path / "Frameworks"
+    if not frameworks.exists():
+        _framework(frameworks, "Override", install_name=str(comparison), version=_version(2), payload=b"returns 2")
+    tool = _tool(tmp_path, _command(0xC, str(ordinary)), versioned="@executable_path/../Frameworks")
+    return tool, ordinary, comparison
+
+
+def test_versioned_comparison_library_keys_the_override_and_is_bound(tmp_path):
+    from triton_msl.backend._native_dependencies import dependency_graph, parse_image
+
+    tool, ordinary, comparison = _witness(tmp_path, comparison_version=1)
+    assert parse_image(comparison, ARM64).current_version == _version(1)
+    rows, providers = dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    override = parse_image(tmp_path / "Frameworks/Override.framework/Override", ARM64).digest
+    # Override (v2) > comparison (v1): dyld keys the override by the comparison library's
+    # OWN install name, i.e. the ordinary library the executable actually requests.
+    assert [row[0] for row in rows] == [
+        parse_image(tool, ARM64).digest,
+        override,
+        parse_image(comparison, ARM64).digest,
+        parse_image(ordinary, ARM64).digest,
+    ]
+    assert rows[0][1] == (
+        (str(ordinary), ("versioned", (1,), ("provider", 3))),
+        (
+            "DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/../Frameworks",
+            ("versioned-overrides", ((1, str(ordinary), ("comparison", 2)),)),
+        ),
+    )
+    assert rows[2] == (parse_image(comparison, ARM64).digest, (("comparison-only", "not-loaded"),))
+    assert comparison.resolve() in providers
+    # Rebuilding only the comparison library at v3 flips dyld's choice (the witness prints
+    # 2 then 1); the identity must differ and the ordinary edge loses its override.
+    tool, ordinary, comparison = _witness(tmp_path, comparison_version=3)
+    later, _ = dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    assert later != rows
+    assert later[0][1][0] == (str(ordinary), ("provider", 3))
+    assert later[0][1][1][1][1] == ((1, None, ("comparison", 2)),)
+    # Equal versions are not "greater": dyld registers nothing.
+    tool, ordinary, comparison = _witness(tmp_path, comparison_version=2)
+    assert dependency_graph([tool], cpu_type=ARM64, executable=tool)[0][0][1][1][1][1][0][1] is None
+
+
+def test_versioned_comparison_against_an_os_image_on_disk(tmp_path, monkeypatch):
+    from triton_msl.backend import _native_dependencies as native
+
+    system = tmp_path / "os"
+    system.mkdir()
+    shipped = system / "libshipped.dylib"
+    canonical = "/usr/lib/libshipped.dylib"
+    shipped.write_bytes(_image(_command(0xD, canonical, _version(1, 5))))
+    real_system = native._system
+    monkeypatch.setattr(native, "_system", lambda path: str(path).startswith(str(system)) or real_system(path))
+    frameworks = tmp_path / "Frameworks"
+    _framework(frameworks, "Newer", install_name=str(shipped), version=_version(2))
+    tool = _tool(tmp_path, _command(0xC, canonical))
+    rows, providers = native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    # The OS image is OS-build bound: header read, no node, but its name and version are recorded
+    # and its own install name is the key the executable's request matches.
+    assert rows[0][1] == (
+        (canonical, ("versioned", (1,), "system-build")),
+        (
+            "DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/../Frameworks",
+            ("versioned-overrides", ((1, canonical, ("system-build", canonical, _version(1, 5))),)),
+        ),
+    )
+    assert shipped.resolve() not in providers and len(rows) == 2
+
+
+def test_cached_comparison_is_keyed_by_its_canonical_cache_path(tmp_path, monkeypatch):
+    """The primary's cached-context witness: the override's transitive edge under the requester."""
+    from triton_msl.backend import _native_dependencies as native
+
+    cached = "/System/Library/Frameworks/ExampleCached.framework/Versions/A/ExampleCached"
+    base, caller_dir = tmp_path / "main-libs", tmp_path / "caller-libs"
+    base.mkdir()
+    caller_dir.mkdir()
+    (base / "leaf.dylib").write_bytes(_image(_command(0xD, "@rpath/leaf.dylib")) + b"main provider")
+    _framework(
+        tmp_path / "Frameworks",
+        "Override",
+        _command(0xC, "@rpath/leaf.dylib"),
+        install_name=cached,
+        version=_version(999),
+    )
+    caller = tmp_path / "caller.dylib"
+    caller.write_bytes(_image(_command(0xD, str(caller)), _command(0xC, cached), _command(0x8000001C, str(caller_dir))))
+    tool = _tool(tmp_path, _command(0xC, str(caller)), _command(0x8000001C, str(base)))
+    monkeypatch.setattr(native, "_shared_cache_canonical", lambda path: cached if str(path) == cached else False)
+    rows, providers = native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    # The key is the cached image's canonical path, the version comparison is unreadable so the
+    # candidate is taken as selectable, and the override is re-interned under the CALLER's
+    # RPATH context (caller-libs then main-libs), which is where its leaf request resolves.
+    assert rows[0][1][-1] == (
+        "DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/../Frameworks",
+        ("versioned-overrides", ((1, cached, ("shared-cache", cached)),)),
+    )
+    caller_row = next(row for row in rows if row[0] == native.parse_image(caller, ARM64).digest)
+    # Node order: tool, Override@main, caller, main-libs leaf@main, Override@caller, leaf@caller.
+    assert caller_row[1][0] == (cached, ("versioned", (4,), "system-build"))
+    assert rows[4][0] == rows[1][0] and rows[4][1] == (("@rpath/leaf.dylib", ("provider", 5)),)
+    assert rows[5][0] == rows[3][0]  # same bytes, distinct requesting context
+    assert (base / "leaf.dylib").resolve() in providers
+    # A second leaf provider in the caller's directory is the ambiguity the closed resolver refuses.
+    (caller_dir / "leaf.dylib").write_bytes(_image(_command(0xD, "@rpath/leaf.dylib")) + b"requester provider")
+    with pytest.raises(ValueError, match="ambiguous native rpath dependency provider: @rpath/leaf.dylib"):
+        native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    # Every candidate is also traversed under the main executable's context (dlopen by name from
+    # the executable resolves there), so a leaf only the caller's directory provides refuses
+    # rather than guessing; with the executable searching the caller's directory as well, the
+    # caller-side provider is bound and its change is visible.
+    (base / "leaf.dylib").unlink()
+    with pytest.raises(ValueError, match="missing native dependency provider: @rpath/leaf.dylib"):
+        native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    tool = _tool(tmp_path, _command(0xC, str(caller)), _command(0x8000001C, str(caller_dir)))
+    only_caller, providers = native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    assert (caller_dir / "leaf.dylib").resolve() in providers
+    (caller_dir / "leaf.dylib").write_bytes(_image(_command(0xD, "@rpath/leaf.dylib")) + b"changed")
+    assert native.dependency_graph([tool], cpu_type=ARM64, executable=tool)[0] != only_caller
+    tool = _tool(tmp_path, _command(0xC, str(caller)), _command(0x8000001C, str(base)))
+    (base / "leaf.dylib").write_bytes(_image(_command(0xD, "@rpath/leaf.dylib")) + b"main provider")
+    (caller_dir / "leaf.dylib").unlink()
+    # An alias request is not the key: dyld's strcmp is against the canonical name only.
+    alias = "/System/Library/Frameworks/ExampleCached.framework/ExampleCached"
+    monkeypatch.setattr(
+        native, "_shared_cache_canonical", lambda path: cached if str(path) in (cached, alias) else False
+    )
+    caller.write_bytes(_image(_command(0xD, str(caller)), _command(0xC, alias), _command(0x8000001C, str(caller_dir))))
+    rows, _ = native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    caller_row = next(row for row in rows if row[0] == native.parse_image(caller, ARM64).digest)
+    assert caller_row[1][0] == (alias, "system-build")
+
+
+def test_cached_comparison_query_states_are_distinct(tmp_path, monkeypatch):
+    from triton_msl.backend import _native_dependencies as native
+
+    name = "/System/Library/Frameworks/Cached.framework/Versions/A/Cached"
+    _framework(tmp_path / "Frameworks", "Cached", install_name=name, version=_version(9))
+    tool = _tool(tmp_path, _command(0xC, name))
+    monkeypatch.setattr(native, "_shared_cache_canonical", lambda path: None)  # query unavailable
+    with pytest.raises(ValueError, match="cannot prove native versioned comparison"):
+        native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    monkeypatch.setattr(native, "_shared_cache_canonical", lambda path: False)  # proved absent
+    rows, _ = native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    assert rows[0][1] == (
+        (name, ("versioned", (1,), "system-build")),
+        (
+            "DYLD_VERSIONED_FRAMEWORK_PATH=@executable_path/../Frameworks",
+            ("versioned-overrides", ((1, name, "absent"),)),
+        ),
+    )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="dyld shared cache query is Darwin-only")
+def test_shared_cache_canonical_resolves_real_aliases():
+    from triton_msl.backend._native_dependencies import _shared_cache_canonical
+
+    assert _shared_cache_canonical("/usr/lib/libSystem.B.dylib") == "/usr/lib/libSystem.B.dylib"
+    assert _shared_cache_canonical("/usr/lib/../lib/libSystem.B.dylib") == "/usr/lib/libSystem.B.dylib"
+    assert _shared_cache_canonical("/usr/lib/swift/definitely-not-shipped.dylib") is False
+    assert _shared_cache_canonical("@rpath/x.dylib") is False
+
+
+def test_relative_comparison_lookup_is_a_working_directory_input(tmp_path, monkeypatch):
+    """The primary's relative witness: dyld opens '@rpath/comparison.dylib' literally in the CWD."""
+    from triton_msl.backend import _native_dependencies as native
+
+    ordinary = tmp_path / "ordinary.dylib"
+    ordinary.write_bytes(_image(_command(0xD, str(ordinary), _version(1))))
+    _framework(tmp_path / "Frameworks", "Override", install_name="@rpath/comparison.dylib", version=_version(2))
+    tool = _tool(tmp_path, _command(0xC, str(ordinary)))
+    work = tmp_path / "work"
+    work.mkdir()
+    rows, _ = native.dependency_graph([tool], cpu_type=ARM64, executable=tool, working_directory=work)
+    entry = (1, "@rpath/comparison.dylib", ("absent-relative", "@rpath/comparison.dylib"))
+    assert rows[0][1][-1][1] == ("versioned-overrides", (entry,))
+    assert native.working_directory_lookups(rows) == ("@rpath/comparison.dylib",)
+    monkeypatch.chdir(work)
+    assert native.dependency_graph([tool], cpu_type=ARM64, executable=tool)[0] == rows  # default = os.getcwd()
+    (work / "@rpath").mkdir()
+    (work / "@rpath" / "comparison.dylib").write_bytes(_image(_command(0xD, str(ordinary), _version(1))))
+    for directory in (work, None):
+        with pytest.raises(ValueError, match="working directory shadows native versioned comparison lookup"):
+            native.dependency_graph([tool], cpu_type=ARM64, executable=tool, working_directory=directory)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    assert native.dependency_graph([tool], cpu_type=ARM64, executable=tool, working_directory=elsewhere)[0] == rows
+    (work / "@rpath" / "comparison.dylib").unlink()
+    (work / "@rpath" / "comparison.dylib").symlink_to(tmp_path / "gone")  # dangling: still an open() input
+    with pytest.raises(ValueError, match="working directory shadows"):
+        native.dependency_graph([tool], cpu_type=ARM64, executable=tool, working_directory=work)
+
+
+def test_unproved_platform_refuses(tmp_path, monkeypatch):
+    from triton_msl.backend import _native_dependencies as native
+
+    monkeypatch.setattr(native, "_shared_cache_canonical", lambda path: False)
+    frameworks = tmp_path / "Frameworks"
+    ios = frameworks / "Mobile.framework"
+    ios.mkdir(parents=True)
+    (ios / "Mobile").write_bytes(_image(_command(0xD, "@rpath/Mobile.framework/Mobile"), platform=2))  # iOS only
+    tool = _tool(tmp_path)
+    with pytest.raises(ValueError, match="unproved native versioned framework candidate"):
+        native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    (ios / "Mobile").unlink()
+    ios.rmdir()
+    target = tmp_path / "target.dylib"
+    target.write_bytes(_image(_command(0xD, str(target), _version(1)), platform=None))  # no platform proof
+    _framework(frameworks, "Over", install_name=str(target), version=_version(2))
+    with pytest.raises(ValueError, match="unproved native versioned comparison library"):
+        native.dependency_graph([tool], cpu_type=ARM64, executable=tool)
+
+
+def test_unproved_versioned_comparison_library_refuses(tmp_path):
+    from triton_msl.backend._native_dependencies import dependency_graph
+
+    target = tmp_path / "target.dylib"
+    _framework(tmp_path / "Frameworks", "Over", install_name=str(target), version=_version(2))
+    tool = _tool(tmp_path)
+    target.write_bytes(_image(file_type=MH_EXECUTE))  # not a dylib: getDylibInfo would fail
+    with pytest.raises(ValueError, match="unproved native versioned comparison library"):
+        dependency_graph([tool], cpu_type=ARM64, executable=tool)
+    target.unlink()
+    target.symlink_to(tmp_path / "gone.dylib")
+    with pytest.raises(ValueError, match="broken native versioned comparison library"):
+        dependency_graph([tool], cpu_type=ARM64, executable=tool)

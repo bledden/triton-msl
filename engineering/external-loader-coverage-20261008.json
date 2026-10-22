@@ -1,0 +1,347 @@
+{
+  "schema": 1,
+  "kind": "accepted_finite_coverage_mapping",
+  "subject": "external/metal_pipeline",
+  "workload_state": "open",
+  "source_digest_at_mapping": "8b225e39bf341220986b456acb3fc79116e61bd537d68f5e0f0cdca9f39b7920",
+  "qualification_boundary": "Launcher-bypassing external Metal consumers using the accepted private relocated native and helper-free installations on the reviewed M4 Max host and toolchain. Top-level anchors, population and cases describe the original two-product window; additional_accepted_windows are separately scoped, not pooled. This is not whole-current-worktree qualification.",
+  "anchors": [
+    {
+      "role": "protocol",
+      "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-device-instrument-rev2-20261008/PROTOCOL.md",
+      "sha256": "156e7ac834da678459fba8f6edc9286e99d484774944e4d9e9646e73fd5b8ad1"
+    },
+    {
+      "role": "instrument_binding",
+      "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-device-instrument-rev2-20261008/BINDING.json",
+      "sha256": "2a610b6e7400a11d72dbfbab412547adf63bf18ffa37e0d7279fc5b985f32c4d"
+    },
+    {
+      "role": "audit",
+      "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-device-results-rev2-20261008/AUDIT.json",
+      "sha256": "be6b9b85b348816f6343a010b2678cba68e855ed2809e5c9fbaeff47add4823f"
+    },
+    {
+      "role": "byte_analysis",
+      "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-device-results-rev2-20261008/ANALYSIS.json",
+      "sha256": "84156d4aed3e2ee73425c69112e0a810acccb8a3822e131aa9b81e4455eac930"
+    },
+    {
+      "role": "results_seal",
+      "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-device-results-rev2-20261008/HASHES.json",
+      "sha256": "62c0ab4d9c25f8469ab44a902d723ac86e8df132112ebf3fd1624c15c54410a1"
+    },
+    {
+      "role": "independent_review",
+      "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/fable-external-loader-device-results-rev2-review-20261008/FABLE-EXTERNAL-LOADER-DEVICE-RESULTS-REV2-REVIEW.md",
+      "sha256": "708499e4ecbb5ed0325df9af8a4e5121ad280acf963d07cc0e8bc83d1247f4b6"
+    }
+  ],
+  "modes": [
+    "native",
+    "pure"
+  ],
+  "population": {
+    "operations": 18,
+    "submissions": 14,
+    "waits": 12,
+    "numerical_files": 112,
+    "distinct_numerical_inodes": 112
+  },
+  "accepted_cases": [
+    {
+      "case": "masked",
+      "coverage": "Exact unsigned masked publication with untouched tails and canaries"
+    },
+    {
+      "case": "alias",
+      "coverage": "Pointwise shared backing preserved at eight-byte offset"
+    },
+    {
+      "case": "packed",
+      "coverage": "32 packed scalar words, signed/unsigned integers, negative-zero float and boolean representations"
+    },
+    {
+      "case": "status_failure",
+      "coverage": "Mixed private staging; status 3 suppresses all caller publication"
+    },
+    {
+      "case": "stale",
+      "coverage": "Live-policy stale-handle refusal before command"
+    },
+    {
+      "case": "altered",
+      "coverage": "Exact digest refusal before observed transport load"
+    },
+    {
+      "case": "commit_uncertain",
+      "coverage": "Injected host exception after real commit return; quarantine, retained exports and observer-only retirement"
+    },
+    {
+      "case": "wait_uncertain",
+      "coverage": "Injected host exception after real wait return; quarantine, retained exports and observer-only retirement"
+    },
+    {
+      "case": "status_uncertain",
+      "coverage": "Injected host exception after real status return; quarantine, retained exports and observer-only retirement"
+    }
+  ],
+  "initialization": "Device and queue precede origin capture in both modes; newly compiled products retain that origin, and unchanged live checks pass through submission, wait, readback and close. No restamping.",
+  "limitations": [
+    "All six uncertainty cases were already Completed at first reaper observation; prolonged in-flight quarantine retention remains unobserved.",
+    "Exceptions injected after host methods return are not actual device faults or cancellation evidence.",
+    "No physical Metal deallocation, concurrency or process-external framework memory bound.",
+    "No other kernels, dtypes, external buffer owners or complete external application coverage.",
+    "No transfer of this consumer's evidence to the project launcher.",
+    "No performance, C++ performance, broader resource or whole-release closure."
+  ],
+  "additional_accepted_windows": [
+    {
+      "id": "grouped-fp16-matmul-20261008",
+      "scope": "Reconstructed PR #6 grouped flat-grid fp16 matmul A[64,32] by B[32,64], not the reporter's exact kernel; native and pure private installations on this M4 Max only.",
+      "anchors": [
+        {
+          "role": "protocol",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-grouped-device-instrument-20261008/PROTOCOL.md",
+          "sha256": "61c73937e03117afea0c49258a8e938640d29f26211f96cb0ff8027b1701c22c"
+        },
+        {
+          "role": "instrument_binding",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-grouped-device-instrument-20261008/BINDING.json",
+          "sha256": "27d8b215881fbc93102efa41e0ad3d5d544b7f78960707c8dbc8d95c8a0b0c39"
+        },
+        {
+          "role": "audit",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-grouped-device-results-20261008/AUDIT.json",
+          "sha256": "f923c5e096ec3f2563f88a410f05346449ca4ff7599bc26c5495e1402321b976"
+        },
+        {
+          "role": "byte_analysis",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-grouped-device-results-20261008/ANALYSIS.json",
+          "sha256": "6fc46b1ec2eac176f898dd2c7182abc13d03162d85756eca1831ad39b9297797"
+        },
+        {
+          "role": "results_seal",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/external-loader-grouped-device-results-20261008/HASHES.json",
+          "sha256": "5e34d8865261d4a906d58aa9658961d6d3e57006b98dba2669dc0aefa5120b59"
+        },
+        {
+          "role": "independent_review",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/fable-external-loader-grouped-device-results-review-20261008/FABLE-EXTERNAL-LOADER-GROUPED-DEVICE-RESULTS-REVIEW.md",
+          "sha256": "2dbb7fdc32bc30a4fb508fdae0b05ddfaf7e646770e7a7ad5eb74fec4fea3eab"
+        }
+      ],
+      "population": {"operations": 14, "submissions": 10, "waits": 8, "numerical_files": 132, "distinct_numerical_inodes": 132},
+      "accepted_cases": [
+        "Full grid (4,1,1) publishes the complete exact finite integer-input matmul",
+        "Partial grid (2,1,1) publishes the left half, distinguishing grouped order from row-major top-half coverage",
+        "Stale and altered artifacts refuse before a command, with exact altered-digest message and no load attempt",
+        "Commit, wait and status host-exception injections quarantine all three caller arrays; observer-only retirement without publication or replay"
+      ],
+      "bindings": "Twelve distinct zero-offset native bindings at lengths 4128, 4128, 8224 and nine times 4 bytes; 256 threads; NotEnqueued before and after encoding; native instance selector receipts.",
+      "product": {"bytes": 5438, "sha256": "c933a1db501f32cf0836395f7d0f986b53cc5cd186ed33efacda8a8c7eebbf9b", "compiler_policy": "-fno-fast-math"},
+      "initialization": "Device and queue before origin capture; unchanged identity through pipeline, binding, submission, readback and close; no restamping.",
+      "limitations": [
+        "All six uncertain commands were already Completed at first status-only reaper observation; prolonged in-flight retention is unobserved.",
+        "Host exceptions are not device faults; physical deallocation and concurrency are unqualified.",
+        "No reporter-exact kernel, general fp16 rounding, other shapes, strides, owners or kernels, or M1 coverage.",
+        "No project-launcher, performance, resource-obligation or release-completion credit."
+      ]
+    },
+    {
+      "id": "trifast-exact-forward-20261009",
+      "scope": "Reporter's exact TriFast forward source program, expression-rendered and executed through the external consumer on this M4 Max in the native and pure private installations. Generated source prototype only; installed emitter still refuses the reporter.",
+      "anchors": [
+        {
+          "role": "protocol",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-device-instrument-20261009/PROTOCOL.md",
+          "sha256": "75c2343fc7999a770b72a13c38f79f65df28098d93efe66f3d39d0593d50d8f2"
+        },
+        {
+          "role": "instrument_binding",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-device-instrument-20261009/BINDING.json",
+          "sha256": "b1b55089f0a965aff2659613eac04042f415097da76107f2a97f706ae6a4e06f"
+        },
+        {
+          "role": "audit",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-device-results-20261009/AUDIT.json",
+          "sha256": "067bb8105320f64da6f9fd0189d7b64add84297649e0bdca854c30abb79f45a3"
+        },
+        {
+          "role": "byte_analysis",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-device-results-20261009/ANALYSIS.json",
+          "sha256": "9977be5411cedcb79d36d422da0c02ff3f43e0bf0c7392365e9a767436884350"
+        },
+        {
+          "role": "results_seal",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-device-results-20261009/HASHES.json",
+          "sha256": "f279f6ea10fb836b68e1ea60589617ef14c59b7ae43f09438b1ab20da48e3c5a"
+        },
+        {
+          "role": "independent_review",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/fable-trifast-device-results-review-20261009/FABLE-TRIFAST-DEVICE-RESULTS-REVIEW.md",
+          "sha256": "5a04b26d1c1c606f363e06733706274e8212434511ba308c0a3cb76677711535"
+        }
+      ],
+      "population": {
+        "operations": 28,
+        "submissions": 24,
+        "waits": 22,
+        "attention_operations": 16,
+        "ordinary_attention_operations": 8,
+        "poisoned_attention_operations": 8,
+        "floating_probes": 2,
+        "precommand_refusals": 4,
+        "host_exception_uncertainties": 6,
+        "numerical_files": 566,
+        "distinct_numerical_inodes": 566
+      },
+      "accepted_cases": [
+        "Padded and masked f32 attention at N32/H1/B1 and N64/H2/B2; O and LSE lie inside the predeclared independent intervals",
+        "Both branches at N64/H1/B1 with all keys masked or the first block masked: source NaN outputs retained rather than repaired",
+        "Per-mode primitive probe observes exp2(-inf)=positive zero, exp2(qNaN)=NaN, maxNum(qNaN,2)=2 and max(-inf,-inf)=-inf",
+        "Stale live policy and self-consistent unregistered product refuse before command creation",
+        "Post-return commit, wait and first-readback host exceptions withhold both outputs, quarantine caller owners and retire by status observation only"
+      ],
+      "initialization": "API, device and queue before origin capture; fresh source-bound products retain that origin, with unchanged live identity and image list through submission, readback and close. No restamping.",
+      "storage": "Eleven distinct non-overlapping native allocations and zero-offset bindings; 32-thread groups. Inputs, scalars and canaries read back unchanged. Both validated outputs published as one immutable result.",
+      "limitations": [
+        "Every uncertain command was already Completed at first reaper observation; prolonged in-flight quarantine retention remains unobserved. Host exceptions are not device faults.",
+        "Millions of output values are repeated finite input families, not independent cases; no general-input or tail qualification.",
+        "No NaN payload/sign guarantee, physical deallocation, concurrency, M1, performance or release completion.",
+        "No installed reporter support or project-launcher credit. Public TriFast statements require Blake's approval."
+      ],
+      "population_note": "Counts are reconstructed from the accepted protocol and retained 28 rows: sixteen attention operations include eight poisoned operations across both modes, plus four pre-command refusals. The sealed review's prose count slips are not imported or edited."
+    },
+    {
+      "id": "trifast-mirrored-provider-20261013",
+      "scope": "Finite mirrored-provider execution of padded and masked f32 branches at N32 and N64, H1/B1, through the accepted private build, loader, route and real provider native entry on this M4 Max, in both original proof installations. Not public compiler or launcher integration.",
+      "anchors": [
+        {
+          "role": "protocol",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-provider-device-instrument-20261012/PROTOCOL.md",
+          "sha256": "7ca9591a458d2c2b830196963a2763bec6cd55bde5023b9ddd07ef37eca01510"
+        },
+        {
+          "role": "instrument_binding",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-provider-device-instrument-20261012/BINDING.json",
+          "sha256": "d27d47df13d84a0162c50749c16dc8362d040d2531264a0599edf30c000aac6b"
+        },
+        {
+          "role": "audit",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-provider-device-results-20261013/AUDIT.json",
+          "sha256": "b690808e59c28b6b646844ab53ac6f036b49481bd90f81bef2db989718c7415f"
+        },
+        {
+          "role": "byte_analysis",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-provider-device-results-20261013/ANALYSIS.json",
+          "sha256": "d09427c65a02bdcde1fab7f4d50b79902131e791f4fa7de1fa055abcb5f946e5"
+        },
+        {
+          "role": "results_seal",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-provider-device-results-20261013/HASHES.json",
+          "sha256": "70deb2bba2ce25a036559db1a35d38f9f9da07ef90469cb1b0ab82ccbea236c5"
+        },
+        {
+          "role": "independent_review",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/fable-trifast-provider-device-results-review-20261013/FABLE-TRIFAST-PROVIDER-DEVICE-RESULTS-REVIEW.md",
+          "sha256": "7b228dbf2030cc3ce4a53e0293e12c21ec4191e4cc938acfa9f131aa27b089dc"
+        }
+      ],
+      "population": {
+        "operations": 18,
+        "submissions": 14,
+        "waits": 12,
+        "positive_rows": 8,
+        "precommand_refusals": 4,
+        "host_exception_uncertainties": 6,
+        "numerical_files": 406,
+        "distinct_numerical_inodes": 406
+      },
+      "accepted_cases": [
+        "Padded and masked finite attention at N32/H1/B1 and N64/H1/B1 publishes O then LSE inside the accepted independent bounds",
+        "Stale live identity and overlapping whole allocations refuse before a command",
+        "Post-return commit, wait and readback exceptions leave caller bytes unchanged and retire through status-only reaping without retry"
+      ],
+      "storage": "Eleven distinct zero-offset AGX buffer bindings with disjoint whole-capacity address ranges; NotEnqueued before and after encoding; 32-thread groups; device-read inputs and scalar bytes match, caller canaries unchanged. Publication is ordered, not atomic.",
+      "initialization": "Device and queue precede origin capture; five fresh owned builds per mode preserve the live origin and image list through submission, readback and close. No restamping.",
+      "limitations": [
+        "All six uncertainty cases already Completed at the first reaper observation; no genuine in-flight interval observed, and host injections are not device faults.",
+        "The repeated finite families do not establish general inputs, exceptional primitives, signaling NaNs, payloads, tails or concurrency.",
+        "No physical deallocation, unknown-preparation recovery or second-publication-failure device evidence.",
+        "No M1, framework compilation, installed reporter support, public dispatch, performance, resource efficiency or release closure."
+      ],
+      "public_dispatch": "refused pending separate exact-path exceptional-value qualification and production integration"
+    },
+    {
+      "id": "trifast-exceptional-exact-path-20261013",
+      "scope": "Finite exceptional-value evidence in both original proof installations on this M4 Max: isolated two-buffer primitive probe and separately owned eleven-buffer source-program recurrence builds. No transfer of primitive-probe credit to the reporter program, and no public dispatch.",
+      "anchors": [
+        {
+          "role": "protocol",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-exceptional-device-instrument-20261013/PROTOCOL.md",
+          "sha256": "9a9916d25193157afeec7980b7cc64788e72bf60a2995583b977efe4747675c0"
+        },
+        {
+          "role": "instrument_binding",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-exceptional-device-instrument-20261013/BINDING.json",
+          "sha256": "c58d26dc38086afcb18b09a584a00d8e111eaf350b075081c43bf07584165c1c"
+        },
+        {
+          "role": "audit",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-exceptional-device-results-20261013/AUDIT.json",
+          "sha256": "e302f2fe5e982c350ba051504d7b01f89d5bac1f4df46d6ba133c9d82c3ca210"
+        },
+        {
+          "role": "byte_analysis",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-exceptional-device-results-20261013/ANALYSIS.json",
+          "sha256": "8a3d34192a0f0507522fdf91302e0db32c7737b0da9c5acfc05ac4e4001f17ac"
+        },
+        {
+          "role": "results_seal",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-exceptional-device-results-20261013/HASHES.json",
+          "sha256": "a9c4a4703ab92cd1b9740aa6c5eae73dc364b9e2147a1cfece5edd6d944657df"
+        },
+        {
+          "role": "independent_review",
+          "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/fable-trifast-exceptional-device-results-review-20261013/FABLE-EXCEPTIONAL-DEVICE-RESULTS-REVIEW.md",
+          "sha256": "f4a40a1efd8f06f5254765913476ae11359ff9731c50bf7c05113bdf81741bfb"
+        }
+      ],
+      "population": {
+        "operations": 76,
+        "submissions": 72,
+        "waits": 70,
+        "primitive_dispatches": 2,
+        "primitive_cases_per_mode": 42,
+        "recurrence_calls": 64,
+        "precommand_refusals": 4,
+        "host_exception_uncertainties": 6,
+        "numerical_files": 1200,
+        "distinct_numerical_inodes": 1200
+      },
+      "accepted_cases": [
+        "All 42 primitive words per mode satisfy the predeclared rounding, flushing and four-ULP rules, including exact positive zero for exp2(-inf) and the contraction/association discriminators",
+        "Thirty-two recurrence fixtures per mode at N32 or N64, DIM32/BLOCK32 and H1/B1, in both branches: every O/LSE population has the expected exceptional classification or lies in its frozen finite enclosure",
+        "Stale identity and overlapping allocations refuse before commands; six host-exception probe uncertainties publish nothing and retire by status observation only"
+      ],
+      "observations": [
+        "Subnormal maximum returns 80000002 rather than numerically larger 00000001, admitted under flushed comparison; ordering hazard remains explicit",
+        "Reciprocal-of-subnormal returns positive infinity; permitted negative infinity remains unobserved and allowed",
+        "Subnormal log returns -infinity; no uniform flush rule inferred from different primitive outcomes"
+      ],
+      "limitations": [
+        "Finite fixtures only: no general-input contract, tails, signaling NaNs or payload guarantees",
+        "Valid-coordinate versus mask-select distinction remains structural because full tiles do not discriminate it",
+        "Every uncertain command already Completed at first observation; no genuine in-flight retention, device-fault, physical-deallocation or concurrency evidence",
+        "No M1, framework compile path, installed reporter support, project-launcher dispatch, performance, resource-efficiency or release closure"
+      ],
+      "public_dispatch": "refused pending production integration and remaining semantic/storage qualification"
+    }
+  ],
+  "sequencing": {
+    "warm_call_optimization": "paused by user as sequencing only",
+    "unchanged_cpp_device_screen": "do not repeat; accepted September 30 screen unresolved in six cells",
+    "next": "Assess production integration gaps against the accepted provider and exceptional windows; reuse both without rerun. Next implementation candidate is producer-owned build retention through the real emitter/compiler and cache boundaries, CPU-qualified with public dispatch still refused. General exceptional semantics, caller storage, installed qualification and performance remain separate gates. Historical 42 toolchain failures remain unlinked to individual cases."
+  }
+}

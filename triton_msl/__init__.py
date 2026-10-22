@@ -4,7 +4,7 @@
 # Source/native implementation bytes, framework/toolchain selection and relevant
 # policy also enter the keys; correctness no longer relies on manually bumping
 # this constant after every codegen edit. Installed-code changes require restart.
-CODEGEN_VERSION = "2026.06.24.1"
+CODEGEN_VERSION = "2026.09.28.1"
 
 # Distribution version, discoverable as ``triton_msl.__version__`` (falls back
 # gracefully when the package metadata is unavailable, e.g. a source checkout).

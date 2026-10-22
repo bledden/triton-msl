@@ -8,6 +8,70 @@
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
+/* Proposed public-call gate, isolated for contract testing. No Metal calls.
+ * A nonzero result is an extent decision, not allocator provenance authentication.
+ */
+#include <stdint.h>
+#include <stddef.h>
+#include <limits.h>
+#include <unistd.h>
+#include <malloc/malloc.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
+typedef struct {
+    size_t rounded, allocated;
+    uintptr_t zone, default_zone;
+    mach_vm_address_t region_start;
+    mach_vm_size_t region_size;
+    int region_status, protection;
+    unsigned allocator_queries, vm_queries;
+    const char *reason;
+} extent_result;
+
+static extent_result public_extent(const void *pointer, size_t length) {
+    extent_result r = {0};
+    uintptr_t ptr = (uintptr_t)pointer;
+    long page_raw = sysconf(_SC_PAGESIZE);
+    r.reason = "geometry";
+    if (page_raw <= 0) return r;
+    size_t page = (size_t)page_raw;
+    if (!ptr || ptr % page || length < page || length % page == 0) return r;
+    r.reason = "overflow";
+    size_t extra = page - length % page;
+    if (length > SIZE_MAX - extra) return r;
+    size_t rounded = length + extra;
+    if (ptr > UINTPTR_MAX - rounded) return r;
+    r.allocator_queries++;
+    r.allocated = malloc_size(pointer);
+    r.reason = "no_malloc_extent";
+    if (!r.allocated) return r;
+    r.allocator_queries += 2;
+    r.zone = (uintptr_t)malloc_zone_from_ptr(pointer);
+    r.default_zone = (uintptr_t)malloc_default_zone();
+    r.reason = "nondefault_zone";
+    if (!r.zone || r.zone != r.default_zone) return r;
+    r.reason = "short_extent";
+    if (r.allocated < rounded) return r;
+    mach_vm_address_t address = ptr;
+    mach_vm_size_t size = 0;
+    mach_port_t object = MACH_PORT_NULL;
+    vm_region_basic_info_data_64_t info = {0};
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    r.vm_queries++;
+    r.region_status = mach_vm_region(mach_task_self(), &address, &size,
+        VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object);
+    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+    r.region_start = address; r.region_size = size; r.protection = info.protection;
+    r.reason = "vm_region";
+    if (r.region_status != KERN_SUCCESS || address > ptr || ptr - address > size ||
+        rounded > size - (ptr - address) ||
+        (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) != (VM_PROT_READ | VM_PROT_WRITE)) return r;
+    r.rounded = rounded; r.reason = "admitted";
+    return r;
+}
+
 #if defined(Py_GIL_DISABLED)
 #error "This optional native observation helper requires a GIL-enabled CPython build."
 #endif
@@ -54,6 +118,8 @@ typedef struct KeyCacheContext {
     struct KeyCacheContext *next;
 } KeyCacheContext;
 typedef struct {
+    int host_extent_ready;
+    const char *host_extent_selftest_reason;
     PyObject *symbols[SYMBOL_COUNT];
     KeyCacheContext *key_cache;
     uint64_t key_serial, probe_hits, probe_builds;
@@ -999,7 +1065,45 @@ static PyObject *function_states_are(PyObject *self, PyObject *const *args, Py_s
     Py_RETURN_TRUE;
 }
 
+
+/* Sample the block-base behavior at module load; never treat this as a proof for
+ * every allocator version or pointer. No user storage is accessed by this test. */
+static void host_extent_selftest(NativeState *st) {
+    st->host_extent_ready = 0;
+    st->host_extent_selftest_reason = "selftest_allocation";
+    long raw = sysconf(_SC_PAGESIZE);
+    if (raw != 16384) { st->host_extent_selftest_reason = "selftest_page_size"; return; }
+    size_t page = (size_t)raw, length = 4 * page + 1024;
+    void *p = NULL;
+    if (posix_memalign(&p, page, length)) return;
+    extent_result base = public_extent(p, length);
+    st->host_extent_selftest_reason = "selftest_positive";
+    if (base.rounded != 5 * page) { free(p); return; }
+    st->host_extent_selftest_reason = "selftest_interior";
+    for (size_t offset = page; offset <= 2 * page; offset += page) {
+        extent_result interior = public_extent((char *)p + offset, page + 1024);
+        if (interior.rounded || strcmp(interior.reason, "no_malloc_extent")) { free(p); return; }
+    }
+    free(p);
+#ifdef TRITON_MSL_TEST_EXTENT_SELFTEST_FAILURE
+    st->host_extent_selftest_reason = "selftest_forced_failure";
+    return;
+#endif
+    st->host_extent_ready = 1;
+    st->host_extent_selftest_reason = "ready";
+}
+
+static PyObject *host_extent(PyObject *self, PyObject *args) {
+    unsigned long long ptr, length;
+    if (!PyArg_ParseTuple(args, "KK:host_extent", &ptr, &length)) return NULL;
+    NativeState *st = PyModule_GetState(self);
+    if (!st->host_extent_ready) return Py_BuildValue("Ks", 0ULL, "unavailable");
+    extent_result result = public_extent((const void *)(uintptr_t)ptr, (size_t)length);
+    return Py_BuildValue("Ks", (unsigned long long)result.rounded, result.reason);
+}
+
 static PyMethodDef methods[] = {
+    {"host_extent", host_extent, METH_VARARGS, "Per-call default-zone backing extent; (span, reason), zero declines."},
     {"key_cache_info", key_cache_info, METH_NOARGS, "Scratch exact-key certificate statistics."},
     {"key_cache_reset", key_cache_reset, METH_NOARGS, "Scratch teardown and re-register diagnostic."},
     {"key_cache_enabled", key_cache_enabled, METH_O, "Scratch diagnostic cache toggle; false uses original census."},
@@ -1044,6 +1148,11 @@ PyMODINIT_FUNC PyInit__validation_native(void) {
     PyObject *module = PyModule_Create(&definition);
     if (!module) return NULL;
     NativeState *st = PyModule_GetState(module);
+    host_extent_selftest(st);
+    if (PyModule_AddObjectRef(module, "host_extent_ready", st->host_extent_ready ? Py_True : Py_False) < 0 ||
+        PyModule_AddStringConstant(module, "host_extent_selftest_reason", st->host_extent_selftest_reason) < 0) {
+        Py_DECREF(module); return NULL;
+    }
     if (key_cache_init(st) < 0) { Py_DECREF(module); return NULL; }
     for (size_t i = 0; i < SYMBOL_COUNT; i++) {
         st->symbols[i] = PyUnicode_InternFromString(symbol_names[i]);

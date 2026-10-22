@@ -17,6 +17,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from typing import Optional
+from ._toolchain_contract import run_metal_tool
 
 # ---------------------------------------------------------------------------
 # DeviceInfo dataclass
@@ -92,39 +93,55 @@ def _estimate_core_count(family: str, variant: str) -> int:
 
 
 def _detect_sdk_version() -> Optional[str]:
-    """Return the macOS SDK version string via ``xcrun --show-sdk-version``.
+    """Return the macOS SDK version through the pinned compiler context.
 
     Returns None if xcrun is unavailable.
     """
     try:
-        out = subprocess.check_output(
-            ["xcrun", "--show-sdk-version"],
+        out = run_metal_tool(
+            ["xcrun", "-sdk", "macosx", "--show-sdk-version"],
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=5,
-        )
+            check=True,
+        ).stdout
         return out.decode().strip()
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return None
 
 
-def _probe_metal_compiler() -> Optional[str]:
+def _probe_metal_compiler(*, max_version: str = "4.1") -> Optional[str]:
     """Probe xcrun metal to find the highest *usable* -std=metalX.Y version.
 
     Tries versions from newest to oldest.  For each candidate the probe:
       1. compiles a trivial kernel to .air,
       2. links it into a .metallib,
-      3. attempts to load the .metallib via the Metal runtime.
+      3. loads the .metallib and resolves its probe function,
+      4. creates a compute pipeline for that function (without dispatch).
 
     Step 3 is critical because the compiler may accept a version that the
     current OS runtime cannot load (e.g. metal4.0 compiles on SDK 26.2
     but MTLDevice refuses to load the library until macOS 26.4+).
 
-    This is more reliable than guessing from SDK version numbers (which
-    jumped from 15.x to 26.x with macOS Tahoe).
+    Library loading alone does not prove pipeline compatibility. None means
+    the probe is unavailable, not successful. When an available probe rejects
+    every candidate, raise rather than letting an SDK heuristic select one of
+    the rejected versions. max_version applies the caller's hardware policy
+    before probing, so the returned version is the one actually qualified.
     """
     import tempfile, os
 
+    try:
+        import Metal, Foundation
+    except ImportError:
+        return None
+    device = Metal.MTLCreateSystemDefaultDevice()
+    if device is None:
+        return None
+
     candidates = ["4.1", "4.0", "3.2", "3.1", "3.0"]
+    ceiling = tuple(int(part) for part in max_version.split("."))
+    candidates = [ver for ver in candidates if tuple(int(part) for part in ver.split(".")) <= ceiling]
     test_src = "kernel void _probe() {}\n"
     for ver in candidates:
         air_path = None
@@ -139,34 +156,46 @@ def _probe_metal_compiler() -> Optional[str]:
             lib_path = metal_path.replace(".metal", ".metallib")
 
             # Step 1: compile to .air
-            subprocess.run(
+            run_metal_tool(
                 ["xcrun", "-sdk", "macosx", "metal", "-std=metal" + ver, "-c", metal_path, "-o", air_path],
                 capture_output=True,
                 timeout=10,
                 check=True,
             )
             # Step 2: link to .metallib
-            subprocess.run(
+            run_metal_tool(
                 ["xcrun", "-sdk", "macosx", "metallib", air_path, "-o", lib_path],
                 capture_output=True,
                 timeout=10,
                 check=True,
             )
-            # Step 3: verify the OS runtime can load it
-            try:
-                import Metal, Foundation
-
-                device = Metal.MTLCreateSystemDefaultDevice()
-                if device is not None:
-                    url = Foundation.NSURL.fileURLWithPath_(lib_path)
-                    lib, error = device.newLibraryWithURL_error_(url, None)
-                    if error is not None:
-                        continue  # Runtime rejected this version
-            except ImportError:
-                pass  # No Metal/Foundation module — trust the compiler result
-
+            # Steps 3/4: qualify the selected standard through pipeline creation.
+            url = Foundation.NSURL.fileURLWithPath_(lib_path)
+            lib, error = device.newLibraryWithURL_error_(url, None)
+            if error is not None or lib is None:
+                continue
+            function = lib.newFunctionWithName_("_probe")
+            if function is None:
+                continue
+            pipeline, error = device.newComputePipelineStateWithFunction_error_(function, None)
+            if error is not None or pipeline is None:
+                continue
             return ver
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        except FileNotFoundError:
+            return None  # Required compiler/linker is unavailable.
+        except subprocess.CalledProcessError as error:
+            from triton_msl.backend._toolchain_errors import _is_metal_toolchain_missing, _METAL_TOOLCHAIN_MISSING_HINT
+            from triton_msl.errors import MetalCompilationError
+
+            stderr = error.stderr or ""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            if _is_metal_toolchain_missing(stderr):
+                # Trying another language standard cannot install a missing
+                # toolchain. Preserve the compiler's existing actionable error.
+                raise MetalCompilationError(_METAL_TOOLCHAIN_MISSING_HINT, stderr=stderr) from error
+            continue
+        except (subprocess.TimeoutExpired, OSError):
             continue
         finally:
             for p in (metal_path, air_path, lib_path):
@@ -175,7 +204,12 @@ def _probe_metal_compiler() -> Optional[str]:
                         os.unlink(p)
                     except OSError:
                         pass
-    return None
+    from triton_msl.errors import MetalCompilationError
+
+    raise MetalCompilationError(
+        "No usable Metal shading-language standard passed compilation, library loading "
+        "and compute-pipeline creation. Check the selected Xcode/Metal toolchain and macOS runtime."
+    )
 
 
 def _extract_air_metadata_ints(ir_text: str, named: str):
@@ -219,7 +253,7 @@ def _probe_air_version():
             f.write("kernel void _probe() {}\n")
             metal_path = f.name
         ll_path = metal_path.replace(".metal", ".ll")
-        subprocess.run(
+        run_metal_tool(
             ["xcrun", "-sdk", "macosx", "metal", "-S", "-emit-llvm", metal_path, "-o", ll_path],
             capture_output=True,
             timeout=10,
@@ -257,17 +291,12 @@ def _infer_metal_version(sdk_version: Optional[str], chip_family: str) -> str:
     """Infer the highest supported Metal Shading Language version.
 
     First tries to probe the compiler directly (most reliable).  Falls
-    back to SDK-version heuristics if probing fails.  Metal 4.x is
-    clamped to 3.2 on pre-M4 hardware.
+    back to SDK-version heuristics only if probing is unavailable. Metal 4.x
+    is excluded on pre-M4 hardware before qualification, not clamped afterward.
     """
     # Prefer runtime probe — works regardless of SDK version numbering.
-    probed = _probe_metal_compiler()
+    probed = _probe_metal_compiler(max_version="4.1" if _chip_generation(chip_family) >= 4 else "3.2")
     if probed is not None:
-        # Clamp Metal 4.x to 3.2 on pre-M4 chips.
-        if probed.startswith("4"):
-            chip_gen = _chip_generation(chip_family)
-            if chip_gen < 4:
-                return "3.2"
         return probed
 
     # Fallback: guess from SDK version.

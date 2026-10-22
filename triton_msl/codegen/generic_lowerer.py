@@ -308,6 +308,7 @@ class GenericLowerer(
         # metadata. Routes the 2-D-grid FA kernel through compile_shader (its
         # 2-D grid blocks the generic 1-D fast-path). None for every other kernel.
         self._flash_attention = None
+        self._argument_abi = None
         self._tail_access_bounds = None
         self.options = options
         self.env = {}  # ssa_id -> MSL variable name
@@ -988,7 +989,14 @@ class GenericLowerer(
             _wide_row_plan = _wide_biased_row_plan(self)
             if _wide_row_plan is not None:
                 self._source_biased_replay = True
-                return _lower_wide_biased_rows(self, _wide_row_plan)
+                scalar = _lower_wide_biased_rows(self, _wide_row_plan)
+                if getattr(self.options, "experimental_cooperative_attention", False) is True:
+                    from ._cooperative_attention import build_candidate, make_descriptor
+
+                    candidate = build_candidate(self, _wide_row_plan)
+                    if candidate is not None:
+                        self._flash_attention = make_descriptor(self, _wide_row_plan, scalar, candidate)
+                return scalar
 
             from ._biased_replay import eligible as _biased_replay_eligible
 
@@ -2459,6 +2467,12 @@ class GenericLowerer(
                 allocation_aliases,
                 extra_bytes=4 if self._assert_plan is not None else 0,
             )
+        if self.kb._argument_abi is not None and self._assert_plan is None:
+            from triton_msl.backend._argument_abi import producer_record
+
+            # Generic emission's shared-memory alias pass can rewrite the text.
+            # Certify the final source, not the builder's pre-alias intermediate.
+            self._argument_abi = producer_record(self.kb.args, "generic-msl-v1", msl)
         return msl
 
     def get_output_arg_indices(self):
@@ -11609,6 +11623,9 @@ class GenericLowerer(
             )
             self.effective_block_size = block_j * block_k
         self._flash_attention = ("flash_attention", msl, self.effective_block_size)
+        from triton_msl.backend._argument_abi import producer_record
+
+        self._argument_abi = producer_record(args, "biased-backward-v1", msl)
         self._used_pid_axes = {0, 1, 2} if grid_3d else {0, 1}
         self._prescan_stores()
         return msl
@@ -11900,6 +11917,24 @@ class GenericLowerer(
             self.effective_block_size = 256
         else:
             Dc = head_dim if head_dim <= 64 else 64
+            # Only the source-proved triangle family from the paired K-layout
+            # screen opts in. Other tiled users (including dense attention) keep
+            # the original layout. This changes no source admission or launch ABI.
+            _transpose_k = (
+                getattr(self.options, "experimental_tiled_k_layout", False) is True
+                and (head_dim, block_m, block_n, Dc) == (64, 32, 32, 64)
+                and info["out_dtype"] in ("fp16", "f16")
+                and all(
+                    args[info[role]].is_ptr and args[info[role]].elem_type in ("fp16", "f16")
+                    for role in ("q", "k", "v", "out", "bias")
+                )
+                and _rq == "half"
+                and _rp == "half"
+                and not info["causal"]
+                and grid_3d
+                and has_mask
+                and mask_batch_div is not None
+            )
             msl = make_flash_attention_kernel_tiled(
                 head_dim,
                 block_m,
@@ -11921,9 +11956,13 @@ class GenericLowerer(
                 round_q=_rq,
                 round_p=_rp,
                 scale_chain=_scale_chain,
+                transpose_k=_transpose_k,
             )
             self.effective_block_size = flash_attention_tiled_threads(block_m, block_n)
         self._flash_attention = ("flash_attention", msl, self.effective_block_size)
+        from triton_msl.backend._argument_abi import producer_record
+
+        self._argument_abi = producer_record(args, "biased-forward-v1", msl)
         self._used_pid_axes = {0, 1, 2} if grid_3d else {0, 1}
         self._prescan_stores()
         return msl

@@ -17,6 +17,7 @@
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -184,7 +185,7 @@ struct AddPtrOpConversion
 };
 
 // ---------------------------------------------------------------------------
-// tt.load → LLVM load (with optional mask → select)
+// tt.load → LLVM load, control-dependent on the mask when present
 // ---------------------------------------------------------------------------
 struct LoadOpConversion
     : public ConvertOpToLLVMPattern<triton::LoadOp> {
@@ -204,29 +205,54 @@ struct LoadOpConversion
       elemTy = getTypeConverter()->convertType(origResultTy);
 
     Value ptr = adaptor.getPtr();
-    Value loaded = LLVM::LoadOp::create(rewriter, loc, elemTy, ptr);
-
-    // If there's a mask, use select: mask ? loaded : other
     Value mask = adaptor.getMask();
-    if (mask) {
-      Value other = adaptor.getOther();
-      if (other) {
-        loaded = LLVM::SelectOp::create(rewriter, loc, mask, loaded, other);
-      }
-      // If mask exists but no other value, we still use the loaded value.
-      // In practice, Triton always provides 'other' when there's a mask.
+    if (!mask || matchPattern(mask, m_One())) {
+      Value loaded = LLVM::LoadOp::create(rewriter, loc, elemTy, ptr,
+                                         /*alignment=*/0,
+                                         /*isVolatile=*/op.getIsVolatile());
+      rewriter.replaceOp(op, loaded);
+      return success();
     }
 
-    rewriter.replaceOp(op, loaded);
+    // Selecting after a load does not suppress the memory access. Inactive
+    // lanes may hold addresses outside the allocation, so the load itself
+    // must live exclusively on the true branch. Without `other`, Triton leaves
+    // the inactive value undefined, but still forbids the memory access.
+    Value other = adaptor.getOther();
+    if (!other)
+      other = LLVM::UndefOp::create(rewriter, loc, elemTy);
+
+    // Do not leave unnecessary control flow for known masks. In particular,
+    // an all-true mask retains the exact unmasked load sequence above.
+    if (matchPattern(mask, m_Zero())) {
+      rewriter.replaceOp(op, other);
+      return success();
+    }
+
+    auto *currentBlock = rewriter.getInsertionBlock();
+    auto *afterBlock =
+        rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+    auto result = afterBlock->addArgument(elemTy, loc);
+    auto *loadBlock = rewriter.createBlock(afterBlock);
+
+    rewriter.setInsertionPointToEnd(currentBlock);
+    LLVM::CondBrOp::create(rewriter, loc, mask, loadBlock, ValueRange{},
+                          afterBlock, ValueRange{other});
+
+    rewriter.setInsertionPointToStart(loadBlock);
+    Value loaded = LLVM::LoadOp::create(rewriter, loc, elemTy, ptr,
+                                       /*alignment=*/0,
+                                       /*isVolatile=*/op.getIsVolatile());
+    LLVM::BrOp::create(rewriter, loc, ValueRange{loaded}, afterBlock);
+
+    rewriter.setInsertionPointToStart(afterBlock);
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
 
 // ---------------------------------------------------------------------------
-// tt.store → LLVM store (with optional mask → conditional via select/nop)
-//
-// For simplicity in the nano backend, we emit an unconditional store.
-// A production backend would emit a conditional branch around the store.
+// tt.store → LLVM store, control-dependent on the mask when present
 // ---------------------------------------------------------------------------
 struct StoreOpConversion
     : public ConvertOpToLLVMPattern<triton::StoreOp> {

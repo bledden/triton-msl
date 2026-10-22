@@ -37,6 +37,8 @@ def _tuner(monkeypatch, tmp_path, blocks, failure=None):
             # Real template lowering initializes kb but returns before building it.
             self.kb = None
             self._assert_plan = None
+            self._flash_attention = None
+            self._argument_abi = None
 
         def lower(self):
             if failure is not None and self.block_k == 128:
@@ -59,9 +61,12 @@ def _tuner(monkeypatch, tmp_path, blocks, failure=None):
         modules[k] = ir.parse_mlir_module(str(path), ctx)
         modules[k].context = ctx
 
+    real_walk = walker.walk_ttgir
+
     def graph_adapter(mod, options):
-        name = mod.get_entry_func_name()
-        return SimpleNamespace(func_name=name, block_k=int(name.rsplit("_", 1)[1]))
+        graph = real_walk(mod, options)
+        graph.block_k = int(graph.func_name.rsplit("_", 1)[1])
+        return graph
 
     monkeypatch.setattr(walker, "walk_ttgir", graph_adapter)
     monkeypatch.setattr(lowerer, "GenericLowerer", Lowerer)

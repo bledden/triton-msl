@@ -14,8 +14,8 @@ readme = "README.md"
 # PEP 639 SPDX expression (Metadata-Version 2.4). Do NOT also add a
 # `License :: OSI Approved :: ...` classifier — PyPI rejects the combination of
 # a license expression and a license classifier (400 Bad Request).
-license = "MIT"
-license-files = ["LICENSE", "third_party/trifast/LICENSE"]
+license = "MIT AND BSD-3-Clause"
+license-files = ["LICENSE", "third_party/trifast/LICENSE", "triton_msl/_vendor/applegpu/LICENSE"]
 requires-python = ">=3.10"
 authors = [
     {name = "Blake Ledden", email = "bledden@users.noreply.github.com"},
@@ -72,6 +72,9 @@ metal = "triton_msl.backend"
 [tool.setuptools.packages.find]
 include = ["triton_msl*"]
 
+[tool.setuptools.package-data]
+"triton_msl._vendor.applegpu" = ["LICENSE", "VENDORED.md"]
+
 # A local experiment binary must never leak into a pure-Python wheel as data.
 # Declared Extension products are installed by build_ext, not package-data copy.
 [tool.setuptools.exclude-package-data]
@@ -90,6 +93,8 @@ markers = [
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+# Preserve the pinned third-party source, apart from its package-relative imports.
+extend-exclude = ["triton_msl/_vendor/applegpu/applegpu.py", "triton_msl/_vendor/applegpu/fma.py", "triton_msl/_vendor/applegpu/srgb.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]

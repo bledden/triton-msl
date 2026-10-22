@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 import pytest
+from tests.python_child import package_child_command
 
 from identity_framework_fixture import ordinary_framework
 
@@ -72,7 +73,7 @@ assert f._stats['hits']==before+1 and seen==[]
 os.environ['TRITON_MSL_IDENTITY_FAST_PATH']='0'
 assert c.execution_contract()==s and seen
 """
-    completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    completed = subprocess.run(package_child_command(code), capture_output=True, text=True, timeout=30)
     assert completed.returncode == 0, completed.stderr
 
 

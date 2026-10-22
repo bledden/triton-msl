@@ -89,8 +89,9 @@ def test_fp16_atomic_correct_under_default_route():
         os.environ, PYTHONPATH=root, TRITON_MSL_CACHE_DIR=tempfile.mkdtemp(), TRITON_CACHE_DIR=tempfile.mkdtemp()
     )
     env.pop("TRITON_MSL_FORCE_PYTHON", None)
+    from tests.python_child import package_child_command
     r = subprocess.run(
-        [sys.executable, "-c", _FP16_ATOMIC_SCRIPT], env=env, capture_output=True, text=True, timeout=180
+        package_child_command(_FP16_ATOMIC_SCRIPT), env=env, capture_output=True, text=True, timeout=180
     )
     assert r.returncode == 0, (
         f"fp16 atomic_add must succeed on the default route; "

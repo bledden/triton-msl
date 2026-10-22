@@ -3990,6 +3990,7 @@ def make_flash_attention_kernel_tiled(
     query_tile=None,
     initial_values=None,
     query_length=None,
+    transpose_k=False,
 ):
     """Generate a HEAD-DIM-TILED FlashAttention-2 kernel for Metal (fp32/fp16).
 
@@ -4049,6 +4050,10 @@ def make_flash_attention_kernel_tiled(
         BLOCK_M:  Query rows per threadgroup.
         BLOCK_N:  KV rows staged per inner loop step.
         Dc:       Head-dim chunk width (default 64).
+        transpose_k: Experimental K-only shared layout. Stage K[r,c] at
+            c*BLOCK_N+r and read it with the matching score index. V keeps
+            its row-major layout. The caller owns device/performance qualification;
+            False preserves the original source text.
         query_tile: Optional resident query-row width. The proved dense D64
             32/64 source envelope uses 32 rows, preserving the source query
             grid, causal loop stop and KV block width. No query or KV source
@@ -4080,6 +4085,10 @@ def make_flash_attention_kernel_tiled(
             detected value is baked, so a kernel that uses a non-standard scale
             (e.g. a learned temperature) computes correctly.
     """
+    if type(transpose_k) is not bool:
+        raise ValueError("transpose_k must be an exact bool")
+    _k_stage_index = "c * BN + r" if transpose_k else "i"
+    _k_score_index = "c * BN + cj" if transpose_k else "cj * DC + c"
     # Element type of the Q/K/V/Out device buffers. fp16 inputs are promoted to
     # float on load and the result is cast back to half on store (cast epilogue,
     # mirroring make_simdgroup_matmul_kernel_fast); all interior compute stays
@@ -4447,7 +4456,7 @@ kernel void {kernel_name}(
                 uint r = i / DC;          // kv row within block
                 uint c = i % DC;          // head-dim col within chunk
                 uint kv_row = kv_start + r;
-                tg_KV[i] = {_k_tail}
+                tg_KV[{_k_stage_index}] = {_k_tail}
                     ? K[k_base + kv_row * k_sn + (dc + c) * k_sk]
                     : 0.0f;
             }}
@@ -4463,7 +4472,7 @@ kernel void {kernel_name}(
                     float dot = 0.0f;
                     for (uint c = 0u; c < DC; c++) {{
                         float qv = {_qv};
-                        dot += qv * tg_KV[cj * DC + c];
+                        dot += qv * tg_KV[{_k_score_index}];
                     }}
                     tg_S[i] += dot;
                 }}

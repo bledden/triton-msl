@@ -87,10 +87,10 @@ def test_tail_storage_gpu_positive(case, compile_shader, monkeypatch, executed, 
     assert torch.equal(got[c_lead + 1024 :], before[2][c_lead + 1024 :])
     assert len(executed) == 1
     if case == "aligned" and compile_shader == "0":
-        from triton_msl.backend.driver import _MM_DIRECT_PIPELINES
+        from triton_msl.backend.driver import _PIPELINE_BUCKETS
 
-        entry = _MM_DIRECT_PIPELINES[id(handle.function)]
-        assert entry[0] is handle.function and executed[0]["pipeline"] is entry[1]
+        entry = _PIPELINE_BUCKETS[id(handle.function)].latest("direct")
+        assert entry.primary is handle.function and executed[0]["pipeline"] is entry.direct
         assert handle.name + "__mmdirect" in handle.asm["msl"]
         source, route = handle.asm["msl"], "host_mmdirect"
     elif case == "aligned" and compile_shader == "1":

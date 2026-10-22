@@ -5,6 +5,10 @@
 These examples document the launch interfaces, not universal support or performance.
 Historical throughput figures below are not requalified for 0.3.0.
 
+Compiling MSL or metallib for Julia, XLA custom calls or your own Metal driver?
+Read the [external-driver contract](EXTERNAL_DRIVER.md). The compiled library
+does not carry the Python launcher's allocation, argument and assertion checks.
+
 ## Installation details
 
 ### Requirements
@@ -39,6 +43,30 @@ Source builds support validation/packed helpers on GIL-enabled CPython 3.13/3.14
 the binder is 3.14-only. No runtime-qualified CPython 3.13 native wheel is included.
 Earlier build/import checks do not establish Torch/Triton runtime coverage. Building helpers
 requires Xcode Command Line Tools and does not replace Triton's separate requirements.
+
+### Experimental C++ compiler path
+
+The optional C++ compiler remains default-off and is distinct from the three
+host helpers in the release wheel. Its NVIDIA-style load/store cache and eviction
+hints do not select an Apple cache policy. They are accepted but ignored on this
+experimental path, and must not be used to establish synchronization or memory
+ordering. Load volatility is a separate semantic requirement, not a cache hint.
+
+With a rebuilt optional C++ helper, `TRITON_MSL_USE_CPP=1
+TRITON_MSL_CPP_SCALAR_CFG=1` additionally opts into bounded LLVM scalar cleanup.
+The second switch is default-off and participates in the cache policy. A positive
+pointer-translation proof runs before the Metal typed-pointer adapter. An
+unproved shape selects the unoptimized native lowering unchanged; Metal compiler
+errors are not the eligibility gate. Unsupported byte-offset and chained array
+GEPs therefore retain the accepted native route. This does not widen the C++
+family admission rules.
+
+Compilation metadata records `cpp_scalar_cfg_route` (`disabled`, `optimized`, or
+`fallback`), `cpp_scalar_cfg_reason`, and hashes of the selected opaque IR and
+typed IR. Opt-in attempts also record both candidate hashes; successful C++
+binary production adds `cpp_scalar_cfg_metallib_sha256`. These are compilation
+records; `binary_route` remains the selected binary route and the records alone
+do not establish GPU execution or timing.
 
 If you're on the exact platform tuple **Python 3.14 / macOS 15+ / Apple Silicon (M1–M5)**, an unofficial prebuilt Triton wheel is attached to the [GitHub releases](https://github.com/bledden/triton-msl/releases/tag/triton-wheel-3.7.0-cp314-macos-arm64) so you can skip the build:
 
@@ -278,3 +306,82 @@ The legacy parser and half accumulation are separate, default-off opt-ins:
 | `TRITON_MSL_MEPT=0` | Disable the multi-element-per-thread register-array model |
 | `TRITON_MSL_LEGACY=1` | Opt **in** to the heuristic legacy text parser (off by default, it can be silent-wrong) |
 | `TRITON_MSL_FA_HALF_ACCUM=1` | Opt **in** to fp16 (half) MMA accumulators in FlashAttention. Off by default; fp16 kernels only, a no-op for fp32. Accuracy depends on the inputs, shape and accumulation order; no universal maximum-error bound is provided. Validate it for your workload before enabling it. The historically reported ~4% speedup has not been revalidated on this tree. |
+
+
+### Experimental host storage extent borrowing
+
+`TRITON_MSL_HOST_EXTENT=1` opts CPU tensors on the synchronous host launch route into
+borrowing a page-rounded backing span when the native helper proves sufficient default
+malloc-zone backing and one covering read-write VM region. The default is off; unproved
+storage uses the existing whole-storage mirror. Existing exact-page borrowing is unchanged.
+Small, unaligned and overflowing spans issue no allocator or VM queries during launch.
+The selected policy is recorded as `false`, `true`, or `"unavailable"` in `HOST_EXTENT`
+in the execution stamp; absent/older helpers and failed helper self-tests are unavailable.
+
+At helper load, a bounded self-test checks a positive allocation and two page-aligned
+interior pointers. If it fails, borrowing is disabled for that helper instance. This is
+an observation of the current allocator, not a proof for every pointer or allocator.
+Inspect `triton_msl.backend._cache_contract._validation_native.host_extent_selftest_reason`
+when the helper is present: `selftest_page_size` means unsupported page geometry,
+`selftest_allocation` means the test allocation failed, `selftest_positive` means the
+positive allocation did not prove the required rounded extent, and `selftest_interior`
+means an interior pointer did not produce the required refusal. A conforming allocator
+that reports only the exact requested size can fail `selftest_positive`; this conservatively
+disables the opt-in. `selftest_forced_failure` is reserved for a test helper build.
+An absent/older helper may have no reason attribute.
+
+The mechanism assumes a conforming default malloc zone and that nonzero `malloc_size`
+identifies a block base. Custom array/tensor allocators delegating to that zone are admitted
+on the same terms; a malloc zone is not the identity of the outer tensor allocator.
+
+The owner is retained and checked against the launch's storage snapshot before and after
+the query; a mismatch refuses the launch before copying or dispatch. A fresh owner on a
+later call is assessed afresh. Concurrent resize/free is outside the valid-storage contract,
+as with the existing exact-page and mirror paths. No address, decision or buffer is cached
+across launches by this mechanism. Synchronous completion and alias grouping are unchanged.
+
+Rounding never moves the pointer. Bytes between the storage length and the rounded length
+may contain allocator-private data. Correct, bounded kernels must not access those bytes;
+an out-of-bounds write there would hit allocator-owned data rather than mirror scratch.
+This flag does not provide bounds checking for arbitrary kernels.
+
+For diagnostics, `triton_msl.backend._host_extent.last_launch()` returns a copied list of
+host preparation decisions in the current execution context, or `None` when no opt-in
+host decisions were recorded. Records include route, reason, logical storage bytes and
+borrowed bytes; they do not certify successful GPU execution. The trace is also attached
+as `host_extent` to available launch metadata for the exit hook. Failed wrap/allocation,
+validation and device-assert exceptions remain visible to the caller.
+
+After a device assertion, borrowed outputs (including the existing exact-page path) may
+contain partial writes already performed by the GPU. Mirrored output groups are not
+copied back when that assertion raises, so those groups remain untouched. The successful
+assert-before-store control does not establish rollback for other kernels.
+
+### Host dispatch failures with uncertain completion
+
+The synchronous host launcher retains its Metal bindings, pooled backing mappings and
+borrowed storage owners before calling the runtime. If submission or waiting raises, the
+original exception propagates without replay or mirror copy-back. Those resources remain
+owned independently of the exception traceback and caller variables.
+
+Before another host launch, failed records are inspected. A failure before any commit
+attempt can be retired; after a commit attempt, only the matching command buffer's
+`Completed` or `Error` status proves that GPU access has ended. A missing command witness,
+a nonterminal status or a status-query error retains the record and refuses the new host
+launch. Failed records are discarded after that proof; their buffers are not recycled
+into the pool and their results are never copied back later. Normal successful launches
+retain the existing pool cleanup and output behavior. This protection also applies with
+host extent borrowing off; it does not change the separate `compile_shader` route or
+supply storage ownership for callers of the raw `MetalUtils.launch` API.
+
+`triton_msl.backend._host_dispatch.reap_completed()` performs the same nonblocking check
+and returns the number of unresolved failed records. Zero is not a global GPU-idle barrier
+and says nothing about other active work. If completion cannot be observed, the resources
+stay retained until worker teardown; there is no timeout or force-clear operation. A new
+host launch is refused while any failed record remains unresolved. Already-active launches
+keep their separate ownership records.
+
+Retention prevents garbage collection from releasing backing memory; it cannot prevent
+explicit storage resize, external free, or CPU mutation. Treat all allocations bound to
+an uncertain failed launch as still in use until its completion is established. Borrowed
+outputs may contain partial writes and failed results remain invalid even after retirement.

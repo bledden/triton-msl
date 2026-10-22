@@ -34,8 +34,9 @@ def stage(monkeypatch):
     monkeypatch.setattr(cache, "execution_contract", lambda: "controlled-producer")
     monkeypatch.setattr(cache, "validate_execution_contract", lambda stamp: None)
     monkeypatch.setattr(compiler, "_cpp_warning_emitted", False, raising=False)
+    monkeypatch.setattr(compiler.MetalBackend, "_initialize_compilation_runtime", lambda self: None)
     backend = compiler.MetalBackend(GPUTarget("metal", "apple-m4", 32))
-    monkeypatch.setattr(backend, "_has_cpp_passes", lambda: True)
+    monkeypatch.setattr(backend, "_cpp_load_failure", lambda: None)
 
     def msl(src, metadata, options):
         metadata["block_size"] = 32
@@ -124,7 +125,7 @@ def test_known_unsafe_dot_is_explicitly_derouted_not_compiled(stage, dot):
 
 def test_missing_optional_extension_has_an_explicit_msl_disposition(stage, monkeypatch):
     run, events, backend = stage
-    monkeypatch.setattr(backend, "_has_cpp_passes", lambda: False)
+    monkeypatch.setattr(backend, "_cpp_load_failure", lambda: "optional extension unavailable: module not found")
     with pytest.warns(UserWarning, match=r"C\+\+.*unavailable.*MSL"):
         binary, metadata = run()
     assert binary == b"msl-binary" and metadata["binary_route"] == "msl"

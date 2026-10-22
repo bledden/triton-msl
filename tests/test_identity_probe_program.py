@@ -8,8 +8,9 @@ import pytest
 
 @pytest.fixture(scope="module")
 def native():
-    root = Path(__file__).resolve().parents[1]
-    image = root / "triton_msl/backend/_validation_native.cpython-314-darwin.so"
+    from triton_msl.backend import _cache_contract as cache
+    assert cache._validation_native is not None, "this suite requires the selected native helper"
+    image = Path(cache._validation_native.__file__).resolve()
     assert image.is_file()
     spec = importlib.util.spec_from_file_location("_validation_native", image)
     module = importlib.util.module_from_spec(spec)

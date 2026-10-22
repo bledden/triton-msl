@@ -187,10 +187,11 @@ def test_scalar_signature_templates_execute_without_changing_matmul(monkeypatch,
         # Aligned K-loop dispatch intentionally selects the sibling pure-direct
         # pipeline from the SAME library. Require that exact registered object;
         # compiled.function identifies the staged entry, not this execution.
-        from triton_msl.backend.driver import _MM_DIRECT_PIPELINES
+        from triton_msl.backend.driver import _PIPELINE_BUCKETS
 
-        primary_pipeline, expected_pipeline = _MM_DIRECT_PIPELINES[id(handle.function)]
-        assert primary_pipeline is handle.function
+        record = _PIPELINE_BUCKETS[id(handle.function)].latest("direct")
+        assert record.primary is handle.function
+        expected_pipeline = record.direct
     else:
         expected_pipeline = handle.function
     assert len(calls) == 1 and calls[0][0] is expected_pipeline

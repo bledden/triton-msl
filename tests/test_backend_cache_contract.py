@@ -33,6 +33,7 @@ def backend(monkeypatch):
         ("INFER_LAYOUT", "0", "1"),
         ("LEGACY", "0", "1"),
         ("USE_CPP", "0", "1"),
+        ("CPP_SCALAR_CFG", "0", "1"),
         ("FORCE_PYTHON", "0", "1"),
         ("FA_HALF_ACCUM", "0", "1"),
         ("CPP_SKIP", "", "reduce"),

@@ -9,6 +9,7 @@ import sys
 from types import FunctionType, ModuleType, SimpleNamespace
 
 import pytest
+from tests.python_child import package_child_command
 import triton
 
 from triton_msl.backend import _cache_contract as cache
@@ -23,7 +24,7 @@ def native():
 
 
 @pytest.mark.parametrize("field", ["meta_path", "path_hooks", "path", "version", "byteorder"])
-def test_remainder_of_token_stays_live(native, monkeypatch, field):
+def test_remainder_of_token_stays_live(monkeypatch, field):
     # Derive the prefix from the ACTUAL integrated function, stopping before
     # filesystem discovery. No replacement implementation of the token fields.
     import ast
@@ -127,7 +128,7 @@ else:
 assert events == ['object.__getattr__']
 print('AUDIT_VETO_PRESERVED')
 """
-    completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    completed = subprocess.run(package_child_command(code), capture_output=True, text=True, timeout=30)
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "AUDIT_VETO_PRESERVED"
 

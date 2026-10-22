@@ -1,5 +1,12 @@
 # triton-msl Implementation Roadmap
 
+> **Historical roadmap:** the priorities, performance ceilings and capability claims
+> below describe earlier work. For the September 23 recovery, use
+> [the engineering contract](../engineering/CONTRACT.md) and
+> [current investigation](../engineering/INVESTIGATION.md). Speed, correctness,
+> capability and the other contract dimensions must be preserved together; historical
+> tradeoffs and measured implementation costs are not current hardware limits.
+
 > Last updated: 2026-08-18 (attention perf, quantized inference, AMD; see "Current status" below). The dated phase tables further
 > below were authored **2026-04-09** and are kept as a detailed reference — but much of
 > Phase 0–1 + 2A + 6A has since landed. **Read "Current status" first for what's actually

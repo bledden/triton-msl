@@ -10,6 +10,9 @@ Routing contract:
   observation cannot prove that a produced C++ binary will only get one tile.
   Until that contract is implemented/audited, no C++ dot capability is claimed.
 - ``TRITON_MSL_FORCE_PYTHON=1`` bypasses C++ entirely (compiler.py).
+- Load volatility is preserved as LLVM volatile, including on masked loads.
+  NVIDIA cache/eviction hints on loads and stores are accepted but ignored;
+  they do not select an Apple cache policy or establish memory ordering.
 """
 
 import os

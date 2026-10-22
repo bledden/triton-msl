@@ -1,5 +1,7 @@
 """Operation-owned `ttg.memdesc_trans` permutations are exact-or-refuse."""
 
+from tests.source_identity import assert_candidate_source
+
 from pathlib import Path
 
 import pytest
@@ -75,7 +77,7 @@ def _direct_lowerer(text, path):
 
 def _lowerer(shape=(32, 32), transposed=False):
     root = Path(__file__).resolve().parents[1]
-    assert Path(triton_msl.__file__).resolve() == root / "triton_msl/__init__.py"
+    assert_candidate_source(root, triton_msl)
     lowerer = GenericLowerer.__new__(GenericLowerer)
     lowerer.env = {1: "shared_a"}
     lowerer.env_types = {1: "float"}

@@ -32,6 +32,7 @@ def test_stamp_text_reuse_never_reuses_live_validation(monkeypatch):
         "policy": {key: False for key in contract._STAMP_FLAGS},
     }
     source["policy"]["CPP_SKIP"] = ""
+    source["policy"]["HOST_EXTENT"] = False
     calls = []
 
     def current():
@@ -53,6 +54,9 @@ def test_stamp_text_reuse_never_reuses_live_validation(monkeypatch):
     for key, value in [
         *((key, True) for key in contract._STAMP_FLAGS),
         ("CPP_SKIP", "changed"),
+        ("HOST_EXTENT", True),
+        ("HOST_EXTENT", "unavailable"),
+        ("HOST_EXTENT", 0),
         ("FA_FAST", 0),
         ("FA_FAST", 1.0),
     ]:

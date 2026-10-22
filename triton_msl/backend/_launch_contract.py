@@ -52,6 +52,13 @@ def _record(metadata):
     if type(metadata["needs_2d_grid"]) is not bool:
         _refuse("invalid grid mode")
     outputs = metadata["output_arg_indices"]
+    attention = metadata["flash_attention"]
+    if type(attention) is dict and attention.get("kind") == "cooperative-row-v1":
+        from ._attention_variant import validate_descriptor
+
+        validate_descriptor(attention, primary=metadata["name"], scalar_threads=metadata["block_size"])
+        if metadata["shared"] not in (0, 1) or metadata["needs_2d_grid"]:
+            _refuse("cooperative attention primary must keep scalar32/0 geometry")
     assertion = metadata["device_assert"]
     if assertion is not None:
         if (
@@ -74,13 +81,23 @@ def _record(metadata):
         or len(set(outputs)) != len(outputs)
     ):
         _refuse("invalid output indices")
-    return {
+    record = {
         "schema": 2,
         "kind": "metal-packed-launch",
         "name": metadata["name"],
         "execution_contract": metadata["execution_contract"],
         "fields": {name: metadata[name] for name in FIELDS},
     }
+    abi = metadata.get("argument_abi")
+    if abi is not None:
+        from ._argument_abi import validate_record
+
+        validate_record(abi)
+        if assertion is not None or any(metadata[name] is not None for name in FIELDS[6:9]):
+            _refuse("packed argument ABI cannot certify assertion or replacement bindings")
+        record["schema"] = 3
+        record["argument_abi"] = abi
+    return record
 
 
 def seal_launch_metadata(metadata):
@@ -105,6 +122,16 @@ def seal_launch_metadata(metadata):
 
 def validate_launch_metadata(metadata):
     """Validate a full producer record; return an immutable packed-value snapshot."""
+    return validate_launch_products(metadata)[0]
+
+
+def validate_launch_products(metadata):
+    """Capture ABI sidecar and hot descriptor from one checked producer record.
+
+    Schema2 grants no new packed host route. The optional schema3 ABI is
+    captured immutably at construction, never restored from inferred defaults.
+    The per-call twelve-field descriptor remains unchanged.
+    """
     if isinstance(metadata, dict):
         values = metadata
     elif hasattr(metadata, "__dict__"):
@@ -117,7 +144,8 @@ def validate_launch_metadata(metadata):
     if type(values.get("launch_contract")) is not str or values["launch_contract"] != record:
         _refuse("missing, altered or incompatible producer record")
     # The serialized copy cannot alias a mutable list/dict in restored metadata.
-    return _canonical([values[name] for name in FIELDS])
+    abi = json.loads(record).get("argument_abi")
+    return _canonical([values[name] for name in FIELDS]), (_canonical(abi) if abi is not None else None)
 
 
 def validate_packed_launch(packed, expected):

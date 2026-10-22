@@ -1,0 +1,766 @@
+{
+  "schema": 1,
+  "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
+  "active_investigation": "2026-10-13 Astra: Implemented the recommended build-owner placement repair following Blake's go. Preserved 613 candidate files in detached worktree /Users/bledden/Documents/triton-metal-worktrees/0.4.0-production-integration at unchanged reviewed digest c830d7f21eb9ef722a460481dbc143a62e9e332776b614093f2ec9f16572c9f0; restored only compiler.py and source-program entry.py from retained parents and removed this unit's two added files from frozen 0.4.0-start, restoring exact predecessor source digest 32f1998b6eb70f31bcc533a6365eaeb3d0fb5cba1aac1c48decb458220a19ab9. Both additions remain recoverable in candidate and sealed packet. Relocated guarded suites pass 176/176 per mode with both predecessor red failures and unchanged emitted MSL, zero unexpected attempts. Placement lane trifast-build-owner-placement-repair-20261013 sealed over 150 files; HASHES.json a098938e0400da2efe8a90b9e1f39ea94870617e8abb2ba0284951fbb4391f8f, handoff ffb48a67b1e8ecb4ea8dd45f5c177d67aeab338747915a2eadde1ceca868a528. Audit authenticates all 234 original sealed members and explicitly relocates 689 original anchors without editing the old packet. Ten predecessor audits replayed unchanged in both modes: six pass; exceptional instrument/results/expectations still fail on historical coverage map 071cb60a versus live 5aff0ea8, and original production-package audit reaches the later accepted disassembler packaging change. No blanket replay-restoration claim; residuals and nonzero exits retained. Coverage map unchanged, exact prior bytes not located; no unrelated repair rolled back. Candidate root is now retained evidence and must not be edited beneath its binding; further units need a successor root/snapshot. No GPU work, lease, receipt, clearance, commit or public-gate change; offered lease window not consumed. Await placement review, then CPU structural compiled-policy integration. All release/performance/resource obligations, prior population decisions and warm-call sequencing pause remain open.",
+  "obligations": [
+    {
+      "id": "correctness",
+      "state": "open",
+      "next_experiment": "Bind independent source-aware oracles for outputs, saved outputs, gradients, tails and nonfinite behavior."
+    },
+    {
+      "id": "safety",
+      "state": "open",
+      "next_experiment": "Map bounds, alias, synchronization, dispatch and owner-lifetime obligations to positive/adverse controls."
+    },
+    {
+      "id": "capability",
+      "state": "open",
+      "next_experiment": "Carry forward the operation/refusal census and positive user/framework workloads; detect supported-to-refused transitions."
+    },
+    {
+      "id": "performance",
+      "state": "open",
+      "next_experiment": "Reproduce per-workload baselines and attribute cold, host and device costs; compare credible admissible alternatives."
+    },
+    {
+      "id": "resources",
+      "state": "open",
+      "next_experiment": "Measure copies, allocations, live/retained memory, compilation/cache footprint and sustained behavior."
+    },
+    {
+      "id": "compatibility",
+      "state": "open",
+      "next_experiment": "Map source/shape/type/hardware/runtime coverage for JIT, Inductor, MLX and external loaders; distinguish missing hardware from device limits."
+    },
+    {
+      "id": "distribution",
+      "state": "open",
+      "next_experiment": "Qualify isolated native/pure installed artifacts, helper/import origins, cold binder modes and toolchain pipeline selection."
+    },
+    {
+      "id": "maintainability",
+      "state": "open",
+      "next_experiment": "Audit route complexity, duplicated proofs and ceiling assumptions; compare causal repairs with architectural simplification."
+    }
+  ],
+  "workloads": [
+    {
+      "id": "warm/native/add",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1984,
+        "excess_us_per_request": 25.9,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.177348, excess 26.646 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+    },
+    {
+      "id": "warm/native/softmax",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.2378,
+        "excess_us_per_request": 24.3,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.162183, excess 27.771 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+    },
+    {
+      "id": "warm/native/matmul_ieee",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1913,
+        "excess_us_per_request": 26.3,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.133205, excess 28.948 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+    },
+    {
+      "id": "warm/native/varlen_48_32",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 0.1154,
+        "excess_us_per_request": -1648.7,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/layernorm_1024x1024",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1828,
+        "excess_us_per_request": 25.2,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/quant_decode_512x1024",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1943,
+        "excess_us_per_request": 24.4,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/fa512_f4_causal0",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1595,
+        "excess_us_per_request": 30.1,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.118869, excess 42.989 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/native/fa512_f4_causal1",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1784,
+        "excess_us_per_request": 33.2,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.186076, excess 71.177 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/native/fa512_f2_causal0",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1507,
+        "excess_us_per_request": 27.4,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.116833, excess 41.719 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/native/fa512_f2_causal1",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1819,
+        "excess_us_per_request": 33.8,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.169814, excess 61.375 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/native/mm2048_f4",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.0373,
+        "excess_us_per_request": 58.1,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/mm2048_f2",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.0363,
+        "excess_us_per_request": 52.8,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/bandwidth_16M",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.0476,
+        "excess_us_per_request": 27.6,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/assert_valid",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1929,
+        "excess_us_per_request": 23.4,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/mla_canonical",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.2791,
+        "excess_us_per_request": 52.9,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.175799, excess 62.146 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/native/compiled_mlp",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.1309,
+        "excess_us_per_request": 39.0,
+        "backend_launches_per_request": 2,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/gpt2_small",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 1.2127,
+        "excess_us_per_request": 728.4,
+        "backend_launches_per_request": 43,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/native/attention_forward_backward",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "candidate_over_public_main": 0.9973,
+        "excess_us_per_request": -1.1,
+        "backend_launches_per_request": 3,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/add",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.3768,
+        "excess_us_per_request": 50.4,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.367672, excess 53.239 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+    },
+    {
+      "id": "warm/pure/softmax",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.4131,
+        "excess_us_per_request": 50.6,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.337567, excess 55.594 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+    },
+    {
+      "id": "warm/pure/matmul_ieee",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.3903,
+        "excess_us_per_request": 57.8,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.261922, excess 58.896 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+    },
+    {
+      "id": "warm/pure/varlen_48_32",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 0.1315,
+        "excess_us_per_request": -1630.2,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/layernorm_1024x1024",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.3645,
+        "excess_us_per_request": 51.6,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/quant_decode_512x1024",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.4166,
+        "excess_us_per_request": 53.8,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/fa512_f4_causal0",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.3241,
+        "excess_us_per_request": 59.7,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.201255, excess 75.906 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/pure/fa512_f4_causal1",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.3674,
+        "excess_us_per_request": 65.8,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.269751, excess 103.104 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/pure/fa512_f2_causal0",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.3275,
+        "excess_us_per_request": 63.2,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.203229, excess 71.531 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/pure/fa512_f2_causal1",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.3748,
+        "excess_us_per_request": 67.2,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.260424, excess 93.896 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/pure/mm2048_f4",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.0691,
+        "excess_us_per_request": 109.4,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/mm2048_f2",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.0611,
+        "excess_us_per_request": 88.7,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/bandwidth_16M",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.1028,
+        "excess_us_per_request": 61.4,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/assert_valid",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.4332,
+        "excess_us_per_request": 48.7,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/mla_canonical",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.4986,
+        "excess_us_per_request": 91.3,
+        "backend_launches_per_request": 1,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.278478, excess 97.740 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification."
+    },
+    {
+      "id": "warm/pure/compiled_mlp",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.231,
+        "excess_us_per_request": 70.9,
+        "backend_launches_per_request": 2,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/gpt2_small",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.4109,
+        "excess_us_per_request": 1408.9,
+        "backend_launches_per_request": 43,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "warm/pure/attention_forward_backward",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "candidate_over_public_main": 1.0009,
+        "excess_us_per_request": 0.3,
+        "backend_launches_per_request": 3,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        }
+      },
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+    },
+    {
+      "id": "cold/native/add",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "public_main_seconds": 0.629,
+        "candidate_seconds": 9.48,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        },
+        "caveat": "Single observations; MLP and GPT-2 shared a worker."
+      },
+      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings."
+    },
+    {
+      "id": "cold/pure/add",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "public_main_seconds": 0.629,
+        "candidate_seconds": 9.586,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        },
+        "caveat": "Single observations; MLP and GPT-2 shared a worker."
+      },
+      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings."
+    },
+    {
+      "id": "cold/native/compiled_mlp",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "public_main_seconds": 0.861,
+        "candidate_seconds": 10.024,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        },
+        "caveat": "Single observations; MLP and GPT-2 shared a worker."
+      },
+      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings."
+    },
+    {
+      "id": "cold/pure/compiled_mlp",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "public_main_seconds": 0.861,
+        "candidate_seconds": 10.053,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        },
+        "caveat": "Single observations; MLP and GPT-2 shared a worker."
+      },
+      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings."
+    },
+    {
+      "id": "cold/native/gpt2_small",
+      "state": "open",
+      "mode": "native",
+      "historical": {
+        "public_main_seconds": 2.81,
+        "candidate_seconds": 5.13,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        },
+        "caveat": "Single observations; MLP and GPT-2 shared a worker."
+      },
+      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings."
+    },
+    {
+      "id": "cold/pure/gpt2_small",
+      "state": "open",
+      "mode": "pure",
+      "historical": {
+        "public_main_seconds": 2.81,
+        "candidate_seconds": 5.174,
+        "origin": {
+          "path": "docs/RELEASE_CANDIDATE_LIMITATIONS.md",
+          "sha256": "10479929ff1852c01ab0065a842a9411b3754042213fd5bd6d7ed2ea43322330",
+          "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
+        },
+        "caveat": "Single observations; MLP and GPT-2 shared a worker."
+      },
+      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings."
+    },
+    {
+      "id": "external/triangle_attention",
+      "state": "open",
+      "next_experiment": "Installed host/compile_shader27pairs execute off/on in both private native/helper-free pure modes:216calls, exact1944rawfiles across fourchildren, actual eightbindings/source/pipeline/payload witnesses and zero receipt counters after ordinary ownercleanup. Fable boundedreceipt review then full-call retention/warm/null and separated cold setup, including binary hashing for direct kernels. This is narrow capability/correctness recovery, no speedclaim. Wider dtype, width-changing wrapper, stride/mask/tail/backward, aliases, external-loader and hardware coverage remain open."
+    },
+    {
+      "id": "external/metal_pipeline",
+      "state": "open",
+      "next_experiment": "All four installed regression phases independently accepted through reviewed source continuity; no unchanged rerun. Review the source-bound CPU operation matrix in trifast-operation-semantics-20261012, then establish the per-program numerical policy for dot/reduction fusion, association and exceptional values before further transport. Public source-program dispatch stays refused; general inputs, tails, actual production transport, resources and performance remain unqualified. No baseline adoption or commit inferred."
+    },
+    {
+      "id": "family/dot_and_epilogues",
+      "state": "open",
+      "next_experiment": "Exercise rectangular/grouped/batched dot, layouts, K tails, narrow types, epilogues and chained operations; compare admissible local and MLIR alternatives."
+    },
+    {
+      "id": "family/reductions_and_indexing",
+      "state": "open",
+      "next_experiment": "Exercise reductions, scans, gather/scatter, offsets, aliases, integer-width and ordered-combiner semantics."
+    },
+    {
+      "id": "family/attention_training_decode",
+      "state": "open",
+      "next_experiment": "Exercise dense/biased/varlen/decode/MLA/KDA and backward saved outputs; diagnose scratch/barriers/source-block rounding/layouts."
+    },
+    {
+      "id": "framework/inductor_training",
+      "state": "open",
+      "next_experiment": "Retain compiled inference/training/gradient/dynamic-shape capability and measure warm/cold costs."
+    },
+    {
+      "id": "framework/mlx",
+      "state": "open",
+      "next_experiment": "Qualify extraction, binding and execution separately from MPS."
+    },
+    {
+      "id": "artifact/native_and_pure",
+      "state": "open",
+      "next_experiment": "Qualify actual installed native/pure artifacts and binder cold modes without injected helpers."
+    },
+    {
+      "id": "hardware/m1_and_later",
+      "state": "open",
+      "next_experiment": "Obtain applicable device evidence; missing hardware stays blocked, not impossible."
+    }
+  ]
+}

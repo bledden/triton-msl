@@ -116,5 +116,6 @@ def test_import_order_msl_templates_first_reexports_matmul(tmp_path):
         "assert 'kernel' in e.make_matmul_kernel().lower()\n"
         "print('OK')\n"
     )
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    from tests.python_child import package_child_command
+    r = subprocess.run(package_child_command(code), capture_output=True, text=True)
     assert r.returncode == 0 and "OK" in r.stdout, r.stderr

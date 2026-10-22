@@ -62,6 +62,7 @@ def _python_roots():
 
 
 def _native_entrypoints(roots):
+    import stat
     from ._native_dependencies import is_native
 
     seeds, visited = [], set()
@@ -69,8 +70,22 @@ def _native_entrypoints(roots):
     # it need not be an LC_LOAD_DYLIB edge of torch._C. No directory search.
     explicit = {path / "lib/libtorch_global_deps.dylib" for path in roots.get("torch", ())}
 
-    def visit(path, excludes=()):
-        path = path.resolve(strict=True)
+    def visit(path, excludes=(), *, canonical_parent=False):
+        # Only ordinary non-entry files can avoid re-walking the already
+        # resolved parent. Roots, directories, symlinks and every potential
+        # native entry retain full strict resolution. Never use cached dirent
+        # metadata: a missing/inaccessible child must still refuse discovery.
+        if not canonical_parent:
+            path = path.resolve(strict=True)
+        else:
+            mode = path.lstat().st_mode
+            if (
+                not stat.S_ISREG(mode)
+                or path.suffix == ".so"
+                or path == roots["python-executable"][0]
+                or path in explicit
+            ):
+                path = path.resolve(strict=True)
         if path in visited:
             return
         visited.add(path)
@@ -78,7 +93,7 @@ def _native_entrypoints(roots):
             for child in sorted(path.iterdir()):
                 if child.name in excludes or child.name == "__pycache__" or child.suffix in (".pyc", ".pyo"):
                     continue
-                visit(child)
+                visit(child, canonical_parent=True)
         elif path.is_file() and (path.suffix == ".so" or path == roots["python-executable"][0] or path in explicit):
             if not is_native(path):
                 with path.open("rb") as handle:
@@ -251,19 +266,28 @@ def _discover_selection():
             )
         )
     runtime_env = tuple((key, os.environ.get(key)) for key in _RUNTIME_SELECTION_ENV)
+    # The token carries id() values of the import machinery. An id names an
+    # object only while that object is alive, so the machinery is captured by
+    # an owning tuple at the moment its ids are read and retained with the memo
+    # built from it. Every name below is selected exactly where the original
+    # expression selected it; the capture adds one `tuple` selection and call
+    # per list before the attribute read. The selected constructors are kept so
+    # the store can prove the capture is an owning snapshot (a replaced
+    # constructor may hand back the live list); an unproved capture is never
+    # memoized.
     token = (
         tuple(sys.path),
-        tuple(map(id, sys.meta_path)),
-        tuple(map(id, sys.path_hooks)),
+        tuple(map(id, (finders := (finder_constructor := tuple)(sys.meta_path)))),
+        tuple(map(id, (hooks := (hook_constructor := tuple)(sys.path_hooks)))),
         tuple(module_tokens),
-        id(importlib.util.find_spec),
+        id(resolver := importlib.util.find_spec),
         sys.version,
         sys.implementation.cache_tag,
         sys.byteorder,
         runtime_env,
     )
     if _discovery_snapshot is not None and _discovery_snapshot[0] == token:
-        return _discovery_snapshot[1:]
+        return _discovery_snapshot[1:3]
     roots = {}
     for name in names:
         spec = importlib.util.find_spec(name)
@@ -303,7 +327,29 @@ def _discover_selection():
         roots = MappingProxyType(roots)
         metadata = MappingProxyType(metadata)
         _owned_selection = roots, metadata, selection
-    _discovery_snapshot = token, roots, metadata
+    # Memoize only a capture proved to own the observed machinery, and only if
+    # the machinery live now IS that machinery, object for object. The exact
+    # tuple type is taken from a literal, not from a name, so this certificate
+    # performs no live builtin lookups; it reads sys.meta_path, sys.path_hooks
+    # and importlib.util.find_spec once more (miss path only). A capture made
+    # by a replaced constructor, or machinery replaced during resolution, is
+    # returned but not memoized; the next call observes again.
+    owning = ().__class__
+    same = finder_constructor is owning and hook_constructor is owning and importlib.util.find_spec is resolver
+    if same:
+        live_finders = owning(sys.meta_path)
+        live_hooks = owning(sys.path_hooks)
+        same = live_finders.__len__() == finders.__len__() and live_hooks.__len__() == hooks.__len__()
+        index = 0
+        while same and index < live_finders.__len__():
+            same = live_finders[index] is finders[index]
+            index += 1
+        index = 0
+        while same and index < live_hooks.__len__():
+            same = live_hooks[index] is hooks[index]
+            index += 1
+    if same:
+        _discovery_snapshot = token, roots, metadata, (finders, hooks, resolver)
     return roots, metadata
 
 

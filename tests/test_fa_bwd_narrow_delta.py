@@ -1,5 +1,7 @@
 """Exact TriFast narrow-dtype delta reduction for the proved D=32 layout."""
 
+from tests.source_identity import assert_candidate_source
+
 import hashlib
 import sys
 from pathlib import Path
@@ -95,7 +97,7 @@ _TORCH_DTYPE = {"fp16": torch.float16, "bf16": torch.bfloat16}
 
 @pytest.fixture(autouse=True, scope="module")
 def _assert_package_identity():
-    assert Path(triton_msl.__file__).resolve().is_relative_to(Path.cwd().resolve())
+    assert_candidate_source(Path(__file__).resolve().parents[1], triton_msl)
 
 
 def _runtime_layout_oracle(values, dtype):

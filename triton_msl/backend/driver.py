@@ -8,6 +8,27 @@ from triton.backends.compiler import GPUTarget
 from triton.backends.driver import DriverBase
 
 
+def _release_host_pool_buffers(pool, entries):
+    """Release every registered lease without hiding an active launch exception."""
+    import sys
+
+    active_error = sys.exception()
+    cleanup_error = None
+    for entry in entries:
+        try:
+            if type(entry[0]) is str and entry[0] == "scalar":
+                pool.release_scalar(entry[1], entry[2])
+            else:
+                pool.release(*entry)
+        except Exception as error:
+            if active_error is not None:
+                active_error.add_note(f"Host buffer cleanup also failed: {error}")
+            elif cleanup_error is None:
+                cleanup_error = error
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
 def ty_to_cpp(ty):
     """Map Triton type strings to C++ type strings for Metal."""
     if ty[0] == "*":
@@ -31,14 +52,54 @@ def ty_to_cpp(ty):
     }[ty]
 
 
-# Two-kernel-split matmul (#159): when a metallib carries both a staged matmul
-# kernel and its pure-direct (no-threadgroup) variant, load_binary resolves both
-# and records (primary, direct) here, keyed by id() of the primary (staged)
-# pipeline. Retaining and checking the primary prevents an address-reused
-# pipeline from selecting an unrelated direct variant after cache eviction.
-# The launcher looks it up to dispatch the direct kernel for
-# fully-aligned matmuls (max occupancy / MLX parity).
-_MM_DIRECT_PIPELINES = {}
+# Loaders own Python acquisition records. Global discovery owns no loader or
+# Metal pipeline. The Python buckets/records, not PyObjC objects, support weakrefs.
+_PIPELINE_BUCKETS = {}
+
+
+# PyObjC pipelines do not support weak references. Receipts own their pipeline
+# and library until the loader's matching unload_module calls (or utils teardown).
+# They are scoped to MetalUtils, not a process-global pipeline side table.
+def _bind_pipeline_binary(pipeline, name, binary, *, owner=None, module=None, direct=None, loaded=False):
+    import hashlib
+    from ._pipeline_ownership import Registry
+
+    proven = type(binary) is bytes and type(name) is str
+    if not proven and not loaded:
+        return
+    owner = _get_utils() if owner is None else owner
+    module = pipeline if module is None else module
+    proof = (pipeline, name, hashlib.sha256(binary).hexdigest(), module) if proven else None
+    registry = getattr(owner, "_pipeline_ownership", None)
+    if registry is None:
+        prepared = Registry()
+        registry = getattr(owner, "_pipeline_ownership", None)
+        if registry is None:
+            owner._pipeline_ownership = registry = prepared
+    return registry.bind(_PIPELINE_BUCKETS, id(pipeline), pipeline, module, proof, direct)
+
+
+def _direct_pipeline(pipeline):
+    bucket = _PIPELINE_BUCKETS.get(id(pipeline))
+    record = None if bucket is None else bucket.latest("direct")
+    return record.direct if record is not None and record.primary is pipeline else None
+
+
+def _validate_packed_pipeline(pipeline, name, digest, *, owner=None):
+    from ._argument_abi import LayoutError
+
+    bucket = _PIPELINE_BUCKETS.get(id(pipeline))
+    registry = None if owner is None else getattr(owner, "_pipeline_ownership", None)
+    record = None if bucket is None or (owner is not None and registry is None) else bucket.latest("binary", registry)
+    entry = None if record is None else record.proof
+    if (
+        entry is None
+        or record.primary is not pipeline
+        or entry[0] is not pipeline
+        or entry[1] != name
+        or entry[2] != digest
+    ):
+        raise LayoutError("host packed argument ABI does not match the loaded pipeline; recompile")
 
 
 def _strided_storage_reach(t):
@@ -300,6 +361,9 @@ class MetalUtils:
         self._device = None
         self._command_queue = None
         self._buffer_pool = None
+        from ._pipeline_ownership import Registry
+
+        self._pipeline_ownership = Registry()
 
     @property
     def device(self):
@@ -400,16 +464,21 @@ class MetalUtils:
         # matmul variant, resolve its pipeline and stash it so the launcher can
         # dispatch it for fully-aligned matmuls. Cheap no-op for other kernels
         # (newFunctionWithName_ returns None when absent).
+        direct_pipeline = None
         try:
             direct_fn = library.newFunctionWithName_(name + "__mmdirect")
             if direct_fn is not None:
                 direct_ps, derr = self.device.newComputePipelineStateWithFunction_error_(direct_fn, None)
                 if derr is None and direct_ps is not None:
-                    _MM_DIRECT_PIPELINES[id(pipeline_state)] = (pipeline_state, direct_ps)
+                    direct_pipeline = direct_ps
         except Exception:
             pass
 
-        return library, pipeline_state, n_regs, n_spills, n_max_threads
+        result = (library, pipeline_state, n_regs, n_spills, n_max_threads)
+        _bind_pipeline_binary(
+            pipeline_state, name, kernel, owner=self, module=library, direct=direct_pipeline, loaded=True
+        )
+        return result
 
     def launch(
         self,
@@ -430,7 +499,14 @@ class MetalUtils:
         """
         import Metal
 
+        from ._host_dispatch import RetainedBuffers
+
+        lease = buffers.lease if isinstance(buffers, RetainedBuffers) else None
+        if lease is not None:
+            lease.stage = "encoding"
         command_buffer = self.command_queue.commandBuffer()
+        if lease is not None:
+            lease.command = command_buffer
         encoder = command_buffer.computeCommandEncoder()
         encoder.setComputePipelineState_(pipeline_state)
 
@@ -441,6 +517,9 @@ class MetalUtils:
         tg_size = Metal.MTLSizeMake(*threadgroup_size)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
         encoder.endEncoding()
+        if lease is not None:
+            # commit may enqueue before the Python/ObjC call raises.
+            lease.stage = "submission_attempted"
         command_buffer.commit()
 
         if sync:
@@ -521,7 +600,9 @@ class MetalUtils:
         }
 
     def unload_module(self, module):
-        pass  # Metal libraries are reference-counted by ObjC ARC
+        registry = getattr(self, "_pipeline_ownership", None)
+        if registry is not None:
+            registry.unload(_PIPELINE_BUCKETS, module)
 
 
 _metal_utils = None
@@ -684,9 +765,12 @@ class MetalLauncher:
         from triton_msl.backend._cache_contract import validate_execution_contract, install_jit_policy_guard
 
         self._execution_contract = validate_execution_contract(getattr(metadata, "execution_contract", None))
-        from triton_msl.backend._launch_contract import validate_launch_metadata
+        from triton_msl.backend._launch_contract import validate_launch_products
 
-        self._packed_contract = validate_launch_metadata(metadata)
+        self._packed_contract, _argument_abi = validate_launch_products(metadata)
+        from ._argument_abi import capture_host_layout
+
+        self._host_packed_layout, self._host_packed_binary_sha = capture_host_layout(_argument_abi)
         install_jit_policy_guard(getattr(src, "fn", None), self._execution_contract)
         self.constants = src.constants if hasattr(src, "constants") else {}
         from triton_msl.backend._launch_signature import ordered_source_signature, make_binding_plan
@@ -730,6 +814,21 @@ class MetalLauncher:
         except Exception:
             self._msl = None
 
+        # Field 9 is the existing sealed attention-descriptor union. The
+        # experimental sibling never replaces the scalar source in its stash.
+        import json
+
+        _attention = json.loads(self._packed_contract)[9]
+        if type(_attention) is dict and _attention.get("kind") == "cooperative-row-v1":
+            from ._attention_variant import validate_descriptor
+
+            validate_descriptor(
+                _attention,
+                primary=self.kernel_name,
+                scalar_source=self._msl,
+                scalar_threads=self._msl_block_size if self._msl is not None else 32,
+            )
+
     def __call__(
         self,
         gridX,
@@ -748,6 +847,9 @@ class MetalLauncher:
         # access. Packed-descriptor/argument ABI validation is a separate layer.
         from triton_msl.backend._cache_contract import validate_execution_contract
 
+        from triton_msl.backend import _host_extent
+
+        _host_extent.clear_launch()
         validate_execution_contract(getattr(self, "_execution_contract", None))
         from triton_msl.backend._launch_contract import validate_packed_launch
 
@@ -785,6 +887,13 @@ class MetalLauncher:
 
                 raise MetalNonRecoverableError(
                     "Refusing launch: packed address-bounds contract is malformed",
+                    op_name="tt.dot",
+                )
+            if address_bounds[0] == "source_program_pending_v1":
+                from triton_msl.errors import MetalNonRecoverableError
+
+                raise MetalNonRecoverableError(
+                    "Refusing launch: source-program numerical, storage and dispatch admission is not qualified",
                     op_name="tt.dot",
                 )
             if address_bounds[0] == "matmul_full_k_storage_v1":
@@ -916,6 +1025,27 @@ class MetalLauncher:
                     # unlike quantized, the host path is equally correct, so a miss (False)
                     # simply falls through -- never wrong, never refused.
                     if flash_attention is not None and all_mps and _os.environ.get("TRITON_MSL_FA_FAST", "1") != "0":
+                        if (
+                            self._msl is not None
+                            and type(flash_attention) is dict
+                            and flash_attention.get("kind") == "cooperative-row-v1"
+                        ):
+                            from ._cooperative_dispatch import dispatch_cooperative_attention
+
+                            if dispatch_cooperative_attention(
+                                _rt,
+                                flash_attention,
+                                kargs,
+                                (gridX, gridY, gridZ),
+                                device_limits=(
+                                    utils.device.maxThreadsPerThreadgroup().width,
+                                    utils.device.maxThreadgroupMemoryLength(),
+                                ),
+                                submission_state=_submission,
+                                launch_exit_hook=launch_exit_hook,
+                                launch_metadata=launch_metadata,
+                            ):
+                                return
                         from triton_msl.autotuning._fa_dispatch import dispatch_flash_attention
 
                         if dispatch_flash_attention(
@@ -1043,21 +1173,21 @@ class MetalLauncher:
                 "compile_shader disabled/unavailable."
             )
 
-        # A >31-arg kernel was lowered with argument-buffer packing (issue #4.7): the MSL
-        # has one packed scalar buffer, not one per scalar. The host round-trip path below
-        # binds one buffer per arg and cannot match that signature, so packed kernels run
-        # only via compile_shader (MPS tensors, 1-D grid). Refuse here rather than mis-bind.
+        # Overflow is admitted only by the fresh producer's explicit MSL ABI,
+        # not by argument count or attention-family name. Geometry stays native.
         _n_nonconstexpr = len(flat_args)
+        _packed_layout = None
+        _packed_payload = None
         if _n_nonconstexpr > _MAX_METAL_BUFFERS:
-            from triton_msl.errors import MetalNonRecoverableError
+            from ._argument_abi import prepare_host_payload
 
-            raise MetalNonRecoverableError(
-                f"kernel with {_n_nonconstexpr} arguments (> {_MAX_METAL_BUFFERS}) uses "
-                "argument-buffer packing, which runs on MPS tensors via compile_shader "
-                "(1-D grid) only. This launch fell to the host path (non-MPS tensors or a "
-                "multi-dim grid). Use MPS tensors with a 1-D grid, or reduce the arg count.",
-                op_name="kernel",
-            )
+            _packed_layout = getattr(self, "_host_packed_layout", None)
+            _packed_payload = prepare_host_payload(_packed_layout, flat_sigs, scalar_payloads, flat_args)
+            _validate_packed_pipeline(function, self.kernel_name, self._host_packed_binary_sha)
+
+        from . import _host_dispatch
+
+        _host_dispatch.check_pending()
 
         # Pack arguments into Metal buffers.
         # Strategy:
@@ -1069,7 +1199,7 @@ class MetalLauncher:
         pool = utils.buffer_pool
         buffers = []
         tensor_copies = []  # (metal_buf, tensor, nbytes, cpu_tensor, pool_info)
-        pool_releases = []  # (metal_buf, aligned_mem, size_class) to release after dispatch
+        pool_releases = []  # Register each successful acquisition before using its bytes.
 
         # Output arg indices: only these need copy-back after dispatch.
         # If not provided (None), copy back all tensors (conservative).
@@ -1121,9 +1251,29 @@ class MetalLauncher:
             )
 
         for arg_idx, arg in enumerate(flat_args):
+            if _packed_layout is not None and arg_idx not in _packed_layout.pointer_indices:
+                continue
             if flat_sigs[arg_idx] == "constexpr" or not hasattr(arg, "data_ptr"):
                 continue
             import torch as _torch
+
+            if _packed_layout is not None:
+                from ._argument_abi import pointee_storage_width
+
+                # A low-level caller can supply a tensor whose storage width
+                # disagrees with its specialization. Prove width on the actual
+                # backing owner, including reinterpret wrappers, before copying.
+                _decl = _packed_layout.declarations[arg_idx]
+                _owner = arg if hasattr(arg, "untyped_storage") else getattr(arg, "base", None)
+                try:
+                    _actual_width = int(_owner.element_size())
+                except Exception:
+                    _storage_refusal(f"packed pointer {arg_idx} has no proved backing element width")
+                if _actual_width != pointee_storage_width(_decl):
+                    _storage_refusal(f"packed pointer {arg_idx} backing width differs from its source declaration")
+                _converts_fp64 = hasattr(arg, "dtype") and arg.dtype == _torch.float64
+                if (_decl == "*fp64") != _converts_fp64:
+                    _storage_refusal(f"packed pointer {arg_idx} has no matching fp64 conversion contract")
 
             if hasattr(arg, "dtype") and arg.dtype == _torch.float64:
                 # The established fp64 compatibility path converts a dense
@@ -1203,6 +1353,7 @@ class MetalLauncher:
                 key,
                 {
                     "layout": layout,
+                    "storage": storage,  # retain the live owner through synchronous completion
                     "storage_nbytes": storage_nbytes,
                     "storage_ptr": storage_ptr,
                     "elem_size": elem_size,
@@ -1218,70 +1369,52 @@ class MetalLauncher:
             if output_arg_indices is None or arg_idx in output_arg_indices:
                 group["is_output"] = True
 
-        for group in storage_groups.values():
-            layout = group["layout"]
-            storage_nbytes = group["storage_nbytes"]
-            storage_ptr = group["storage_ptr"]
-            elem_size = group["elem_size"]
-            single_complete_view = len(group["members"]) == 1 and group["members"][0][2]
-            if storage_nbytes > _HOST_MIRROR_MAX_BYTES and not single_complete_view:
-                _storage_refusal(
-                    f"a tensor alias group needs its full {storage_nbytes}-byte backing storage, "
-                    f"exceeding the {_HOST_MIRROR_MAX_BYTES}-byte safety limit"
-                )
-            if storage_nbytes % elem_size != 0:
-                _storage_refusal(
-                    f"a {storage_nbytes}-byte backing storage is not divisible by its "
-                    f"{elem_size}-byte representative element size"
-                )
+        from triton_msl.backend import _cache_contract as _extent_contract
 
-            if group["is_mps"]:
-                # Copy the COMPLETE MPS allocation to a CPU byte-faithful mirror.
-                # as_strided(..., storage_offset=0) deliberately ignores the
-                # representative view's base and exposes the whole typed storage.
-                try:
-                    import torch as _torch
-
-                    _torch.mps.synchronize()
-                    storage_elems = storage_nbytes // elem_size
-                    flat_storage = layout.as_strided((storage_elems,), (1,), 0)
-                    source = flat_storage.cpu().contiguous()
-                    if source.numel() * source.element_size() != storage_nbytes:
-                        _storage_refusal("the complete MPS backing storage could not be mirrored byte-for-byte")
-                except MetalNonRecoverableError:
-                    raise
-                except Exception as error:
-                    _storage_refusal(f"the complete MPS backing storage could not be mirrored ({error})")
-                metal_buf, aligned_mem, size_class = pool.acquire(storage_nbytes)
-                src = (ctypes.c_char * storage_nbytes).from_address(source.data_ptr())
-                dst_view = metal_buf.contents().as_buffer(storage_nbytes)
-                dst = (ctypes.c_char * storage_nbytes).from_buffer(dst_view)
-                ctypes.memmove(dst, src, storage_nbytes)
-                pool_releases.append((metal_buf, aligned_mem, size_class))
-                if group["is_output"]:
-                    tensor_copies.append(
-                        (
-                            metal_buf,
-                            layout,
-                            storage_nbytes,
-                            None,
-                            ("whole_storage_mps", elem_size),
-                        )
+        extent_state = _extent_contract.effective_policy()["HOST_EXTENT"]
+        extent_query = getattr(_extent_contract._validation_native, "host_extent", None)
+        pool_reusable = True
+        try:
+            for group in storage_groups.values():
+                layout = group["layout"]
+                storage_nbytes = group["storage_nbytes"]
+                storage_ptr = group["storage_ptr"]
+                elem_size = group["elem_size"]
+                single_complete_view = len(group["members"]) == 1 and group["members"][0][2]
+                if storage_nbytes > _HOST_MIRROR_MAX_BYTES and not single_complete_view:
+                    _storage_refusal(
+                        f"a tensor alias group needs its full {storage_nbytes}-byte backing storage, "
+                        f"exceeding the {_HOST_MIRROR_MAX_BYTES}-byte safety limit"
                     )
-            else:
-                # CPU tensors can expose their complete storage directly when it
-                # satisfies Metal's page-wrapping contract; otherwise use one
-                # pooled raw-byte mirror for the whole alias group.
-                page_aligned = (storage_ptr % PAGE_SIZE == 0) and (storage_nbytes % PAGE_SIZE == 0)
-                if page_aligned and storage_nbytes >= PAGE_SIZE:
-                    metal_buf = utils.make_buffer_from_ptr(storage_ptr, storage_nbytes)
-                else:
+                if storage_nbytes % elem_size != 0:
+                    _storage_refusal(
+                        f"a {storage_nbytes}-byte backing storage is not divisible by its "
+                        f"{elem_size}-byte representative element size"
+                    )
+
+                if group["is_mps"]:
+                    # Copy the COMPLETE MPS allocation to a CPU byte-faithful mirror.
+                    # as_strided(..., storage_offset=0) deliberately ignores the
+                    # representative view's base and exposes the whole typed storage.
+                    try:
+                        import torch as _torch
+
+                        _torch.mps.synchronize()
+                        storage_elems = storage_nbytes // elem_size
+                        flat_storage = layout.as_strided((storage_elems,), (1,), 0)
+                        source = flat_storage.cpu().contiguous()
+                        if source.numel() * source.element_size() != storage_nbytes:
+                            _storage_refusal("the complete MPS backing storage could not be mirrored byte-for-byte")
+                    except MetalNonRecoverableError:
+                        raise
+                    except Exception as error:
+                        _storage_refusal(f"the complete MPS backing storage could not be mirrored ({error})")
                     metal_buf, aligned_mem, size_class = pool.acquire(storage_nbytes)
-                    src = (ctypes.c_char * storage_nbytes).from_address(storage_ptr)
+                    pool_releases.append((metal_buf, aligned_mem, size_class))
+                    src = (ctypes.c_char * storage_nbytes).from_address(source.data_ptr())
                     dst_view = metal_buf.contents().as_buffer(storage_nbytes)
                     dst = (ctypes.c_char * storage_nbytes).from_buffer(dst_view)
                     ctypes.memmove(dst, src, storage_nbytes)
-                    pool_releases.append((metal_buf, aligned_mem, size_class))
                     if group["is_output"]:
                         tensor_copies.append(
                             (
@@ -1289,321 +1422,383 @@ class MetalLauncher:
                                 layout,
                                 storage_nbytes,
                                 None,
-                                ("whole_storage_host", storage_ptr),
+                                ("whole_storage_mps", elem_size),
                             )
                         )
-            for arg_idx, byte_offset, _full_storage_view in group["members"]:
-                storage_bindings[arg_idx] = (metal_buf, byte_offset)
-
-        for arg_idx, arg in enumerate(flat_args):
-            # Per-leaf constexpr entries (e.g. constexpr element inside a
-            # mixed tuple) are already compiled into the kernel — skip.
-            if flat_sigs[arg_idx] == "constexpr":
-                continue
-            if hasattr(arg, "data_ptr"):
-                import torch as _torch
-
-                is_mps = hasattr(arg, "device") and str(arg.device).startswith("mps")
-                # Metal has no float64 — downcast to float32 transparently.
-                is_f64 = hasattr(arg, "dtype") and arg.dtype == _torch.float64
-                if not is_f64 and arg_idx in storage_bindings:
-                    buffers.append(storage_bindings[arg_idx])
-                    continue
-                if is_f64:
-                    arg_f32 = arg.float()  # float64 → float32
-                    nbytes = arg_f32.nelement() * arg_f32.element_size()
-                    is_output = output_arg_indices is None or arg_idx in output_arg_indices
-                    metal_buf, aligned_mem, size_class = pool.acquire(nbytes)
-                    src = (ctypes.c_char * nbytes).from_address(arg_f32.data_ptr())
-                    dst_view = metal_buf.contents().as_buffer(nbytes)
-                    dst = (ctypes.c_char * nbytes).from_buffer(dst_view)
-                    ctypes.memmove(dst, src, nbytes)
-                    buffers.append((metal_buf, 0))
-                    pool_releases.append((metal_buf, aligned_mem, size_class))
-                    if is_output:
-                        tensor_copies.append((metal_buf, arg, nbytes, arg_f32, None))
-                    continue
-                # TensorWrapper (unsigned int tensors) may lack nelement()
-                if hasattr(arg, "nelement"):
-                    nbytes = arg.nelement() * arg.element_size()
-                elif hasattr(arg, "numel"):
-                    nbytes = arg.numel() * arg.element_size()
                 else:
-                    import functools, operator
-
-                    nbytes = functools.reduce(operator.mul, arg.shape, 1) * arg.element_size()
-                is_output = output_arg_indices is None or arg_idx in output_arg_indices
-
-                if is_mps:
-                    # MPS tensors: copy via CPU intermediate to avoid
-                    # ctypes.memmove corruption of MPS buffer tracking.
-                    import torch
-
-                    torch.mps.synchronize()
-                    # A kernel addresses each operand with the user-passed RUNTIME
-                    # stride args, which describe the tensor's actual (possibly
-                    # NON-contiguous) storage layout. ``arg.cpu()`` may DENSIFY a
-                    # non-contiguous view (e.g. a column slice randn(K,N+pad)[:, :N]
-                    # comes back contiguous with stride N, not N+pad), so a buffer of
-                    # just ``numel`` dense bytes no longer matches the kernel's
-                    # stride-N+pad addressing -> silently wrong / OOB (audit sliced-B).
-                    # Faithfully mirror the storage instead: copy the FULL strided
-                    # extent (storage_offset .. storage_offset + reach) verbatim, so
-                    # ``buf[i*row_stride + j*col_stride]`` lands on the same element
-                    # the user's strides select. Contiguous tensors keep the fast
-                    # numel-sized copy (reach == numel).
-                    cpu_tensor = arg.cpu()
-                    reach_elems = _strided_storage_reach(arg)
-                    copy_bytes = max(nbytes, reach_elems * arg.element_size())
-                    # Try to build the FULL-strided faithful source buffer. ``arg.cpu()``
-                    # densifies a non-contiguous view (losing the original row stride),
-                    # so re-read the underlying storage via an as_strided flat view over
-                    # [storage_offset, +reach), which keeps ``buf[i*row_stride +
-                    # j*col_stride]`` pointing at the right element. Done on the MPS
-                    # tensor (then .cpu()) so the strided storage is mirrored, not the
-                    # densified copy. Only take the faithful path if it actually
-                    # produced a reach-sized contiguous source — otherwise fall through
-                    # to the dense numel copy (never memmove copy_bytes from a smaller
-                    # source, which would over-read the heap).
-                    # TensorWrapper (triton.reinterpret, e.g. uint8 over int8) lacks
-                    # is_contiguous/as_strided/storage_offset but shares its base
-                    # tensor's storage BYTE-FOR-BYTE -- only the dtype label differs.
-                    # The base therefore answers every layout question and stands in
-                    # for the faithful mirror AND the copy-back tensor (the copy-back
-                    # builds a scratch via _torch.empty(dtype=tensor.dtype), which
-                    # crashes on a wrapper's triton dtype). For a plain tensor,
-                    # _layout_t IS arg, so this is a no-op. A wrapper-like object with
-                    # neither method nor base falls back to the dense copy, matching
-                    # _strided_storage_reach's safe reach==numel default.
-                    _layout_t = arg if hasattr(arg, "is_contiguous") else getattr(arg, "base", None)
-                    _faithful_src = None
-                    if _layout_t is not None and (not _layout_t.is_contiguous()) and copy_bytes > nbytes:
-                        try:
-                            flat = _layout_t.as_strided((reach_elems,), (1,), _layout_t.storage_offset())
-                            _cand = flat.cpu().contiguous()
-                            if _cand.numel() * _cand.element_size() >= copy_bytes:
-                                _faithful_src = _cand
-                        except Exception:
-                            _faithful_src = None
-                    if _faithful_src is not None:
-                        src_t = _faithful_src
-                        metal_buf, aligned_mem, size_class = pool.acquire(copy_bytes)
-                        src = (ctypes.c_char * copy_bytes).from_address(src_t.data_ptr())
-                        dst_view = metal_buf.contents().as_buffer(copy_bytes)
-                        dst = (ctypes.c_char * copy_bytes).from_buffer(dst_view)
-                        ctypes.memmove(dst, src, copy_bytes)
-                        buffers.append((metal_buf, 0))
+                    # CPU tensors can expose their complete storage directly when it
+                    # satisfies Metal's page-wrapping contract; otherwise use one
+                    # pooled raw-byte mirror for the whole alias group.
+                    route, borrow_nbytes, reason = _host_extent.select(
+                        group["storage"],
+                        storage_ptr,
+                        storage_nbytes,
+                        extent_state,
+                        extent_query,
+                        PAGE_SIZE,
+                        owner=layout,
+                    )
+                    if extent_state is not False:
+                        _host_extent.record(
+                            {
+                                "route": route,
+                                "reason": reason,
+                                "storage_nbytes": storage_nbytes,
+                                "borrow_nbytes": borrow_nbytes if route in ("borrow", "existing") else 0,
+                                "members": tuple(member[0] for member in group["members"]),
+                            },
+                            launch_metadata,
+                        )
+                    if route == "refuse":
+                        _storage_refusal(reason)
+                    if route in ("borrow", "existing"):
+                        metal_buf = utils.make_buffer_from_ptr(storage_ptr, borrow_nbytes)
+                    else:
+                        metal_buf, aligned_mem, size_class = pool.acquire(storage_nbytes)
                         pool_releases.append((metal_buf, aligned_mem, size_class))
-                        if is_output:
-                            # The copy-back must mirror the FULL strided extent back
-                            # through the tensor's own layout — NOT memmove the dense
-                            # numel-prefix over the storage, which would densify and
-                            # CORRUPT a strided operand (e.g. overwrite a column-sliced
-                            # input's rows). The 6th tuple element flags a faithful
-                            # strided round-trip (carrying reach + the device-elem
-                            # count); the copy-back below scatters via as_strided.
-                            # (Inputs are restored byte-identical; a strided output
-                            # is written correctly. Most callers pass output indices
-                            # so inputs never reach here at all.)
-                            # _layout_t, not arg: the copy-back scatters through
-                            # tensor.shape/stride and allocates scratch by
-                            # tensor.dtype -- for a TensorWrapper that must be the
-                            # base (same storage bytes); for a plain tensor it IS arg.
+                        src = (ctypes.c_char * storage_nbytes).from_address(storage_ptr)
+                        dst_view = metal_buf.contents().as_buffer(storage_nbytes)
+                        dst = (ctypes.c_char * storage_nbytes).from_buffer(dst_view)
+                        ctypes.memmove(dst, src, storage_nbytes)
+                        if group["is_output"]:
                             tensor_copies.append(
                                 (
                                     metal_buf,
-                                    _layout_t,
-                                    nbytes,
-                                    cpu_tensor,
-                                    ("faithful_strided", reach_elems, arg.element_size()),
+                                    layout,
+                                    storage_nbytes,
+                                    None,
+                                    ("whole_storage_host", storage_ptr),
                                 )
                             )
-                    else:
-                        # Use buffer pool for page-aligned zero-copy
+                for arg_idx, byte_offset, _full_storage_view in group["members"]:
+                    storage_bindings[arg_idx] = (metal_buf, byte_offset)
+
+            for arg_idx, arg in enumerate(flat_args):
+                if _packed_layout is not None and arg_idx not in _packed_layout.pointer_indices:
+                    continue
+                # Per-leaf constexpr entries (e.g. constexpr element inside a
+                # mixed tuple) are already compiled into the kernel — skip.
+                if flat_sigs[arg_idx] == "constexpr":
+                    continue
+                if hasattr(arg, "data_ptr"):
+                    import torch as _torch
+
+                    is_mps = hasattr(arg, "device") and str(arg.device).startswith("mps")
+                    # Metal has no float64 — downcast to float32 transparently.
+                    is_f64 = hasattr(arg, "dtype") and arg.dtype == _torch.float64
+                    if not is_f64 and arg_idx in storage_bindings:
+                        buffers.append(storage_bindings[arg_idx])
+                        continue
+                    if is_f64:
+                        arg_f32 = arg.float()  # float64 → float32
+                        nbytes = arg_f32.nelement() * arg_f32.element_size()
+                        is_output = output_arg_indices is None or arg_idx in output_arg_indices
                         metal_buf, aligned_mem, size_class = pool.acquire(nbytes)
-                        src = (ctypes.c_char * nbytes).from_address(cpu_tensor.data_ptr())
+                        pool_releases.append((metal_buf, aligned_mem, size_class))
+                        src = (ctypes.c_char * nbytes).from_address(arg_f32.data_ptr())
                         dst_view = metal_buf.contents().as_buffer(nbytes)
                         dst = (ctypes.c_char * nbytes).from_buffer(dst_view)
                         ctypes.memmove(dst, src, nbytes)
                         buffers.append((metal_buf, 0))
-                        pool_releases.append((metal_buf, aligned_mem, size_class))
                         if is_output:
-                            tensor_copies.append((metal_buf, arg, nbytes, cpu_tensor, None))
+                            tensor_copies.append((metal_buf, arg, nbytes, arg_f32, None))
+                        continue
+                    # TensorWrapper (unsigned int tensors) may lack nelement()
+                    if hasattr(arg, "nelement"):
+                        nbytes = arg.nelement() * arg.element_size()
+                    elif hasattr(arg, "numel"):
+                        nbytes = arg.numel() * arg.element_size()
+                    else:
+                        import functools, operator
+
+                        nbytes = functools.reduce(operator.mul, arg.shape, 1) * arg.element_size()
+                    is_output = output_arg_indices is None or arg_idx in output_arg_indices
+
+                    if is_mps:
+                        # MPS tensors: copy via CPU intermediate to avoid
+                        # ctypes.memmove corruption of MPS buffer tracking.
+                        import torch
+
+                        torch.mps.synchronize()
+                        # A kernel addresses each operand with the user-passed RUNTIME
+                        # stride args, which describe the tensor's actual (possibly
+                        # NON-contiguous) storage layout. ``arg.cpu()`` may DENSIFY a
+                        # non-contiguous view (e.g. a column slice randn(K,N+pad)[:, :N]
+                        # comes back contiguous with stride N, not N+pad), so a buffer of
+                        # just ``numel`` dense bytes no longer matches the kernel's
+                        # stride-N+pad addressing -> silently wrong / OOB (audit sliced-B).
+                        # Faithfully mirror the storage instead: copy the FULL strided
+                        # extent (storage_offset .. storage_offset + reach) verbatim, so
+                        # ``buf[i*row_stride + j*col_stride]`` lands on the same element
+                        # the user's strides select. Contiguous tensors keep the fast
+                        # numel-sized copy (reach == numel).
+                        cpu_tensor = arg.cpu()
+                        reach_elems = _strided_storage_reach(arg)
+                        copy_bytes = max(nbytes, reach_elems * arg.element_size())
+                        # Try to build the FULL-strided faithful source buffer. ``arg.cpu()``
+                        # densifies a non-contiguous view (losing the original row stride),
+                        # so re-read the underlying storage via an as_strided flat view over
+                        # [storage_offset, +reach), which keeps ``buf[i*row_stride +
+                        # j*col_stride]`` pointing at the right element. Done on the MPS
+                        # tensor (then .cpu()) so the strided storage is mirrored, not the
+                        # densified copy. Only take the faithful path if it actually
+                        # produced a reach-sized contiguous source — otherwise fall through
+                        # to the dense numel copy (never memmove copy_bytes from a smaller
+                        # source, which would over-read the heap).
+                        # TensorWrapper (triton.reinterpret, e.g. uint8 over int8) lacks
+                        # is_contiguous/as_strided/storage_offset but shares its base
+                        # tensor's storage BYTE-FOR-BYTE -- only the dtype label differs.
+                        # The base therefore answers every layout question and stands in
+                        # for the faithful mirror AND the copy-back tensor (the copy-back
+                        # builds a scratch via _torch.empty(dtype=tensor.dtype), which
+                        # crashes on a wrapper's triton dtype). For a plain tensor,
+                        # _layout_t IS arg, so this is a no-op. A wrapper-like object with
+                        # neither method nor base falls back to the dense copy, matching
+                        # _strided_storage_reach's safe reach==numel default.
+                        _layout_t = arg if hasattr(arg, "is_contiguous") else getattr(arg, "base", None)
+                        _faithful_src = None
+                        if _layout_t is not None and (not _layout_t.is_contiguous()) and copy_bytes > nbytes:
+                            try:
+                                flat = _layout_t.as_strided((reach_elems,), (1,), _layout_t.storage_offset())
+                                _cand = flat.cpu().contiguous()
+                                if _cand.numel() * _cand.element_size() >= copy_bytes:
+                                    _faithful_src = _cand
+                            except Exception:
+                                _faithful_src = None
+                        if _faithful_src is not None:
+                            src_t = _faithful_src
+                            metal_buf, aligned_mem, size_class = pool.acquire(copy_bytes)
+                            pool_releases.append((metal_buf, aligned_mem, size_class))
+                            src = (ctypes.c_char * copy_bytes).from_address(src_t.data_ptr())
+                            dst_view = metal_buf.contents().as_buffer(copy_bytes)
+                            dst = (ctypes.c_char * copy_bytes).from_buffer(dst_view)
+                            ctypes.memmove(dst, src, copy_bytes)
+                            buffers.append((metal_buf, 0))
+                            if is_output:
+                                # The copy-back must mirror the FULL strided extent back
+                                # through the tensor's own layout — NOT memmove the dense
+                                # numel-prefix over the storage, which would densify and
+                                # CORRUPT a strided operand (e.g. overwrite a column-sliced
+                                # input's rows). The 6th tuple element flags a faithful
+                                # strided round-trip (carrying reach + the device-elem
+                                # count); the copy-back below scatters via as_strided.
+                                # (Inputs are restored byte-identical; a strided output
+                                # is written correctly. Most callers pass output indices
+                                # so inputs never reach here at all.)
+                                # _layout_t, not arg: the copy-back scatters through
+                                # tensor.shape/stride and allocates scratch by
+                                # tensor.dtype -- for a TensorWrapper that must be the
+                                # base (same storage bytes); for a plain tensor it IS arg.
+                                tensor_copies.append(
+                                    (
+                                        metal_buf,
+                                        _layout_t,
+                                        nbytes,
+                                        cpu_tensor,
+                                        ("faithful_strided", reach_elems, arg.element_size()),
+                                    )
+                                )
+                        else:
+                            # Use buffer pool for page-aligned zero-copy
+                            metal_buf, aligned_mem, size_class = pool.acquire(nbytes)
+                            pool_releases.append((metal_buf, aligned_mem, size_class))
+                            src = (ctypes.c_char * nbytes).from_address(cpu_tensor.data_ptr())
+                            dst_view = metal_buf.contents().as_buffer(nbytes)
+                            dst = (ctypes.c_char * nbytes).from_buffer(dst_view)
+                            ctypes.memmove(dst, src, nbytes)
+                            buffers.append((metal_buf, 0))
+                            if is_output:
+                                tensor_copies.append((metal_buf, arg, nbytes, cpu_tensor, None))
+                    else:
+                        ptr = arg.data_ptr()
+                        page_aligned = (ptr % PAGE_SIZE == 0) and (nbytes % PAGE_SIZE == 0)
+
+                        if page_aligned and nbytes >= PAGE_SIZE:
+                            # Zero-copy: wrap existing memory as Metal buffer.
+                            buf = utils.make_buffer_from_ptr(ptr, nbytes)
+                            buffers.append((buf, 0))
+                            # No copy-back needed — same physical memory (UMA).
+                        else:
+                            # Pool path: acquire page-aligned buffer, memmove in
+                            metal_buf, aligned_mem, size_class = pool.acquire(nbytes)
+                            pool_releases.append((metal_buf, aligned_mem, size_class))
+                            src = (ctypes.c_char * nbytes).from_address(ptr)
+                            dst_view = metal_buf.contents().as_buffer(nbytes)
+                            dst = (ctypes.c_char * nbytes).from_buffer(dst_view)
+                            ctypes.memmove(dst, src, nbytes)
+                            buffers.append((metal_buf, 0))
+                            if is_output:
+                                tensor_copies.append((metal_buf, arg, nbytes, None, None))
+                elif isinstance(arg, (bool, int, float)):
+                    payload = scalar_payloads[arg_idx]
+                    size = len(payload)
+                    buf = pool.acquire_scalar(size)
+                    pool_releases.append(("scalar", buf, size))
+                    view = buf.contents().as_buffer(size)
+                    view[:size] = payload
+                    buffers.append((buf, 0))
+                elif arg is None:
+                    # Optional pointer argument (mask, other, scale) — pack as null.
+                    buf = pool.acquire_scalar(8)
+                    pool_releases.append(("scalar", buf, 8))
+                    view = buf.contents().as_buffer(8)
+                    struct.pack_into("Q", view, 0, 0)
+                    buffers.append((buf, 0))
+                elif isinstance(arg, str):
+                    # Constexpr string argument — already compiled into kernel.
+                    continue
+                elif hasattr(arg, "__module__") and "triton" in str(type(arg)):
+                    # tl.dtype or similar constexpr type — skip.
+                    continue
                 else:
-                    ptr = arg.data_ptr()
-                    page_aligned = (ptr % PAGE_SIZE == 0) and (nbytes % PAGE_SIZE == 0)
+                    raise TypeError(f"Unsupported argument type: {type(arg)}")
 
-                    if page_aligned and nbytes >= PAGE_SIZE:
-                        # Zero-copy: wrap existing memory as Metal buffer.
-                        buf = utils.make_buffer_from_ptr(ptr, nbytes)
-                        buffers.append((buf, 0))
-                        # No copy-back needed — same physical memory (UMA).
-                    else:
-                        # Pool path: acquire page-aligned buffer, memmove in
-                        metal_buf, aligned_mem, size_class = pool.acquire(nbytes)
-                        src = (ctypes.c_char * nbytes).from_address(ptr)
-                        dst_view = metal_buf.contents().as_buffer(nbytes)
-                        dst = (ctypes.c_char * nbytes).from_buffer(dst_view)
-                        ctypes.memmove(dst, src, nbytes)
-                        buffers.append((metal_buf, 0))
-                        pool_releases.append((metal_buf, aligned_mem, size_class))
-                        if is_output:
-                            tensor_copies.append((metal_buf, arg, nbytes, None, None))
-            elif isinstance(arg, (bool, int, float)):
-                payload = scalar_payloads[arg_idx]
-                size = len(payload)
-                buf = pool.acquire_scalar(size)
-                view = buf.contents().as_buffer(size)
-                view[:size] = payload
-                buffers.append((buf, 0))
-                pool_releases.append(("scalar", buf, size))
-            elif arg is None:
-                # Optional pointer argument (mask, other, scale) — pack as null.
-                buf = pool.acquire_scalar(8)
-                view = buf.contents().as_buffer(8)
-                struct.pack_into("Q", view, 0, 0)
-                buffers.append((buf, 0))
-                pool_releases.append(("scalar", buf, 8))
-            elif isinstance(arg, str):
-                # Constexpr string argument — already compiled into kernel.
-                continue
-            elif hasattr(arg, "__module__") and "triton" in str(type(arg)):
-                # tl.dtype or similar constexpr type — skip.
-                continue
-            else:
-                raise TypeError(f"Unsupported argument type: {type(arg)}")
+            if _packed_layout is not None:
+                if len(buffers) != _packed_layout.packed_slot:
+                    raise MetalNonRecoverableError("host packed pointer bindings disagree with producer ABI")
+                _packed_size = len(_packed_payload)
+                _packed_buffer = pool.acquire_scalar(_packed_size)
+                # Register before property/fill calls that may raise.
+                pool_releases.append(("scalar", _packed_buffer, _packed_size))
+                _packed_view = _packed_buffer.contents().as_buffer(_packed_size)
+                _packed_view[:_packed_size] = _packed_payload
+                buffers.append((_packed_buffer, 0))
 
-        from ._generic_launch import host_launch_geometry
+            from ._generic_launch import host_launch_geometry
 
-        grid, threadgroup_size = host_launch_geometry((gridX, gridY, gridZ), block_size, needs_2d_grid)
+            grid, threadgroup_size = host_launch_geometry((gridX, gridY, gridZ), block_size, needs_2d_grid)
 
-        # Two-kernel split (#159): for a fully-aligned float matmul, dispatch the
-        # pure-direct (no-threadgroup) kernel instead of the staged one — same
-        # grid, max occupancy. Falls back to the staged kernel on any
-        # uncertainty (different size, non-aligned, read error). Other kernels
-        # have no descriptor and are unaffected.
-        dispatch_fn = function
-        mm_two = kernel_metadata[6] if (kernel_metadata and len(kernel_metadata) > 6) else None
-        if mm_two is not None:
-            direct_entry = _MM_DIRECT_PIPELINES.get(id(function))
-            if direct_entry is not None and direct_entry[0] is function:
-                direct_ps = direct_entry[1]
-                try:
-                    _M = int(flat_args[mm_two["m_idx"]])
-                    _N = int(flat_args[mm_two["n_idx"]])
-                    _K = int(flat_args[mm_two["k_idx"]])
-                    if _M % mm_two["block_m"] == 0 and _N % mm_two["block_n"] == 0 and _K % 8 == 0:
-                        dispatch_fn = direct_ps
-                except Exception:
-                    dispatch_fn = function
+            # Two-kernel split (#159): for a fully-aligned float matmul, dispatch the
+            # pure-direct (no-threadgroup) kernel instead of the staged one — same
+            # grid, max occupancy. Falls back to the staged kernel on any
+            # uncertainty (different size, non-aligned, read error). Other kernels
+            # have no descriptor and are unaffected.
+            dispatch_fn = function
+            mm_two = kernel_metadata[6] if (kernel_metadata and len(kernel_metadata) > 6) else None
+            if mm_two is not None:
+                direct_ps = _direct_pipeline(function)
+                if direct_ps is not None:
+                    try:
+                        _M = int(flat_args[mm_two["m_idx"]])
+                        _N = int(flat_args[mm_two["n_idx"]])
+                        _K = int(flat_args[mm_two["k_idx"]])
+                        if _M % mm_two["block_m"] == 0 and _N % mm_two["block_n"] == 0 and _K % 8 == 0:
+                            dispatch_fn = direct_ps
+                    except Exception:
+                        dispatch_fn = function
 
-        # Immediate mode: dispatch, wait, copy-back
-        _assert_desc = kernel_metadata[11]
-        if _assert_desc is not None:
-            from ._device_assert import check_binding, check_failure
+            # Immediate mode: dispatch, wait, copy-back
+            _assert_desc = kernel_metadata[11]
+            if _assert_desc is not None:
+                from ._device_assert import check_binding, check_failure
 
-            check_binding(buffers, _assert_desc)
-            _assert_buffer = utils.make_buffer_with_data(bytes(4), 4)
-            buffers.append((_assert_buffer, 0))
-        utils.launch(dispatch_fn, grid, threadgroup_size, buffers)
+                check_binding(buffers, _assert_desc)
+                _assert_buffer = utils.make_buffer_with_data(bytes(4), 4)
+                buffers.append((_assert_buffer, 0))
+            # Only recycle after a normal synchronous return. A raised dispatch may
+            # have an uncertain submission/completion state; preserve non-reuse there.
+            with _host_dispatch.retain(
+                buffers,
+                owners=(flat_args, storage_groups, tensor_copies, pool_releases, pool),
+            ) as retained_buffers:
+                pool_reusable = False
+                utils.launch(dispatch_fn, grid, threadgroup_size, retained_buffers)
+                pool_reusable = True
 
-        if _assert_desc is not None:
-            check_failure(int.from_bytes(_assert_buffer.contents().as_buffer(4), "little"), _assert_desc)
+            if _assert_desc is not None:
+                check_failure(int.from_bytes(_assert_buffer.contents().as_buffer(4), "little"), _assert_desc)
 
-        # Copy results back from Metal buffers to tensor memory.
-        for entry in tensor_copies:
-            metal_buf, tensor, nbytes = entry[0], entry[1], entry[2]
-            cpu_tensor = entry[3] if len(entry) > 3 else None
-            _marker = entry[4] if len(entry) > 4 else None
+            # Copy results back from Metal buffers to tensor memory.
+            for entry in tensor_copies:
+                metal_buf, tensor, nbytes = entry[0], entry[1], entry[2]
+                cpu_tensor = entry[3] if len(entry) > 3 else None
+                _marker = entry[4] if len(entry) > 4 else None
 
-            import torch as _torch
+                import torch as _torch
 
-            if isinstance(_marker, tuple) and _marker[0] == "whole_storage_mps":
-                _esz = _marker[1]
-                if nbytes % _esz != 0:
-                    raise RuntimeError("host-roundtrip whole-storage copy-back has a partial element")
-                _count = nbytes // _esz
-                src_view = metal_buf.contents().as_buffer(nbytes)
-                flat_cpu = _torch.empty(_count, dtype=tensor.dtype)
-                ctypes.memmove(
-                    (ctypes.c_char * nbytes).from_address(flat_cpu.data_ptr()),
-                    (ctypes.c_char * nbytes).from_buffer(src_view),
-                    nbytes,
+                if isinstance(_marker, tuple) and _marker[0] == "whole_storage_mps":
+                    _esz = _marker[1]
+                    if nbytes % _esz != 0:
+                        raise RuntimeError("host-roundtrip whole-storage copy-back has a partial element")
+                    _count = nbytes // _esz
+                    src_view = metal_buf.contents().as_buffer(nbytes)
+                    flat_cpu = _torch.empty(_count, dtype=tensor.dtype)
+                    ctypes.memmove(
+                        (ctypes.c_char * nbytes).from_address(flat_cpu.data_ptr()),
+                        (ctypes.c_char * nbytes).from_buffer(src_view),
+                        nbytes,
+                    )
+                    flat_device = tensor.as_strided((_count,), (1,), 0)
+                    flat_device.copy_(flat_cpu.to(tensor.device))
+                    _torch.mps.synchronize()
+                    continue
+
+                if isinstance(_marker, tuple) and _marker[0] == "whole_storage_host":
+                    _storage_ptr = _marker[1]
+                    src_view = metal_buf.contents().as_buffer(nbytes)
+                    ctypes.memmove(
+                        (ctypes.c_char * nbytes).from_address(_storage_ptr),
+                        (ctypes.c_char * nbytes).from_buffer(src_view),
+                        nbytes,
+                    )
+                    continue
+
+                # Faithful strided round-trip: the device buffer mirrors the full
+                # strided storage (reach >= numel). Read it ALL back into a flat CPU
+                # buffer, then write the values into the tensor through an as_strided
+                # view that maps each logical element to its strided storage slot —
+                # so a strided operand is restored/written WITHOUT densifying (the
+                # numel-prefix memmove below would corrupt a column-sliced layout).
+                if isinstance(_marker, tuple) and _marker[0] == "faithful_strided":
+                    _reach, _esz = _marker[1], _marker[2]
+                    _rbytes = _reach * _esz
+                    src_view = metal_buf.contents().as_buffer(_rbytes)
+                    flat_cpu = _torch.empty(_reach, dtype=tensor.dtype)
+                    ctypes.memmove(
+                        (ctypes.c_char * _rbytes).from_address(flat_cpu.data_ptr()),
+                        (ctypes.c_char * _rbytes).from_buffer(src_view),
+                        _rbytes,
+                    )
+                    # Index the flat buffer by the tensor's own strides so each logical
+                    # [i,j,...] reads flat[i*s0 + j*s1 + ...]. ``flat_cpu`` was built from
+                    # ``arg.as_strided((reach,),(1,),storage_offset)`` (dispatch), so it is
+                    # ALREADY re-based to the storage offset — index it from 0, NOT from
+                    # tensor.storage_offset() again (double-applying the offset would push
+                    # the view out of bounds for any non-zero-offset output and silently
+                    # drop the write). Failure here is a silent-wrong (output not written),
+                    # so do NOT swallow it — raise loudly.
+                    strided_logical = flat_cpu.as_strided(tuple(tensor.shape), tuple(tensor.stride()), 0)
+                    tensor.copy_(strided_logical.to(tensor.device))
+                    _torch.mps.synchronize()
+                    continue
+
+                is_f64_downcast = (
+                    cpu_tensor is not None
+                    and hasattr(tensor, "dtype")
+                    and tensor.dtype == _torch.float64
+                    and hasattr(cpu_tensor, "dtype")
+                    and cpu_tensor.dtype == _torch.float32
                 )
-                flat_device = tensor.as_strided((_count,), (1,), 0)
-                flat_device.copy_(flat_cpu.to(tensor.device))
-                _torch.mps.synchronize()
-                continue
 
-            if isinstance(_marker, tuple) and _marker[0] == "whole_storage_host":
-                _storage_ptr = _marker[1]
-                src_view = metal_buf.contents().as_buffer(nbytes)
-                ctypes.memmove(
-                    (ctypes.c_char * nbytes).from_address(_storage_ptr),
-                    (ctypes.c_char * nbytes).from_buffer(src_view),
-                    nbytes,
-                )
-                continue
+                if is_f64_downcast:
+                    src_view = metal_buf.contents().as_buffer(nbytes)
+                    dst = (ctypes.c_char * nbytes).from_address(cpu_tensor.data_ptr())
+                    ctypes.memmove(dst, (ctypes.c_char * nbytes).from_buffer(src_view), nbytes)
+                    tensor.copy_(cpu_tensor.double())
+                elif cpu_tensor is not None:
+                    src_view = metal_buf.contents().as_buffer(nbytes)
+                    dst = (ctypes.c_char * nbytes).from_address(cpu_tensor.data_ptr())
+                    ctypes.memmove(dst, (ctypes.c_char * nbytes).from_buffer(src_view), nbytes)
+                    tensor.copy_(cpu_tensor)
+                    _torch.mps.synchronize()
+                else:
+                    src_view = metal_buf.contents().as_buffer(nbytes)
+                    dst = (ctypes.c_char * nbytes).from_address(tensor.data_ptr())
+                    ctypes.memmove(dst, (ctypes.c_char * nbytes).from_buffer(src_view), nbytes)
 
-            # Faithful strided round-trip: the device buffer mirrors the full
-            # strided storage (reach >= numel). Read it ALL back into a flat CPU
-            # buffer, then write the values into the tensor through an as_strided
-            # view that maps each logical element to its strided storage slot —
-            # so a strided operand is restored/written WITHOUT densifying (the
-            # numel-prefix memmove below would corrupt a column-sliced layout).
-            if isinstance(_marker, tuple) and _marker[0] == "faithful_strided":
-                _reach, _esz = _marker[1], _marker[2]
-                _rbytes = _reach * _esz
-                src_view = metal_buf.contents().as_buffer(_rbytes)
-                flat_cpu = _torch.empty(_reach, dtype=tensor.dtype)
-                ctypes.memmove(
-                    (ctypes.c_char * _rbytes).from_address(flat_cpu.data_ptr()),
-                    (ctypes.c_char * _rbytes).from_buffer(src_view),
-                    _rbytes,
-                )
-                # Index the flat buffer by the tensor's own strides so each logical
-                # [i,j,...] reads flat[i*s0 + j*s1 + ...]. ``flat_cpu`` was built from
-                # ``arg.as_strided((reach,),(1,),storage_offset)`` (dispatch), so it is
-                # ALREADY re-based to the storage offset — index it from 0, NOT from
-                # tensor.storage_offset() again (double-applying the offset would push
-                # the view out of bounds for any non-zero-offset output and silently
-                # drop the write). Failure here is a silent-wrong (output not written),
-                # so do NOT swallow it — raise loudly.
-                strided_logical = flat_cpu.as_strided(tuple(tensor.shape), tuple(tensor.stride()), 0)
-                tensor.copy_(strided_logical.to(tensor.device))
-                _torch.mps.synchronize()
-                continue
-
-            is_f64_downcast = (
-                cpu_tensor is not None
-                and hasattr(tensor, "dtype")
-                and tensor.dtype == _torch.float64
-                and hasattr(cpu_tensor, "dtype")
-                and cpu_tensor.dtype == _torch.float32
-            )
-
-            if is_f64_downcast:
-                src_view = metal_buf.contents().as_buffer(nbytes)
-                dst = (ctypes.c_char * nbytes).from_address(cpu_tensor.data_ptr())
-                ctypes.memmove(dst, (ctypes.c_char * nbytes).from_buffer(src_view), nbytes)
-                tensor.copy_(cpu_tensor.double())
-            elif cpu_tensor is not None:
-                src_view = metal_buf.contents().as_buffer(nbytes)
-                dst = (ctypes.c_char * nbytes).from_address(cpu_tensor.data_ptr())
-                ctypes.memmove(dst, (ctypes.c_char * nbytes).from_buffer(src_view), nbytes)
-                tensor.copy_(cpu_tensor)
-                _torch.mps.synchronize()
-            else:
-                src_view = metal_buf.contents().as_buffer(nbytes)
-                dst = (ctypes.c_char * nbytes).from_address(tensor.data_ptr())
-                ctypes.memmove(dst, (ctypes.c_char * nbytes).from_buffer(src_view), nbytes)
-
-        # Release pool buffers back to pool for reuse
-        for release_entry in pool_releases:
-            if release_entry[0] == "scalar":
-                pool.release_scalar(release_entry[1], release_entry[2])
-            else:
-                pool.release(release_entry[0], release_entry[1], release_entry[2])
+        finally:
+            if pool_reusable:
+                _release_host_pool_buffers(pool, pool_releases)
 
         if launch_exit_hook:
             launch_exit_hook(launch_metadata)
@@ -1674,19 +1869,19 @@ class MetalDriver(DriverBase):
     def is_active(cls):
         if platform.system() != "Darwin":
             return False
-        # Check for Xcode Command Line Tools (xcrun is required for MSL compilation)
+        # Use the same SDK selection and pinned resolver as compiler/probe calls.
+        # Selection is sufficient here; full content identity belongs to compilation.
         try:
-            subprocess.run(
-                ["xcrun", "--find", "metal"],
-                capture_output=True,
-                check=True,
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError):
+            from ._toolchain_contract import compiler_process_context
+
+            compiler_process_context()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
             import warnings
 
             warnings.warn(
-                "triton-msl requires Xcode Command Line Tools for MSL compilation. "
-                "Install with: xcode-select --install",
+                f"triton-msl cannot select a usable Metal compiler: {error}. "
+                "Install/select Xcode and its Metal Toolchain component; "
+                "restart after changing the toolchain selection.",
                 RuntimeWarning,
                 stacklevel=2,
             )

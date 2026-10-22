@@ -1,5 +1,7 @@
 """Callee legacy type fields must agree with native MLIR facts, not regex guesses."""
 
+from tests.source_identity import assert_candidate_source
+
 import os
 from pathlib import Path
 
@@ -16,8 +18,7 @@ from triton_msl.codegen.mlir_walker import walk_ttgir
 
 def _graph(tmp_path, dtype, space=1):
     root = Path(os.environ.get("EXPECTED_SOURCE", Path(__file__).resolve().parents[1])).resolve()
-    assert Path(triton_msl.__file__).resolve() == root / "triton_msl/__init__.py"
-    assert Path(walker_module.__file__).resolve() == root / "triton_msl/codegen/mlir_walker.py"
+    assert_candidate_source(root, triton_msl, walker_module)
     tensor = f"tensor<32x{dtype}, #blocked>"
     pointer = f"!tt.ptr<{dtype}, {space}>"
     source = (

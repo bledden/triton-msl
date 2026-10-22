@@ -1,5 +1,7 @@
 """Compiler-only pins for faithful ordered cmp/select multipass reductions."""
 
+from tests.source_identity import assert_candidate_source
+
 from pathlib import Path
 
 import pytest
@@ -71,8 +73,7 @@ def _softmax_msl(tmp_path, monkeypatch, n, mode):
 @requires
 def test_package_identity_is_the_861_checkout():
     root = Path(__file__).resolve().parents[1]
-    assert Path(base.triton_msl.__file__).resolve().is_relative_to(root)
-    assert Path(base.generic_lowerer.__file__).resolve() == (root / "triton_msl/codegen/generic_lowerer.py").resolve()
+    assert_candidate_source(root, base.triton_msl, base.generic_lowerer)
 
 
 @requires

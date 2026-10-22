@@ -20,6 +20,7 @@ from types import ModuleType
 # import BaseBackend directly from the compiler submodule without going
 # through triton.backends.__init__.
 from triton.backends.compiler import BaseBackend, GPUTarget
+from ._toolchain_contract import run_metal_tool
 
 
 _cpp_warning_emitted = False
@@ -218,21 +219,10 @@ _METALLIB_COMPILE_ATTEMPTS = 3
 # absent, so `xcrun metal` fails with "cannot execute tool 'metal' due to missing
 # Metal Toolchain". This is PERMANENT, not a transient flake — detect it and raise
 # an actionable error instead of retrying (and mislabelling it "transient").
-_METAL_TOOLCHAIN_MISSING_HINT = (
-    "The Metal Toolchain is not installed. macOS 26 / Xcode 26 ship the Metal "
-    "compiler as a separate on-demand component, so a fresh setup or a recent "
-    "Xcode update can leave it absent. Install it with:\n"
-    "    sudo xcodebuild -downloadComponent MetalToolchain\n"
-    "(or Xcode > Settings > Components > Metal Toolchain), then verify with "
-    "`xcrun metal --version`."
+from triton_msl.backend._toolchain_errors import (
+    _METAL_TOOLCHAIN_MISSING_HINT,
+    _is_metal_toolchain_missing,
 )
-
-
-def _is_metal_toolchain_missing(stderr: str) -> bool:
-    """True when a metal/metallib invocation failed because the Metal Toolchain
-    component is absent (see _METAL_TOOLCHAIN_MISSING_HINT). Such failures are
-    permanent — the caller must raise immediately, never retry as transient."""
-    return "missing Metal Toolchain" in stderr or "cannot execute tool 'metal'" in stderr
 
 
 _NUM_STAGES_WARNED = False
@@ -271,6 +261,10 @@ def _warn_inert_num_stages(n):
 @dataclass(frozen=True)
 class MetalOptions:
     num_warps: int = 4
+    # Explicit validation candidate, not a default or a numerical qualification.
+    experimental_cooperative_attention: bool = False
+    # Separate K-layout experiment; no promotion of the wider tiled maker.
+    experimental_tiled_k_layout: bool = False
     # num_stages is accepted for Triton-API compatibility but is INTENTIONALLY a
     # no-op on Metal (default 1). On CUDA it sets the software-pipelining depth —
     # multi-buffering threadgroup-staged operands to overlap global loads with MMA.
@@ -315,6 +309,10 @@ class MetalOptions:
     waves_per_eu: int = 0
 
     def __post_init__(self):
+        # Route selection uses identity with True, so string-coercing this field
+        # in hash() must never alias a non-bool with the enabled option.
+        if type(self.experimental_tiled_k_layout) is not bool:
+            raise ValueError("experimental_tiled_k_layout must be an exact bool")
         # Match NVIDIA/AMD: ``extern_libs`` is exposed downstream as a
         # tuple of (name, path) pairs so ``options.__dict__`` produces
         # a hashable, deterministic value. Tests query
@@ -453,7 +451,8 @@ class MetalBackend(BaseBackend):
         # The diff harness + family table + dtype gate stay as the foundation for
         # a corpus-validated re-flip. FORCE_PYTHON kept as an explicit override.
         use_cpp = os.environ.get("TRITON_MSL_FORCE_PYTHON") != "1" and os.environ.get("TRITON_MSL_USE_CPP", "") == "1"
-        if use_cpp and self._has_cpp_passes():
+        cpp_load_failure = self._cpp_load_failure() if use_cpp else None
+        if use_cpp and cpp_load_failure is None:
 
             def _metallib_via_cpp(src, metadata):
                 """Compile metallib from C++ LLVM IR when possible, MSL otherwise.
@@ -483,6 +482,7 @@ class MetalBackend(BaseBackend):
                         cpp_meta.pop("block_size", None)
                         _warn_cpp_unaudited()
                         llir = MetalBackend.make_llir(ttgir_text, cpp_meta, options)
+                        metadata.update({k: v for k, v in cpp_meta.items() if k.startswith("cpp_scalar_cfg_")})
                         cpp_meta["name"] = metadata["name"]
                         # Compile metallib FIRST — only then commit the
                         # C++ path's block_size to shared metadata. This
@@ -492,6 +492,7 @@ class MetalBackend(BaseBackend):
                         metadata["block_size"] = cpp_meta["block_size"]
                         metadata["binary_route"] = "cpp"
                         metadata["cpp_fallback_reason"] = None
+                        metadata["cpp_scalar_cfg_metallib_sha256"] = hashlib.sha256(result).hexdigest()
                         return result
                     except Exception as _e:
                         reason = f"{type(_e).__name__}: {_e}"
@@ -527,7 +528,7 @@ class MetalBackend(BaseBackend):
         else:
 
             def _metallib_msl(src, metadata):
-                reason = "optional extension unavailable" if use_cpp else None
+                reason = cpp_load_failure if use_cpp else None
                 if reason:
                     _warn_cpp_fallback(metadata, reason)
                 result = self.make_metallib(src, metadata, options)
@@ -549,6 +550,9 @@ class MetalBackend(BaseBackend):
             validate_execution_contract(producer_contract)
             result = final_stage(src, metadata)
             validate_execution_contract(producer_contract)
+            from triton_msl.backend._argument_abi import finish_record
+
+            finish_record(metadata, src, result)
             metadata["execution_contract"] = producer_contract
             from triton_msl.backend._launch_contract import seal_launch_metadata
 
@@ -761,6 +765,24 @@ class MetalBackend(BaseBackend):
             return True
         except ImportError:
             return False
+
+    @staticmethod
+    def _cpp_load_failure():
+        """Describe this import attempt without another lookup or saved error state."""
+        try:
+            import triton_msl._triton_msl_cpp
+
+            return None
+        except ImportError as error:
+            # Classify only the builtin exception with a plain name. Custom
+            # importers may raise subclasses or attach callback-bearing values.
+            if type(error) is ModuleNotFoundError:
+                name = error.name
+                if type(name) is str and name == "triton_msl._triton_msl_cpp":
+                    return "optional extension unavailable: module not found"
+            return (
+                "optional extension unavailable: failed to load; check the extension and Triton provider installation"
+            )
 
     @staticmethod
     def _strip_ttg_annotations(ttgir_text):
@@ -1004,7 +1026,7 @@ class MetalBackend(BaseBackend):
     }
 
     @staticmethod
-    def _opaque_to_typed_ptrs(llir_text):
+    def _opaque_to_typed_ptrs(llir_text, *, proved_device_types=None):
         """Convert LLVM IR with opaque pointers to typed pointers for Metal AIR.
 
         Metal's GPU JIT compiler requires typed pointers and does not support
@@ -1059,6 +1081,11 @@ class MetalBackend(BaseBackend):
                 ptr_name = m.group(3)  # e.g. "%4"
                 if ptr_name not in param_types:
                     param_types[ptr_name] = elem_type
+
+        # The opt-in scalar cleanup supplies types proved across ALL pointer
+        # uses, including buffers whose zero-offset GEP was eliminated.
+        if proved_device_types is not None:
+            param_types.update({root: ty for root, ty in proved_device_types.items() if ty is not None})
 
         # Parse function signature to get ordered parameter names.
         # Pattern: define void @kernel(ptr addrspace(1) %0, ptr addrspace(1) %1, ...)
@@ -1248,7 +1275,11 @@ class MetalBackend(BaseBackend):
             # By this point, constant buffer loads (addrspace 2) already have
             # their ptr replaced with i32 addrspace(2)*, so any remaining
             # "load <type>, ptr %X" refers to a device buffer GEP result.
-            line = re.sub(r"load\s+(\w+),\s*ptr\s+(%\S+)", r"load \1, \1 addrspace(1)* \2", line)
+            line = re.sub(
+                r"load\s+(volatile\s+)?(\w+),\s*ptr\s+(%\S+)",
+                r"load \1\2, \2 addrspace(1)* \3",
+                line,
+            )
 
             # Store: store <type> %v, ptr %X → store <type> %v, <type> addrspace(1)* %X
             # Handle any scalar type. The stored value may be an SSA register
@@ -1559,6 +1590,16 @@ class MetalBackend(BaseBackend):
 
         _air = air_version_components()
         air_llvm_ir_opaque = cpp.run_to_llvm(stripped, _air[0], _air[1], _air[2], _air[3])
+        unoptimized_opaque = air_llvm_ir_opaque
+        scalar_cfg = os.environ.get("TRITON_MSL_CPP_SCALAR_CFG") == "1"
+        scalar_cfg_error = None
+        if scalar_cfg:
+            try:
+                air_llvm_ir_opaque = cpp.run_to_llvm(stripped, *_air, optimize_scalar_cfg=True)
+            except (RuntimeError, TypeError) as error:
+                # A failed optional pass (or an older helper without the switch)
+                # must preserve the accepted native lowering's capability.
+                scalar_cfg_error = f"optimized native lowering refused: {type(error).__name__}: {error}"
 
         if level >= 2:
             debug_dir = _dump_dir()
@@ -1584,9 +1625,38 @@ class MetalBackend(BaseBackend):
                 with open(os.path.join(debug_dir, f"{kernel_name}.wrapped.ll"), "w") as f:
                     f.write(air_llvm_ir_opaque)
 
+        proved_types = None
+        metadata["cpp_scalar_cfg_route"] = "disabled"
+        metadata["cpp_scalar_cfg_reason"] = None
+        if scalar_cfg:
+            from triton_msl.backend.cpp_cfg_translation_proof import Decision, prove_translatable, select_lowering
+
+            if block_size > 1024:
+                unoptimized_opaque = MetalBackend._inject_wrapping_loop(unoptimized_opaque, block_size, 1024)
+            metadata["cpp_scalar_cfg_unoptimized_opaque_sha256"] = hashlib.sha256(
+                unoptimized_opaque.encode()
+            ).hexdigest()
+            metadata["cpp_scalar_cfg_optimized_opaque_sha256"] = (
+                hashlib.sha256(air_llvm_ir_opaque.encode()).hexdigest() if scalar_cfg_error is None else None
+            )
+            decision = (
+                select_lowering(air_llvm_ir_opaque, unoptimized_opaque)
+                if scalar_cfg_error is None
+                else Decision("fallback", unoptimized_opaque, scalar_cfg_error)
+            )
+            air_llvm_ir_opaque = decision.ir
+            metadata["cpp_scalar_cfg_route"] = decision.route
+            metadata["cpp_scalar_cfg_reason"] = decision.reason
+            if decision.route == "optimized":
+                proved_types = prove_translatable(decision.ir)
+        metadata["cpp_scalar_cfg_selected_opaque_sha256"] = hashlib.sha256(air_llvm_ir_opaque.encode()).hexdigest()
+
         # Metal's GPU JIT compiler requires typed pointers (old LLVM IR format).
         # Convert opaque pointers to typed pointers.
-        air_llvm_ir = MetalBackend._opaque_to_typed_ptrs(air_llvm_ir_opaque)
+        if proved_types is None:
+            air_llvm_ir = MetalBackend._opaque_to_typed_ptrs(air_llvm_ir_opaque)
+        else:
+            air_llvm_ir = MetalBackend._opaque_to_typed_ptrs(air_llvm_ir_opaque, proved_device_types=proved_types)
 
         # Strip LLVM function attributes that Metal's compiler doesn't
         # understand (nocreateundeforpoison, memory(none), etc.).
@@ -1616,6 +1686,7 @@ class MetalBackend(BaseBackend):
         # Detect 2D grid usage from program_id axes in the TTGIR.
         needs_2d = bool(re.search(r"tt\.get_program_id\s+y\b", ttgir_text))
         metadata.setdefault("needs_2d_grid", needs_2d)
+        metadata["cpp_scalar_cfg_typed_ir_sha256"] = hashlib.sha256(air_llvm_ir.encode()).hexdigest()
 
         return air_llvm_ir
 
@@ -1844,7 +1915,7 @@ class MetalBackend(BaseBackend):
             t0 = time.perf_counter()
 
         try:
-            cache_dir = _get_cache_dir()
+            cache_dir = os.path.abspath(_get_cache_dir())
             from triton_msl.backend._cache_contract import binary_key, read_binary_product, publish_binary_record
 
             compile_flags = ("-c", "-x", "ir")
@@ -1889,7 +1960,7 @@ class MetalBackend(BaseBackend):
                     # A nonzero tool exit is not a proved resource/race condition.
                     # Preserve it even if its diagnostic lacks a source location.
                     try:
-                        subprocess.run(
+                        run_metal_tool(
                             [
                                 "xcrun",
                                 "-sdk",
@@ -1940,7 +2011,7 @@ class MetalBackend(BaseBackend):
                     # Concurrent callers each rename their OWN unique tmp onto the same
                     # final path — last-writer-wins with identical content; all safe.
                     try:
-                        subprocess.run(
+                        run_metal_tool(
                             [
                                 "xcrun",
                                 "-sdk",
@@ -2282,7 +2353,7 @@ class MetalBackend(BaseBackend):
 
         try:
             # Persistent cache directory (survives reboots).
-            cache_dir = _get_cache_dir()
+            cache_dir = os.path.abspath(_get_cache_dir())
             from triton_msl.backend._cache_contract import binary_key, read_binary_product, publish_binary_record
 
             # The effective standard must be resolved BEFORE looking up a
@@ -2341,7 +2412,7 @@ class MetalBackend(BaseBackend):
                     # A nonzero tool exit is not a proved resource/race condition.
                     # Preserve it even if its diagnostic lacks a source location.
                     try:
-                        subprocess.run(
+                        run_metal_tool(
                             [
                                 "xcrun",
                                 "-sdk",
@@ -2395,7 +2466,7 @@ class MetalBackend(BaseBackend):
                     # Concurrent callers each rename their OWN unique tmp onto the same
                     # final path — last-writer-wins with identical content; all safe.
                     try:
-                        subprocess.run(
+                        run_metal_tool(
                             [
                                 "xcrun",
                                 "-sdk",

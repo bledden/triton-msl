@@ -153,13 +153,14 @@ class _Device:
 @pytest.fixture
 def pipeline_loader(monkeypatch):
     monkeypatch.setitem(sys.modules, "Foundation", SimpleNamespace(NSURL=SimpleNamespace(fileURLWithPath_=lambda p: p)))
-    monkeypatch.setattr(driver, "_MM_DIRECT_PIPELINES", {})
+    monkeypatch.setattr(driver, "_PIPELINE_BUCKETS", {})
     loader = driver.MetalUtils.__new__(driver.MetalUtils)
 
     def load(name, mode="success"):
         loader._device = _Device(name, mode)
         return loader.load_binary("kernel", "record-only.metallib", 0, 0)[1]
 
+    load.unload = lambda: loader.unload_module(loader._device)
     return load
 
 
@@ -170,14 +171,15 @@ def _invoke_matrix(pipeline, dims=(32, 32, 8), split=True):
     launcher(1, 1, 1, None, pipeline, metadata, None, None, None, *dims)
 
 
-def test_direct_cache_owns_primary_until_entry_removed(pipeline_loader):
+def test_loader_owns_primary_until_matching_unload(pipeline_loader):
     primary = pipeline_loader("A")
     key = id(primary)
     reference = weakref.ref(primary)
     del primary
     assert reference() is not None
-    driver._MM_DIRECT_PIPELINES.clear()
+    pipeline_loader.unload()
     assert reference() is None
+    assert key not in driver._PIPELINE_BUCKETS
 
 
 @pytest.mark.parametrize("mode", ["absent", "failed"])
