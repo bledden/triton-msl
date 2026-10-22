@@ -35,9 +35,15 @@ scenarios per proof label. Sources and raw results are retained; CHECKPOINT.txt
 names scope, failures and remaining work. Native construction remains disabled.
 The rehearsal found a normal-exit/identity-sample race, now closed by explicit
 parent-EOF shutdown, and a partial-constructor cleanup gap with a new red control.
-Next: complete native bootstrap/image authentication and final controller/evidence
-integration, then startup-inclusive qualification and a single complete reviewed
-binding. No additional partial handoff is needed. The CPU wave is not native proof.
+The next continuation implements snapshot bootstrap/provider authentication,
+the native worker, append-only archive, controller and whole-window verifier.
+CPU wave005 passes24 jobs across both labels, including16 startup/archive controls,
+16 readiness mutants,four cold-worker refusals,and a complete synthetic window
+accepted with12 altered windows refused. The native entry is still disabled.
+Next: exercise the final controller's full path on CPU, bind the actual provider
+inventory, qualify device-free preflight/startup budget and submit one complete
+review packet. The CPU evidence does not qualify native APIs or compilation time.
+No additional partial handoff is needed. Details/source snapshots are in the lane.
 No device attempt may use this CPU packet. RG-02 and all59 obligations stay open;
 the isolated result cannot be subtracted from historical public-call excess.
 
