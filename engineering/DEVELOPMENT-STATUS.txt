@@ -80,7 +80,7 @@ What is proved, what is not, and what not to repeat
    TriFast serving, public integration, C++ performance/resources, installed
    qualification and the full release obligations remain open independently.
 
-Bounded follow-up completed; intermediate review pending
+Bounded binder follow-up completed and independently reviewed
 B/public-binding-boundary-assessment-20261022 joins the actual binder, native
 helper, driver and errors bytes to both accepted installations. Four untimed
 Python-definition controls preserve live declarations after pointer callbacks,
@@ -104,9 +104,43 @@ The generic observation-only timing proposal is therefore NOT selected. First
 identify a specific avoidable mechanism and admissible counterfactual from source,
 or move to another demonstrated gap. Do not duplicate a profiler, remove required
 completion/error behavior, or restart closed density/discovery experiments.
-Opus5.5 review requested in triton-msl; no disposition yet. Preparation failures
+Opus5.5 review accepted at B/opus-binding-boundary-assessment-review-20261022/REVIEW.txt,
+SHA256c280f216525314fb99e70328378face3ad9e2eac3a978ede13280d8628d0a42f.
+All14 review members and30 inputs verified. Preparation failures
 retained: extracted local binding omitted on first probe; first manifest command
 used a wrong source path. Corrected probes pass; no package/test bytes changed.
+
+Framework boundary assessed; complete shader inventory awaiting review
+Opus accepted B/public-framework-timing-boundary-20261022 at its source-only
+scope. Review B/opus-framework-timing-boundary-review-20261022/REVIEW.txt,
+SHA256831b9e5b2fc7280491e6423944da0d44cbf4c4da45dfdf23589db3cd1c7e1c5c;
+all26 inputs and10 review members verified. The wheel-advertised PyTorch source
+revision is7269437d655783a26cba32aa88195b741ff496aa, not a binary-build proof.
+Public custom dispatch returns no command/timestamps; its methods lack ordinary
+kernel profiler hooks. MPS Event elapsed time uses CPU notification clocks and
+event recording ends coalescing. Capture/signpost tracing at stream construction
+changes commit policy. No already-available same-path GPU timer was identified.
+These facts do not prohibit external capture, prove a timing share, or authorize
+a replacement private harness. No new device window is selected.
+
+Following that review, B/public-fa512-shader-delta-20261022 now partitions all13
+changed regions/83 added-and-removed lines of retained0.2.0/current f16 N512
+attention. All five sources join to twelve actual admission observations.
+0.3.0/current shader bytes match. Eight full KV blocks execute; the tail branch
+does not execute atN512, though its binary/resource effect remains unknown.
+Changes preserve row-local nonfinite handling, rescale/normalization, and source
+tail semantics. Blind diagonal-MMA restoration violates those obligations.
+Both interpreter labels reproduce the inventory and scalar counterexamples;
+GPU tests are inspected by source, not run. No single safe, proven-cost
+intervention is selected and no hardware cause is closed. Opus source review is
+pending at B/opus-fa512-shader-delta-review-20261022/REVIEW.txt. Do not treat the
+unreviewed inventory as authority. Two inventory-script mistakes were retained
+and fixed before output: geometry JSON nesting and per-panel observation counts.
+
+The remaining decision is a supported contract-preserving mechanism, actual-path
+capture with its own observer-effect design, or leaving this residual open while
+working other release obligations. Repeated profiling, unsafe reversions and
+another closed fragment screen are not default next steps.
 
 Review/commit discipline
 Use Opus5.5 in Claude triton-msl for intermediate review; Fable only encompassing
