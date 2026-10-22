@@ -110,7 +110,7 @@ All14 review members and30 inputs verified. Preparation failures
 retained: extracted local binding omitted on first probe; first manifest command
 used a wrong source path. Corrected probes pass; no package/test bytes changed.
 
-Framework boundary assessed; complete shader inventory awaiting review
+Framework boundary and complete shader inventory independently reviewed
 Opus accepted B/public-framework-timing-boundary-20261022 at its source-only
 scope. Review B/opus-framework-timing-boundary-review-20261022/REVIEW.txt,
 SHA256831b9e5b2fc7280491e6423944da0d44cbf4c4da45dfdf23589db3cd1c7e1c5c;
@@ -132,15 +132,30 @@ Changes preserve row-local nonfinite handling, rescale/normalization, and source
 tail semantics. Blind diagonal-MMA restoration violates those obligations.
 Both interpreter labels reproduce the inventory and scalar counterexamples;
 GPU tests are inspected by source, not run. No single safe, proven-cost
-intervention is selected and no hardware cause is closed. Opus source review is
-pending at B/opus-fa512-shader-delta-review-20261022/REVIEW.txt. Do not treat the
-unreviewed inventory as authority. Two inventory-script mistakes were retained
+intervention is selected and no hardware cause is closed. Opus source review
+accepted this scope at B/opus-fa512-shader-delta-review-20261022/REVIEW.txt,
+SHA256a569111a174503c7a6169d6bae883333a98bfc9a3867738e7b7ccea1df388cfc.
+All10 review members and14 inputs verified. Its two unmeasured source ideas
+are not selected for implementation/timing. A hunk-alignment editorial difference
+is reconciled in B/development-transition-20261022/REVIEW-RECONCILIATION.txt;
+the sealed byte/range inventory is unchanged. Two script mistakes were retained
 and fixed before output: geometry JSON nesting and per-panel observation counts.
 
 The remaining decision is a supported contract-preserving mechanism, actual-path
 capture with its own observer-effect design, or leaving this residual open while
 working other release obligations. Repeated profiling, unsafe reversions and
 another closed fragment screen are not default next steps.
+
+Overnight stopping point
+The bounded density experiment and source follow-ups have reviewed dispositions.
+No safe supported implementation or new measurement scope is selected. The
+one-night automation is being paused early under its explicit stop instruction,
+not declaring the project complete or the remaining work impossible. The next
+choice is whether to fund actual-path attention capture with observer effects
+handled, or reprioritize another release gap while retaining RG-02 as open.
+Recommendation: do not buy another device window first; select a concrete
+measurement design or next workload and its falsifier before implementation.
+Morning handoff: B/development-transition-20261022/MORNING.txt.
 
 Review/commit discipline
 Use Opus5.5 in Claude triton-msl for intermediate review; Fable only encompassing

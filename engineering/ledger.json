@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-22: Development branch dev/0.4.0 preserves the exact frozen source/test/gate baseline at commit84f8fa7; no later experiment is promoted. Density-cost rev4 completed FAIL in both labels, independently confirmed by Opus review1564a707b77cec2942fb66b5c209a96e6fd82d486e1b915e7b15be88200a88ff. GAIN blocked; this candidate is closed without retry or threshold change. See engineering/DEVELOPMENT-STATUS.txt for evidence and next bounded CPU source analysis. All59 obligations remain open; no installed/device/release credit is transferred to this new root.",
+  "active_investigation": "2026-10-22 overnight handoff: dev/0.4.0 preserves the exact frozen source/test/gate baseline at84f8fa7; no experiment promoted. Density rev4 CLOSED FAIL, no GAIN/retry. Opus accepted binder/assertion, framework-timing and complete fa512 shader inventories at CPU/source scope; no safe proved-cost intervention selected and no hardware cause closed. Next requires actual-path measurement design or explicit reprioritization of another release gap, not another opaque screen. See engineering/DEVELOPMENT-STATUS.txt and external development-transition-20261022/MORNING.txt. All59 obligations remain open; release HOLD, no performance claim.",
   "obligations": [
     {
       "id": "correctness",
