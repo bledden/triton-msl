@@ -44,6 +44,16 @@ Next: exercise the final controller's full path on CPU, bind the actual provider
 inventory, qualify device-free preflight/startup budget and submit one complete
 review packet. The CPU evidence does not qualify native APIs or compilation time.
 No additional partial handoff is needed. Details/source snapshots are in the lane.
+CPU wave006 now passes28 jobs: controller.run success/six stops using real
+recording children and private authority, plus actual provider startup with six
+preflight refusals per label. Device-free positive preflight costs0.700/0.741s;
+native compilation remains unmeasured. The inventory omission of libmpdec was
+found and repaired before native execution; its failed preparation is retained.
+The selected venv launcher and underlying executable are bound separately.
+The shared project lease file is absent. Header preparation refused without
+recreating it; coordinated restoration approval was requested. Private CPU test
+leases give no device authority. Final binding/seal and complete review are still
+pending, and native entry remains disabled. No production/test bytes changed.
 No device attempt may use this CPU packet. RG-02 and all59 obligations stay open;
 the isolated result cannot be subtracted from historical public-call excess.
 
