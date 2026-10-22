@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-22 overnight handoff: dev/0.4.0 preserves the exact frozen source/test/gate baseline at84f8fa7; no experiment promoted. Density rev4 CLOSED FAIL, no GAIN/retry. Opus accepted binder/assertion, framework-timing and complete fa512 shader inventories at CPU/source scope; no safe proved-cost intervention selected and no hardware cause closed. Next requires actual-path measurement design or explicit reprioritization of another release gap, not another opaque screen. See engineering/DEVELOPMENT-STATUS.txt and external development-transition-20261022/MORNING.txt. All59 obligations remain open; release HOLD, no performance claim.",
+  "active_investigation": "2026-10-22 manual continuation: Blake selected the isolated FA512 GPU diagnostic design. Opus design findings adopted in sealed design-rev2; Metal4.0 safe/precise readback, separate fixture storage, setBytes/dispatchThreads, unchanged350-command rule. CPU recording adapter350-command rehearsal and48 refusal controls pass both labels; combined Opus review pending. Native entry/controller, actual address/API binding, oracle and resource/cleanup qualification still needed before a reviewed device instrument. No hardware cause closed, no product/test change, no performance credit. Density rev4 and fragment experiments remain closed; automation paused. See engineering/DEVELOPMENT-STATUS.txt and external development-transition-20261022/STATE.txt. All59 obligations open; release HOLD.",
   "obligations": [
     {
       "id": "correctness",

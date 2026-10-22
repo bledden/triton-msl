@@ -1,5 +1,38 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
+Current manual continuation, after the overnight handoff
+Blake selected preparation of the narrow isolated FA512 GPU comparison. This
+supersedes the overnight waiting-for-scope status below, not the closed density
+or fragment experiments. The one-night automation remains paused.
+Opus accepted the design with two required changes before adapter work:
+B/opus-fa512-isolated-gpu-comparison-design-review-20261022/REVIEW.txt,
+SHA2562b04b5ddb09e59522cb28afe59216906d72d5a59d4f0226b29aa7c230d7ed7b8.
+His prior shader-label note L1 is withdrawn in the separate correction:
+B/opus-fa512-shader-delta-review-correction-20261022/CORRECTION.txt,
+SHA256d7dd2057b56ec1b8254a3fe1bf4ef63288719ffd0c4b8aa1d209e79409cd4047.
+
+New sealed design revision at B/fa512-isolated-gpu-comparison-design-rev2-20261022
+adopts Metal4.0/safe/precise with option readback and no fallback, separate original
+and uniform buffer sets, setBytes scalars and dispatchThreads, and explicit shared
+storage/cadence/memory limitations.48 CPU checks plus all three parent replays
+pass in both proof labels. The350-command schedule, shaders, fixed0.004 tolerance
+and diagnostic decision rule are unchanged. No hardware result is inferred.
+New B/fa512-isolated-gpu-adapter-preparation-20261022/HANDOFF.txt,
+SHA25659e02c2f30cef60d251b8e28aefb6fffc8800d1a24d3f6a81bc47a14deacf61c,
+checks real method-shaped encoding on recording receivers:350 commands, two
+recording builds, eight logical buffers,48 refusal controls. All pass both labels.
+Output patterns and clocks are synthetic; native construction is disabled.
+Initial ASCII conversion failure was retained and fixed to exact UTF-8 roundtrip
+without changing shader bytes. No device/compile/timing/lease or product edit.
+
+Combined bounded CPU handoff sent to Opus5.5 in verified Claude triton-msl;
+review pending at B/opus-fa512-isolated-gpu-adapter-preparation-review-20261022.
+Next: resolve its findings and implement actual native address/API/creator
+authentication, real oracle/readback, controller resource/cleanup and offline
+verification, with startup-inclusive qualification and a fresh reviewed binding.
+No device attempt may use this CPU packet. RG-02 and all59 obligations stay open;
+the isolated result cannot be subtracted from historical public-call excess.
+
 User outcome
 0.4.0 must succeed the correct 0.2.0 baseline across the project's obligations,
 not merely improve on 0.3.0. Performance is central. Correctness protects that
@@ -146,7 +179,7 @@ capture with its own observer-effect design, or leaving this residual open while
 working other release obligations. Repeated profiling, unsafe reversions and
 another closed fragment screen are not default next steps.
 
-Overnight stopping point
+Historical overnight stopping point (manual continuation above supersedes the wait)
 The bounded density experiment and source follow-ups have reviewed dispositions.
 No safe supported implementation or new measurement scope is selected. The
 one-night automation is being paused early under its explicit stop instruction,
