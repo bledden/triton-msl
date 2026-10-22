@@ -1,0 +1,101 @@
+Triton 0.4.0 development checkpoint — October 22, 2026
+
+User outcome
+0.4.0 must succeed the correct 0.2.0 baseline across the project's obligations,
+not merely improve on 0.3.0. Performance is central. Correctness protects that
+deliverable; passing correctness is not evidence of speed. No aggregate rescue.
+
+Recoverable development baseline
+Branch dev/0.4.0, initial preservation commit84f8fa7379d27a2660ba00e070496a4c4c6e355e.
+Exactly611 files from frozen0.4.0-start at parent3a69b3dd3d99639928a7c3777730de34448a772d.
+Source/test/gate digest32f1998b6eb70f31bcc533a6365eaeb3d0fb5cba1aac1c48decb458220a19ab9.
+The branch is editable; the source and evidence roots are not. No later candidate
+worktree was merged. Default-off features and the public TriFast refusal remain
+unchanged. A commit is history, not installed, hardware, performance or release credit.
+Ten standalone engineering-checker tests passed. All59 obligations remain open.
+The staged whitespace check records eight pre-existing findings in two vendored
+decoder files; their authenticated baseline bytes were intentionally preserved.
+
+Evidence base B:
+/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start
+Inventory/validation: B/development-transition-20261022/{BASELINE-INVENTORY.json,
+COPY-RESULT.json,BASELINE-VALIDATION.json,PREPARATION-FINDINGS.txt}.
+Inventory SHA2568f3f525f24b7328cd8d03788293e1fda5aa11202f13358fe1a517ec60f14c3e6.
+
+Current experiment: CLOSED, not another iteration
+Dictionary-density rev4 CPU RISK completed both labels normally. Native4FAIL,
+10UNRESOLVED; pure2FAIL,12UNRESOLVED; zeroPASS. The tail-storage and wide-bounds
+fallbacks exceed the unchanged50ns cap in six precise cells. Two pure cold
+counterparts remain unresolved by the precision veto, not counted as failures.
+No retry, GAIN, promotion or threshold change follows. The screen does not
+attribute the internal cause of its fallback overhead.
+Results: B/public-preparation-density-cost-rev4-execution-20261021
+Seal ae72ee88b002f0b3f828ecde4b8df47870c4414fa44b3dc2042f586d591108e1.
+Independent Opus review: B/opus-density-cost-rev4-results-review-20261022/REVIEW.txt
+SHA2561564a707b77cec2942fb66b5c209a96e6fd82d486e1b915e7b15be88200a88ff.
+Its own raw reduction reproduces all28 decisions. Review manifests verified.
+Correction: B/public-preparation-density-cost-rev4-results-supplement-20261022/CORRECTION.txt
+SHA2563ced0aeeeb74e44e1462bbd20dea87b345b5db156341a3ccbeba20a2e6a92899.
+The sealed handoff's process-tree memory phrase was wrong: the instrument checks
+worker RUSAGE_SELF peak RSS only. The original is retained and corrected additively.
+
+Where the full comparison stands
+The accepted installed-configuration comparison identified ten slower cells
+versus correct0.2.0, on retained compiler32023.883. Current versus0.3.0 had36
+unresolved contrasts; unresolved is not equality or improvement. Different helper
+modes were separate windows. Do not mix these costs with other toolchain screens.
+Source: B/public-regression-attribution-20261018/REGRESSION-LIST.json and DIAGNOSIS.md.
+Paired excess, microseconds (historical comparison, not new measurements):
+  native add18.948; f16 attention N512 noncausal214.01075;
+  native layernorm23.9165; GPT-2 legacy fixture604.4375;
+  pure add46.07275; valid assertion45.7185; f16 matmul2048 67.781;
+  pure quantized decode49.927; softmax45.4895; GPT-2 legacy1264.625.
+None is causally closed at hardware scope. GPT-2 stays a legacy comparator;
+selection of a modern model remains separate and cannot erase its regression.
+
+What is proved, what is not, and what not to repeat
+1. Pure public-add CPU recording interventions isolate material discovery and
+   environment-capture contributions:20.114585us and22.96479us respectively,
+   each24/24 directional. Sources:
+   B/public-add-discovery-isolated-causal-rev2-20261020/{HANDOFF.txt,REVIEW.json}
+   B/public-add-environment-causal-rev2-20261020/{HANDOFF.json,REVIEW.json}.
+   These effects overlap other boundaries and MUST NOT be summed or subtracted
+   from hardware gaps. The bypasses fail required live-mutation controls.
+2. Fable's B/fable-discovery-boundary-consultation-20261020/FABLE-CONSULTATION.txt
+   rejects the examined pure discovery shortcuts: callbacks occur between the
+   pre-run hook and launcher. No trusted mutation source or approved pure-mode
+   admitted state exists. Do not implement stale per-call token reuse, early
+   environment capture, prefetching, or early dirty exit as an optimization.
+3. Checked packed validation plus argument binding has measured CPU leverage as
+   a GROUP. B/public-causal-prioritization-20261020/PROTOCOL.json describes its
+   diagnostic ablation, not a shippable bypass. It does not isolate binding from
+   encoding/decoding. The dictionary candidate's failure does not identify the
+   remaining contributor or authorize another encoder experiment.
+4. f16 fragment rescaling was hardware-tested and closed as unresolved, adverse
+   in median direction, with no promotion. B/f16-fragment-native-results-rev5-
+   independent-review-20261020/REVIEW.json records that disposition. Do not rerun
+   merely to seek a more favorable classification.
+5. The private TriFast missing-attribute finding belongs to a different owned
+   path; it is not the cause of microsecond-scale public-launch overhead by fiat.
+   TriFast serving, public integration, C++ performance/resources, installed
+   qualification and the full release obligations remain open independently.
+
+Next bounded work, before any patch or timing
+Recover the exact checked-preparation call graph and existing adverse controls
+for argument binding separately from canonical snapshotting. Identify whether
+the remaining binding work has an independent, contract-preserving lever or is
+already minimal. Use source inspection and untimed CPU controls only. Preserve
+selection after callbacks, fresh snapshots, exact errors, ownership and pure
+fallback. First check that the evidence's functions match this development root.
+Falsifier: proposed reuse crosses a callback/mutation boundary, changes an error
+or snapshot, or lacks a demonstrated independent cost. If so, reject it before
+building or timing. Deliver a specific cause/lever or a named missing premise,
+not another broad comparison. New timing needs its own reviewed finite protocol;
+this plan does not reopen the closed density candidate or authorize hardware.
+
+Review/commit discipline
+Use Opus5.5 in Claude triton-msl for intermediate review; Fable only encompassing
+final review. No Superset or guardrail delegation. Commit coherent tested changes
+locally, keep raw evidence external, no push/release/publication. Never edit a
+bound predecessor in place. At08:00local record the morning handoff and pause
+the one-night automation; pause earlier if only a user decision can unblock work.

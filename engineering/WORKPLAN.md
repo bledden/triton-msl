@@ -1,5 +1,13 @@
 # 0.4.0 working plan
 
+## Development checkpoint, October 22
+
+The active plan is now `DEVELOPMENT-STATUS.txt`. The text below is retained
+historical context, not current execution authority or a request to retry.
+The separate `dev/0.4.0` branch preserves the frozen source baseline; later
+experimental roots have not been merged. Density rev4 failed its RISK gate
+and is closed, with GAIN blocked. No release obligation has been waived.
+
 Owner: Astra. Shared with Fable through Blake. This is the next-work sequence,
 not a release promise or a relaxation of `CONTRACT.md`. The ledger remains the
 workload/obligation register; this file is the short execution plan. Update this
