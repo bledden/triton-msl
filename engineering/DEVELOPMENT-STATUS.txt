@@ -80,18 +80,33 @@ What is proved, what is not, and what not to repeat
    TriFast serving, public integration, C++ performance/resources, installed
    qualification and the full release obligations remain open independently.
 
-Next bounded work, before any patch or timing
-Recover the exact checked-preparation call graph and existing adverse controls
-for argument binding separately from canonical snapshotting. Identify whether
-the remaining binding work has an independent, contract-preserving lever or is
-already minimal. Use source inspection and untimed CPU controls only. Preserve
-selection after callbacks, fresh snapshots, exact errors, ownership and pure
-fallback. First check that the evidence's functions match this development root.
-Falsifier: proposed reuse crosses a callback/mutation boundary, changes an error
-or snapshot, or lacks a demonstrated independent cost. If so, reject it before
-building or timing. Deliver a specific cause/lever or a named missing premise,
-not another broad comparison. New timing needs its own reviewed finite protocol;
-this plan does not reopen the closed density candidate or authorize hardware.
+Bounded follow-up completed; intermediate review pending
+B/public-binding-boundary-assessment-20261022 joins the actual binder, native
+helper, driver and errors bytes to both accepted installations. Four untimed
+Python-definition controls preserve live declarations after pointer callbacks,
+fresh values/results and exact errors. A prefetched-width/name shortcut fails.
+The immutable packers and exact-type native path already exist. No independent
+recoverable binder cost or new safe lever was established. Close this lead;
+the older WORKLIST-v2 explicitly excludes isolated binder tuning as primary.
+Both interpreter-label outputs and the nine-member/eight-input packet verify.
+No timing or native-helper qualification is claimed by this Python-only probe.
+
+The assertion slice control is source-bound but duplicates known ordering, not
+new causal evidence. A delayed check wrongly exposes exit hooks to failed work.
+Prior decisions were recovered after sending the packet and supplied to Opus:
+B/public-gpt2-assertion-boundary-20261020/{DECISION.json,REVIEW.json} and
+B/public-gpt2-assertion-dataflow-20261020/{RESULT.json,REVIEW.json}.
+They already refute direct-item removing allocation/copy/wait and shape-only
+assertion removal. Successful-zero pooling changes multiple mechanisms; input
+immutability/check reuse is unproved. See the additive correction at
+B/public-binding-boundary-assessment-supplement-20261022/PRIOR-EVIDENCE.txt.
+The generic observation-only timing proposal is therefore NOT selected. First
+identify a specific avoidable mechanism and admissible counterfactual from source,
+or move to another demonstrated gap. Do not duplicate a profiler, remove required
+completion/error behavior, or restart closed density/discovery experiments.
+Opus5.5 review requested in triton-msl; no disposition yet. Preparation failures
+retained: extracted local binding omitted on first probe; first manifest command
+used a wrong source path. Corrected probes pass; no package/test bytes changed.
 
 Review/commit discipline
 Use Opus5.5 in Claude triton-msl for intermediate review; Fable only encompassing
