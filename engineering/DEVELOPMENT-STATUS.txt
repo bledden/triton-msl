@@ -1,5 +1,31 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
+Current result: the authorized isolated FA512 GPU diagnostic COMPLETED once.
+W1 closure review4a6de1f113b5145dcf6af4ca5ad0e6ca64d50db3264f4afc8396e10028314a0f
+was verified before execution; instrument binding391eb280 unchanged. User lease
+confirmation and fresh ASIC GPU-off acknowledgment recorded; machine assessed.
+Fresh preflight ended13.41ms before900s receipt/clearance issuance. Controller
+completed350commands in40.702s,workerexit0/reaped,emptycensus/stderr,noSTOP,
+peak163561472bytes,existinglease186832885 released/unchanged. No retry.
+
+Results B/fa512-isolated-gpu-results-attempt001-20261022 are SEALED:
+RESULT-SEAL ea5e4c2f4e34ced92091f4ac3524c3b86e06e36570dfaaf4c261be646d13c78d;
+HANDOFF16c4eb9c49807a904442505194888fa32ba54c27a7061f3210d28e86c8d210b9.
+CURRENT_SLOWER: paired median+12.500us/+5.732%,31/32blocks slower,noise floor5.000us.
+Arm medians218.375us(old)/231.021us(current). One old-arm393.833usblock retained.
+Both original outputs byte-identical, maxabs0.000139764<fixed0.004;uniformexactones.
+All350outputs pass. Actual staticthreadgroup bytes22912old/21888current.
+Full-window verifier and separate raw reduction agree under both proof labels.
+M4Max40GPUcores,f16noncausal[1,4,512,64],freshMetal4.0safe/precise compiles,
+sharedbuffers,single-dispatch GPUStartTime/EndTime afterwarmup. Not host/compile
+latency,not whole-release performance,not a subtraction from214.011us publicgap.
+It establishes a shader-side difference on this isolated path, NOT which source
+region causes it. No production/test change,no promotion,no release row closed.
+Raw result sent to Opus5.5 triton-msl; independent results review pending at
+B/opus-fa512-isolated-gpu-results-attempt001-review-20261022. No second window.
+ASIC notified window ended. Next adopt review and select a falsifiable source
+mechanism, not an unsupported performance patch. Earlier pending lines are history.
+
 Newest: Opus's complete instrument review is verified, SHA256
 2ba499363cc43e1fb5f09c4b8ca74a35d1ddf91e5a0ddee54c3c6c30a2f8d325.
 It accepts the arm/provenance/oracle scope, conditionally accepts the instrument,
