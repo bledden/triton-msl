@@ -1,5 +1,26 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
+CURRENT: actual-public-path trace feasibility, not another batched screen.
+B/fa512-public-trace-feasibility-20261022 sealed19files/13inputs; FINDINGS
+c02e71a12912a7a91b6fa3d791bc5d61040d056ed6f01333ada3965c4b57eddd.
+Installed Metal System Trace model rules join GPU segments to submission,
+process, command and encoder; commit-to-start and execution duration are
+separate. Official Apple tool guidance names the matching export tables.
+Exact wheel-commit MPSProfiler source distinguishes Torch env/API signposts
+from external tracing, but capture support is a separate predicate and observer
+effects remain unproved. Proposed attach-after-initialization avoids assuming
+Torch profiler mode is harmless. No trace, target launch or GPU run occurred.
+Only xctrace help and a no-record options query ran; initial sandbox cache
+failure retained, normal approved escalation succeeded without recording.
+CPU normalized interval reducer passes13 refusal controls under both labels;
+keeps union/span/queue delay/public elapsed distinct, no historical subtraction.
+This is NOT an XML parser, proven clock bridge or loaded-product qualification.
+Focused CPU feasibility review SENT to Opus5.5 triton-msl, destination
+B/opus-fa512-public-trace-feasibility-review-20261022/REVIEW.txt. Next resolve
+its concrete prerequisites and exact reusable public worker before any pilot;
+counts/caps/attach handshake and new reviewed authority remain unissued.
+Rev2 batching stays CLOSED NO-GO; prototype deferred; all59HOLD unchanged.
+
 CURRENT CLOSURE: Opus reviewabe82c41558f33c0f0130a44257cabe46796c86063f55477ef8648d214bd29cf
 verified with all review members and35inputs. Q1-Q3 YES, no required changes.
 Rev2 remains CLOSED NO-GO, not a pending hardware proposal. Opus's independent
