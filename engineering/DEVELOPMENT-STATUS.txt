@@ -1,5 +1,27 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
+Newest: Opus's complete instrument review is verified, SHA256
+2ba499363cc43e1fb5f09c4b8ca74a35d1ddf91e5a0ddee54c3c6c30a2f8d325.
+It accepts the arm/provenance/oracle scope, conditionally accepts the instrument,
+and requires W1: test the worker's own live authority through the controller's
+actual environment and inherited descriptor. No implementation defect found.
+
+W1 CPU supplement is now sealed at B/fa512-worker-authority-controls-20261022:
+HANDOFF e74fd3a602c6dc87ec7b0b183fa770e2c35df3827312cb6786c5a6111e66cb86;
+MANIFEST5ebd624b474bd1315ebe4dae00b2ccc969b182d0827ce81ccd37a3f75e210f4f.
+Both labels pass8 cases: the positive executes4 real worker gate calls and
+refuses first Metal import; seven negative parent/fd/spent/deadline handoffs
+refuse before framework import. All16 real children reaped, empty censuses,
+private fixture leases released. The CPU wrapper runs unchanged native_worker
+via runpy with import/child guards; it does not replace any authority function.
+Controller stop records are expected test outcomes, not successful native runs.
+Original instrument and binding unchanged; no production/test or GPU change.
+Supplement sent to Opus5.5 triton-msl, visibly responding, for W1 closure only.
+Explicit user confirmation of lease restoration requested; ASIC acknowledgment
+requested again as the review requires. Neither response is claimed. Fresh
+execution conditions remain required, all59 obligations/HOLD unchanged.
+Earlier review-pending paragraphs below describe the original submission.
+
 Latest: B/fa512-isolated-gpu-instrument-20261022 is sealed and submitted to
 Opus5.5 in the verified Claude triton-msl session for one complete review.
 Binding391eb2802c7c078952a35b1a5cf2532f7c8832ad6fb147a2286df8cd504ae2ca;
