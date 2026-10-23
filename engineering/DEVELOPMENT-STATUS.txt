@@ -1,5 +1,23 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
+CURRENT CLOSURE: Opus reviewabe82c41558f33c0f0130a44257cabe46796c86063f55477ef8648d214bd29cf
+verified with all review members and35inputs. Q1-Q3 YES, no required changes.
+Rev2 remains CLOSED NO-GO, not a pending hardware proposal. Opus's independent
+raw-arm-pool cross-check also fails only double-rate clustering:328/400,
+Wilson lower0.779. The result does not depend on recentering. No automatic
+successor, easier stress case or lower planning bar. Prototype stays deferred.
+Carry N1:250us event cutoff folds smaller excursions into base noise; N2:
+GPU-busy-time arrival rate and periodic display interference are unmeasured;
+N3:0x7e00 poison can equal a legitimate half NaN. Finite-fixture CPU controls
+do not qualify per-element write detection on exceptional outputs. Any future
+fixture must establish that expected output cannot be mistaken for unwritten
+poison; do not infer a universal detector from this model.
+Remaining worklist checked against later reviews: standalone binder tuning is
+closed; direct-item avoids neither copy nor wait; assertion pooling changes
+ownership/initialization and is not a selected proven fix. Do not restart those
+measurements or silently transfer the private TriFast host profile to public
+FA512. No hardware cause or recovery follows from this design closure.
+
 CURRENT: Opus6b4614b3 requires interruption exposure D1 and all-output poisoning
 D2 before a batched native adapter. Rev1 batch32 design is not ready to run.
 One predeclared CPU successor, batch4/median9 with unchanged decision rule,
