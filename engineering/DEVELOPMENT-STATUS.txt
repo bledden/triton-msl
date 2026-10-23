@@ -1,5 +1,23 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
+Latest review874b65a7: reciprocal mechanism and prototype accepted at CPU scope,
+NOT device proposal. Each thread visits8 different rows; duplication is across
+row consumers, not repeated division of one row by a thread. No native count or
+clock/occupancy-based estimate is treated as established. C1-C5 controls carried.
+Prototype DEFERRED because expected benefit versus resolvable floor is unproved.
+Selected O1 follow-up is old/current ONLY with32 serial dispatches per command.
+B/fa512-batched-cadence-design-20261022:10sealedfiles/5inputs; both proof labels
+pass schedule/unit/classifier arithmetic and ordinary-range C4 witness. Frozen
+350commands/11200dispatches,32 distinct outputs retained per fixture, same total
+command rule, per-dispatch effects/floor divided once by32. No native adapter.
+Noise-scaling scenarios are explicit assumptions; actual calibration determines
+floor. No automatic prototype arm, size sweep or retry. Old nonfinite behavior
+is not used as a correctness reference; future C2 applies current/prototype.
+Design sent to Opus5.5 in verified triton-msl and visibly responding. Destination
+B/opus-fa512-batched-cadence-design-review-20261022. Read disposition before
+implementing native adapter. Proposed caps900/600/300s,2CPUs/4GiB unchanged,
+resource rehearsal still owed. No hardware/production/test/lease change.
+
 Latest: isolated result independently reviewed by Opus759f5aac, numerical and
 cleanup findings reproduced. O1: median109.85ms inter-command idle limits the
 finding to this isolated cadence, not back-to-back public execution. G3 actual
