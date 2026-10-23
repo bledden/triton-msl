@@ -1,6 +1,23 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
-CURRENT: actual-public-path trace feasibility, not another batched screen.
+CURRENT: trace prerequisites, not a new timing attempt.
+Opus feasibility review e6912f29 accepted in scope with required corrections:
+default template has CPU sampler; orphan GPU rows can be hidden; clock bridge
+needed. New sealed B/fa512-public-trace-prerequisites-20261022 implements only
+the normalized CPU handling and proposes in-trace signpost envelopes. Its 29
+interval refusals and 18 marker refusals pass both proof labels; red witnesses
+reproduce both parent reducer defects. No exporter/native marker implemented.
+RESPONSE48d7eec0c32730f6b2deb716eecd521354fdd7441b2c45f5f11e8290523f503b;
+25 sealed members/17 inputs. Opus5.5 focused review sent in triton-msl.
+Minimal Metal Application/GPU/os_signpost no-record options query succeeds;
+this does not prove effective GPU counter/shader-profiler/forced-state settings.
+P1 attach permission and P2 effective settings remain OPEN; no security change,
+recording, GPU or lease. P3 mechanism pending review; P4 CPU repair pending review.
+Next expose actual recording settings without target recording, then qualify
+native marker/export only after its design review. No fitted clock offset or
+inferred CPU cause, no perf claim. All59HOLD, batching closed, prototype deferred.
+
+PREVIOUS: actual-public-path trace feasibility, not another batched screen.
 B/fa512-public-trace-feasibility-20261022 sealed19files/13inputs; FINDINGS
 c02e71a12912a7a91b6fa3d791bc5d61040d056ed6f01333ada3965c4b57eddd.
 Installed Metal System Trace model rules join GPU segments to submission,
