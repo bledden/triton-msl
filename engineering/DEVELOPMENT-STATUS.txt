@@ -1,5 +1,26 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
+CURRENT: Opus6b4614b3 requires interruption exposure D1 and all-output poisoning
+D2 before a batched native adapter. Rev1 batch32 design is not ready to run.
+One predeclared CPU successor, batch4/median9 with unchanged decision rule,
+fails its own planning gate: clustered double-rate scenario resolves342/400,
+85.5% (Wilson95%81.71–88.61%), below required90% LOWER bound. Independent
+scenarios resolve98–100%; all six proposed nulls have zero false directions.
+Retain NO-GO for this configuration. No sweep, criterion change, adapter or GPU
+attempt. This is conditional sensitivity from three historical long commands,
+not proof that all bounded configurations fail or a hardware power guarantee.
+D2 model passes8 controls, including skipped/duplicate dispatches after prior
+success, and demonstrates no-poison stale-byte false acceptance. Native buffer
+identity and submission remain unqualified. Prototype remains deferred.
+B/fa512-batched-cadence-design-rev2-20261022 is sealed25files/9inputs,
+HANDOFF4a269f24822677eb5901f427ddbe8cc56e906eb2b7060e40b04a41da2c0b3d7e;
+both proof labels match5600trials each and consistency checks. They are the
+same Python binary, not independent replication. Focused result review SENT
+to Opus5.5 triton-msl at opus-fa512-batched-cadence-design-rev2-review-20261022.
+No automatic successor follows; any new design needs a concrete rationale,
+not tuning until these samples pass. RG-02/CP-01 and59HOLD remain unchanged.
+Earlier paragraphs below are historical checkpoints, not pending authority.
+
 Latest review874b65a7: reciprocal mechanism and prototype accepted at CPU scope,
 NOT device proposal. Each thread visits8 different rows; duplication is across
 row consumers, not repeated division of one row by a thread. No native count or
