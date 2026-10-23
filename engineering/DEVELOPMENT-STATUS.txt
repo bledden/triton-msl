@@ -1,5 +1,33 @@
 Triton 0.4.0 development checkpoint — October 22, 2026
 
+Latest: isolated result independently reviewed by Opus759f5aac, numerical and
+cleanup findings reproduced. O1: median109.85ms inter-command idle limits the
+finding to this isolated cadence, not back-to-back public execution. G3 actual
+ASIC thread messages recovered additively; exact end-message delivery time is
+not exposed. Blake clarified delegated bounded diagnostics/agent-issued records
+and read-only assessment; ask before massive compute. No human assessment or
+backdated consent claimed. See B/fa512-isolated-gpu-results-governance-supplement-20261022.
+
+New CPU evidence: B/fa512-epilogue-cost-inspection-20261022 is sealed (270 files,
+8 external inputs) and SENT to Opus5.5 in verified Claude triton-msl; review
+pending at B/opus-fa512-epilogue-cost-inspection-review-20261022.
+Metal4.0 command-line AIR keeps current's reciprocal inside the output loop;
+old and private row-shared prototype keep it in a lid<32 acyclic block.
+Source/AIR finite-full-tile counts2048 versus32 per threadgroup, not native
+instruction counts or measured time. Runtime backend may transform further.
+Prototype changes only final reciprocal scheduling: reuses dead tg_alpha,
+adds one uniform barrier, retains original scalar multiply, NaN classification,
+index and half conversion. Full recurrence/tail prefix unchanged; exact reversal.
+Both proof labels pass20,196 scalar-model checks and9 geometry enumerations.
+Shared AIR declarations unchanged. Compile001 unused-Z/-Werror preparation
+stop retained; compile002 removes inspection-only-Werror. Six successful CPU
+compiler/disassembler children total. No framework/device or production edit.
+Tradeoff: added barrier and shared reads could erase gains. No cause or speedup
+claimed; no closed fragment experiment reopened. Proposed next step is a newly
+reviewed three-arm scheduling diagnostic, with cadence explicitly addressed,
+not a rerun of spent binding391eb280 or a speculative production fix.
+All59 obligations remain open/HOLD. Earlier review-pending paragraphs are history.
+
 Current result: the authorized isolated FA512 GPU diagnostic COMPLETED once.
 W1 closure review4a6de1f113b5145dcf6af4ca5ad0e6ca64d50db3264f4afc8396e10028314a0f
 was verified before execution; instrument binding391eb280 unchanged. User lease
