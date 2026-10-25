@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: FA512 whole-filesystem result verifier composes authority, full inventory/preflight,39/9 protocol,30 numerical calls, population/fences,14-child resource/exit records and12 trace exports; marker IDs/payloads tied to traced calls. qualification023 passes30jobs/175methods per label, including cold CLI and27,351 retained real rows. qualification018/021 fixture failures retained. Trace units/lifetimes/loss/containment/settings, native10s schedule and full rebinding/qualification/review remain open. Native entry disabled; no new GPU, authority, lease, product change or performance claim. All59 HOLD; six research leads queued.",
+  "active_investigation": "2026-10-25: FA512 source audit establishes that modeled AGX begin/end pairs and matching interval views cannot prove upstream coverage; no claim of actual event loss or a regression cause. Aggregate PID/UID diagnostics composed into result verifier, qualification024 passes16jobs/62methods per label. Retained TOC has time-info recovery lead; no new export. Opus5.5 review sent to triton-msl. Native10s schedule, coverage/lifetimes/settings and full qualification/review remain open; native entry disabled. No GPU, authority, lease, product change or performance credit; all59 HOLD; six research leads queued.",
   "obligations": [
     {
       "id": "correctness",

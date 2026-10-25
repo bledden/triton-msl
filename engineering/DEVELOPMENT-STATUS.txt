@@ -1,3 +1,37 @@
+2026-10-25 — trace source/lifetime audit, CPU only; intermediate Opus review sent.
+Installed AGX rules emit both execution points from one modeled workload and
+can reconstruct or omit workloads. Balanced points plus matching derived rows
+cannot prove upstream completeness. This is a limit of the evidence argument,
+not a finding of actual lost events or a product-regression cause. No recording
+should be spent merely to rediscover it. Five primary-source files are retained
+and pinned in trace-source-audit001; the bounded 223-CLP-file search found no
+usable selected-table AGX loss counter and does not prove no mechanism exists.
+
+trace_scope.py is now composed into the result verifier and retained-export
+reducer. It reports PID/unique-ID ambiguity and missing identities as aggregates;
+document-local tokens are never cross-export lifetime keys. Real export:
+1,206 process-info records, one nonpositive identity, zero observed identity
+conflicts, one row with the marker worker PID. No lifetime/coverage credit.
+qualification024:16 serial jobs,62 test methods per label, byte-identical real
+aggregate outputs. Both labels share one interpreter binary. All82 ancestor
+references match, no integration bytecode and no production change.
+
+The retained TOC has one time-info table, omitted by the current nine join
+selections. Primary rules give an explicit epoch/numerator/denominator conversion;
+no clock offset was fitted and no new rows were exported. Next bounded recovery:
+review a selective CPU-only time-info re-export from the existing recording and
+assess an independent coverage mechanism. Observed-interval-only scope would be
+a changed question requiring review, never an automatic release-gate weakening.
+The native10s schedule and effective settings remain open separately.
+
+Opus5.5 received FINDINGS c2658383 / HASHES 6a6c2f99 in Claude triton-msl,
+confirmed by the sent-message UI. Only a CPU/source review was requested; no
+final instrument acceptance or device authority. The app initially exposed ASIC;
+no message/edit was made there; the Window menu selected the Claude main window
+whose chat identity was verified as triton-msl before sending. Review pending.
+Native entry remains disabled; old inventory/full qualification/preflight remain
+historical. N1/RG-02/CP-01/all59 stay OPEN/HOLD; no performance result or fix.
+
 2026-10-25 — filesystem result composition and real-export marker checks, CPU only.
 The result verifier now takes an externally pinned result index, binding hash and
 review hash and checks the entire result population (including empty directories),
