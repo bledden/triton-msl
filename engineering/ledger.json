@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Opus45738972 accepted reverse rev2/sizing. Z1/Z2 sealed in sizing-rev2 (a46ce4ae): fixed refusal/partial counts and exact argv controls,23 inherited refusals+9 tests/label. Optional driver split:346 completion-only occurrences,one PID,all command IDs have device mapping; no commit-specific submission proof. Parent aggregates unchanged. Sent to Opus triton-msl for focused review. No sizing attempt or per-attempt ps approval; no export/GPU/timing/product change; all59 HOLD.",
+  "active_investigation": "2026-10-25: Opus0b89d5aa accepts sizing rev2/driver split. C1 diagnostics repair sealed separately in sizing rev3 (4fbc65a7): replaced timeout and child cleanup state retained, six fixed labels,23 inherited refusals+12 tests/label pass including parent red control. D1 supersedes unspent rev1/rev2; only reviewed rev3 may be proposed. Sent focused review to Opus triton-msl. Optional timestamp analysis deferred. No export/ps/device/product change or per-attempt approval; all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",

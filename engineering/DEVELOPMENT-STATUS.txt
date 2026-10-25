@@ -1,3 +1,29 @@
+2026-10-25 — Opus sizing review accepted; C1 cleanup diagnostic successor sealed.
+Review0b89d5aa accepts Z1/Z2 and the driver crosscheck. It identifies C1: cleanup
+can replace an export refusal and omit child accounting. New separate packet
+fa512-clock-raw-event-sizing-rev3-20261025 addresses C1 without changing Owned,
+resource caps, selector, counter, table order or native gate. Handofff8dd1706;
+manifest4fbc65a7. Direct replaced exception is filtered to fixed reason; six
+Owned messages admitted; child record retained/refreshed even on cleanup failure.
+Unknown census/exit is null. Process-loss durability is not claimed.
+
+Four serial qualification jobs pass:23 inherited refusals and12 amendment test
+methods per label. Red control reproduces both defects through actual rev2 main
+with synthetic children. Transient/persistent cleanup and unknown PermissionError
+are covered without ps/export. Both labels share one binary. Rev2, rev3 and the
+crosscheck verifiers pass under both labels; originals unchanged.
+
+D1: rev1 22d0f861 and rev2 a46ce4ae are superseded, immutable and unspent. Only
+rev3 may be named by a future reviewed execution decision. All three attempt
+folders absent; separate per-attempt ps approval remains required. Focused C1
+review sent to Opus5.5 only in triton-msl, delivery confirmed. No export, ps,
+recording, device, timing, lease or product change; all59 remain OPEN/HOLD.
+
+Reviewer correction retained: two installed driver rules can produce the
+command/device map. Its346 completion-only occurrences belong to one non-worker
+process; membership does not identify specific commits. Optional same-clock
+timestamp analysis deferred so this sizing step does not grow further.
+
 2026-10-25 — sizing Z1/Z2 complete; optional driver split narrows the residual.
 Opus review45738972 accepted reverse rev2 and the bounded sizing design. It
 strengthens the345-in-span comparison: both input times use host kdebug clock.
