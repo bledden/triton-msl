@@ -1,3 +1,53 @@
+Triton 0.4.0 development checkpoint — October 25, 2026
+
+CURRENT: recording-fences CPU result complete; wire integration sent for review.
+No production runtime/test changes or performance recovery in this checkpoint.
+The backend still has 59 open release obligations; FA512 RG-02 remains open.
+
+The full validation checks could not fit the 10-second trace. That design is
+closed NO-GO. The separately approved fence design keeps identity/metadata,
+package and instrument checks inside recording and full provider-byte checks
+on either side. Its disclosed transient memory-mapped-write blind spot remains;
+it is an instrument observation change, not a product-contract relaxation.
+
+One approved CPU cost run completed in 239.668 s, with serial workers exiting0
+and reaped. TRACED measured6.227652/6.380376 s, plus1s settle. Both verdicts are
+CPU_SUBTOTAL_ONLY_NOT_GO. Guard and metadata work account for about95% of the
+identity checks. No subtraction, performance credit, retry or native GO follows.
+Results B/fa512-recording-fences-cost-results-20261025/HANDOFF.txt
+SHA6584e738c866f901e2f0e973f8aaafb982ba96cb3f87cf08d2cf5836865522af;
+SEALcba068aa5dec919048f337515abaace44ea383c9df2bee8a55e553cb4feca6ee.
+
+Source account B/fa512-native-residual-account-20261025 identifies9 additional
+Guard calls through native authority:48 total versus39 in CPU subtotal. Applying
+observed Guard costs leaves only a projected1.911/1.747s for other native work;
+this is not a bound or sufficient schedule evidence. API/runtime/device checks,
+public calls/readback, process startup and recorder delay remain unpriced.
+
+B/fa512-fence-wire-integration-20261025 connects the accepted owner to retained
+worker/controller sequences using real pipes between two CPU threads. Both labels
+pass1 positive,11 protocol faults and native-entry refusal (3 methods):30calls,
+61sync,39worker/7controller frames,117full/15identity closings. Population ACK
+precedes first receipt; PRE ACK precedes READY; POST ACK precedes AFTER execution;
+EXIT closes exactly. Completion is only a sequencing marker. Process identity,
+recorder and operator are synthetic; actual native construction is not qualified.
+One faulty test assumption about sent AFTER versus accepted AFTER is retained.
+HANDOFFe39a0cda40b3a32aec8cfd554d8761660a6aaf6f4036483368eaf1e349528bf5;
+SEAL458155e326d79f5b026e9cab58d578664d0719de4178a4ad617a8bdaf62c5c18.
+
+All three units were sent together to the verified Claude triton-msl session,
+Opus5.5, with separate dispositions requested. The UI confirms delivery and a
+response in progress. No repeated approval question or device attempt made.
+Next: consume that review, then complete concrete native binding/construction,
+owned recorder/process lifecycle and schedule qualification. A new native run
+still requires the complete instrument review and its fresh bound authority.
+Do not reopen closed batching, density or fragment experiments or transfer private
+TriFast host costs to this public path. Backend parallelism is workload-specific;
+no optimal occupancy, kernel speedup or proven public-regression repair is claimed.
+
+B=/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start
+Historical checkpoints below are retained; their pending statuses are superseded.
+
 Triton 0.4.0 development checkpoint — October 22, 2026
 
 CURRENT: trace prerequisites, not a new timing attempt.
