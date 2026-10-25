@@ -1,3 +1,35 @@
+2026-10-25 — executable/authority evidence and exit retention, CPU only.
+qualification017 passes12 serial jobs,74 test methods per interpreter label;
+the labels share an interpreter binary and are not independent replications.
+The unchanged retained descendant verifier is source-hash checked, its two pure
+functions extracted, and every recorded child receipt is linked to the actual
+sample's root birth. Vanished/departed/zombie observations retain no executable
+credit. No native identity lookup is performed by this offline verifier.
+
+Managed child owners now retain the integer return code after close and reject a
+changed code on repeated close. Successful resource evidence requires zero for
+all14 roots, alongside retirements and empty post-cleanup census rows. The shared
+preflight producer/validator was updated too: missing/nonzero/bool return codes
+refuse. Old preflight snapshots have the old schema and remain historical only.
+
+Controller results now retain bracketed UTC/monotonic observations before work
+and after cleanup. authority_evidence.py replays the unchanged authority verifier
+at recorded times and checks externally supplied binding/review hashes, the
+240s entry window, clearance end, launch/authority deadlines and spent identity.
+One-microsecond rounding is widened conservatively. This is recorded-clock
+consistency at the trusted-writer boundary, not an independent trusted clock,
+trace clock conversion, authority issuance or permission to execute now.
+The positive controller test feeds the real controller-produced clock/launch/
+authority files to this check; transports remain CPU doubles.
+
+The final filesystem-bound composition still needs full inventory/preflight,
+protocol/numerical/population/resource/authority linkage and actual trace joins.
+The unchanged10s native schedule remains unproved. Native entry stays disabled;
+no review handoff or device/measurement attempt is claimed. Rebind and requalify
+the complete instrument after integration; earlier inventory08a149d2/full-wave
+and preflight results do not qualify the changed sources. All82 sealed ancestor
+source references remain byte-identical. N1/RG-02/CP-01/all59 remain OPEN/HOLD.
+
 2026-10-25 — cleanup/resource evidence continuation, CPU only.
 Added cleanup_evidence.py and eight adversarial test methods. The positive
 fixture executes the actual Monitor and Resources methods with synthetic child,
