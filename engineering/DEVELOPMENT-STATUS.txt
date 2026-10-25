@@ -1,3 +1,26 @@
+2026-10-25 — native construction CPU preparation sealed; Opus review requested.
+Opus combined review b6c8871282aa0c307d818d2a154948d05f20b36907560d13e9e6d4b56900b34a
+accepts the cost results at CPU_SUBTOTAL_ONLY_NOT_GO and the wire base at CPU scope.
+Its prospective-count wording R1 and five additional W1 wire controls are addressed
+in B/fa512-fenced-native-preparation-20261025. Actual NativeFactories, worker and
+controller construction now connect the owned fence adapter; native entry remains
+disabled. First receipt carries the population link and must receive FIRST_CALL_ACK
+before call two. The startup birth context is controller-observed in the prepared
+native path; tests supply a synthetic kernel reader, not native authentication.
+Fourteen jobs pass: 60 inherited tests per label, four composition methods with
+2 positive paths/21 faults, plus 88 snapshot pins and mutation controls. Counts:
+30 calls, 39 worker/9 controller frames, 117 full/15 identity closings. A failed
+preparation exposed the missing first-receipt ACK; sources and output are retained.
+A seal-script variable-shadowing failure is separately retained; final seal verifies.
+HANDOFF ec7b88a3afcc38ef06cacc39517435bdd2f28f60edd37a532f188f3e6df753fc
+SEAL 3fb45c5bb8f5287afa5409591808e8b206f3feb9b2fcd99f348658673059693b
+Sent to verified Claude triton-msl, Opus 5.5; UI confirms response in progress.
+No device, timing, lease, fresh authority or production change. All 59 remain HOLD.
+Next: consume construction review, then full instrument fixture/result requalification,
+fresh inventory/preflight, changed-population cost and native residual schedule.
+No timeout enlargement, spent-attempt retry or product performance claim follows.
+Historical checkpoints below are retained and superseded where marked pending.
+
 Triton 0.4.0 development checkpoint — October 25, 2026
 
 CURRENT: recording-fences CPU result complete; wire integration sent for review.
