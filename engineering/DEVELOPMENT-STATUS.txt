@@ -1,3 +1,40 @@
+2026-10-25 — complete CPU wave and guarded preflight passed (unsealed instrument).
+The current fa512-fenced-instrument-integration-20261025 passes90 serial jobs,
+346 unittest methods per label. Real CPU child ownership/cleanup, guarded native
+package construction, lazy dependency freeze, concrete first-framework refusal,
+protocol journaling and saved numerical/population evidence controls all pass.
+The two proof labels share the underlying interpreter; no independent replication.
+
+Fresh unreviewed inventory08a149d2 binds60,830 files/5,511,597,507 bytes. Device-free
+preparation-preflight001 passed in33.507s:2025 modules,299 caches,597 images,
+366 RSS samples,2,498,543,616-byte sampled peak; worker reaped/retired,empty errors,
+no device/public calls or lease acquisition. Frozen population is now persisted
+and hash-linked so later native results can be compared by names/paths, not counts.
+Both proof labels independently replay the checkpoint verifier byte-identically.
+All82 sealed predecessor source references remain unchanged.
+
+Result evidence now composes the39/9 raw message sequence with manifest membership,
+explicit preflight/worker population differences and re-evaluated input/output/
+canary bytes against both retained FA512 numerical references. Historical five-call
+bytes and synthetic30-call composition are test fixtures only. No native output,
+trace, release or performance credit transfers. Authority, cleanup, actual trace
+joins and the complete filesystem-bound result entry remain separate open gates.
+
+Retained failures: qualification007's incorrect factory.components assertion
+(correct adapter ownership is factory.origin/guard.hook.loaded), and sandboxed
+toolchain-discovery001's confstr warning. The test was corrected; read-only
+outside-sandbox discovery002 completed separately. No spent hardware or measurement
+attempt was retried. See FINDINGS.txt; all exact failed sources/output remain.
+
+Next: finish integrated authority/cleanup/trace result accounting and prove the
+unchanged10s native recording schedule with the changed validation path. The old
+CPU subtotal and this preflight are not native schedule GO. Keep native entry
+disabled; no new partial-review loop. Before any native attempt, complete the
+whole-instrument review and obtain its fresh bound preflight/authority. No cap or
+threshold change, no backend source change. N1/RG-02/CP-01/all59 remain open.
+
+Historical checkpoints below:
+
 2026-10-25: unsealed fa512-fenced-instrument-integration-20261025 progressed
 through qualification006 (20 passing CPU jobs). S1 inherited shadow/reference
 controls and P1/P2 real-body/predicate controls now pass. A new ABCMeta Initial-pin

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Opus native-construction CPU review 0f8132e5 accepted at scope. Unsealed fa512-fenced-instrument-integration-20261025 qualification006:20 passing CPU jobs; S1 inherited-method/module-reference checks, P1 actual entry-body doubles, P2 birth/recorder predicates. New Initial ABCMeta pin gap detected in qualification005 and repaired with failed source/output retained. Controller receipt/intent journal and raw protocol consistency slice tested. Full result acceptance, inventory/preflight, whole-instrument qualification and native schedule remain open. Native entry disabled; no new device, measurement, authority or production optimization. N1/RG-02/CP-01/all59 remain open.",
+  "active_investigation": "2026-10-25: fa512-fenced-instrument-integration-20261025 full CPU wave90 jobs/346 methods per label and device-free preflight33.507s pass. Fresh inventory08a149d2,2025 modules/299 caches/597 images persisted;2.327GiB sampled peak,worker cleanup complete. Protocol/population/numerical consistency composed; historical and synthetic fixtures only. Full authority/cleanup/trace result integration and unchanged10s native schedule remain open. Native entry disabled, no new device/measurement/authority or backend optimization. Parent82 sources unchanged;N1/RG-02/CP-01/all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",
