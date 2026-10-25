@@ -1,3 +1,25 @@
+2026-10-25 — sizing results accepted; firmware projection design prepared.
+Opus6d6fc05e independently recounted1/65979rows and1398/22693656bytes with a
+different system Python and parser. All three questions yes; source trace and
+instrument unchanged. Authorization.txt is a post-run report of the earlier
+user approval, correctly not presented as a contemporaneous independent receipt.
+Owned-group cleanup is not a census of helpers in other sessions.
+
+New fa512-firmware-projection-design-20261025 fixes minimum semantic projection
+before any actual values: discard desktop/AMD by class/subclass before args;
+AGX time/code/arg1 only, arg3/arg4 only for0x2a/2b/2c; no thread/core/state/
+function/callstack. Arg1 meaning depends on code, not a universal workload ID.
+Time-info scope is epoch/timebase only. Pinned installed schema/knowledge rules
+support the map. Typed synthetic model passes8 poison-access probes per excluded
+family,8 AGX positives and16 invalid refusals per label; same binary consistency.
+
+Design explicitly does not implement/qualify XML encoding or reference handling.
+It requires selective passes, reference provenance, bounds and refusal on unknown
+radix before a real-value entrypoint. No clock conversion,join,coverage or
+performance result. Handoffd0b6b330; seal2b3697e8. Sent to Opus5.5 only in
+triton-msl for design review; delivery confirmed. No export,ps,device,recording,
+lease or real-value access this unit. Native entry off; all59 OPEN/HOLD.
+
 2026-10-25 — reviewed rev4 offline sizing completed once with user approval.
 Opus reviewb214880b closed C2 with no open findings. Blake answered yes to the
 exact binding567fc93d invocation and per-attempt ps escalation. Native -I -B

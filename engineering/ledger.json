@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Opusb214880b cleared sizing rev4; Blake approved exact one-shot ps escalation. Completed in6.708s:time-info1row/1398B,raw table65979rows/22693656B, both children exit0/reaped, original trace unchanged. Attempt spent/no retry. Structure recounts identical both labels; sealed results063be4da sent to Opus triton-msl. No values decoded or clock/join/performance credit; next narrow parser design after review; no new recording/GPU/product change; all59 HOLD.",
+  "active_investigation": "2026-10-25: Opus6d6fc05e accepted sizing with independent recount. Firmware projection design sealed2b3697e8: discard-first AGX minimum fields, no universal arg1 identity, typed model8 controls/excluded family+8 positives+16 refusals per label. XML parser/reference/encoding protections remain implementation requirements, no actual values read. Sent design to Opus triton-msl. No export/ps/GPU/product change; all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",
