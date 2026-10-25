@@ -1,3 +1,11 @@
+2026-10-25: unsealed fa512-fenced-instrument-integration-20261025 progressed
+through qualification006 (20 passing CPU jobs). S1 inherited shadow/reference
+controls and P1/P2 real-body/predicate controls now pass. A new ABCMeta Initial-pin
+gap was detected in qualification005 and repaired; exact failed sources retained.
+Controller observation journal plus read-only raw protocol slice now tested; no
+final native result acceptance or schedule GO. See WORK-IN-PROGRESS.txt and
+CHECKPOINT.json for hashes/counts. Native entry remains disabled, all59 HOLD.
+
 2026-10-25 — native construction CPU preparation sealed; Opus review requested.
 Opus combined review b6c8871282aa0c307d818d2a154948d05f20b36907560d13e9e6d4b56900b34a
 accepts the cost results at CPU_SUBTOTAL_ONLY_NOT_GO and the wire base at CPU scope.
