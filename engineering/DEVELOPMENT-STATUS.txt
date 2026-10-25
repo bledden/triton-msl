@@ -1,3 +1,39 @@
+2026-10-25 — Opus coverage review addressed: reverse accounting completed.
+Review2f70bc2b accepted the source/lifetime audit and identified a missing reverse
+witness in the existing data. A new, separate CPU lane implements it without
+changing the prior packet or integration sources:
+  fa512-reverse-trace-audit-20261025/HANDOFF.txt 918ad5168fc04e849647b2991f7a3ca7f99195e6a1ab31611d443f6c9936e91a
+  HASHES.json 9e360cdaaebbf161328b3698dc5e3a2e4e916254bc436d0961da123e3cf3f6a8
+
+Existing5248 submission rows form1381 command/commit occurrences and2624 encoder
+groups. Every group has at least one of5239 validated modeled segments. Nine IDs
+have no point rows, but grouping avoids falsely counting speculative ID+1 rows
+as extra expected workloads. Of1727 completions,346 have no submission occurrence;
+each has a unique frame and positive ordered raw commit span. Their cause remains
+unknown; neither empty commands nor event loss is established. No nonzero loss
+lower bound, clock qualification, whole-trace coverage or regression cause.
+
+qualification002 passes4 serial jobs with13 tests/label and byte-identical real
+aggregate outputs; removing the new diagnostic leaves every qualification024
+aggregate unchanged. Both labels share one Python binary. qualification001 stays
+as a passing intermediate. verify.py also passes under both labels. The whole-pair
+removal control exposes one missing submission/completion that forward-only
+checks miss; plus-one/collision/reuse/partial-point/invalid-data controls pass.
+All152 prior audit pins and82 ancestor refs unchanged. No new bytecode.
+
+P1/W1 corrections are in a sidecar: static knowledge sets the timestamp flag;
+absence of observed worker-PID GPU rows does not prove no GPU use. Originals stay
+unchanged. Intermediate review sent to Opus5.5 in triton-msl, delivery confirmed.
+No message was sent to another session; the app Window menu selected the verified
+triton-msl chat before pasting. No source change is awaiting merge into production.
+
+Next: review A0 and prepare the separately reviewed CPU-only time-info/raw-event
+sizing unit from the retained recording. The raw kdebug table's selection includes
+other event families, so constrain projection before reading values. No new
+recording/export was performed. Coverage/lifetime/clock/settings and native10s
+schedule remain unresolved; native entry disabled; no new authority/lease/device
+work or speedup. N1/RG-02/CP-01/all59 OPEN/HOLD; math leads remain queued.
+
 2026-10-25 — trace source/lifetime audit, CPU only; intermediate Opus review sent.
 Installed AGX rules emit both execution points from one modeled workload and
 can reconstruct or omit workloads. Balanced points plus matching derived rows

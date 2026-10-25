@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: FA512 source audit establishes that modeled AGX begin/end pairs and matching interval views cannot prove upstream coverage; no claim of actual event loss or a regression cause. Aggregate PID/UID diagnostics composed into result verifier, qualification024 passes16jobs/62methods per label. Retained TOC has time-info recovery lead; no new export. Opus5.5 review sent to triton-msl. Native10s schedule, coverage/lifetimes/settings and full qualification/review remain open; native entry disabled. No GPU, authority, lease, product change or performance credit; all59 HOLD; six research leads queued.",
+  "active_investigation": "2026-10-25: Opus coverage review2f70bc2b addressed in separate reverse-trace-audit lane. All1381 submitted command occurrences/2624 encoder groups have modeled execution;346 of1727 completions lack submissions, all with ordered positive raw spans, cause unknown. Four CPU jobs/13tests per label PASS; old aggregates unchanged; no loss/coverage/performance claim. A0 result sent to Opus triton-msl; next separately reviewed clock/raw-event sizing from retained trace. No new export/recording/authority/lease/product change; native entry disabled; coverage/clock/lifetime/settings/schedule gates and all59 remain OPEN/HOLD.",
   "obligations": [
     {
       "id": "correctness",
