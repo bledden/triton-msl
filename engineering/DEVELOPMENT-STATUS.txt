@@ -1,3 +1,49 @@
+2026-10-25 — filesystem result composition and real-export marker checks, CPU only.
+The result verifier now takes an externally pinned result index, binding hash and
+review hash and checks the entire result population (including empty directories),
+external authority/preflight/catalog files, current inventory bytes and source
+membership, recorded authority times, spent record, worker argv and launch,
+39/9 protocol frames, persisted population and PRE/POST fences, all30 numerical
+records/blobs, raw lifecycle/RSS/descendant receipts and all14 child exits.
+The sequence summary is compared with the actual raw calls and six lifetime
+observations; it cannot substitute for them. Result and input hashes are checked
+again after reduction. Nothing is repaired on refusal.
+
+The same verifier ties the recorder and12 exports to the owned children, exact
+argv, TOC-selected tables and original trace contents. It decodes the nine GPU
+join tables with the existing minimum-field projection and emits aggregates only.
+marker_evidence.py reuses pinned reference/type guards, ties six exported marker
+events and12 argument rows to calls25..27/call numbers4..6, nonce, process, thread,
+IDs and order, and refuses observed condition induction/forced consistent state.
+Numeric settings are observations; no loss/coverage or effective-settings proof.
+No worker/trace clock is fitted and no historical output or trace earns new credit.
+
+qualification023 passes30 serial jobs,175 test methods per interpreter label.
+Both labels share one interpreter binary. The whole filesystem positive and a
+cold CLI process run the actual validators with CPU authority/process doubles;
+a second composition decodes all27,351 retained real table rows and adapted real
+marker XML. Both MUST remain RECORDED_RUN_CONSISTENT_TRACE_UNRESOLVED with zero
+observability/performance/release/execution credit. Resealed mutations test nonce,
+birth, child/argv, sequence, trace, numerical population and failure cross-links.
+This wave covers the changed result composition and relevant dependencies, not
+the complete native instrument. replay_cpu.py now includes all four new suites.
+
+Retained failures: qualification018 missed rebasing the synthetic completion
+marker's controller_start_ns; qualification021's deletion control hit a dangling
+XML reference before the intended population check. The latter now materializes
+references before deleting each event, so the intended missing-event check is
+exercised. Both exact failed sources/logs remain. qualification019/020/022 remain
+passing intermediate records. All82 sealed ancestor references still match.
+
+Remaining: actual trace units/process lifetimes/loss coverage and call/command/GPU
+containment, effective runtime-settings interpretation, native10s schedule with
+all kept checks costed, then fresh inventory/full qualification/preflight and the
+complete independent instrument review. Current native entry remains disabled.
+No GPU, xctrace, native benchmark, new authority or project lease action occurred.
+The old inventory/full wave/preflight remain historical, not current qualification.
+No product runtime change or speedup; N1/RG-02/CP-01/all59 remain OPEN/HOLD. The six
+research leads stay queued behind this regression-cause work.
+
 2026-10-25 — executable/authority evidence and exit retention, CPU only.
 qualification017 passes12 serial jobs,74 test methods per interpreter label;
 the labels share an interpreter binary and are not independent replications.

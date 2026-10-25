@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: FA512 unsealed integration retains child exit codes and controller UTC/monotonic brackets; descendant receipts tied to sample birth; historical authority/launch/spent linkage tested on actual controller CPU records. qualification017 passes12 jobs/74 methods per label; qualification015 clock-double failure retained. Old wave/inventory/preflight remain historical and do not qualify changed source/schema. Full filesystem-bound result and trace composition, unchanged10s native schedule, rebind/full qualification/review remain open. Native entry disabled; no new device/measurement/authority or performance claim. Six math leads stay queued; all59 HOLD.",
+  "active_investigation": "2026-10-25: FA512 whole-filesystem result verifier composes authority, full inventory/preflight,39/9 protocol,30 numerical calls, population/fences,14-child resource/exit records and12 trace exports; marker IDs/payloads tied to traced calls. qualification023 passes30jobs/175methods per label, including cold CLI and27,351 retained real rows. qualification018/021 fixture failures retained. Trace units/lifetimes/loss/containment/settings, native10s schedule and full rebinding/qualification/review remain open. Native entry disabled; no new GPU, authority, lease, product change or performance claim. All59 HOLD; six research leads queued.",
   "obligations": [
     {
       "id": "correctness",
