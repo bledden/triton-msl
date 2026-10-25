@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: reverse-audit rev2 addresses review57541eb6:9 higher IDs unobserved now explicit partial classes; all346 completion-only PIDs have other submissions and ordinal0,345 commits inside observed spans/1 after, cause unknown.17tests per label plus identical retained reductions pass, predecessors unchanged. Prepared unexecuted two-table clock/raw-event sizing with23 synthetic refusals/label and explicit byte/row/time caps; both packets sent to Opus triton-msl. No export/recording/ps/GPU/authority/lease/product change; native entry disabled; all59 HOLD.",
+  "active_investigation": "2026-10-25: Opus45738972 accepted reverse rev2/sizing. Z1/Z2 sealed in sizing-rev2 (a46ce4ae): fixed refusal/partial counts and exact argv controls,23 inherited refusals+9 tests/label. Optional driver split:346 completion-only occurrences,one PID,all command IDs have device mapping; no commit-specific submission proof. Parent aggregates unchanged. Sent to Opus triton-msl for focused review. No sizing attempt or per-attempt ps approval; no export/GPU/timing/product change; all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",

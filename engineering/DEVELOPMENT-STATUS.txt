@@ -1,3 +1,29 @@
+2026-10-25 — sizing Z1/Z2 complete; optional driver split narrows the residual.
+Opus review45738972 accepted reverse rev2 and the bounded sizing design. It
+strengthens the345-in-span comparison: both input times use host kdebug clock.
+That does not qualify firmware clock conversion or establish whole coverage.
+
+New sealed fa512-clock-raw-event-sizing-rev2-20261025 retains fixed refusal
+reasons, observed output size and partial parse progress. Unknown rows before
+counting remain null. Exact argv/quoted @codes selector is tested, but actual
+xctrace acceptance is unproved. Runtime changes only run.py/count_xml.py; caps,
+selection, verifier and inherited Owned cleanup unchanged. Handoffc0534185,
+manifest a46ce4ae. Qualification002 passes23 inherited refusals and9 new test
+methods per label; passing qualification001 retained. No attempt folder exists.
+
+Optional fa512-completion-driver-crosscheck-20261025 reports all346 completion-
+only occurrences share one valid framePID; each commandID has one positive
+command/device mapping row. Mapping lacks commit ordinal, so this cannot prove
+submission of these specific occurrences or identify their absence's cause.
+Handoff74538892, seal2d893313. Two tests per label plus saved-data reductions pass;
+all parent aggregates unchanged. Both labels share one binary, not replication.
+
+Both packet verifiers pass under both labels. Focused intermediate handoff sent
+to Opus5.5 only in triton-msl, delivery confirmed. Separate per-attempt ps
+approval remains required before the reviewed offline sizing invocation. No new
+export, recording, device, ps, timing, lease or production change. Native entry
+remains disabled. N1/RG-02/CP-01 and all59 obligations remain OPEN/HOLD.
+
 2026-10-25 — reverse audit R1/R2 closed in CPU successor; sizing prepared.
 Review57541eb6 corrected the earlier ID+1 interpretation. New immutable lane:
 fa512-reverse-trace-audit-rev2-20261025 (handoff7351b6a3, sealcab8ca8a).
