@@ -1,3 +1,26 @@
+2026-10-25 — reviewed rev4 offline sizing completed once with user approval.
+Opus reviewb214880b closed C2 with no open findings. Blake answered yes to the
+exact binding567fc93d invocation and per-attempt ps escalation. Native -I -B
+runner exited0 in6.708455667s; attempt001 is spent, no retry. No recording/GPU.
+ time-info:1398 bytes/1 row;2.403252250s export.
+ agx-kdebug selected table:22693656 bytes/65979 rows;3.428626875s export.
+Both under32MiB/100000rows/20s; overall under240s. Both children exited0 and
+were reaped. Final owned-group census had only zombies before reaping; no live
+members. No extra post-run census. The first-use @codes predicate succeeded.
+
+All9 result files retained locally. Source trace population and bound bytes
+verify unchanged. Structure-only analysis under both labels passes with identical
+output; same binary, not independent replication. No event values decoded.
+Results analysis fa512-clock-raw-event-sizing-rev4-results-analysis-20261025:
+handoff7cdb1b38; seal063be4da; analysis49c3101c. Review sent to Opus5.5 only in
+triton-msl, delivery confirmed. Raw XML/tool logs remain local and unreported.
+
+No clock conversion, joins, lifetime, completeness or performance credit. Next
+is results review and a narrow CPU projection design for already permitted
+firmware fields, excluding desktop/AMD arguments before conversion. No semantic
+parser or follow-on value access inferred from sizing approval. Earlier three
+versions superseded/unspent; native entry disabled; all59 remain OPEN/HOLD.
+
 2026-10-25 — C2 fixed with phase capture, not exception-chain inference.
 Opus review4a2eae78 found rev3 loses an export refusal when real Owned.close
 wraps ProcessLookupError, and mislabels suppressed parser context as replaced.
