@@ -1,3 +1,23 @@
+2026-10-25 — C2 fixed with phase capture, not exception-chain inference.
+Opus review4a2eae78 found rev3 loses an export refusal when real Owned.close
+wraps ProcessLookupError, and mislabels suppressed parser context as replaced.
+Separate fa512-clock-raw-event-sizing-rev4-20261025 captures export_failure
+before cleanup, initial_cleanup_failure at its boundary, and retains propagated
+and final-cleanup failures. No exception-chain traversal or replaced_failure.
+Only run.py runtime changes; Owned, counter, selector, limits and gates unchanged.
+Handoff8b4f5281; manifest567fc93d. Earlier three versions superseded/unspent.
+
+Qualification001 passes4 serial jobs:23 inherited refusals and15 amendment test
+methods per label. New tests execute actual unchanged Owned.close with OS doubles
+for both ProcessLookupError branches, plus suppressed cleanup and actual malformed
+XML. Rev3 red controls reproduce both C2 defects. No real ps/process/export.
+Both labels share one binary. Parent/successor seals pass under both labels.
+
+Focused delta sent to Opus5.5 only in triton-msl; responding. All four attempt
+folders absent. No invocation, ps, timing, recording, GPU, lease or product change.
+Separate per-attempt ps approval still required for a reviewed rev4 invocation.
+Optional timestamp split stays deferred. N1/RG-02/CP-01 and59 remain OPEN/HOLD.
+
 2026-10-25 — Opus sizing review accepted; C1 cleanup diagnostic successor sealed.
 Review0b89d5aa accepts Z1/Z2 and the driver crosscheck. It identifies C1: cleanup
 can replace an export refusal and omit child accounting. New separate packet
