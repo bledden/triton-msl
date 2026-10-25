@@ -1,3 +1,66 @@
+2026-10-25 — cleanup/resource evidence continuation, CPU only.
+Added cleanup_evidence.py and eight adversarial test methods. The positive
+fixture executes the actual Monitor and Resources methods with synthetic child,
+census, kernel and clock providers: no real process query, child, timing or GPU.
+Raw retirement/census, worker birth, lifecycle, clocks and RSS totals must agree
+with the complete-capture summary. Truncated logs, survivors, changed births,
+wrong counts/peaks and stopped results refuse. Six serial qualification013 jobs
+pass, 34 methods per label including retained resource/monitor controls.
+Executable receipt validation, process exit-code evidence, authority and trace
+joins are explicitly not claimed; the final filesystem-bound composition remains
+unfinished. No new native execution or performance credit.
+
+The two new source files are NOT in provider-inventory001 or cpu-qualification001.
+Those earlier passes remain historical snapshots, not qualification of this
+expanded instrument. Rebinding and the complete qualification/review are still
+required; native entry stays disabled. Previous frozen lanes are untouched.
+Next: compose executable/authority/trace checks with the existing protocol,
+population, numerical and cleanup checks, then settle native schedule feasibility.
+
+2026-10-25 — mathematics research leads added at Blake's request.
+Execution order is unchanged: complete the current FA512 instrument/result and
+schedule work below. Explore these leads when their corresponding measured
+bottleneck or workload is reached; they are not six new implementation campaigns.
+No theorem, manuscript count or formalization grants a backend speedup, numerical
+equivalence, release credit, relaxed contract or permission to reopen a spent run.
+The screen covered all372 family titles and selected summaries/formalization
+scopes, not all719 manuscripts or independent proof verification.
+
+Research queue (official source prefix: https://github.com/openai/math/blob/main/):
+1. Matrix multiplication, lean/docs/107.md: strongest direct arithmetic lead,
+   including rectangular products in attention. Before a prototype, extract a
+   finite algorithm for an actual target shape and price additions, temporaries,
+   memory traffic and synchronization against existing Metal matrix operations.
+   Require FP16/FP32 error analysis and a plausible crossover, not just an exponent.
+2. Online placement, lean/docs/110.md: investigate only if measured residency,
+   reload or movement cost dominates a runtime workload. Establish that resource
+   sizes/costs and requests fit the k-server model; include policy overhead and
+   compare simpler policies. No stale validation reuse or lifetime relaxation.
+3. Algebraic rewrite validation, lean/docs/116.md: potential optimization enabler
+   when a concrete matrix-expression rewrite is proposed. Compare finite exact
+   identity-testing cost with existing proofs. Exact algebra does not certify
+   floating-point order, masks, addresses, synchronization or exceptional values.
+4. Intermediate-sum bounds, lean/docs/097.md: exploratory reduced-precision or
+   reduction-order idea only when dynamic range is a demonstrated constraint.
+   The result is existential, not an online algorithm; unsigned reordering needs
+   a zero-sum family. Prove applicable assumptions and a constructive affordable
+   schedule before changing any accumulation or claiming numerical safety.
+5. Matrix-function approximation, lean/docs/325.md: deferred until a real workload
+   computes a matrix function. Compare polynomial degree, evaluation cost and
+   error bounds. Elementwise softmax exponentials do not qualify by analogy.
+6. Dimension reduction, lean/docs/094.md: deferred approximate-workload research.
+   Distance preservation is not attention-output preservation. Needs separate
+   user acceptance of an approximation contract and end-to-end error/cost proof;
+   no transparent replacement of existing exact-contract kernels is authorized.
+
+For each eligible lead: state the measured cost it could remove, applicable
+theorem assumptions, constructible mechanism, finite cost/error model and a cheap
+falsifier. Retain rejected/inapplicable findings. A positive model permits a
+scoped proposal, not an assumed win. Existing workload-specific gain requirements
+and strict non-regression elsewhere remain in force. FFT/scheduling and quantum
+tensor results have no demonstrated current mapping; do not inflate this queue
+with keyword similarities. Review selection at natural workload transitions.
+
 2026-10-25 — complete CPU wave and guarded preflight passed (unsealed instrument).
 The current fa512-fenced-instrument-integration-20261025 passes90 serial jobs,
 346 unittest methods per label. Real CPU child ownership/cleanup, guarded native

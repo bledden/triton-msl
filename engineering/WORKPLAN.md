@@ -4,6 +4,8 @@
 
 The active plan is now `DEVELOPMENT-STATUS.txt`. The text below is retained
 historical context, not current execution authority or a request to retry.
+The October25 research queue there retains six mathematics leads for exploration
+at relevant workload transitions; it does not displace the active FA512 work.
 The separate `dev/0.4.0` branch preserves the frozen source baseline; later
 experimental roots have not been merged. Density rev4 failed its RISK gate
 and is closed, with GAIN blocked. No release obligation has been waived.
