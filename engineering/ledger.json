@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Opus coverage review2f70bc2b addressed in separate reverse-trace-audit lane. All1381 submitted command occurrences/2624 encoder groups have modeled execution;346 of1727 completions lack submissions, all with ordered positive raw spans, cause unknown. Four CPU jobs/13tests per label PASS; old aggregates unchanged; no loss/coverage/performance claim. A0 result sent to Opus triton-msl; next separately reviewed clock/raw-event sizing from retained trace. No new export/recording/authority/lease/product change; native entry disabled; coverage/clock/lifetime/settings/schedule gates and all59 remain OPEN/HOLD.",
+  "active_investigation": "2026-10-25: reverse-audit rev2 addresses review57541eb6:9 higher IDs unobserved now explicit partial classes; all346 completion-only PIDs have other submissions and ordinal0,345 commits inside observed spans/1 after, cause unknown.17tests per label plus identical retained reductions pass, predecessors unchanged. Prepared unexecuted two-table clock/raw-event sizing with23 synthetic refusals/label and explicit byte/row/time caps; both packets sent to Opus triton-msl. No export/recording/ps/GPU/authority/lease/product change; native entry disabled; all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",

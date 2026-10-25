@@ -1,3 +1,35 @@
+2026-10-25 — reverse audit R1/R2 closed in CPU successor; sizing prepared.
+Review57541eb6 corrected the earlier ID+1 interpretation. New immutable lane:
+fa512-reverse-trace-audit-rev2-20261025 (handoff7351b6a3, sealcab8ca8a).
+Every group has exactly2 IDs;2615 groups have both observed and9 lack the higher
+ID's segment. The9 groups and their9 command occurrences now have explicit
+partial-ID classes, not an all-observed label. Tests remove either numeric member
+and reproduce the parent's overbroad label before checking the successor.
+
+All346 completions without submissions have frame PIDs with other submissions
+and commit ordinal0.345 commits are inside both global and same-PID submission
+spans;1 is after both. Raw clock/lifetime premises remain unqualified; no lost
+workload, empty-command, coverage or regression-cause inference.17 tests per label
+and both real-export reductions pass; all original forward aggregates unchanged.
+The two labels use one binary. All40 parent pins and152 source-audit pins unchanged.
+
+Next packet prepared in the same work unit:
+fa512-clock-raw-event-sizing-20261025 (plan12b55c67, manifest22d0f861).
+Exact retained time-info#52 and codes-matched kdebug#18 only; no cell-value parser.
+32MiB/100000row per-table caps,20s/export, inherited240s overall and cleanup.
+23 synthetic refusals per label pass; both packet verifiers pass. No attempt
+folder exists. Diffs against the reviewed sizing predecessor are retained.
+No native instrumentation or process cleanup behavior redesigned. Row cap applies
+during post-export count; size polling/final-check overshoot explicitly disclosed.
+Future code must discard desktop/AMD rows before any argument conversion. No such
+semantic projection is implemented or authorized by this sizing proposal.
+
+Both packets sent together to Opus5.5 only in triton-msl; delivery confirmed.
+No export, recording, timing, ps, device, authority or lease action occurred.
+Native entry remains disabled. N1/RG-02/CP-01 and all59 stay OPEN/HOLD. Next is
+independent review, then separately authorized bounded CPU export of the existing
+trace; no new recording or performance claim. Product source digest unchanged.
+
 2026-10-25 — Opus coverage review addressed: reverse accounting completed.
 Review2f70bc2b accepted the source/lifetime audit and identified a missing reverse
 witness in the existing data. A new, separate CPU lane implements it without
