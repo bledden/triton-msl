@@ -1,3 +1,27 @@
+2026-10-25 — identity parser accepted; one-shot runner sealed for review.
+Opus d696332f accepts parser preparation, requesting R1-R3 in the concrete runner.
+New fa512-timestamp-identity-runner-20261025 keeps all six parser/model/control
+copies and the reviewed monitor/sample gate bytes unchanged. R1 binds reducer
+SHA and explicit identity mode, validates a closed aggregate schema and checks
+unchanged old aggregates. R2 captures the exact accepted pair path unchanged,
+requires source counts2615/2615/9, reports E1(a) PASS/CONTRADICTION without silently
+deduplicating. R3 binds860 input files/402112270 bytes; one native-label worker,
+180s worker/240s controller,4GiB sampled RSS,at least1sample. Earlier443MiB was
+raw-only; combined peak/runtime remain unmeasured. No real semantic read ran.
+
+New modeled_adapter and result_check are tested on synthetic rows and doubles.
+Guard adds exec/spawn denials; description acknowledges stdlib C imports and no
+security isolation. Controller ownership record disclaims human approval proof.
+Fresh decision must be recorded before invocation; per-attempt ps escalation
+still required. Fresh result folder absent, no retry and no approval inherited.
+
+Qualification001: ten serial jobs pass,57 tests per label. audit001: two passes
+with identical output. Both labels share one binary:consistency only. Seal7c07d01d
+(64 members,860 inputs),handoff d7d12332 sent and visibly received in Opus5.5
+triton-msl. Review pending. Next: resolve review findings,then ask exact execution
+decision before invoking this new read. No GPU/export/recording/lease/runtime
+changes or performance credit;N1/RG-02/CP-01 and all59 remain OPEN/HOLD.
+
 2026-10-25 — timestamp identity D1 fixed; concrete parser prepared for review.
 Opus65ed5c5d accepts design direction with D1 boundary repair and E1 expectations.
 New fa512-timestamp-identity-parser-20261025 corrects low32 all-ones:0xFFFFFFFF
