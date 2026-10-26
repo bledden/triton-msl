@@ -1,3 +1,26 @@
+2026-10-25 — timestamp identity D1 fixed; concrete parser prepared for review.
+Opus65ed5c5d accepts design direction with D1 boundary repair and E1 expectations.
+New fa512-timestamp-identity-parser-20261025 corrects low32 all-ones:0xFFFFFFFF
+is comparable under retained pairing; only zero is non-comparable. Actual pairing
+and old-model red controls prove the defect and repair. Parent remains immutable.
+
+Explicit identity mode adds arg1 only for classified AGX timestamp rows42/43/44.
+It keeps raw tuples in memory and returns aggregate membership accounting; default
+aggregate-only mode preserved. Trusted reducer callback must be hash-bound by the
+concrete worker, which must require identity mode and its output field. No real
+firmware IDs/XML were read and no runner is included or approved yet.
+E1 fixed in PLAN: modeled multiplicity expectation, conditional duplicate-fact
+mechanism, retained raw-only/model-only/collision/zero-ID evidence. Exact duplicate
+and raw-only excess counters overlap; do not sum as disjoint causal explanations.
+
+Qualification001: six serial jobs pass;21 unchanged inherited parser tests,12 model
+tests,11 new identity tests per label,44 total. Shared binary, consistency only.
+Seal75b50b78 (31 members,11 inputs), handoff22d90162 sent and visibly received in
+Opus5.5 triton-msl. Review in progress. Next: incorporate findings and prepare
+bounded runner, then obtain exact new semantic-read decision before invocation.
+No real-value read, child/ps/export/recording/GPU/lease/runtime change or performance
+claim. N1/RG-02/CP-01 and all59 obligations remain OPEN/HOLD.
+
 2026-10-25 — channel review accepted; timestamp identity design sent to Opus.
 Delivery of the prior packet is now confirmed by Opus review44f2b943: Q1-Q3 yes,
 no blocker. It accepts the qualifier0 uniqueness correction. B1 requests deriving

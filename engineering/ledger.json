@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Channel census accepted Opus44f2b943 (3/3/0 count differences, no loss claim). Timestamp identity design/model9391a570 sent and visibly received in Opus triton-msl. B1 derives code/source;12 synthetic tests/label pass. Retained histogram has zero9 installed start/end/dequeue codes; no model-completeness inference. Proposes timestamp-only arg1 membership accounting, no real IDs read. Await design review before concrete parser/runner and separate semantic-read decision. No GPU/export/ps/runtime change;all59 HOLD.",
+  "active_investigation": "2026-10-25: Opus65ed5c5d design accepted with D1; parser successor75b50b78 fixes all-ones boundary and predeclares E1. Six serial synthetic jobs pass:44 tests/label. Identity mode adds timestamp arg1 only; default projection preserved. Actual pairing/old-model red test included. Sent and visibly received in Opus triton-msl, review pending. No real firmware IDs read; bounded runner/new decision remain necessary. No GPU/export/ps/runtime changes;all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",
