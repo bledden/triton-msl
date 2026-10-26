@@ -1,3 +1,20 @@
+2026-10-25 — accepted firmware results; modeled-channel census ready for review.
+Opus3052fc75 accepts the completed aggregate-only read. Existing authorized
+modeled projection now splits5239 exact parent pairs: Vertex2615, Fragment2615,
+Compute9. Accepted raw timestamp aggregates are2618/2618/9, hence signed count
+differences3/3/0. No new firmware semantic read, fields, export, recording, ps,
+GPU or lease. Counts are not matched identities or proof of event loss; Compute
+count equality does not prove coverage. Qualifier0 does not prove unique kicks.
+
+New evidence fa512-modeled-channel-census-20261025: handoff be339bbc, seal47176f80.
+Four serial qualification jobs pass; six synthetic methods per label; both labels
+share a binary. Original parent aggregates exactly unchanged; both seals pass.
+Review request was drafted in verified triton-msl Opus5.5, but Claude window
+changed at Send and delivery could not be verified. UI input paused to avoid
+other sessions. Review pending; do not duplicate-send without checking that chat.
+Next: verify delivery/review, then narrowly design identity accounting if needed.
+No production changes or performance claim. All59 obligations remain OPEN/HOLD.
+
 2026-10-25 — first firmware projection completed once under explicit approval.
 Opus e8c6a51d accepted the proposal. Scope clarifications separately disclose
 limited audit coverage, single-threaded execution (no two-core quota), and the

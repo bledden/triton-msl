@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: User-approved firmware read completed once under 8d176753/e8c6a51d: 3.15 s, 29 samples, ~442 MiB sampled peak, child exit0/reaped. All65979 rows AGX;5245 timestamp rows, none pre-epoch or end<=start. No clock conversion or ID join; raw/model totals cannot establish loss. Results sealed1ddac6f4 sent to Opus triton-msl; aggregate-only replays agree; attempt spent/no retry. No export/GPU/product change; all59 HOLD.",
+  "active_investigation": "2026-10-25: Firmware results accepted by Opus3052fc75. Existing modeled-channel census gives Vertex2615/Fragment2615/Compute9 versus raw2618/2618/9: signed differences3/3/0, not matched IDs or loss. Four serial qualification jobs pass, parent aggregates unchanged. Packet47176f80 ready for Opus; delivery unverified after Claude window contention, review pending. No new fields/firmware read/export/ps/GPU/product change. All59 HOLD.",
   "obligations": [
     {
       "id": "correctness",
