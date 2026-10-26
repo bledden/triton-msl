@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Timestamp identity rev2 completed once under Blake approval and per-attempt escalation. Controller 4.913s, worker 4.307s, 43 samples, peak467615744B, exit0/reaped. Six distinct raw-only source/low32 keys (3 Vertex,3 Fragment), zero duplicates/repeats/collisions/zero IDs/modeled-only excess; E1 PASS. Candidate membership only; no loss/cause/performance credit. Results analysis seal e1047ca8, handoff7776a02e; both label offline analyses and verifiers pass (same binary). Review delivery blocked by automatic approval review; draft removed, not sent. Need explicit sharing confirmation for this results packet to Opus in triton-msl. Attempt spent,no retry;all59 HOLD.",
+  "active_investigation": "2026-10-25: Opus results review fccaf02a accepted; locally verified exact review and prior packet hashes, no resend needed. Source-only follow-up sealed9811bf69 (line correction in adjacent LINE-CORRECTION.txt): explicit time-info/input/output bindings found, no submission lookup in timestamp-to-point path. Six synthetic witnesses match all accepted identity aggregate fields with different submission membership and tick-edge order; 3runs pass(system+two same-binary labels). Submission absence/trace-edge cause remain unproved. Draft next discrimination design prepared, no new real read or external message. Need concrete reviewed read plan and fresh decision before execution. N1/RG-02/CP-01 and59 obligations HOLD.",
   "obligations": [
     {
       "id": "correctness",
