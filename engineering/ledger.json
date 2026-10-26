@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Opus 695413bd addressed in narrowed parser/first-read proposal (8d176753). Event-time/arg1 omitted; equality/timebase comparison added. Exact inputs, one worker, inherited 4 GiB sampled monitor, 180/240 s caps and contemporaneous authorization record. 21 parser + 7 runner tests per label pass; no actual values decoded. Sent to Opus triton-msl; attempt absent, separate ps approval required. No export/GPU/product change; all 59 HOLD.",
+  "active_investigation": "2026-10-25: User-approved firmware read completed once under 8d176753/e8c6a51d: 3.15 s, 29 samples, ~442 MiB sampled peak, child exit0/reaped. All65979 rows AGX;5245 timestamp rows, none pre-epoch or end<=start. No clock conversion or ID join; raw/model totals cannot establish loss. Results sealed1ddac6f4 sent to Opus triton-msl; aggregate-only replays agree; attempt spent/no retry. No export/GPU/product change; all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",

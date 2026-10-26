@@ -1,3 +1,31 @@
+2026-10-25 — first firmware projection completed once under explicit approval.
+Opus e8c6a51d accepted the proposal. Scope clarifications separately disclose
+limited audit coverage, single-threaded execution (no two-core quota), and the
+controller-generated sequencing record. Reviewed runtime bytes were unchanged.
+Blake answered yes to seal 8d176753 / review e8c6a51d and ps escalation. A separate
+consent record was saved before launch, followed by controller ownership record.
+
+Controller 3.14755 s, worker 3.04864 s; 29 valid samples, sampled peak 463699968 B,
+worker Darwin peak 464781312 B, max sample gap 0.11605 s. One child exited 0 and
+was reaped. Attempt001 spent; no retry, export, recording, GPU or lease action.
+All eight result files retained; packet and exact source XML hashes unchanged.
+
+Raw aggregates: all 65979 rows AGX; 5245 timestamp rows (42:2618,43:2618,44:9),
+all qualifier 0. No timestamp start/end precedes epoch; no end precedes or equals
+start. Numerator>=denominator true, with no clock conversion. Every admitted
+numeric representation decimal. Selected-target high water 10428; nodes 989756;
+IDs 97019. Event-time and arg1 were not retained or converted.
+
+The raw pre-epoch/zero-duration conditions checked here are absent. Raw timestamp
+count 5245 and earlier modeled count 5239 are different populations; difference
+6 is not a loss count or identity match. No cause/clock/coverage/performance
+claim. Next is results review and a separate identity-accounting design.
+
+Results lane fa512-firmware-projection-results-analysis-20261025, handoff
+f9b7bfe5 / seal 1ddac6f4. Aggregate-only analysis replays agree under both labels;
+real XML projection was not repeated. Sent to Opus 5.5 only in triton-msl,
+delivery confirmed. All 59 obligations and N1/RG-02/CP-01 remain OPEN/HOLD.
+
 2026-10-25 — narrowed parser and bounded first-read proposal prepared.
 Opus review 695413bd identified unused event-time/arg1 conversions and required
 runner resource bounds. New packet: fa512-firmware-projection-runner-20261025,
