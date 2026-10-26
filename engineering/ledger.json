@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Opus6d6fc05e accepted sizing with independent recount. Firmware projection design sealed2b3697e8: discard-first AGX minimum fields, no universal arg1 identity, typed model8 controls/excluded family+8 positives+16 refusals per label. XML parser/reference/encoding protections remain implementation requirements, no actual values read. Sent design to Opus triton-msl. No export/ps/GPU/product change; all59 HOLD.",
+  "active_investigation": "2026-10-25: Opus9e7a9c91 T1/T2/R1/R2 folded into selective XML parser (b0f5cee0): shared same-type refs, stage encoding census,13-codearg1restriction, aggregatequalifier/epochcounts, explicitbounds/highwater.20syntheticXMLtests/label pass incl8controls/excludedfamily. No actualvaluesread orrealrunner; sent to Opus triton-msl. No ps/export/GPU/productchange; all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",

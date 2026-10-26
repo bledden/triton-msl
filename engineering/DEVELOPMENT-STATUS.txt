@@ -1,3 +1,29 @@
+2026-10-25 — selective firmware XML parser prepared from design review.
+Opus9e7a9c91 identified normal cross-column shared argument references and
+separated structural-ID count from text retention. New CPU-only packet:
+fa512-firmware-projection-parser-20261025, handoffddd0aba5/sealb0f5cee0.
+No actual export values opened or parsed; no real-data runner supplied.
+
+Implements stage-selective text retention and typed backward reference resolution,
+includingarg2 definitions referenced by admittedarg1. Per-column representation
+census rejects mixed/other before conversion, retains only counts on refusal.
+T1 restrictsarg1 to13 consumedcodes; othercodes countonly. Timestamparg3/arg4
+only42..44, noKickStartarg3, dequeue reconstructionOUT. ProposedT2 qualifier
+histogram is aggregateonly; epoch comparisons perform no clock conversion.
+
+R2:131072structural-ID index,100000selectedtargets/stage (directcells+refs),
+reportedhighwater,128byte scalarcap acrosscallbacks,1MiBaggregatecap and existing
+file/row/depth limits. Multiple stage passes disclosed; no runtime cost claim.
+Qualification002:20XMLtestmethods/label pass,including8controls/excludedfamily,
+13consumed+10count-onlycodes,alltimestamp/qualifier variants,epochbins,sharedref,
+invalidref/encoding/limits. Passing17-testqualification001 retained. Samebinary
+consistency only. Both seals verify underbothlabels. No claims about actualXML
+encoding acceptance or data compatibility until a separately reviewed firstread.
+
+Concrete packet sent to Opus5.5 only in triton-msl; deliveryconfirmed. Review
+requested before any real-value runner/permission. No ps,export,recording,GPU,
+lease,productchange,clockconversion,join or performancecredit. All59 OPEN/HOLD.
+
 2026-10-25 — sizing results accepted; firmware projection design prepared.
 Opus6d6fc05e independently recounted1/65979rows and1398/22693656bytes with a
 different system Python and parser. All three questions yes; source trace and
