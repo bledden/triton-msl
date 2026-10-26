@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Opus9e7a9c91 T1/T2/R1/R2 folded into selective XML parser (b0f5cee0): shared same-type refs, stage encoding census,13-codearg1restriction, aggregatequalifier/epochcounts, explicitbounds/highwater.20syntheticXMLtests/label pass incl8controls/excludedfamily. No actualvaluesread orrealrunner; sent to Opus triton-msl. No ps/export/GPU/productchange; all59 HOLD.",
+  "active_investigation": "2026-10-25: Opus 695413bd addressed in narrowed parser/first-read proposal (8d176753). Event-time/arg1 omitted; equality/timebase comparison added. Exact inputs, one worker, inherited 4 GiB sampled monitor, 180/240 s caps and contemporaneous authorization record. 21 parser + 7 runner tests per label pass; no actual values decoded. Sent to Opus triton-msl; attempt absent, separate ps approval required. No export/GPU/product change; all 59 HOLD.",
   "obligations": [
     {
       "id": "correctness",

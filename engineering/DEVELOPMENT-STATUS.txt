@@ -1,3 +1,28 @@
+2026-10-25 — narrowed parser and bounded first-read proposal prepared.
+Opus review 695413bd identified unused event-time/arg1 conversions and required
+runner resource bounds. New packet: fa512-firmware-projection-runner-20261025,
+handoff e1cd7ca9, seal 8d176753. Unexecuted; no real export values decoded.
+
+M1 removes event-time and arg1 from retention, census and conversion. T3 adds
+raw equality and numerator>=denominator counts/boolean; no clock conversion or
+CLIPS numeric-parity claim. Exact two input hashes bind the known near-cap
+node population. The node limit stays unchanged. XML callbacks encounter and
+discard excluded text; documentation no longer calls that "never read".
+
+One native-label child is proposed: 2 configured CPU threads, 4 GiB sampled RSS,
+180 s worker wall/alarm, 240 s controller target. The reviewed monitor and sample
+gate are copied byte-for-byte. Worker guards prohibit descendants/native-library/
+network operations. Retain sample count/peak/gap, worker ru_maxrss and journal.
+Authorization record is written before launch. Explicit review/seal arguments
+and per-attempt user ps approval are required; no prior approval is inherited.
+
+Qualification001 passes 21 parser and 7 runner tests per label using synthetic
+XML and child doubles. Both labels share one binary. Parent and successor seals
+verify. Actual dataset compatibility and resource cost remain unmeasured.
+Sent to Opus 5.5 only in triton-msl; delivery confirmed. The attempt folder is
+absent. No ps, export, new recording, GPU, lease or product change. All 59
+obligations and N1/RG-02/CP-01 remain OPEN/HOLD.
+
 2026-10-25 — selective firmware XML parser prepared from design review.
 Opus9e7a9c91 identified normal cross-column shared argument references and
 separated structural-ID count from text retention. New CPU-only packet:
