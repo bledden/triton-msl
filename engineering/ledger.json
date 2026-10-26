@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Opusa17590a9 runner review accepted with R4. Rev2 e481cd46 fixes fixed-reason diagnostics,19 closed labels; four actual gates discriminate vs parent,unknown/private text suppressed.14 serial jobs pass62tests/label plus audits. Sent and visibly received in Opus triton-msl,review pending. Rev1 superseded/unspent,both result folders absent. Need rev2 review,new user decision and ps escalation before real read. No semantic/GPU/export/runtime-product change;all59 HOLD.",
+  "active_investigation": "2026-10-25: Timestamp identity rev2 completed once under Blake approval and per-attempt escalation. Controller 4.913s, worker 4.307s, 43 samples, peak467615744B, exit0/reaped. Six distinct raw-only source/low32 keys (3 Vertex,3 Fragment), zero duplicates/repeats/collisions/zero IDs/modeled-only excess; E1 PASS. Candidate membership only; no loss/cause/performance credit. Results analysis seal e1047ca8, handoff7776a02e; both label offline analyses and verifiers pass (same binary). Review delivery blocked by automatic approval review; draft removed, not sent. Need explicit sharing confirmation for this results packet to Opus in triton-msl. Attempt spent,no retry;all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",

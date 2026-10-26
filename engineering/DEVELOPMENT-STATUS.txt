@@ -1,3 +1,5 @@
+2026-10-25: Timestamp identity rev2 completed once under Blake approval and per-attempt escalation. Controller 4.913s, worker 4.307s, 43 samples, peak467615744B, exit0/reaped. Six distinct raw-only source/low32 keys (3 Vertex,3 Fragment), zero duplicates/repeats/collisions/zero IDs/modeled-only excess; E1 PASS. Candidate membership only; no loss/cause/performance credit. Results analysis seal e1047ca8, handoff7776a02e; both label offline analyses and verifiers pass (same binary). Review delivery blocked by automatic approval review; draft removed, not sent. Need explicit sharing confirmation for this results packet to Opus in triton-msl. Attempt spent,no retry;all59 HOLD.
+
 2026-10-25 — identity runner R4 diagnostics repaired in immutable successor.
 Opus a17590a9 accepts Q1-Q3 with R4 fixed or waived. R4 is fixed, not waived.
 New fa512-timestamp-identity-runner-rev2-20261025 changes only runtime output path
