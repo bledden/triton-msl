@@ -1,3 +1,25 @@
+2026-10-25 — channel review accepted; timestamp identity design sent to Opus.
+Delivery of the prior packet is now confirmed by Opus review44f2b943: Q1-Q3 yes,
+no blocker. It accepts the qualifier0 uniqueness correction. B1 requests deriving
+code/source from pinned knowledge instead of hardcoding it in a successor.
+
+New CPU-only packet fa512-timestamp-identity-design-20261025 addresses B1 and
+proposes arg1 only on the three timestamp codes, retaining raw ticks solely for
+exact tuple equality and comparing source/low32 with accepted modeled IDs.
+Synthetic reducer preserves multiplicity, duplicate tuples, reused IDs, low32
+collisions, invalid lower IDs and unmatched counts in both directions. It grants
+no authenticated matches, clock, lifetime, coverage or performance claim.
+No real parser/ID read exists or ran. Concrete parser/runner and explicit decision
+remain prerequisites for new semantic access.
+
+Retained histogram plus source facts: none of the9 installed KickStart/KickEnd/
+KickDequeued codes occurs among65979 exported rows. Thus missing-end-after-start
+is not supported by this export; no model execution/completeness inference.
+Qualification001: four serial jobs pass,12 synthetic tests per label. Source
+observation byte-equal; shared binary gives consistency only. Seal9391a570 and
+handoff41dab104 sent and visibly received in Opus5.5 triton-msl; review running.
+No GPU/export/ps/lease or runtime change. N1/RG-02/CP-01 and all59 HOLD.
+
 2026-10-25 — accepted firmware results; modeled-channel census ready for review.
 Opus3052fc75 accepts the completed aggregate-only read. Existing authorized
 modeled projection now splits5239 exact parent pairs: Vertex2615, Fragment2615,

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Firmware results accepted by Opus3052fc75. Existing modeled-channel census gives Vertex2615/Fragment2615/Compute9 versus raw2618/2618/9: signed differences3/3/0, not matched IDs or loss. Four serial qualification jobs pass, parent aggregates unchanged. Packet47176f80 ready for Opus; delivery unverified after Claude window contention, review pending. No new fields/firmware read/export/ps/GPU/product change. All59 HOLD.",
+  "active_investigation": "2026-10-25: Channel census accepted Opus44f2b943 (3/3/0 count differences, no loss claim). Timestamp identity design/model9391a570 sent and visibly received in Opus triton-msl. B1 derives code/source;12 synthetic tests/label pass. Retained histogram has zero9 installed start/end/dequeue codes; no model-completeness inference. Proposes timestamp-only arg1 membership accounting, no real IDs read. Await design review before concrete parser/runner and separate semantic-read decision. No GPU/export/ps/runtime change;all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",
