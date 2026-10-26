@@ -1,3 +1,25 @@
+2026-10-25 — identity runner R4 diagnostics repaired in immutable successor.
+Opus a17590a9 accepts Q1-Q3 with R4 fixed or waived. R4 is fixed, not waived.
+New fa512-timestamp-identity-runner-rev2-20261025 changes only runtime output path
+and worker generic-exception reason selection. Exact types/messages allow19 fixed
+source labels; unknown messages,subclasses,extra arguments and other exception
+types remain worker failed. No new-handler str/repr/chain traversal or private
+values. Parser Refusal,status/exit,positive behavior,cleanup and limits unchanged.
+
+Real worker probes exercise actual count,parent-output,schema and prior-aggregate
+checks. Four distinct reasons retained; same probes reproduce rev1 generic reason.
+All19 allowlisted labels through worker,6 unknown/type/private cases,hostile str/
+cause case,and positive aggregate/journal parity. No real semantic reads or child.
+Qualification001:14 serial jobs pass,62 tests per label plus audit per label.
+Shared binary gives consistency only. No preparation failure. Rev1 remains
+immutable,unspent,superseded; both result folders absent. Rev2 needs own decision.
+
+Seal e481cd46 (74 members,926 inputs),handoff ffbc0347 sent and visibly received
+in Opus5.5 triton-msl. Review pending. Next: obtain completed delta review,then
+Blake's exact new-read decision and per-attempt ps escalation before invocation.
+No GPU/export/recording/lease/runtime-product change or performance credit.
+N1/RG-02/CP-01 and all59 obligations remain OPEN/HOLD.
+
 2026-10-25 — identity parser accepted; one-shot runner sealed for review.
 Opus d696332f accepts parser preparation, requesting R1-R3 in the concrete runner.
 New fa512-timestamp-identity-runner-20261025 keeps all six parser/model/control

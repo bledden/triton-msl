@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-25: Parser accepted Opusd696332f. Concrete identity runner7c07d01d implements R1-R3: pinned reducer/closed output,exact accepted pairs2615/2615/9,E1 contradiction report,180s/240s/4GiB sampled.860 inputs bound;57 synthetic tests/label and2 audits pass. Sent and visibly received in Opus triton-msl; review pending. Fresh result folder absent,no real semantic read. Needs completed review,new user decision and ps escalation before invocation. No GPU/export/runtime changes;all59 HOLD.",
+  "active_investigation": "2026-10-25: Opusa17590a9 runner review accepted with R4. Rev2 e481cd46 fixes fixed-reason diagnostics,19 closed labels; four actual gates discriminate vs parent,unknown/private text suppressed.14 serial jobs pass62tests/label plus audits. Sent and visibly received in Opus triton-msl,review pending. Rev1 superseded/unspent,both result folders absent. Need rev2 review,new user decision and ps escalation before real read. No semantic/GPU/export/runtime-product change;all59 HOLD.",
   "obligations": [
     {
       "id": "correctness",
