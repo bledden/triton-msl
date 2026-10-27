@@ -1,5 +1,26 @@
 # 0.4.0 working plan
 
+## Priority change, October 26: shader regression first
+
+Blake accepted the recommendation to prioritize CPU preparation for FA512 shader
+bisection and add userspace session discovery to the deferred plan. The current
+source-bound design is `fa512-shader-bisection-design-20261026/HANDOFF.txt` under
+`/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start`.
+It prepares dependency-complete diagnostic source groups and an interaction-aware
+comparison, not a product reversion. Nonfinite/tail correctness requirements remain
+mandatory. Design review precedes a concrete instrument and any new device window.
+
+Deferred: userspace numeric-session discovery in the recorder supervisor, if tracing
+is still useful after the shader investigation. This does not improve kernel speed
+by itself. The header-defined `KERN_PROC_SESSION` shortcut is withdrawn following
+Opus review `e282adaa`; no exact host errno is inferred from the published source.
+The candidate needs PID birth checks, unrelated-metadata privacy boundaries, retained
+helper identities, session-change/disappearance handling, resource accounting and
+reviewed native qualification. Polling remains incomplete. Keep per-step diagnostic
+records in bounded memory and persist once per sample or at first failure, not
+between primitive reads. Do not retry either held C4 rehearsal against the old
+zero-valued `ps sess` premise. This backlog item supplies no execution authority.
+
 ## Development checkpoint, October 22
 
 The active plan is now `DEVELOPMENT-STATUS.txt`. The text below is retained
