@@ -1148,3 +1148,5 @@ final review. No Superset or guardrail delegation. Commit coherent tested change
 locally, keep raw evidence external, no push/release/publication. Never edit a
 bound predecessor in place. At08:00local record the morning handoff and pause
 the one-night automation; pause earlier if only a user decision can unblock work.
+
+2026-10-27 Codex: Prepared separate optimization-composition-retrospective-20261027/HANDOFF.txt for Blake to forward to Opus, not sent. Local-history mechanism audit:42 families,70 pinned source/result documents; independent retained-data reductions reproduce small-snapshot joint failure despite four targeted CPU gains and p503 descriptive standalone/model contrast. Proposed preservation states and workload-compatible composition portfolio await review; no historical verdict, gate, default, authority or release credit changed. FA512 bisection controller remains primary/prepared/disabled. No benchmark, backend/native load, ps, device or project lease; all59 OPEN/HOLD.

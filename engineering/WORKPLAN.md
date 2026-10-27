@@ -1,5 +1,21 @@
 # 0.4.0 working plan
 
+## October 27 retrospective supplement — pending Opus review
+
+Blake requested a project-wide retrospective on local gains, end-to-end gates and
+complementary optimizations. The separate second handoff is
+`optimization-composition-retrospective-20261027/HANDOFF.txt` under the evidence root.
+It catalogs 42 mechanism families and 70 source/result documents, including the
+small-descriptor snapshot's targeted CPU gains despite its failed all-native-cells
+gate, p503's descriptive standalone assertion signal, retained cooperative/K-layout
+and cold gains, and explicit semantic/performance/measurement failures.
+
+The proposed preservation policy and composition portfolio await Opus review.
+Historical failures, spent attempts, defaults, numerical contracts and all 59
+obligations remain unchanged. No old candidate is reopened or promoted by this
+entry. The prepared FA512 bisection remains the primary technical task; this
+supplement neither modifies its binding nor grants device authority.
+
 ## Priority change, October 26: shader regression first
 
 Blake accepted the recommendation to prioritize CPU preparation for FA512 shader
