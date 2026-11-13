@@ -35,7 +35,14 @@ def emit(module, graph, options, entry, lowerer_type):
         # identities, operands and attributes are checked against that SAME graph.
         program, receipt = precision.capture(
             module, ir, lambda mod, opts: graph, options, semantics, lowerer_type)
-        source, manifest = renderer.Row(program).generate(entry)
+        enabled = options.experimental_source_program_cooperative
+        if enabled:
+            from . import cooperative
+            source, manifest = cooperative.render(program, entry)
+            threads, shared = manifest['threads'], manifest['shared_bytes']
+        else:
+            source, manifest = renderer.Row(program).generate(entry)
+            threads, shared = 32, 0
         descriptor = [KIND, {
             'schema': 1,
             'entry': entry,
@@ -45,8 +52,8 @@ def emit(module, graph, options, entry, lowerer_type):
             'outputs': [0, 1],
             'scalar_roles': [[7, 'f32', 'scale'], [8, 'f32', 'sentinel'],
                              [9, 'i32', 'N'], [10, 'i32', 'H']],
-            'threads': [32, 1, 1],
-            'full_tile_domain': {'N': [32, 64], 'H': [1, 2], 'batch': [1, 2],
+            'threads': [threads, 1, 1],
+            'full_tile_domain': {'N': [32, 64, 128, 256] if enabled else [32, 64], 'H': [1, 2], 'batch': [1, 2],
                                  'DIM': 32, 'BLOCK': 32},
             'addresses': [asdict(item['record']) for item in program['addresses']],
             'native_ieee_enum': receipt['ieee_enum'],
@@ -55,7 +62,7 @@ def emit(module, graph, options, entry, lowerer_type):
             'runtime_admission': 'blocked: numerical, storage and dispatch qualification pending',
         }]
         return source, {
-            'block_size': 32, 'shared': 0, 'output_arg_indices': [0, 1],
+            'block_size': threads, 'shared': shared, 'output_arg_indices': [0, 1],
             'needs_2d_grid': True, 'mm_two_kernel': None, 'fast_matmul': None,
             'quant_matmul': None, 'flash_attention': None,
             'batched_dot_bounds': descriptor, 'device_assert': None, 'argument_abi': None,

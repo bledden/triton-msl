@@ -241,7 +241,15 @@ This mode has 13 measured alerts above the unchanged 10% threshold. They are ope
 
 This mode has 14 measured alerts above the unchanged 10% threshold. They are open, not accepted or declared irreducible.
 
-The varlen row uses a changed retained route and is not a same-route speedup. These alerts are not universal model slowdowns and no exhaustive lower bound or proven irreducibility exists. Public JIT and Inductor have different validator counts. Both public validations and immediate assertion observation remain enabled; no timing recovery may weaken them.
+The varlen ratios above are historical, unqualified observations. The October 31
+baseline-admissibility investigation subsequently found the old comparator unsafe;
+matching numerical outputs in the September run did not establish memory safety.
+Do not cite 0.1154/0.1315 as an approximately eightfold speedup. The safe replacement
+comparison used a shader byte-identical to the current shader, so it cannot test or
+refute the old kernel-speed claim. The original rows remain here as historical
+records, not accepted performance evidence.
+
+These alerts are not universal model slowdowns and no exhaustive lower bound or proven irreducibility exists. Public JIT and Inductor have different validator counts. Both public validations and immediate assertion observation remain enabled; no timing recovery may weaken them.
 
 ### Cold first-call observations
 

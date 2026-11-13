@@ -1,13 +1,32 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000 && !defined(Py_GIL_DISABLED)
+#define Py_BUILD_CORE
+#include "internal/pycore_dict.h"
+#undef Py_BUILD_CORE
+#define PACKED_UNICODE_KEYS 1
+#endif
 
-typedef struct { PyObject *globals; } Context;
+enum { CHILD, FALLBACK, REFUSE, PYTHON_LEAF, KEY_COUNT };
+static const char *provider_names[KEY_COUNT] = {
+    "_checked_packed_copy", "_UsePackedJSON", "_refuse", "_checked_packed_copy_python"
+};
+typedef struct { PyObject *keys[KEY_COUNT]; } State;
+typedef struct { PyObject *globals; State *state; } Context;
 
 /* Preserve exceptions raised by dictionary-key comparisons. The String API
    deliberately suppresses those exceptions and cannot implement LOAD_GLOBAL. */
-static PyObject *lookup(Context *c, const char *name) {
-    /* Fresh key identity is observable to a colliding dictionary key. */
-    PyObject *key = PyUnicode_FromString(name);
+static PyObject *lookup(Context *c, int index) {
+    PyObject *key = NULL;
+#ifdef PACKED_UNICODE_KEYS
+    /* The current representation excludes custom/subclass keys. No callback,
+       allocation or GIL release occurs before the live lookup. Recheck after
+       every recursive edge: a callback may replace the entire key domain. */
+    if (DK_IS_UNICODE(((PyDictObject *)c->globals)->ma_keys))
+        key = Py_NewRef(c->state->keys[index]);
+#endif
+    /* General dictionaries retain fresh identity for colliding foreign keys. */
+    if (!key) key = PyUnicode_FromString(provider_names[index]);
     if (!key) return NULL;
     PyObject *out = PyDict_GetItemWithError(c->globals, key);
     Py_XINCREF(out);
@@ -18,7 +37,7 @@ static PyObject *lookup(Context *c, const char *name) {
 /* Each Python recursive edge resolves the live helper after earlier callbacks.
    Keep that call boundary, including replacement and in-place code changes. */
 static PyObject *child_copy(Context *c, PyObject *value, PyObject *plan) {
-    PyObject *fn = lookup(c, "_checked_packed_copy");
+    PyObject *fn = lookup(c, CHILD);
     if (!fn) {
         if (!PyErr_Occurred()) PyErr_SetString(PyExc_NameError, "name '_checked_packed_copy' is not defined");
         return NULL;
@@ -30,13 +49,13 @@ static PyObject *child_copy(Context *c, PyObject *value, PyObject *plan) {
 }
 
 static PyObject *fallback(Context *c) {
-    PyObject *kind = lookup(c, "_UsePackedJSON");
+    PyObject *kind = lookup(c, FALLBACK);
     if (kind) { PyErr_SetNone(kind); Py_DECREF(kind); }
     else if (!PyErr_Occurred()) PyErr_SetString(PyExc_RuntimeError, "missing JSON fallback exception");
     return NULL;
 }
 static PyObject *refuse(Context *c) {
-    PyObject *fn = lookup(c, "_refuse");
+    PyObject *fn = lookup(c, REFUSE);
     if (!fn) { if (!PyErr_Occurred()) PyErr_SetString(PyExc_RuntimeError, "missing refusal provider"); return NULL; }
     PyObject *out = PyObject_CallFunction(fn, "s", "descriptor changed after launcher construction");
     Py_DECREF(fn);
@@ -124,7 +143,7 @@ static PyObject *visit_body(Context *c, PyObject *value, PyObject *plan) {
     if (kind==(PyObject *)&PyFloat_Type && PyFloat_AS_DOUBLE(value)==0.0) {
         /* Rare observable math callbacks retain the original interpreter code,
            including its version-specific temporary destruction order. */
-        PyObject *fn=lookup(c,"_checked_packed_copy_python");
+        PyObject *fn=lookup(c, PYTHON_LEAF);
         if (!fn) { if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError,"missing original Python leaf"); return NULL; }
             PyObject *out=PyObject_CallFunctionObjArgs(fn,value,plan,NULL);
         Py_DECREF(fn);
@@ -138,7 +157,6 @@ static PyObject *visit(Context *c, PyObject *value, PyObject *plan) {
     Py_LeaveRecursiveCall(); return out;
 }
 static PyObject *checked_copy(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
-    (void)self;
     if (nargs != 3) {
         /* Preserve the existing public helper's argument-error wording. */
         PyObject *tuple=PyTuple_New(nargs), *a, *b, *d;
@@ -150,8 +168,26 @@ static PyObject *checked_copy(PyObject *self, PyObject *const *args, Py_ssize_t 
     }
     PyObject *value=args[0],*plan=args[1],*globals=args[2];
     if (!PyDict_CheckExact(globals)) { PyErr_SetString(PyExc_TypeError,"exact globals required"); return NULL; }
-    Context c={.globals=globals}; return visit(&c,value,plan);
+    Context c={.globals=globals, .state=PyModule_GetState(self)}; return visit(&c,value,plan);
 }
 static PyMethodDef methods[]={{"copy",(PyCFunction)(void(*)(void))checked_copy,METH_FASTCALL,"Check every live descriptor value and copy containers."},{NULL,NULL,0,NULL}};
-static struct PyModuleDef module={PyModuleDef_HEAD_INIT,"_packed_native",NULL,-1,methods,NULL,NULL,NULL,NULL};
-PyMODINIT_FUNC PyInit__packed_native(void) { return PyModule_Create(&module); }
+static int traverse(PyObject *module, visitproc visit, void *arg) {
+    State *s=PyModule_GetState(module);
+    for (int i=0;i<KEY_COUNT;i++) { Py_VISIT(s->keys[i]); }
+    return 0;
+}
+static int clear(PyObject *module) {
+    State *s=PyModule_GetState(module);
+    for (int i=0;i<KEY_COUNT;i++) { Py_CLEAR(s->keys[i]); }
+    return 0;
+}
+static struct PyModuleDef module={PyModuleDef_HEAD_INIT,"_packed_native",NULL,sizeof(State),methods,NULL,traverse,clear,NULL};
+PyMODINIT_FUNC PyInit__packed_native(void) {
+    PyObject *out=PyModule_Create(&module); if (!out) return NULL;
+    State *s=PyModule_GetState(out);
+    for (int i=0;i<KEY_COUNT;i++) {
+        s->keys[i]=PyUnicode_FromString(provider_names[i]);
+        if (!s->keys[i]) { Py_DECREF(out); return NULL; }
+    }
+    return out;
+}

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0rc1 - unreleased candidate
+
+Local candidate on `dev/0.4.0-candidate-20261103`. Not published. Release evidence
+is on hold: one artifact row of the engineering ledger is accepted and 58 rows are
+pending. Scope, artifacts and limits are in `docs/RELEASE_CANDIDATE_0.4.0.md`.
+
+- Add opt-in cooperative source-program export, an installed `triton-msl-export`
+  command and generic backward stride lowering for the external reporter workflow.
+  The regular Python launcher still refuses the pending source-program descriptor.
+- Add seven dense attention fragment compositions behind the existing default-off
+  option, with source and precision admission checks and a public GPU test for each.
+- Admit full-storage, zero-offset dense rank-two fp16/fp32 transposes to the direct
+  MPS route. Offset, partial, overlapping and gappy transposes keep the host route.
+  Four transposed-B matmul cases fall from 1.08–1.26 ms to 0.21–0.26 ms per public
+  call plus sync on an M4 Max in both installed modes. This is a descriptive
+  workflow result, not a release performance qualification.
+- Compose four host fast paths: guard reuse, shared binder census, scalar
+  eligibility and packed-key reuse. Installed correctness passes. In the November 9
+  nine-case comparison with the November 3 wheels, the native wheel's mean call time
+  is higher in all nine cases (+1.47% to +10.07%) and the pure wheel is mixed
+  (−8.14% to +13.23%). Two workers per arm: the panel establishes no general
+  speedup and attributes the difference to no cause.
+- Carry forward toolchain, cache, ownership, import/identity and launch-contract
+  repairs, and the pure-Python environment-snapshot and tensor-classification changes.
+- Not tested: M1 and M5 hardware; native wheels on Python versions other than
+  CPython 3.14; older macOS releases and toolchains.
+
 ## 0.3.0 - 2026-09-16
 
 Supersedes unpublished rc1–rc4 candidates. Fresh validation on the formatted 0.3.0 candidate at `73ba428` records 6,079 project passes / 16 skips, exact 9,342-node upstream identity (5,780 passed / 3,562 skipped), installed acceptance 1,468 native / 252 pure with no failures/skips, and four unchanged M4 Max floors (packets 906–909). Final-version artifacts are freshly built, reproduced from the sdist and rebound to these tested runtime payloads. The full warm comparisons in packets 879/890/895 and the vendor receipts remain pre-format measurements; they were not rerun on formatted bytes, and no warm alert is cleared.

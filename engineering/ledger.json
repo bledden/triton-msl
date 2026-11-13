@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "objective": "Faithful, safe, capable and fast Triton on Metal with reliable integration/distribution and maintainable architecture. No compensating score.",
-  "active_investigation": "2026-10-27: Accepted Opus native-integration review d979344f. Completed fa512-shader-bisection-controller-preparation-20261026 (handoff eca09759, seal c08045b6). R1 predeclares property/compile failure after spend as terminal, even before dispatch. Binding-keyed marker in a bound spent root blocks a new clearance from retrying the same binding; mismatch properties persist through adapter, worker STOP and controller. Controller covers prepare/875 calls/close, sample gate, partial construction and separate cleanup errors. Caps stay 300s worker / 600s work / 60s cleanup / 900s window, entry within240s; historical101.756s scaling is illustrative, not a bound. Numeric-only ps census prepared, not run. Disabled binding a7189709 has 4837 files;4803 retained runtime files rehash unchanged, but current provider closure and native lifecycle remain unqualified. Final27 CPU jobs pass,60 tests/environment, equal stdout; proof labels share a binary, system independent. Real Lease body tested with OS lock calls faked and private marker files. Two test-only failures retained: noncanonical temporary receipt path and outdated cold-refusal exception expectation. Passing intermediate wave retained before binding-key refinement. Packet197 files/271 pins verifies in3 environments; parent89/167 unchanged. Controller, worker and preflight remain disabled; bound production spent root absent. No device, ps, native provider query, project lease, receipt, clearance or product change. Next current provider/bootstrap/lifecycle qualification and encompassing instrument review before a fresh device decision. Ready, not sent. Session support deferred; N1,RG-02,CP-01 and all59 OPEN/HOLD. Separate second handoff optimization-composition-retrospective-20261027/HANDOFF.txt is prepared for Opus:42-family historical audit and proposed partial-gain/composition portfolio, pending review; no historical verdict or primary execution plan changed.",
+  "active_investigation": "2026-11-09: Actual first-public-add attribution completed:plain13.926s;separate profiled10.369s with backend hash9.228s cumulative and make_metallib0.177s (instrumented,nested costs,not ordinary shares). Scratch read-buffer and name-only-traversal experiments retain identical toolchain digests but no reliable gain;not promoted. Traversal104CPUcontrols pass,4framework controls separately blocked/deselected by no-Torch guard. Native nine-case counter run numerically passes,binder/identity hits acrossall9,scalar hits on4routes;no general fastpath-inactivity explanation. All installed/product files unchanged. Evidence cold-public-attribution-20261109/FINDINGS.txt. 2026-11-10 follow-up: small-file pooling (ratios 0.894, 0.977) and invocation alias reuse (1.027, 0.927) both missed their predeclared 0.60 SDK-stage rules. Neither is promoted; retain the alias safety pin and full-byte contract. Stop these two experiment axes. Evidence: fable-sync-followup-20261110/FOLLOW-UP.txt. Next: consolidate the candidate documentation and explicit commit set for packaging; commit/push/release remain separate decisions. No performance closure.",
   "obligations": [
     {
       "id": "correctness",
@@ -21,7 +21,7 @@
     {
       "id": "performance",
       "state": "open",
-      "next_experiment": "Reproduce per-workload baselines and attribute cold, host and device costs; compare credible admissible alternatives."
+      "next_experiment": "Reproduce per-workload baselines and attribute cold, host and device costs; compare credible admissible alternatives. 2026-11-09: Current installed source1f79f3c2 versus November3 installed candidate:4 separate correctness workers pass,8 timing workers retain7200samples,all output hashes equal. All9native means slower1.47\u201310.07%;pure mixed; substantial worker variation,descriptive only,no general gain or causal regression claim. CPU standalone toolchain identity4.651s,cached43.5us;1/4/8-worker probes retain identical identity/full-byte reads,serial slower,four versus eight unresolved. Product unchanged. Evidence installed-current-comparison-20261109-native-access/FINDINGS.txt; initial sandbox refusal retained separately. No closure or old-release recovery claim."
     },
     {
       "id": "resources",
@@ -59,7 +59,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.177348, excess 26.646 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.177348, excess 26.646 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots. 2026-10-31 guard-proof reuse candidate now passes observer controls and actual public correctness; modeled-public saving in both reps, but full-call softmax descriptive cost and matmul resident conflict remain. See shared-launch-guard-public-comparison-20261031. Retain for composition with larger mapping/selection changes; no historical regression erased or performance receipt issued. Exceptional installed correctness supplement now passes in both modes: g1-installed-exceptional-20261031,92calls/12outputs,exact finite add bits and unchanged softmax tolerances; no performance credit or denormal generalization. 2026-11-09: Fresh current-installed related workload comparison versus Nov3 candidate retained in installed-current-comparison-20261109-native-access/ANALYSIS.json. Numerical checks pass,all samples retained;descriptive mixed/adverse means and substantial worker variation. Not a historical released-version comparison or complete row qualification."
     },
     {
       "id": "warm/native/softmax",
@@ -75,7 +75,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.162183, excess 27.771 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.162183, excess 27.771 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots. 2026-10-31 guard-proof reuse candidate now passes observer controls and actual public correctness; modeled-public saving in both reps, but full-call softmax descriptive cost and matmul resident conflict remain. See shared-launch-guard-public-comparison-20261031. Retain for composition with larger mapping/selection changes; no historical regression erased or performance receipt issued. Exceptional installed correctness supplement now passes in both modes: g1-installed-exceptional-20261031,92calls/12outputs,exact finite add bits and unchanged softmax tolerances; no performance credit or denormal generalization. 2026-11-09: Fresh current-installed related workload comparison versus Nov3 candidate retained in installed-current-comparison-20261109-native-access/ANALYSIS.json. Numerical checks pass,all samples retained;descriptive mixed/adverse means and substantial worker variation. Not a historical released-version comparison or complete row qualification."
     },
     {
       "id": "warm/native/matmul_ieee",
@@ -91,7 +91,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.133205, excess 28.948 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.133205, excess 28.948 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots. 2026-10-31 guard-proof reuse candidate now passes observer controls and actual public correctness; modeled-public saving in both reps, but full-call softmax descriptive cost and matmul resident conflict remain. See shared-launch-guard-public-comparison-20261031. Retain for composition with larger mapping/selection changes; no historical regression erased or performance receipt issued."
     },
     {
       "id": "warm/native/varlen_48_32",
@@ -107,7 +107,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current installed correctness passes; matched warm comparison against intact September24 artifacts completed3840samples,allfour predeclaredlabels unresolved (g5-matched-warm-comparison-20261031). Preserve outputs and variation; no unchanged rerun to chasepass. Old public-main varlen is unsafe and exact871 refuses current compiler identity, both retained. Resume demonstrated shared-host diagnosis/composition and independently review current artifact evidence; row staysopen. 2026-11-09: Fresh current-installed related workload comparison versus Nov3 candidate retained in installed-current-comparison-20261109-native-access/ANALYSIS.json. Numerical checks pass,all samples retained;descriptive mixed/adverse means and substantial worker variation. Not a historical released-version comparison or complete row qualification."
     },
     {
       "id": "warm/native/layernorm_1024x1024",
@@ -123,7 +123,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current actual-installed correctness passes (g1-installed-continuity-20261031); fixed paired comparison against intact September24 payload complete (g1-remaining-matched-warm-20261031), all modes unresolved. Retain all samples and existing host composition gains/costs. No unchanged rerun to seek a pass; next performance step must test a causal shared-host change. Independent review/current contract receipt still required. New same-artifact public/runtime attribution (g1-public-runtime-boundary-20261031) establishes a public-path premium with identical outputs; prioritize a causal shared launch-path change, not shader-only tuning or an unchanged timing rerun. Direct mode is diagnostic only."
     },
     {
       "id": "warm/native/quant_decode_512x1024",
@@ -139,7 +139,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current actual-installed correctness passes (g1-installed-continuity-20261031); fixed paired comparison against intact September24 payload complete (g1-remaining-matched-warm-20261031), all modes unresolved. Retain all samples and existing host composition gains/costs. No unchanged rerun to seek a pass; next performance step must test a causal shared-host change. Independent review/current contract receipt still required."
     },
     {
       "id": "warm/native/fa512_f4_causal0",
@@ -251,7 +251,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current actual-installed correctness passes (g1-installed-continuity-20261031); fixed paired comparison against intact September24 payload complete (g1-remaining-matched-warm-20261031), all modes unresolved. Retain all samples and existing host composition gains/costs. No unchanged rerun to seek a pass; next performance step must test a causal shared-host change. Independent review/current contract receipt still required."
     },
     {
       "id": "warm/native/assert_valid",
@@ -267,7 +267,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current actual-installed correctness passes (g1-installed-continuity-20261031); fixed paired comparison against intact September24 payload complete (g1-remaining-matched-warm-20261031), all modes unresolved. Retain all samples and existing host composition gains/costs. No unchanged rerun to seek a pass; next performance step must test a causal shared-host change. Independent review/current contract receipt still required. New same-artifact public/runtime attribution (g1-public-runtime-boundary-20261031) establishes a public-path premium with identical outputs; prioritize a causal shared launch-path change, not shader-only tuning or an unchanged timing rerun. Direct mode is diagnostic only."
     },
     {
       "id": "warm/native/mla_canonical",
@@ -299,7 +299,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization. 2026-11-09: Fresh current-installed related workload comparison versus Nov3 candidate retained in installed-current-comparison-20261109-native-access/ANALYSIS.json. Numerical checks pass,all samples retained;descriptive mixed/adverse means and substantial worker variation. Not a historical released-version comparison or complete row qualification."
     },
     {
       "id": "warm/native/gpt2_small",
@@ -331,7 +331,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current installed correctness passes; matched warm comparison against intact September24 artifacts completed3840samples,allfour predeclaredlabels unresolved (g5-matched-warm-comparison-20261031). Preserve outputs and variation; no unchanged rerun to chasepass. Old public-main varlen is unsafe and exact871 refuses current compiler identity, both retained. Resume demonstrated shared-host diagnosis/composition and independently review current artifact evidence; row staysopen."
     },
     {
       "id": "warm/pure/add",
@@ -347,7 +347,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.367672, excess 53.239 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.367672, excess 53.239 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots. Exceptional installed correctness supplement now passes in both modes: g1-installed-exceptional-20261031,92calls/12outputs,exact finite add bits and unchanged softmax tolerances; no performance credit or denormal generalization. 2026-11-09: Fresh current-installed related workload comparison versus Nov3 candidate retained in installed-current-comparison-20261109-native-access/ANALYSIS.json. Numerical checks pass,all samples retained;descriptive mixed/adverse means and substantial worker variation. Not a historical released-version comparison or complete row qualification."
     },
     {
       "id": "warm/pure/softmax",
@@ -363,7 +363,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.337567, excess 55.594 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots."
+      "next_experiment": "New finite-input paired baseline (historical-comparison-2026-09-25, Fable reviewed): current/0.2 pure median ratio 1.337567, excess 55.594 us. Diagnose shared host versus changed shader cost without weakening checks. Complete wider numerical/route/resource and old-version coverage before qualification. Shared-launch discriminator reproduces excess without final dispatch (Fable bounded approval); use its real/public-modeled/resident-modeled boundaries to design a shared preparation repair, retaining both observation phases and fresh checked snapshots. Exceptional installed correctness supplement now passes in both modes: g1-installed-exceptional-20261031,92calls/12outputs,exact finite add bits and unchanged softmax tolerances; no performance credit or denormal generalization. 2026-11-09: Fresh current-installed related workload comparison versus Nov3 candidate retained in installed-current-comparison-20261109-native-access/ANALYSIS.json. Numerical checks pass,all samples retained;descriptive mixed/adverse means and substantial worker variation. Not a historical released-version comparison or complete row qualification."
     },
     {
       "id": "warm/pure/matmul_ieee",
@@ -395,7 +395,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current installed correctness passes; matched warm comparison against intact September24 artifacts completed3840samples,allfour predeclaredlabels unresolved (g5-matched-warm-comparison-20261031). Preserve outputs and variation; no unchanged rerun to chasepass. Old public-main varlen is unsafe and exact871 refuses current compiler identity, both retained. Resume demonstrated shared-host diagnosis/composition and independently review current artifact evidence; row staysopen. 2026-11-09: Fresh current-installed related workload comparison versus Nov3 candidate retained in installed-current-comparison-20261109-native-access/ANALYSIS.json. Numerical checks pass,all samples retained;descriptive mixed/adverse means and substantial worker variation. Not a historical released-version comparison or complete row qualification."
     },
     {
       "id": "warm/pure/layernorm_1024x1024",
@@ -411,7 +411,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current actual-installed correctness passes (g1-installed-continuity-20261031); fixed paired comparison against intact September24 payload complete (g1-remaining-matched-warm-20261031), all modes unresolved. Retain all samples and existing host composition gains/costs. No unchanged rerun to seek a pass; next performance step must test a causal shared-host change. Independent review/current contract receipt still required. New same-artifact public/runtime attribution (g1-public-runtime-boundary-20261031) establishes a public-path premium with identical outputs; prioritize a causal shared launch-path change, not shader-only tuning or an unchanged timing rerun. Direct mode is diagnostic only."
     },
     {
       "id": "warm/pure/quant_decode_512x1024",
@@ -427,7 +427,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current actual-installed correctness passes (g1-installed-continuity-20261031); fixed paired comparison against intact September24 payload complete (g1-remaining-matched-warm-20261031), all modes unresolved. Retain all samples and existing host composition gains/costs. No unchanged rerun to seek a pass; next performance step must test a causal shared-host change. Independent review/current contract receipt still required."
     },
     {
       "id": "warm/pure/fa512_f4_causal0",
@@ -539,7 +539,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current actual-installed correctness passes (g1-installed-continuity-20261031); fixed paired comparison against intact September24 payload complete (g1-remaining-matched-warm-20261031), all modes unresolved. Retain all samples and existing host composition gains/costs. No unchanged rerun to seek a pass; next performance step must test a causal shared-host change. Independent review/current contract receipt still required."
     },
     {
       "id": "warm/pure/assert_valid",
@@ -555,7 +555,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current actual-installed correctness passes (g1-installed-continuity-20261031); fixed paired comparison against intact September24 payload complete (g1-remaining-matched-warm-20261031), all modes unresolved. Retain all samples and existing host composition gains/costs. No unchanged rerun to seek a pass; next performance step must test a causal shared-host change. Independent review/current contract receipt still required. New same-artifact public/runtime attribution (g1-public-runtime-boundary-20261031) establishes a public-path premium with identical outputs; prioritize a causal shared launch-path change, not shader-only tuning or an unchanged timing rerun. Direct mode is diagnostic only."
     },
     {
       "id": "warm/pure/mla_canonical",
@@ -587,7 +587,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization. 2026-11-09: Fresh current-installed related workload comparison versus Nov3 candidate retained in installed-current-comparison-20261109-native-access/ANALYSIS.json. Numerical checks pass,all samples retained;descriptive mixed/adverse means and substantial worker variation. Not a historical released-version comparison or complete row qualification."
     },
     {
       "id": "warm/pure/gpt2_small",
@@ -619,7 +619,7 @@
           "scope": "Historical 0.3.0 documentation; not newly reproduced and not current 0.4 evidence."
         }
       },
-      "next_experiment": "Recover retained source, stack, oracle and timing boundary; compare last-correct, 0.3 and current with paired controls and separate host/device costs. Diagnose before selecting an optimization."
+      "next_experiment": "Current installed correctness passes; matched warm comparison against intact September24 artifacts completed3840samples,allfour predeclaredlabels unresolved (g5-matched-warm-comparison-20261031). Preserve outputs and variation; no unchanged rerun to chasepass. Old public-main varlen is unsafe and exact871 refuses current compiler identity, both retained. Resume demonstrated shared-host diagnosis/composition and independently review current artifact evidence; row staysopen."
     },
     {
       "id": "cold/native/add",
@@ -635,7 +635,7 @@
         },
         "caveat": "Single observations; MLP and GPT-2 shared a worker."
       },
-      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings."
+      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings. 2026-11-09: Related first add call with fresh caches remains9.74\u201312.53s on current installed modes; excludes import/data setup,only2observations per arm. Standalone exact toolchain identity4.651s is a separate CPU process and must not be subtracted as a measured public-call share. Inventory profiles/concurrency samples in installed-current-comparison-20261109-native-access;full-byte contract preserved,default unchanged. 2026-11-09: Actual first-public-add attribution completed:plain13.926s;separate profiled10.369s with backend hash9.228s cumulative and make_metallib0.177s (instrumented,nested costs,not ordinary shares). Scratch read-buffer and name-only-traversal experiments retain identical toolchain digests but no reliable gain;not promoted. Traversal104CPUcontrols pass,4framework controls separately blocked/deselected by no-Torch guard. Native nine-case counter run numerically passes,binder/identity hits acrossall9,scalar hits on4routes;no general fastpath-inactivity explanation. All installed/product files unchanged. Evidence cold-public-attribution-20261109/FINDINGS.txt. Next target: repeated inventory/provider work under full-byte checks;no buffer/default/source relaxation or performance closure."
     },
     {
       "id": "cold/pure/add",
@@ -651,7 +651,7 @@
         },
         "caveat": "Single observations; MLP and GPT-2 shared a worker."
       },
-      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings."
+      "next_experiment": "Reproduce retained process/cache protocol then add independent fresh-process measurements, splitting identity/compilation/first checked result. Do not extrapolate component savings. 2026-11-09: Related first add call with fresh caches remains9.74\u201312.53s on current installed modes; excludes import/data setup,only2observations per arm. Standalone exact toolchain identity4.651s is a separate CPU process and must not be subtracted as a measured public-call share. Inventory profiles/concurrency samples in installed-current-comparison-20261109-native-access;full-byte contract preserved,default unchanged."
     },
     {
       "id": "cold/native/compiled_mlp",
@@ -720,12 +720,12 @@
     {
       "id": "external/triangle_attention",
       "state": "open",
-      "next_experiment": "Installed host/compile_shader27pairs execute off/on in both private native/helper-free pure modes:216calls, exact1944rawfiles across fourchildren, actual eightbindings/source/pipeline/payload witnesses and zero receipt counters after ordinary ownercleanup. Fable boundedreceipt review then full-call retention/warm/null and separated cold setup, including binary hashing for direct kernels. This is narrow capability/correctness recovery, no speedclaim. Wider dtype, width-changing wrapper, stride/mask/tail/backward, aliases, external-loader and hardware coverage remain open."
+      "next_experiment": "2026-11-07 fresh kernels emitted from installed candidate pass finite opt-in full-layer reverse AD and six SGD updates per orientation through external Reactant/PJRT custom calls:41gradientarrays,maxabs1.1920928955078125e-07. Portable training companion verified after extraction. Evidence training-integration-20261107/current-run-002 and CURRENT-COMPANION.json. Scope Float32 N32,D32,H2,B1, process-local explicit hook; no general arbitrary-custom-call AD, higher-order/tail/mixed-precision/performance qualification. GPU hardware M1/M5 untested as user-directed exclusions. Remains open for wider declared row scope."
     },
     {
       "id": "external/metal_pipeline",
       "state": "open",
-      "next_experiment": "All four installed regression phases independently accepted through reviewed source continuity; no unchanged rerun. Review the source-bound CPU operation matrix in trifast-operation-semantics-20261012, then establish the per-program numerical policy for dot/reduction fusion, association and exceptional values before further transport. Public source-program dispatch stays refused; general inputs, tails, actual production transport, resources and performance remain unqualified. No baseline adoption or commit inferred."
+      "next_experiment": "2026-11-07 fresh kernels emitted from installed candidate pass finite opt-in full-layer reverse AD and six SGD updates per orientation through external Reactant/PJRT custom calls:41gradientarrays,maxabs1.1920928955078125e-07. Portable training companion verified after extraction. Evidence training-integration-20261107/current-run-002 and CURRENT-COMPANION.json. Scope Float32 N32,D32,H2,B1, process-local explicit hook; no general arbitrary-custom-call AD, higher-order/tail/mixed-precision/performance qualification. GPU hardware M1/M5 untested as user-directed exclusions. Remains open for wider declared row scope."
     },
     {
       "id": "family/dot_and_epilogues",
@@ -745,22 +745,26 @@
     {
       "id": "framework/inductor_training",
       "state": "open",
-      "next_experiment": "Retain compiled inference/training/gradient/dynamic-shape capability and measure warm/cold costs."
+      "next_experiment": "Current candidate passes full existing Torch model/training suite, including CNN/transformer gradients and 8-step optimizer loops, on both installed wheel modes; see /Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/release-candidate-integration-20261103/RESULTS.json. Warm/cold matched performance remains separate."
     },
     {
       "id": "framework/mlx",
       "state": "open",
-      "next_experiment": "Qualify extraction, binding and execution separately from MPS."
+      "next_experiment": "Installed MLX extraction/binding/execution tests pass on both 0.4.0rc1 modes with MLX 0.32.0; public suites have no skips. See /Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/release-candidate-integration-20261103/RESULTS.json. Performance and wider matrix remain separate."
     },
     {
       "id": "artifact/native_and_pure",
-      "state": "open",
-      "next_experiment": "Qualify actual installed native/pure artifacts and binder cold modes without injected helpers."
+      "state": "evidence_ready",
+      "next_experiment": "2026-11-07 independently reviewed dense-transpose successor installed native/pure artifacts, fullCPU1318/1226pass,normal and relocatedsmokes; sourcebound1f79f3c2. Scope cloned retained dependencyenvs,notfreshdependencyinstall. Prior receipt/artifacts preserved. No general release/performance qualification.",
+      "receipt": {
+        "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/transposed-dense-direct-20261107/ARTIFACT-RECEIPT.json",
+        "sha256": "9c88abd6b790d11afa769cab1796a5d09d7a25ca735cee201183604912aa95ef"
+      }
     },
     {
       "id": "hardware/m1_and_later",
       "state": "open",
-      "next_experiment": "Obtain applicable device evidence; missing hardware stays blocked, not impossible."
+      "next_experiment": "Run /Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/trifast-xla-plugin-20261102/trifast-workflow-bundle.tar.gz on actual M1 hardware when available; expected-device check defaults M1, validates each pipeline thread/scratch limit and compares15 outputs/gradients to FP64 references. Bundle passed relocated M4 validation only; no M1 emulation or qualification claim."
     }
   ]
 }

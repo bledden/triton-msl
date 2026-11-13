@@ -19,6 +19,11 @@ template uses another) go through this same module.
 """
 
 from triton_msl.codegen.msl_types import triton_type_to_msl
+from triton_msl.codegen._fa_fragments import (
+    row_loop as _fa_row_loop,
+    scope_reason as _fa_fragment_scope,
+    validate_mode as _fa_fragment_mode,
+)
 # NOTE: KernelBuilder, _msl_compute_type, _msl_zero, _sanitize_msl_name are
 # imported from msl_emitter at the BOTTOM of this module, not here. msl_emitter
 # re-exports this module via `from _msl_templates import *`, so importing it at
@@ -1912,6 +1917,7 @@ def make_flash_attention_kernel_simdgroup(
     unmasked_kv=(),
     source_causal_stop=None,
     initial_values=None,
+    fragment_lowering="off",
 ):
     """simdgroup_matrix FlashAttention-2 (fp32/fp16, causal/non-causal, head_dim=128).
 
@@ -1946,6 +1952,34 @@ def make_flash_attention_kernel_simdgroup(
     """
     import math as _math
 
+    _fa_fragment_mode(fragment_lowering)
+    _expanded = fragment_lowering != "off"
+    if _expanded:
+        reason = _fa_fragment_scope(
+            head_dim=head_dim,
+            v_head_dim=v_head_dim,
+            out_dtype=out_dtype,
+            causal=causal,
+            half_accumulate=half_accumulate,
+            source_kv_block=source_kv_block,
+            mask_tail_scores=mask_tail_scores,
+            unmasked_kv=unmasked_kv,
+            source_causal_stop=source_causal_stop,
+            initial_values=initial_values,
+            bias=bias,
+            mask=mask,
+            lse=lse,
+            runtime_scale=runtime_scale,
+            grid_3d=grid_3d,
+            mask_batch_div=mask_batch_div,
+            runtime_neg_inf=runtime_neg_inf,
+            round_q=round_q,
+            round_p=round_p,
+            scale_chain=scale_chain,
+            scale=scale,
+        )
+        if reason is not None:
+            raise ValueError("fragment lowering outside prepared scope: " + reason)
     D, BM, BN, NT = head_dim, BLOCK_M, BLOCK_N, 256
     _initial_acc, _initial_den = _fa_initial_values(initial_values, source_kv_block)
     # ASYMMETRIC head dims (MLA / DeepSeek-style): the QK CONTRACTION runs over
@@ -2193,22 +2227,66 @@ def make_flash_attention_kernel_simdgroup(
     # float slots; 8 groups * 4 fragments * 64 slots == BM * BN == 2048.
     # The end-of-key-block threadgroup barrier protects the next score store.
     if elem == "half" and not half_accumulate:
-        _alpha_rescale = """// Batch four row fragments in the now-dead float score tile.
-            for (uint rb=0u;rb<4u;rb++) {
-                simdgroup_store(o[rb][t], tg_S + sgitg*256u + rb*64u, 8u);
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint rb=0u;rb<4u;rb++) {
-                for (uint e=lid%32u;e<64u;e+=32u) {
-                    float a=tg_alpha[rb*8u+e/8u];
-                    tg_S[sgitg*256u+rb*64u+e] = float(tg_S[sgitg*256u+rb*64u+e] * float(isfinite(a) ? a : 0.0f));
-                }
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint rb=0u;rb<4u;rb++) {
-                simdgroup_load(o[rb][t], tg_S + sgitg*256u + rb*64u, 8u);
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);"""
+        _alpha_rescale = (
+            "// Batch four row fragments in the now-dead float score tile.\n            "
+            + _fa_row_loop(
+                "\n                simdgroup_store(o[@ROW@][t], tg_S + sgitg*256u + @ROW@*64u, 8u);\n            ",
+                _expanded,
+            )
+            + "\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n            "
+            + _fa_row_loop(
+                "\n                for (uint e=lid%32u;e<64u;e+=32u) {\n                    float a=tg_alpha[@ROW@*8u+e/8u];\n                    tg_S[sgitg*256u+@ROW@*64u+e] = float(tg_S[sgitg*256u+@ROW@*64u+e] * float(isfinite(a) ? a : 0.0f));\n                }\n            ",
+                _expanded,
+            )
+            + "\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n            "
+            + _fa_row_loop(
+                "\n                simdgroup_load(o[@ROW@][t], tg_S + sgitg*256u + @ROW@*64u, 8u);\n            ",
+                _expanded,
+            )
+            + "\n            simdgroup_barrier(mem_flags::mem_threadgroup);"
+        )
+
+    _before_fragments = _after_fragments = ""
+    if fragment_lowering in ("private", "private-output"):
+        _before_fragments = (
+            "        // CPU prototype: broadcast each row's alpha into an identically typed fragment.\n"
+            "        // Each SIMD group owns 256 slots; no cross-group scratch reader exists here.\n"
+            "        "
+            + _fa_row_loop(
+                "\n            for (uint e=lid%32u;e<64u;e+=32u) {\n"
+                "                float a=tg_alpha[@ROW@*8u+e/8u];\n"
+                "                tg_S[sgitg*256u+@ROW@*64u+e] = isfinite(a) ? a : 0.0f;\n"
+                "            }\n        ",
+                True,
+            )
+            + "\n"
+            "        simdgroup_barrier(mem_flags::mem_threadgroup);\n"
+        )
+        _alpha_rescale = (
+            "// Same-type storage multiplication: no diagonal MMA and no lane-row formula.\n            "
+            + _fa_row_loop(
+                "\n                simdgroup_float8x8 alpha_fragment;\n"
+                "                simdgroup_load(alpha_fragment, tg_S + sgitg*256u + @ROW@*64u, 8u);\n"
+                "                o[@ROW@][t].thread_elements() = o[@ROW@][t].thread_elements() * alpha_fragment.thread_elements();\n            ",
+                True,
+            )
+        )
+    elif fragment_lowering in ("shared", "shared-output"):
+        _after_fragments = (
+            "        // Replicate each row coefficient across one 8-wide matrix row.\n"
+            "        float row_alpha = tg_alpha[lid/8u];\n"
+            "        on_scratch[lid] = isfinite(row_alpha) ? row_alpha : 0.0f;\n"
+            "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        )
+        _alpha_rescale = (
+            "// Same-type fragments pair elements without a lane-coordinate formula.\n            "
+            + _fa_row_loop(
+                "\n                simdgroup_float8x8 coefficient;\n"
+                "                simdgroup_load(coefficient, on_scratch + @ROW@*64u, 8u);\n"
+                "                o[@ROW@][t].thread_elements() *= coefficient.thread_elements();\n            ",
+                True,
+            )
+        )
 
     # An explicit dense-source proof may retain zero-K scores beyond N_CTX.
     # Keep this opt-in: biased/MLA/standalone contracts must not inherit it.
@@ -2347,8 +2425,8 @@ def make_flash_attention_kernel_simdgroup(
             }
 %(NONFINITE_SANITIZE)s        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        %(PLOADT)s pf, vf, vfs[%(BN)d/8];
-        for (uint t=0u;t<TPG;t++) {
+%(BEFORE_FRAGMENTS)s        %(PLOADT)s pf, vf, vfs[%(BN)d/8];
+%(AFTER_FRAGMENTS)s        for (uint t=0u;t<TPG;t++) {
             uint ct = sgitg + t*%(NG)du;
             %(ALPHA_RESCALE)s
 %(VLOAD)s
@@ -2363,6 +2441,8 @@ def make_flash_attention_kernel_simdgroup(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }"""
         return tmpl % {
+            "BEFORE_FRAGMENTS": _before_fragments,
+            "AFTER_FRAGMENTS": _after_fragments,
             "ACC": acc_frag,
             "AZ": acc_zero,
             "KVFRAG": kv_frag,
@@ -2408,6 +2488,21 @@ def make_flash_attention_kernel_simdgroup(
         f"                    Out[o_base + qr2*o_sm + dc2*o_sk] = {store_cast(_final_value)};\n"
         "            }\n"
         "            threadgroup_barrier(mem_flags::mem_threadgroup);"
+    )
+
+    if fragment_lowering in ("output", "private-output", "shared-output"):
+        # on_scratch is group-private here. The end-of-block group barrier
+        # already retires all shared coefficient readers before this reuse.
+        final_store = final_store.replace("threadgroup_barrier(", "simdgroup_barrier(")
+    _initialization = _fa_row_loop(
+        f"for (uint t=0u;t<TPG;t++) o[@ROW@][t]={acc_frag}({acc_zero if _initial_acc == '0.0f' else _initial_acc});",
+        _expanded,
+        single=True,
+    )
+    _final_rows = _fa_row_loop(
+        "\n        for (uint t=0u;t<TPG;t++) {\n"
+        f"            uint ct = sgitg + t*{n_groups}u;\n" + final_store.replace("rb", "@ROW@") + "\n        }\n    ",
+        _expanded,
     )
 
     # Causal work-skipping: a q-block covers rows [q_start, q_start+BM); any kv-block
@@ -2458,7 +2553,7 @@ kernel void {kernel_name}(
     threadgroup {elem} tgKV[{BN} * {Dc_tail}u];
 
     {acc_frag} o[4][TPG];
-    for (uint rb=0u;rb<4u;rb++) for (uint t=0u;t<TPG;t++) o[rb][t]={acc_frag}({acc_zero if _initial_acc == "0.0f" else _initial_acc});
+    {_initialization}
 
     for (uint i = lid; i < BM*D; i += NT) {{
         uint qr = q_start + i/D;
@@ -2478,12 +2573,7 @@ kernel void {kernel_name}(
     }}
 {lse_store}
 
-    for (uint rb=0u;rb<4u;rb++) {{
-        for (uint t=0u;t<TPG;t++) {{
-            uint ct = sgitg + t*{n_groups}u;
-{final_store}
-        }}
-    }}
+    {_final_rows}
 }}
 """
     return head

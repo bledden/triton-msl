@@ -1,0 +1,89 @@
+Default-off dense attention fragment compositions — CPU candidate
+
+The experimental_fa_fragment_lowering compiler option is a closed string enum:
+  off             unchanged C path (default)
+  expanded        C_U: literal row fragments, scratch rescale
+  private         S_U: private coefficient copies plus literal row fragments
+  output          B_U: C_U with group-private output barriers
+  private-output  SB_U: both private coefficients and output barriers
+  shared          F_U: shared coefficient tile plus literal row fragments
+  shared-output   F_U+B: shared coefficients and group-private output barriers
+All enabled choices include expansion. No slow unexpanded fragment-arithmetic
+variant is installed as an experimental mode. These names are diagnostic compiler
+choices, not performance levels or defaults selected from a benchmark result.
+
+Selection
+Only the existing proved dense SIMD route can select a mode. Source/role/value
+verification still precedes the maker. The initial scope is noncausal Dqk=Dv=64,
+half inputs/output with FP32 accumulation, scale 0.125, source KV block 32 and
+physical tile32x64, masked K/V loads with source score-tail replay, zero positive
+initial state, no new scalar/product rounding, bias, mask, LSE or runtime sentinel.
+Other source families retain their existing implementation. Direct-maker requests
+outside this scope raise rather than silently claim the requested composition.
+The existing tile/32KiB/256-thread gates remain. No post-submission fallback or
+retry is introduced. The option is validated by MetalOptions and included in its
+hash; package-content hashing includes the new producer helper. Restart/rebuild
+is required after changing implementation bytes; old native bindings are stale.
+
+For explicit requests, emission metadata reports requested/selected/reason as
+fa_fragment_lowering. This is diagnostic metadata; it grants no execution authority.
+The existing flash_attention descriptor, source hash and dispatch ownership remain
+unchanged in kind. No extra metadata is emitted for the default off path.
+
+Producer representation
+_fa_fragments.row_loop emits one template-owned body with an explicit @ROW@
+placeholder. Off retains the old loop spelling; enabled emits four lexical scopes
+with uint literals 0u..3u, preserving row-major/t ordering. It is not a parser or
+textual optimizer over arbitrary MSL. Initialization, full/tail rescale and final
+store are produced directly. The bodies retain casts, zero/nonfinite behavior,
+source tail predicates and arithmetic order. Retained source comments are kept
+for exact reconstruction; their historical wording is not new qualification.
+
+Shared-coefficient and output-scratch composition proof
+In each KV block the existing group barrier completes alpha production. Exactly
+256 threads write coefficient slots [0,256), one per lid, representing 32 rows
+by 8 identical coefficients per row. A group barrier publishes those writes to
+all eight groups. Each coefficient is loaded as the same fragment type as the
+accumulator; multiplication pairs the two fragment storages without assuming a
+lane-to-matrix mapping. The normal end-of-block group barrier retires all reads
+before the next KV block rewrites coefficients, or before final output reuses
+on_scratch. Full/tail selection is group-uniform; those barriers remain.
+
+At final output, each group stores/reads only its own 64 slots at sgitg*64+e.
+For lane 0..31, e=lane and lane+32 partition those slots exactly. No group reads
+another group's region. The first SIMD barrier orders its matrix store before
+scalar reads; the second orders those reads before its next row/tile store. The
+shared-output mode narrows only these eight expanded epilogue barriers, not the
+coefficient publication or block-end barriers. All normalization/guard/store bytes
+remain equal to F_U. This source proof is not native correctness for the new arm.
+
+Evidence and limits
+The actual retained TTGIR is parsed, walked and lowered through GenericLowerer and
+emit_msl, with no proof stubs, to reconstruct C/C_U/S_U/B_U/SB_U/F_U byte-for-byte.
+F_U+B is a new source differing from F_U only in eight epilogue barrier spellings.
+The changed-recurrence test feeds real altered TTGIR and proves refusal before the
+maker. Real scale/initial-state neighbors and half-accumulation preserve baseline
+emission with a documented nonselection. Ninety-eight parent hashes cover direct
+maker defaults including width/tail/causal/precision and biased/mask/LSE variants.
+No source test proves a GPU result, installed-wheel route, register use or speedup.
+The current 19 timing labels remain withheld; the rising originals are not a
+useful end-to-end baseline. No component is discarded for a masked local gain.
+
+CPU tests
+Use a CPU-only Python launcher with framework/device and process actions refused,
+pytest plugin autoload disabled, --noconftest, and bytecode disabled. The repository
+root conftest actively creates a Metal device, so normal test collection is NOT a
+CPU-only entry point. The evidence lane retains the exact launcher. Triton's native
+IR parser and ctypes' handle for the running Python process are allowed; no named
+library load, Metal/objc/torch import, subprocess, MSL compiler or GPU work is used.
+
+Next qualification
+Review this concrete patch and its source archive, then use a fresh source-bound
+native correctness instrument for actual generated sources, including the new
+F_U+B arm. Retain all23 fixtures/two poisons, guards, independent source-aware
+oracle, 256-thread geometry and resource records. The public route also needs
+positive actual dispatch evidence, not just direct Metal. Any later timing must
+be designed before fresh data and distinguish sustained device behavior from
+host gating/observer cost. Installed native/pure coverage remains open. No new
+CPU preflight or GPU attempt is launched or authorized by this preparation.
+All59 obligations, N1(release), RG-02 and CP-01 remain open.

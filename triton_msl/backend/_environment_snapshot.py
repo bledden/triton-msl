@@ -111,12 +111,18 @@ def _implementation_unchanged(guard):
     if _validation_native is not None and _native_all is not None:
         return _validation_native.implementation_unchanged(globals(), guard)
     fn, code, defaults, dependencies = guard
-    return (
-        fn.__code__ is code
-        and fn.__defaults__ is defaults
-        and fn.__kwdefaults__ is None
-        and all(fn.__globals__.get(name, fn.__builtins__.get(name)) is expected for name, expected in dependencies)
-    )
+    if fn.__code__ is not code or fn.__defaults__ is not defaults or fn.__kwdefaults__ is not None:
+        return False
+    if _native_all is not None and all is _native_all and type(fn) is FunctionType:
+        # These two function attributes are read-only dictionary references.
+        # Preserve live lookups, eager default evaluation and short-circuiting;
+        # only the standard all() path avoids the per-check generator.
+        namespace, builtins_namespace = fn.__globals__, fn.__builtins__
+        for name, expected in dependencies:
+            if namespace.get(name, builtins_namespace.get(name)) is not expected:
+                return False
+        return True
+    return all(fn.__globals__.get(name, fn.__builtins__.get(name)) is expected for name, expected in dependencies)
 
 
 def _standard_encoding(fn):

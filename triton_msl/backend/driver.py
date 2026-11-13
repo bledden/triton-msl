@@ -3,6 +3,10 @@ import platform
 import struct
 import subprocess
 import tempfile
+from types import BuiltinFunctionType
+
+# Only the ordinary builtin consumer may omit the per-launch generator.
+_standard_all = all if type(all) is BuiltinFunctionType and all.__module__ == "builtins" and all.__name__ == "all" else None
 
 from triton.backends.compiler import GPUTarget
 from triton.backends.driver import DriverBase
@@ -666,7 +670,14 @@ def _compile_shader_scalars_ok(launcher, kargs, *, checked=None) -> bool:
     Any uncertainty (tuple arg, unresolvable type, unknown/unsafe scalar type)
     -> return False so the launch falls back to the existing path.
     """
+    global _SCALAR_GATE
+    if _SCALAR_GATE is False:
+        _SCALAR_GATE = _select_scalar_gate()
     try:
+        if _SCALAR_GATE is not None:
+            _fast_scalar = _SCALAR_GATE(launcher, kargs, checked)
+            if _fast_scalar is not None:
+                return _fast_scalar
         # Original arg indices of the non-constexpr args, in kargs order.
         # __call__ builds kargs as [a for i,a in enumerate(args)
         # if i not in constexpr_indices]; mirror that index mapping here.
@@ -715,6 +726,25 @@ def _compile_shader_scalars_ok(launcher, kargs, *, checked=None) -> bool:
         return True
     except Exception:
         return False  # any resolution failure -> conservative fall back
+
+
+def _select_scalar_gate():
+    from ._launch_signature import _binder_native
+
+    if _binder_native is None:
+        return None
+    configure = getattr(_binder_native, "configure_scalar", None)
+    if configure is None:
+        return None
+    gate = getattr(_binder_native, "scalar_gate", None)
+    for entry, name in ((configure, "configure_scalar"), (gate, "scalar_gate")):
+        if (type(entry) is not BuiltinFunctionType or entry.__self__ is not _binder_native
+                or entry.__name__ != name):
+            return None
+    return gate if configure(_compile_shader_scalars_ok) else None
+
+
+_SCALAR_GATE = False
 
 
 _MAX_METAL_BUFFERS = 31
@@ -972,12 +1002,25 @@ class MetalLauncher:
                     # Ordered non-constexpr args (match [[buffer(i)]] order).
                     kargs = [a for i, a in enumerate(args) if i not in self.constexpr_indices]
                     tensors = [a for a in kargs if hasattr(a, "data_ptr")]
-                    all_mps = bool(tensors) and all(
-                        # TensorWrapper has data_ptr/device but compile_shader cannot
-                        # bind it. This is eligibility, not an ambiguous dispatch retry.
-                        isinstance(a, _torch.Tensor) and str(a.device).startswith("mps")
-                        for a in tensors
-                    )
+                    all_mps = bool(tensors)
+                    if all_mps:
+                        if _standard_all is not None and all is _standard_all:
+                            # Keep each live type/device read in its original order.
+                            # TensorWrapper is still ineligible; no dispatch is retried.
+                            try:
+                                for a in tensors:
+                                    if not (isinstance(a, _torch.Tensor) and str(a.device).startswith("mps")):
+                                        all_mps = False
+                                        break
+                            except StopIteration as error:
+                                # The original generator applies PEP 479 here.
+                                raise RuntimeError("generator raised StopIteration") from error
+                        else:
+                            # A custom consumer retains its lazy iterator and result.
+                            all_mps = all(
+                                isinstance(a, _torch.Tensor) and str(a.device).startswith("mps")
+                                for a in tensors
+                            )
 
                     # --- Quantized-matmul dispatch (compile_shader-only) ---
                     # Route a recognized weight-only int8 matmul to the fast dequant

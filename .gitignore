@@ -13,6 +13,9 @@ build/
 *.air
 *.metal
 !triton_msl/**/*.metal
+# Frozen regression inputs, not compiler output or benchmark artifacts.
+!tests/fixtures/fa_fragments/*.metal
+!tests/fixtures/source_program/external_cooperative/*.metal
 torch_compile_debug/
 /tmp/
 triton_msl_cache/

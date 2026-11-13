@@ -216,7 +216,12 @@ def _select_binder_native():
     if name not in sys.modules and find_spec(name) is None:
         return None
     native = import_module(name)
-    if not native.configure(bind_arguments, _BindingPlan, bind_arguments_with_plan):
+    validation_name = __package__ + "._validation_native"
+    census = None
+    if validation_name in sys.modules or find_spec(validation_name) is not None:
+        validation = import_module(validation_name)
+        census = getattr(validation, "dict_keys_exact_str", None)
+    if not native.configure(bind_arguments, _BindingPlan, bind_arguments_with_plan, census):
         return None
     return native
 

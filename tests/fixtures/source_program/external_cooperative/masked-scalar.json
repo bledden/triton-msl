@@ -1,0 +1,572 @@
+{
+  "argument_abi": null,
+  "batched_dot_bounds": [
+    "source_program_pending_v1",
+    {
+      "addresses": [
+        {
+          "bool_byte_cast": false,
+          "element": "f32",
+          "links": [
+            [
+              "mul",
+              [
+                "pid",
+                2
+              ],
+              [
+                "mul",
+                [
+                  "mul",
+                  [
+                    "arg",
+                    9
+                  ],
+                  [
+                    "arg",
+                    9
+                  ]
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "pid",
+                1
+              ],
+              [
+                "mul",
+                [
+                  "arg",
+                  9
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "add",
+                [
+                  "lane",
+                  0
+                ],
+                [
+                  "mul",
+                  [
+                    "pid",
+                    0
+                  ],
+                  [
+                    "const",
+                    32
+                  ]
+                ]
+              ],
+              [
+                "const",
+                32
+              ]
+            ],
+            [
+              "lane",
+              1
+            ]
+          ],
+          "root": 2,
+          "shape": [
+            32,
+            32
+          ]
+        },
+        {
+          "bool_byte_cast": false,
+          "element": "f32",
+          "links": [
+            [
+              "mul",
+              [
+                "pid",
+                2
+              ],
+              [
+                "mul",
+                [
+                  "mul",
+                  [
+                    "arg",
+                    9
+                  ],
+                  [
+                    "arg",
+                    9
+                  ]
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "pid",
+                1
+              ],
+              [
+                "mul",
+                [
+                  "arg",
+                  9
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ],
+            [
+              "lane",
+              0
+            ],
+            [
+              "mul",
+              [
+                "add",
+                [
+                  "lane",
+                  1
+                ],
+                [
+                  "iv"
+                ]
+              ],
+              [
+                "const",
+                32
+              ]
+            ]
+          ],
+          "root": 3,
+          "shape": [
+            32,
+            32
+          ]
+        },
+        {
+          "bool_byte_cast": false,
+          "element": "f32",
+          "links": [
+            [
+              "mul",
+              [
+                "pid",
+                2
+              ],
+              [
+                "mul",
+                [
+                  "arg",
+                  9
+                ],
+                [
+                  "arg",
+                  9
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "add",
+                [
+                  "lane",
+                  0
+                ],
+                [
+                  "mul",
+                  [
+                    "pid",
+                    0
+                  ],
+                  [
+                    "const",
+                    32
+                  ]
+                ]
+              ],
+              [
+                "arg",
+                9
+              ]
+            ],
+            [
+              "add",
+              [
+                "lane",
+                1
+              ],
+              [
+                "iv"
+              ]
+            ]
+          ],
+          "root": 5,
+          "shape": [
+            32,
+            32
+          ]
+        },
+        {
+          "bool_byte_cast": true,
+          "element": "i8",
+          "links": [
+            [
+              "mul",
+              [
+                "divsi",
+                [
+                  "pid",
+                  2
+                ],
+                [
+                  "arg",
+                  10
+                ]
+              ],
+              [
+                "mul",
+                [
+                  "arg",
+                  9
+                ],
+                [
+                  "arg",
+                  9
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "pid",
+                1
+              ],
+              [
+                "arg",
+                9
+              ]
+            ],
+            [
+              "add",
+              [
+                "lane",
+                0
+              ],
+              [
+                "iv"
+              ]
+            ]
+          ],
+          "root": 6,
+          "shape": [
+            32
+          ]
+        },
+        {
+          "bool_byte_cast": false,
+          "element": "f32",
+          "links": [
+            [
+              "mul",
+              [
+                "pid",
+                2
+              ],
+              [
+                "mul",
+                [
+                  "mul",
+                  [
+                    "arg",
+                    9
+                  ],
+                  [
+                    "arg",
+                    9
+                  ]
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "pid",
+                1
+              ],
+              [
+                "mul",
+                [
+                  "arg",
+                  9
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "add",
+                [
+                  "lane",
+                  0
+                ],
+                [
+                  "iv"
+                ]
+              ],
+              [
+                "const",
+                32
+              ]
+            ],
+            [
+              "lane",
+              1
+            ]
+          ],
+          "root": 4,
+          "shape": [
+            32,
+            32
+          ]
+        },
+        {
+          "bool_byte_cast": false,
+          "element": "f32",
+          "links": [
+            [
+              "mul",
+              [
+                "pid",
+                2
+              ],
+              [
+                "mul",
+                [
+                  "mul",
+                  [
+                    "arg",
+                    9
+                  ],
+                  [
+                    "arg",
+                    9
+                  ]
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "pid",
+                1
+              ],
+              [
+                "mul",
+                [
+                  "arg",
+                  9
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "add",
+                [
+                  "lane",
+                  0
+                ],
+                [
+                  "mul",
+                  [
+                    "pid",
+                    0
+                  ],
+                  [
+                    "const",
+                    32
+                  ]
+                ]
+              ],
+              [
+                "const",
+                32
+              ]
+            ],
+            [
+              "lane",
+              1
+            ]
+          ],
+          "root": 0,
+          "shape": [
+            32,
+            32
+          ]
+        },
+        {
+          "bool_byte_cast": false,
+          "element": "f32",
+          "links": [
+            [
+              "mul",
+              [
+                "pid",
+                2
+              ],
+              [
+                "mul",
+                [
+                  "arg",
+                  9
+                ],
+                [
+                  "arg",
+                  9
+                ]
+              ]
+            ],
+            [
+              "mul",
+              [
+                "pid",
+                1
+              ],
+              [
+                "arg",
+                9
+              ]
+            ],
+            [
+              "add",
+              [
+                "lane",
+                0
+              ],
+              [
+                "mul",
+                [
+                  "pid",
+                  0
+                ],
+                [
+                  "const",
+                  32
+                ]
+              ]
+            ]
+          ],
+          "root": 1,
+          "shape": [
+            32
+          ]
+        }
+      ],
+      "bindings": 11,
+      "branch": "masked",
+      "entry": "_fwd",
+      "full_tile_domain": {
+        "BLOCK": 32,
+        "DIM": 32,
+        "H": [
+          1,
+          2
+        ],
+        "N": [
+          32,
+          64
+        ],
+        "batch": [
+          1,
+          2
+        ]
+      },
+      "max_imprecise_accumulation": 0,
+      "native_ieee_enum": 2,
+      "outputs": [
+        0,
+        1
+      ],
+      "private_bytes_declared": 1468,
+      "runtime_admission": "blocked: numerical, storage and dispatch qualification pending",
+      "scalar_roles": [
+        [
+          7,
+          "f32",
+          "scale"
+        ],
+        [
+          8,
+          "f32",
+          "sentinel"
+        ],
+        [
+          9,
+          "i32",
+          "N"
+        ],
+        [
+          10,
+          "i32",
+          "H"
+        ]
+      ],
+      "schema": 1,
+      "source_sha256": "587ee35a2fc24a3b25d1c4801044261d2bff2d5922162160a50c4883c4c79be2",
+      "threads": [
+        32,
+        1,
+        1
+      ]
+    }
+  ],
+  "block_size": 32,
+  "device_assert": null,
+  "fast_matmul": null,
+  "flash_attention": null,
+  "mm_two_kernel": null,
+  "name": "_fwd",
+  "needs_2d_grid": true,
+  "output_arg_indices": [
+    0,
+    1
+  ],
+  "quant_matmul": null,
+  "shared": 0
+}

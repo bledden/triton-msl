@@ -1,0 +1,1530 @@
+[
+  {
+    "args": {
+      "head_dim": 8,
+      "v_head_dim": 8,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "825107f75d3e829376ab601710ce0e542a1f3c273937d0f93000a0a587ec5c9d"
+  },
+  {
+    "args": {
+      "head_dim": 8,
+      "v_head_dim": 8,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "61a405fee4f8329947f819d129f959dfd27a21c937d0c35394a4e9780a55d5f2"
+  },
+  {
+    "args": {
+      "head_dim": 8,
+      "v_head_dim": 8,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "bd95cf7701d73d778ddaecd508b81be086cad3b49d54cba61930417866d36e15"
+  },
+  {
+    "args": {
+      "head_dim": 8,
+      "v_head_dim": 8,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "b05f82dc2ce4c03c8bb8ec17b3b30c1beeef59f215c4dcc8ea9218d6993f8c3b"
+  },
+  {
+    "args": {
+      "head_dim": 8,
+      "v_head_dim": 8,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "a6fbf950072276684f660ac7bbbc4e58a5634cea5e8d1747d039df8a5fbbe373"
+  },
+  {
+    "args": {
+      "head_dim": 8,
+      "v_head_dim": 8,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "8d07c76f0f5f3dbf8ef5837eff13c60db2f854642af556869a47a48b6b35f5c7"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "6a949f1c2804feec87b98e759fe69bbc9169dcabae94aa72568efe47e9f0d099"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "7e001cfd5e2743c1dd89353540b88711a0a0d72cf105666db98d21cdb1c0c871"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "7b591c267c597588b765a76464f866ae1df6f457bd70a48f3351775b959ae8e5"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "078a85609095ae84bf48f50cb9108bdb0b1564697edb5f5d02aa21db1913182b"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "3c76f5b04dfe720786665195a59c87fb94a6d5be19e2d39502ad39ad32879e9f"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "d48424e4bbbbbd7a8d8d16a8655ef7639376d1c69f67d6e4e23b491a41f022ac"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "4add2535ca8d31f3b4974dea98a3838e7405a3d72c9cbf4dd31ee4da1947f8eb"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "cf16ec4dc265429b9bbf7cc7cb7ea1b32448dc29c89e09619710c3679a101b46"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "496174804f87fb4a6600c24b3dd1cbc330dcdde2037c641f56c9c1b0cf05a951"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "2f3bf13c8846c73b90549828454aa28579bfb057d2a9ff79e90f30cb63749309"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "894c064df12c0342ebf3022f65a5628df763d3b9b1de19d4c16777a6a3f75e08"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "3d4f4f80551f0759d41d618c7a10b059a2d9dbdc7de00379747a54622a8894c3"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "8fd3d7474e4396e902efc376c09f3ee8e21b3882cbe69cb10d79281f1625f2cb"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "9a8550bc68a1991ea8c1d1c88fa6bac132f3887aa2ca31a3f54da730d98427a3"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "5dd148ea9753f91b8b91b9490f7d0afcfc6b9a6396e375187d256e5766af933a"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "6ef0cd5e0d15b0dc47ff4c7b0afe47255d2998c3804835e92fc60fdada3185f8"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "933eef7ce17e983858fa980ae1eef64ce5f87cf8992927d5b63a27ae176400db"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "c8256392c59293507c309424b1fea6bec9f9a75cd885a6b3ba34c6d091e9ad14"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "2dbddd662f1427944ebd31071a62a4542409e34ae8981ac8f180d791e5fda600"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "02e73c1165b8d57263a8bac2976e6e8f925fe5b4cf3a0262b34de298785efd9e"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "7664391a063286ec7c224bc031a36daf6d3d661ac851ea8c37a507148f8bcd4e"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "7e0a8752461289f0a66425c06da9fa3b72b55298c51f3384dd4064473551eaf6"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "85759be683a2b3787aadc1ce03ffef71b9ee0b421351efcfc5e76b07272af9ae"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "d9f3b7f5295de618953dbfbbe52998c7554b02ea0944e8ed521910404101e5a7"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "59dbc9d76cd8185838b072f1e618448a0f290191975da910f088b64bdc1b21da"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "a6889d41838ca3a608bb9e3e6a5f34c0a2020b0af638dd815d34298d65a8afa8"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "ab1488d3924eaf9accca9d34b03cccf6d1fe227f3d58d6a759403627d974ada6"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "b0f97045d3e8bcecb26969f2f3525d1a228a7be3d940b0cabc9f0293e5964e76"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "88b86638402ba7191ac65b3ff3b31becbf349ab0a082c15ab6dbbea489ebeb8c"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "9c91025f57964a2fbcdc658ab593a5464ff7fa3096dff923d32c4bf73349d2ab"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "bcf5a3b4df713cffde3a0430447deff0b2f99d5e26a94305aaab885fc3f2b6a2"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "1d74b68e98e41b25e46a6087b2fdb2d8c9f689286ded0f1bb72e040fdee29bcd"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "51e1bcd277f2432e79938da4eb5a6b60ec44c6b451fabc78ac1427076b36c7a8"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "7946502059175ff769fdf2185b87329037bd09624145a82f3a64da3d264b12c6"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "19319aff8e14eb2147f5c5bb006730231a8a6ce1d6870c9e28b2a8a4a282e1f0"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "c78ffd26297237022acd45bf605346b642eb7df245005264d341b201c972a09c"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 72,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "f32d9556a26d6e4b51f37d2d56d44cf9646069b02bd6c2be85c9990c08a698f0"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 72,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "8dd5dfecdde11ec19bf71ffef93f099ca47b11a9aedb57ac0f5022158428485d"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 72,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "73a0fd25e26eb1777864ea39345498923f73d1cc856c48fbca30f637e3cb4549"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 72,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "e5f690da7156c34ed5710dbd3dc7e9cc062a07b5a6adf0d3edfcfa7d513f390f"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 72,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "f6b622b9a9fd0308322cfc35aa01adaa54e784fafc88cd3910746299aa5276f2"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 72,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "9eda48b00e0e7f6a19ec8d77e3acf1fff1fb743e45a6657cfe133bf69242ab11"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 96,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "38870562fdb66edbfda4c321feffa96056362761375e3e03f6a0c5cc29781511"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 96,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "c29ec1c973fbcf0d55fa96f579a17c371c1a99647b0702e6b8d2af7c2957e96f"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 96,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "dda229d0b2ca2a26a4ec6ffe52e2c1face02bd64c4ccac4ae183dd8b96b95a31"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 96,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "4513cac2c306e94c7d2079cc96cd13ca1b2b1788eb7bc17460ad1ee7327f458a"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 96,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "5c1d3f57bd34996f7048edb89d9769026dac9c02c3afd1f19de29c475ddafb52"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 96,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "dcc81fe0d975de60afa8fc82eec58ccdbd15c2b34082b001c53fd96430d66c61"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "7e82817ed7e0880ccc630e368808e882bcfd0366f537770b2090e4d9ce9049c9"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "0a5f2aa6c53d13fb2e76278a8dfab92284f2afe823766a08498ca6fddc1b0ae2"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "07dc9fdcd69b139239d42f53ec4d5c873641f51b7319fdf38a9aca62d4f654fb"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "bcceec22680006ae72ebf98bdb6bba7c68775d9dee5a8219e9fe4726e1d826e8"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "6863cafb25fa4776448952fc570f89c7aa9accf543e5ed91e189c48390258798"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "c82a3e7db52084db0fbb0a86a8dc5ca366b9a1c4d84218709322ea27952bf26d"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 192,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "d4452370cae163f6044faf63a9beffb75a918384ff8c05d58bca53b922676901"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 192,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "e0432e4647c710abaaa26707f023ec9628a08225ccc8edd069d47188491bc6e5"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 192,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "1edf6a359ced59348c04a08b5f6315d23cfc3d19b7e38864840797eb27fbce37"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 192,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "eee7cf35ad4e25b30a45c8517f7b24f6a3c014f5dbae707223f91e4807e097b9"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 192,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "347f617cd798219c3745cb81efcceb6e55771f0579db1192af358897a3251f0f"
+  },
+  {
+    "args": {
+      "head_dim": 192,
+      "v_head_dim": 192,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "47ec06bb256283a676402c572e18fdbcd8edfe8729ef91177f6a90349117fa8c"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 248,
+      "out_dtype": "fp16",
+      "causal": false
+    },
+    "sha256": "394b4440cf9130a3bc5335fd7ca2e908461319bef22c8f8618927fdda82c9a3f"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 248,
+      "out_dtype": "fp16",
+      "causal": false,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "d5d98cf3c1660f3a27b65319fa00e7c28884eb2ffe217a21a8219d8f016a228e"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 248,
+      "out_dtype": "fp16",
+      "causal": false,
+      "source_kv_block": 32,
+      "mask_tail_scores": false,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": false
+    },
+    "sha256": "4ab181447bcb653fbabd95416d49a20c1efab3b776d403555179b0441fb971e0"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 248,
+      "out_dtype": "fp16",
+      "causal": true
+    },
+    "sha256": "5d2882dbdee4447eabc4c11f48142682b884ccf8f94726b24c01fbf59227a266"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 248,
+      "out_dtype": "fp16",
+      "causal": true,
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "c1ca5eded54de4e3fba100e3a69e736de43b1818a65baeb67b6d57f76c1222eb"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 248,
+      "out_dtype": "fp16",
+      "causal": true,
+      "source_kv_block": 32,
+      "mask_tail_scores": true,
+      "unmasked_kv": [
+        "K",
+        "V"
+      ],
+      "source_causal_stop": true
+    },
+    "sha256": "90289ad6d8e268611c37d9e05203b75791347c77c12f07f7fd14745b5d499f6c"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "half_accumulate": true,
+      "causal": false
+    },
+    "sha256": "27ea142ee930748a539cc070c5103b17711384bd0bb9cd8ccc55d1d5a2368fba"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp16",
+      "half_accumulate": true,
+      "causal": true
+    },
+    "sha256": "81e386cbfd4170caf1a51be3ccedfb1e23bfa71803d98b473c3ea8c3a997bd94"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "half_accumulate": true,
+      "causal": false
+    },
+    "sha256": "77ce87858cfc8cb9f5957f8bac21008b241da8816e3f184cb2c3487c2fda204a"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp16",
+      "half_accumulate": true,
+      "causal": true
+    },
+    "sha256": "7b3f3762e99281320d31b06719e8e1dabc5ad8b54f10792dbd93844b38d169fd"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp16",
+      "half_accumulate": true,
+      "causal": false
+    },
+    "sha256": "783d3ec48e38f40817a1a5c46dda8ee568bcec663d52a2482b1f2f721953d8b7"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp16",
+      "half_accumulate": true,
+      "causal": true
+    },
+    "sha256": "0e47f8ff26cd855e1074ff86c6d3c852d74345c78565557151f6569fbdbdb8a8"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "half_accumulate": true,
+      "causal": false
+    },
+    "sha256": "08a55ea03fbeac2004cc48982b588936208538d49a89732d172bc7fa54a488f2"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp16",
+      "half_accumulate": true,
+      "causal": true
+    },
+    "sha256": "bca8d35d75f1c3116f5381aa939b3bfcf455eac820e9bba690db1dcb7d4fa89f"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp32",
+      "half_accumulate": false,
+      "causal": false
+    },
+    "sha256": "5d8d9f87f650002244417556cebd560359fd5ae7d64d86ad419ff8f149149efb"
+  },
+  {
+    "args": {
+      "head_dim": 32,
+      "v_head_dim": 32,
+      "out_dtype": "fp32",
+      "half_accumulate": false,
+      "causal": true
+    },
+    "sha256": "ab2ed41da99964636b08a070a4b6d4ccc53128cb8546b00dbe0dafbb2cec4b1e"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp32",
+      "half_accumulate": false,
+      "causal": false
+    },
+    "sha256": "a77c0a66c6541801ddc0ad8c21bd1d8681eb2b87571a46f52cef4a4fdeda6035"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "v_head_dim": 64,
+      "out_dtype": "fp32",
+      "half_accumulate": false,
+      "causal": true
+    },
+    "sha256": "dd8be39d0454aac27ba82570d8976663d08c36a351b3f3c69b6b83fa1644b5ef"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp32",
+      "half_accumulate": false,
+      "causal": false
+    },
+    "sha256": "85e5a521b8b9d0f6fb4e41a64724e603dfa5727ac7f2039e1f7563dd83302783"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 40,
+      "out_dtype": "fp32",
+      "half_accumulate": false,
+      "causal": true
+    },
+    "sha256": "c4c85150372d72ca5262dc6e9ec55b64762d2660e65956b5df6d3db31f021c8f"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp32",
+      "half_accumulate": false,
+      "causal": false
+    },
+    "sha256": "6955c8ef8c38e8e3b8b302ca0dccc15774c15aebf5c1ef476c909ff4a174062d"
+  },
+  {
+    "args": {
+      "head_dim": 128,
+      "v_head_dim": 128,
+      "out_dtype": "fp32",
+      "half_accumulate": false,
+      "causal": true
+    },
+    "sha256": "70e2aa64a38776c4fe1579c2fb97dfc6f939de8be747c5df567050335d69855b"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp16",
+      "source_kv_block": 32,
+      "initial_values": [
+        0.0,
+        0.0
+      ]
+    },
+    "sha256": "4add2535ca8d31f3b4974dea98a3838e7405a3d72c9cbf4dd31ee4da1947f8eb"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp16",
+      "source_kv_block": 32,
+      "initial_values": [
+        1.0,
+        2.0
+      ]
+    },
+    "sha256": "d1a076416054f3b9db57f9b0fcc3a86157d0f4a93df5ef036ea678aca1d085ba"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": false,
+      "bias": true,
+      "mask": true,
+      "lse": true,
+      "runtime_scale": true,
+      "grid_3d": true,
+      "runtime_neg_inf": true,
+      "arg_decls": [
+        "    device const half* Q [[buffer(0)]]",
+        "    device const half* K [[buffer(1)]]",
+        "    device const half* V [[buffer(2)]]",
+        "    device half* Out [[buffer(3)]]",
+        "    device const half* Bias [[buffer(4)]]",
+        "    device const uchar* Mask [[buffer(5)]]",
+        "    device float* Lse [[buffer(6)]]",
+        "    constant uint& length [[buffer(7)]]",
+        "    constant float& input_scale [[buffer(8)]]",
+        "    constant float& sentinel [[buffer(9)]]"
+      ],
+      "bindings": {
+        "q_sz": "1u",
+        "q_sh": "1u",
+        "q_sm": "1u",
+        "q_sk": "1u",
+        "k_sz": "1u",
+        "k_sh": "1u",
+        "k_sn": "1u",
+        "k_sk": "1u",
+        "v_sz": "1u",
+        "v_sh": "1u",
+        "v_sn": "1u",
+        "v_sk": "1u",
+        "o_sz": "1u",
+        "o_sh": "1u",
+        "o_sm": "1u",
+        "o_sk": "1u",
+        "Z": "1u",
+        "H": "1u",
+        "N_CTX": "length",
+        "b_sz": "1u",
+        "b_sh": "1u",
+        "b_sm": "1u",
+        "b_sn": "1u",
+        "mask_sz": "1u",
+        "mask_sh": "1u",
+        "mask_sn": "1u",
+        "lse_sz": "1u",
+        "lse_sh": "1u",
+        "lse_sm": "1u",
+        "scale": "input_scale",
+        "neg_inf": "sentinel"
+      }
+    },
+    "sha256": "cb9e2fc19b5938d3ed64747e5827180c9a04a1b293f4c3d77268b9a85ee74b16"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": false,
+      "bias": true,
+      "mask": true,
+      "lse": true,
+      "runtime_scale": true,
+      "grid_3d": true,
+      "runtime_neg_inf": true,
+      "arg_decls": [
+        "    device const half* Q [[buffer(0)]]",
+        "    device const half* K [[buffer(1)]]",
+        "    device const half* V [[buffer(2)]]",
+        "    device half* Out [[buffer(3)]]",
+        "    device const half* Bias [[buffer(4)]]",
+        "    device const uchar* Mask [[buffer(5)]]",
+        "    device float* Lse [[buffer(6)]]",
+        "    constant uint& length [[buffer(7)]]",
+        "    constant float& input_scale [[buffer(8)]]",
+        "    constant float& sentinel [[buffer(9)]]"
+      ],
+      "bindings": {
+        "q_sz": "1u",
+        "q_sh": "1u",
+        "q_sm": "1u",
+        "q_sk": "1u",
+        "k_sz": "1u",
+        "k_sh": "1u",
+        "k_sn": "1u",
+        "k_sk": "1u",
+        "v_sz": "1u",
+        "v_sh": "1u",
+        "v_sn": "1u",
+        "v_sk": "1u",
+        "o_sz": "1u",
+        "o_sh": "1u",
+        "o_sm": "1u",
+        "o_sk": "1u",
+        "Z": "1u",
+        "H": "1u",
+        "N_CTX": "length",
+        "b_sz": "1u",
+        "b_sh": "1u",
+        "b_sm": "1u",
+        "b_sn": "1u",
+        "mask_sz": "1u",
+        "mask_sh": "1u",
+        "mask_sn": "1u",
+        "lse_sz": "1u",
+        "lse_sh": "1u",
+        "lse_sm": "1u",
+        "scale": "input_scale",
+        "neg_inf": "sentinel"
+      },
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "4478fe28796e41c05cd0a0bebdae4aad211b3fdbe691c1d52fa6f6e363296fb0"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": true,
+      "bias": true,
+      "mask": true,
+      "lse": true,
+      "runtime_scale": true,
+      "grid_3d": true,
+      "runtime_neg_inf": true,
+      "arg_decls": [
+        "    device const half* Q [[buffer(0)]]",
+        "    device const half* K [[buffer(1)]]",
+        "    device const half* V [[buffer(2)]]",
+        "    device half* Out [[buffer(3)]]",
+        "    device const half* Bias [[buffer(4)]]",
+        "    device const uchar* Mask [[buffer(5)]]",
+        "    device float* Lse [[buffer(6)]]",
+        "    constant uint& length [[buffer(7)]]",
+        "    constant float& input_scale [[buffer(8)]]",
+        "    constant float& sentinel [[buffer(9)]]"
+      ],
+      "bindings": {
+        "q_sz": "1u",
+        "q_sh": "1u",
+        "q_sm": "1u",
+        "q_sk": "1u",
+        "k_sz": "1u",
+        "k_sh": "1u",
+        "k_sn": "1u",
+        "k_sk": "1u",
+        "v_sz": "1u",
+        "v_sh": "1u",
+        "v_sn": "1u",
+        "v_sk": "1u",
+        "o_sz": "1u",
+        "o_sh": "1u",
+        "o_sm": "1u",
+        "o_sk": "1u",
+        "Z": "1u",
+        "H": "1u",
+        "N_CTX": "length",
+        "b_sz": "1u",
+        "b_sh": "1u",
+        "b_sm": "1u",
+        "b_sn": "1u",
+        "mask_sz": "1u",
+        "mask_sh": "1u",
+        "mask_sn": "1u",
+        "lse_sz": "1u",
+        "lse_sh": "1u",
+        "lse_sm": "1u",
+        "scale": "input_scale",
+        "neg_inf": "sentinel"
+      }
+    },
+    "sha256": "56d5e3198894359336f2920902a399313c72b73454a7117e2f4e40e252f117d7"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp16",
+      "causal": true,
+      "bias": true,
+      "mask": true,
+      "lse": true,
+      "runtime_scale": true,
+      "grid_3d": true,
+      "runtime_neg_inf": true,
+      "arg_decls": [
+        "    device const half* Q [[buffer(0)]]",
+        "    device const half* K [[buffer(1)]]",
+        "    device const half* V [[buffer(2)]]",
+        "    device half* Out [[buffer(3)]]",
+        "    device const half* Bias [[buffer(4)]]",
+        "    device const uchar* Mask [[buffer(5)]]",
+        "    device float* Lse [[buffer(6)]]",
+        "    constant uint& length [[buffer(7)]]",
+        "    constant float& input_scale [[buffer(8)]]",
+        "    constant float& sentinel [[buffer(9)]]"
+      ],
+      "bindings": {
+        "q_sz": "1u",
+        "q_sh": "1u",
+        "q_sm": "1u",
+        "q_sk": "1u",
+        "k_sz": "1u",
+        "k_sh": "1u",
+        "k_sn": "1u",
+        "k_sk": "1u",
+        "v_sz": "1u",
+        "v_sh": "1u",
+        "v_sn": "1u",
+        "v_sk": "1u",
+        "o_sz": "1u",
+        "o_sh": "1u",
+        "o_sm": "1u",
+        "o_sk": "1u",
+        "Z": "1u",
+        "H": "1u",
+        "N_CTX": "length",
+        "b_sz": "1u",
+        "b_sh": "1u",
+        "b_sm": "1u",
+        "b_sn": "1u",
+        "mask_sz": "1u",
+        "mask_sh": "1u",
+        "mask_sn": "1u",
+        "lse_sz": "1u",
+        "lse_sh": "1u",
+        "lse_sm": "1u",
+        "scale": "input_scale",
+        "neg_inf": "sentinel"
+      },
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "0527176fdb4fd11d99139d92588e367c4fe5c7a2dff0f01dd53ecd6e815114f1"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp32",
+      "causal": false,
+      "bias": true,
+      "mask": true,
+      "lse": true,
+      "runtime_scale": true,
+      "grid_3d": true,
+      "runtime_neg_inf": true,
+      "arg_decls": [
+        "    device const float* Q [[buffer(0)]]",
+        "    device const float* K [[buffer(1)]]",
+        "    device const float* V [[buffer(2)]]",
+        "    device float* Out [[buffer(3)]]",
+        "    device const float* Bias [[buffer(4)]]",
+        "    device const uchar* Mask [[buffer(5)]]",
+        "    device float* Lse [[buffer(6)]]",
+        "    constant uint& length [[buffer(7)]]",
+        "    constant float& input_scale [[buffer(8)]]",
+        "    constant float& sentinel [[buffer(9)]]"
+      ],
+      "bindings": {
+        "q_sz": "1u",
+        "q_sh": "1u",
+        "q_sm": "1u",
+        "q_sk": "1u",
+        "k_sz": "1u",
+        "k_sh": "1u",
+        "k_sn": "1u",
+        "k_sk": "1u",
+        "v_sz": "1u",
+        "v_sh": "1u",
+        "v_sn": "1u",
+        "v_sk": "1u",
+        "o_sz": "1u",
+        "o_sh": "1u",
+        "o_sm": "1u",
+        "o_sk": "1u",
+        "Z": "1u",
+        "H": "1u",
+        "N_CTX": "length",
+        "b_sz": "1u",
+        "b_sh": "1u",
+        "b_sm": "1u",
+        "b_sn": "1u",
+        "mask_sz": "1u",
+        "mask_sh": "1u",
+        "mask_sn": "1u",
+        "lse_sz": "1u",
+        "lse_sh": "1u",
+        "lse_sm": "1u",
+        "scale": "input_scale",
+        "neg_inf": "sentinel"
+      }
+    },
+    "sha256": "1a7acf3f38c51ce18c4e7e8a840ad3a8ba75662bf9167d24b52d22f810eb20e2"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp32",
+      "causal": false,
+      "bias": true,
+      "mask": true,
+      "lse": true,
+      "runtime_scale": true,
+      "grid_3d": true,
+      "runtime_neg_inf": true,
+      "arg_decls": [
+        "    device const float* Q [[buffer(0)]]",
+        "    device const float* K [[buffer(1)]]",
+        "    device const float* V [[buffer(2)]]",
+        "    device float* Out [[buffer(3)]]",
+        "    device const float* Bias [[buffer(4)]]",
+        "    device const uchar* Mask [[buffer(5)]]",
+        "    device float* Lse [[buffer(6)]]",
+        "    constant uint& length [[buffer(7)]]",
+        "    constant float& input_scale [[buffer(8)]]",
+        "    constant float& sentinel [[buffer(9)]]"
+      ],
+      "bindings": {
+        "q_sz": "1u",
+        "q_sh": "1u",
+        "q_sm": "1u",
+        "q_sk": "1u",
+        "k_sz": "1u",
+        "k_sh": "1u",
+        "k_sn": "1u",
+        "k_sk": "1u",
+        "v_sz": "1u",
+        "v_sh": "1u",
+        "v_sn": "1u",
+        "v_sk": "1u",
+        "o_sz": "1u",
+        "o_sh": "1u",
+        "o_sm": "1u",
+        "o_sk": "1u",
+        "Z": "1u",
+        "H": "1u",
+        "N_CTX": "length",
+        "b_sz": "1u",
+        "b_sh": "1u",
+        "b_sm": "1u",
+        "b_sn": "1u",
+        "mask_sz": "1u",
+        "mask_sh": "1u",
+        "mask_sn": "1u",
+        "lse_sz": "1u",
+        "lse_sh": "1u",
+        "lse_sm": "1u",
+        "scale": "input_scale",
+        "neg_inf": "sentinel"
+      },
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "8f59ff2bcdbc93cc5e32939eb9223a90516c9293a69d53f301af463b99f54417"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp32",
+      "causal": true,
+      "bias": true,
+      "mask": true,
+      "lse": true,
+      "runtime_scale": true,
+      "grid_3d": true,
+      "runtime_neg_inf": true,
+      "arg_decls": [
+        "    device const float* Q [[buffer(0)]]",
+        "    device const float* K [[buffer(1)]]",
+        "    device const float* V [[buffer(2)]]",
+        "    device float* Out [[buffer(3)]]",
+        "    device const float* Bias [[buffer(4)]]",
+        "    device const uchar* Mask [[buffer(5)]]",
+        "    device float* Lse [[buffer(6)]]",
+        "    constant uint& length [[buffer(7)]]",
+        "    constant float& input_scale [[buffer(8)]]",
+        "    constant float& sentinel [[buffer(9)]]"
+      ],
+      "bindings": {
+        "q_sz": "1u",
+        "q_sh": "1u",
+        "q_sm": "1u",
+        "q_sk": "1u",
+        "k_sz": "1u",
+        "k_sh": "1u",
+        "k_sn": "1u",
+        "k_sk": "1u",
+        "v_sz": "1u",
+        "v_sh": "1u",
+        "v_sn": "1u",
+        "v_sk": "1u",
+        "o_sz": "1u",
+        "o_sh": "1u",
+        "o_sm": "1u",
+        "o_sk": "1u",
+        "Z": "1u",
+        "H": "1u",
+        "N_CTX": "length",
+        "b_sz": "1u",
+        "b_sh": "1u",
+        "b_sm": "1u",
+        "b_sn": "1u",
+        "mask_sz": "1u",
+        "mask_sh": "1u",
+        "mask_sn": "1u",
+        "lse_sz": "1u",
+        "lse_sh": "1u",
+        "lse_sm": "1u",
+        "scale": "input_scale",
+        "neg_inf": "sentinel"
+      }
+    },
+    "sha256": "7fbaca59f4bf0f19fbb5036ceb02d7325dee08f5156003db05989767390ada8e"
+  },
+  {
+    "args": {
+      "head_dim": 64,
+      "out_dtype": "fp32",
+      "causal": true,
+      "bias": true,
+      "mask": true,
+      "lse": true,
+      "runtime_scale": true,
+      "grid_3d": true,
+      "runtime_neg_inf": true,
+      "arg_decls": [
+        "    device const float* Q [[buffer(0)]]",
+        "    device const float* K [[buffer(1)]]",
+        "    device const float* V [[buffer(2)]]",
+        "    device float* Out [[buffer(3)]]",
+        "    device const float* Bias [[buffer(4)]]",
+        "    device const uchar* Mask [[buffer(5)]]",
+        "    device float* Lse [[buffer(6)]]",
+        "    constant uint& length [[buffer(7)]]",
+        "    constant float& input_scale [[buffer(8)]]",
+        "    constant float& sentinel [[buffer(9)]]"
+      ],
+      "bindings": {
+        "q_sz": "1u",
+        "q_sh": "1u",
+        "q_sm": "1u",
+        "q_sk": "1u",
+        "k_sz": "1u",
+        "k_sh": "1u",
+        "k_sn": "1u",
+        "k_sk": "1u",
+        "v_sz": "1u",
+        "v_sh": "1u",
+        "v_sn": "1u",
+        "v_sk": "1u",
+        "o_sz": "1u",
+        "o_sh": "1u",
+        "o_sm": "1u",
+        "o_sk": "1u",
+        "Z": "1u",
+        "H": "1u",
+        "N_CTX": "length",
+        "b_sz": "1u",
+        "b_sh": "1u",
+        "b_sm": "1u",
+        "b_sn": "1u",
+        "mask_sz": "1u",
+        "mask_sh": "1u",
+        "mask_sn": "1u",
+        "lse_sz": "1u",
+        "lse_sh": "1u",
+        "lse_sm": "1u",
+        "scale": "input_scale",
+        "neg_inf": "sentinel"
+      },
+      "round_q": "half",
+      "round_p": "half"
+    },
+    "sha256": "1ef3cd81621b94481b8989ba505fc8a0f36a61441bafaa6963a30ac5653daab7"
+  }
+]

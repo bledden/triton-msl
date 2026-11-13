@@ -9194,6 +9194,40 @@ class GenericLowerer(
                 break
             return sid
 
+        def uniform_stride(sid, seen=frozenset()):
+            # Exact i32 products, retaining source wraparound. Never derive a
+            # stride from a program id, range, load, induction variable or float.
+            if sid in seen or len(seen) >= 32:
+                return None
+            seen = seen | {sid}
+            arg = arg_by_id.get(sid)
+            if arg is not None:
+                return arg.index if not arg.is_ptr and str(arg.type_str) == "i32" else None
+            op = op_by_id.get(sid)
+            if op is None:
+                return None
+            if op.op in ("tt.splat", "tt.broadcast", "tt.expand_dims", "ttg.convert_layout") and len(op.operand_ids or []) == 1:
+                return uniform_stride(op.operand_ids[0], seen)
+            if op.op == "arith.constant" and "i32" in (op.type_str or ""):
+                value = (op.attrs or {}).get("value")
+                if type(value) is int and 0 <= value <= 0xFFFFFFFF:
+                    return C1 if value == 1 else ("literal", value)
+            if op.op == "arith.muli" and len(op.operand_ids or []) == 2:
+                left, right = [uniform_stride(x, seen) for x in op.operand_ids]
+                if left is not None and right is not None:
+                    return ("mul", left, right)
+            return None
+
+        def split_stride(op):
+            if op is None or op.op != "arith.muli" or len(op.operand_ids or []) != 2:
+                return None
+            sides = [uniform_stride(x) for x in op.operand_ids]
+            # Exactly one coordinate-dependent side and one uniform stride.
+            if (sides[0] is None) == (sides[1] is None):
+                return None
+            i = 1 if sides[0] is None else 0
+            return op.operand_ids[1-i], sides[i]
+
         def stride_from_term(tid):
             tid = skip_layout(tid)
             op = op_by_id.get(tid)
@@ -9203,29 +9237,15 @@ class GenericLowerer(
                 return stride_from_term(op.operand_ids[0])
             if op.op != "arith.muli":
                 return C1
-            for oid in op.operand_ids:
-                sub = op_by_id.get(oid)
-                if sub is not None and sub.op == "tt.splat" and sub.operand_ids:
-                    a = arg_by_id.get(sub.operand_ids[0])
-                    if a is not None and not a.is_ptr:
-                        return a.index
-            return None
+            pair = split_stride(op)
+            return pair[1] if pair is not None else None
 
         def scalar_stride_from_muli(mid):
             op = op_by_id.get(mid)
-            # A stride specialised to one is folded out of ``pid * stride`` by
-            # Triton, leaving the program id itself. Admit only that exact
-            # unit-stride spelling; an arbitrary scalar expression remains
-            # unresolved and therefore fail-closed.
             if op is not None and op.op in ("tt.get_program_id", "tt.program_id"):
                 return C1
-            if op is None or op.op != "arith.muli":
-                return None
-            for oid in op.operand_ids:
-                a = arg_by_id.get(oid)
-                if a is not None and not a.is_ptr:
-                    return a.index
-            return None
+            pair = split_stride(op)
+            return pair[1] if pair is not None else None
 
         def _base_and_scalar(scal_id):
             scal = op_by_id.get(scal_id)
@@ -9274,6 +9294,12 @@ class GenericLowerer(
                 return None
             addr_id = skip_layout(addr_id)
             op = op_by_id.get(addr_id)
+            # Triton loads bool storage through an i8 pointer. Both occupy one
+            # byte in the Metal ABI; no data cast or other pointer cast is erased.
+            if op is not None and op.op == "tt.bitcast" and len(op.operand_ids or []) == 1 and "!tt.ptr<i8>" in (op.type_str or ""):
+                src = op_by_id.get(op.operand_ids[0])
+                if src is not None and "!tt.ptr<i1>" in (src.type_str or ""):
+                    op = src
             if op is None or op.op != "tt.addptr" or len(op.operand_ids) < 2:
                 return None
             col = stride_from_term(op.operand_ids[1])
@@ -9447,12 +9473,8 @@ class GenericLowerer(
                 m = op_by_id.get(muli_id)
                 if m is None or m.op != "arith.muli":
                     return None
-                for oid in m.operand_ids:
-                    a = arg_by_id.get(oid)
-                    if a is not None and not a.is_ptr:
-                        continue  # the stride arg
-                    return oid  # the offset SSA (off_h / off_z)
-                return None
+                pair = split_stride(m)
+                return pair[0] if pair is not None else None
 
             # Preserve the address-chain order: for the canonical
             # ptr + h*stride_h + z*stride_z form this is (z_off, h_off).
@@ -10799,6 +10821,9 @@ class GenericLowerer(
         if kind == "b":
             # per-iteration advance stride of a loop-carried pointer (its i-stride).
             def _off_arg(oid):
+                direct = uniform_stride(oid)
+                if direct is not None:
+                    return direct
                 seen = set()
                 while oid not in seen:
                     seen.add(oid)
@@ -10964,7 +10989,29 @@ class GenericLowerer(
             ):
                 adv = _advance_stride(_addr)
                 if adv is None:
-                    _refuse("an i-loop advance stride")
+                    # The reporter rebuilds each pointer from its base + i*stride,
+                    # rather than carrying an advanced pointer around the loop.
+                    # Use the already resolved i coefficient only for a single
+                    # exact range(0, N, 1) loop and its own bare induction value.
+                    loops = [x for x in allops if x.op == "scf.for"]
+                    addr = _addr
+                    cast = op_by_id.get(addr)
+                    if cast is not None and cast.op == "tt.bitcast" and "!tt.ptr<i8>" in (cast.type_str or ""):
+                        src = op_by_id.get(cast.operand_ids[0])
+                        if src is not None and "!tt.ptr<i1>" in (src.type_str or ""):
+                            addr = src.id
+                    offsets = _scalar_offsets(_scal_of(addr))
+                    if len(loops) == 1:
+                        loop = loops[0]
+                        bids = (loop.attrs or {}).get("block_arg_ids", [])
+                        lo = op_by_id.get(loop.operand_ids[0])
+                        step = op_by_id.get(loop.operand_ids[2])
+                        if (bids and offsets and len(offsets) == 2 and offsets[0] == bids[0]
+                            and lo is not None and lo.op == "arith.constant" and lo.attrs.get("value") == 0
+                            and step is not None and step.op == "arith.constant" and step.attrs.get("value") == 1):
+                            adv = _res[1][1]
+                    if adv is None:
+                        _refuse("an i-loop advance stride")
                 _res[1][1] = adv
 
             n_ctx_arg = _resolve_n_ctx()
@@ -11372,6 +11419,10 @@ class GenericLowerer(
                 return "0u"
             if isinstance(entry, int) and entry in scalar_pos:
                 return f"_bpk[{scalar_pos[entry]}]" if packed else f"bsc_{entry}"
+            if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "literal" and type(entry[1]) is int and 0 <= entry[1] <= 0xFFFFFFFF:
+                return f"{entry[1]}u"
+            if isinstance(entry, tuple) and len(entry) == 3 and entry[0] == "mul":
+                return f"({_u(entry[1])} * {_u(entry[2])})"
             raise MetalNonRecoverableError("biased-FA backward stride unmapped; refusing.")
 
         def _scale(entry):
@@ -13942,6 +13993,37 @@ class GenericLowerer(
         # arg_decls above use each argument's proved real element type, and both
         # tiled paths promote on load, compute in fp32 and cast on store.
         if _simd_fa_eligible(info) and "query_length" not in info:
+            from triton_msl.codegen._fa_fragments import scope_reason, validate_mode
+
+            requested = validate_mode(getattr(self.options, "experimental_fa_fragment_lowering", "off"))
+            half_accumulate = _fa_half_accumulate(info["out_dtype"])
+            rounding = getattr(self, "_fa_rounding", {})
+            reason = scope_reason(
+                head_dim=head_dim,
+                v_head_dim=v_head_dim,
+                out_dtype=info["out_dtype"],
+                causal=info["causal"],
+                half_accumulate=half_accumulate,
+                scale=info["scale"],
+                round_q=rounding.get("round_q"),
+                round_p=rounding.get("round_p"),
+                scale_chain=rounding.get("scale_chain", ()),
+                source_kv_block=_dense_tail["source_kv_block"],
+                mask_tail_scores=_dense_tail["mask_tail_scores"],
+                unmasked_kv=_dense_tail["unmasked_kv"],
+                source_causal_stop=_dense_tail["source_causal_stop"],
+                initial_values=_dense_tail["initial_values"],
+            )
+            if info.get("is_mla"):
+                reason = "source-family"
+            if not all(args[info[r]].elem_type in ("f16", "fp16") for r in ("q", "k", "v", "out")):
+                reason = "role-types"
+            selected = requested if reason is None else "off"
+            self._fa_fragment_lowering = {
+                "requested": requested,
+                "selected": selected,
+                "reason": "disabled" if requested == "off" else (reason or "selected"),
+            }
             msl = make_flash_attention_kernel_simdgroup(
                 head_dim,
                 32,
@@ -13953,7 +14035,8 @@ class GenericLowerer(
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
                 scale=info["scale"],
                 v_head_dim=v_head_dim,
-                half_accumulate=_fa_half_accumulate(info["out_dtype"]),
+                half_accumulate=half_accumulate,
+                fragment_lowering=selected,
                 source_kv_block=_dense_tail["source_kv_block"],
                 mask_tail_scores=_dense_tail["mask_tail_scores"],
                 unmasked_kv=_dense_tail["unmasked_kv"],

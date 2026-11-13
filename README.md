@@ -14,6 +14,14 @@ numerical precision and performance depend on the backend.
 **Status: alpha.** The goal is to preserve the source computation or refuse an
 unsupported kernel explicitly. This is not a universal correctness guarantee.
 
+## 0.4.0 release candidate
+
+`0.4.0rc1` is a local, unpublished candidate. It adds opt-in source-program export
+with an installed `triton-msl-export` command, default-off dense attention fragment
+compositions and a direct route for full-storage dense transposes. No general
+speedup is claimed and it has not been timed against 0.3.0 here. See
+[docs/RELEASE_CANDIDATE_0.4.0.md](docs/RELEASE_CANDIDATE_0.4.0.md).
+
 ## What's new in 0.3.0
 
 This update fixes silent-wrong results, expands attention and matmul coverage,

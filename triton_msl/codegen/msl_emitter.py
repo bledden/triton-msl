@@ -777,6 +777,13 @@ def emit_msl(mod, metadata, options):
 
         from triton_msl.codegen._source_program.entry import emit as emit_source_program
 
+        fragment_request = getattr(options, "experimental_fa_fragment_lowering", "off")
+        if fragment_request != "off":
+            metadata["fa_fragment_lowering"] = {
+                "requested": fragment_request,
+                "selected": "off",
+                "reason": "not-dense-simd",
+            }
         source_program = emit_source_program(mod, graph, options, metadata["name"], GenericLowerer)
         if source_program is not None:
             msl_src, source_metadata = source_program
@@ -786,6 +793,8 @@ def emit_msl(mod, metadata, options):
 
         lowerer = GenericLowerer(graph, options)
         msl_src = lowerer.lower()
+        if fragment_request != "off" and hasattr(lowerer, "_fa_fragment_lowering"):
+            metadata["fa_fragment_lowering"] = dict(lowerer._fa_fragment_lowering)
 
         # Use lowerer's effective block_size (may differ from graph for matmul templates)
         metadata["block_size"] = lowerer.effective_block_size

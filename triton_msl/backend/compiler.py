@@ -265,6 +265,10 @@ class MetalOptions:
     experimental_cooperative_attention: bool = False
     # Separate K-layout experiment; no promotion of the wider tiled maker.
     experimental_tiled_k_layout: bool = False
+    # Source-proved saved-LSE program; explicit external-consumer candidate.
+    experimental_source_program_cooperative: bool = False
+    # Dense half/FP32 fragment compositions; default path is byte-preserved.
+    experimental_fa_fragment_lowering: str = "off"
     # num_stages is accepted for Triton-API compatibility but is INTENTIONALLY a
     # no-op on Metal (default 1). On CUDA it sets the software-pipelining depth —
     # multi-buffering threadgroup-staged operands to overlap global loads with MMA.
@@ -309,8 +313,13 @@ class MetalOptions:
     waves_per_eu: int = 0
 
     def __post_init__(self):
+        from triton_msl.codegen._fa_fragments import validate_mode
+
+        validate_mode(self.experimental_fa_fragment_lowering)
         # Route selection uses identity with True, so string-coercing this field
         # in hash() must never alias a non-bool with the enabled option.
+        if type(self.experimental_source_program_cooperative) is not bool:
+            raise ValueError("experimental_source_program_cooperative must be an exact bool")
         if type(self.experimental_tiled_k_layout) is not bool:
             raise ValueError("experimental_tiled_k_layout must be an exact bool")
         # Match NVIDIA/AMD: ``extern_libs`` is exposed downstream as a

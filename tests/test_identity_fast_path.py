@@ -121,7 +121,8 @@ def test_program_slots_stay_bounded_across_record_rebuilds(monkeypatch):
         assert native.probe_cache_info()["entries"] <= 8
         hits = native.probe_cache_info()["hits"]
         assert cache.execution_contract() == stamp
-        assert native.probe_cache_info()["hits"] - hits == 4
+        # Four proof programs plus one live native-observer selector check.
+        assert native.probe_cache_info()["hits"] - hits == 5
     assert native.probe_cache_info()["released"] > 0
 
 

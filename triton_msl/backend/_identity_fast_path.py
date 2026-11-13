@@ -67,6 +67,31 @@ _STANDARD = {
 }
 _record = None
 _stats = {"hits": 0, "misses": 0, "guard_rebuilds": 0, "builds": 0}
+_GUARD_PRIMITIVES = None
+if type(cache._validation_native) is ModuleType:
+    _owner = cache._validation_native
+    _mapping = _owner.__dict__
+    if all(type(key) is str for key in _mapping):
+        _values = tuple(_mapping.get(name) for name in ("identity_probes", "function_code_is", "dict_keys_exact_str"))
+        if all(type(value) is BuiltinFunctionType and value.__self__ is _owner and value.__name__ == name
+               for name, value in zip(("identity_probes", "function_code_is", "dict_keys_exact_str"), _values)):
+            _GUARD_PRIMITIVES = (_owner, _values[0], (
+                (TYPEOF, _owner, None, None, ModuleType),
+                (DICTGET, cache.__dict__, "_validation_native", None, _owner),
+                *((DICTGET, _mapping, name, None, value) for name, value in zip(
+                    ("identity_probes", "function_code_is", "dict_keys_exact_str"), _values)),
+            ))
+
+
+def _guard_batch_available(native):
+    selected = _GUARD_PRIMITIVES
+    # The captured callback-free primitive checks the live owner and observers.
+    # Its exact-key preflight declines before equality on a foreign dictionary
+    # key. A custom observer is never called merely to choose a bypass.
+    return (selected is not None and native is selected[0]
+            and selected[1](selected[2]) is True)
+
+
 _STATE_BATCH = None
 if type(cache._validation_native) is ModuleType:
     _native_state = cache._validation_native.__dict__
@@ -975,8 +1000,19 @@ def _check_locked(record, native):
     if (
         not native.function_code_is(_STANDARD["fw._discover_selection"], _DISCOVER_CODE)
         or not native.identity_probes(record[0])
-        or not native.identity_probes(record[3])
-        or not _ordinary_guard(guard, native)
+        or not (guard_probe := native.identity_probes)(record[3])
+        or not (
+            # The successful ordinary guard program has already checked exact
+            # owner types, complete instance dictionaries, method overrides and
+            # class/MRO version tags. Cold admission checked method identities.
+            # Keep both live code checks HERE, at their original position.
+            (native.function_code_is(_GUARD_VERIFY, _GUARD_CODE)
+             and native.function_code_is(_READER_CALL, _READER_CODE))
+            if (guard is not None and _GUARD_PRIMITIVES is not None
+                and guard_probe is _GUARD_PRIMITIVES[1]
+                and _guard_batch_available(native))
+            else _ordinary_guard(guard, native)
+        )
         or not native.identity_probes(record[4])
         or not native.dict_keys_exact_bytes(record[5])
         or not native.bytes_dict_items_are(record[5], record[6])

@@ -1,0 +1,4 @@
+Reporter fork Janssena/trifast 92abd91978774f4a9d8355e5bbd83cb224d7c9b7.
+Adapted fixture copied from the executed 2026-11-02 backward candidate.
+Derived contiguous strides, i1 mask storage, canonical transpose of loaded K.
+No fully-masked gradient correction is hidden in compiler lowering.

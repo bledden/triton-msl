@@ -1,0 +1,7 @@
+# Additional test/oracle dependencies for the tested CPython 3.14/macOS 26 arm64 stack.
+# Install the candidate wheel and its Triton/Torch dependencies separately.
+# MLX is optional for product users, required for positive MLX workflow tests.
+mlx==0.32.0
+scipy==1.17.1
+pytest>=7.0
+pytest-timeout

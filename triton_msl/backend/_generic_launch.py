@@ -65,7 +65,6 @@ def generic_2d_geometry(launcher, arguments, signatures, metadata, grid):
                 or value.device.type != "mps"
                 or value.dtype != dtypes.get(declared)
                 or value.layout != torch.strided
-                or not value.is_contiguous()
                 or value.is_conj()
                 or value.is_neg()
                 or value.numel() <= 0
@@ -81,6 +80,21 @@ def generic_2d_geometry(launcher, arguments, signatures, metadata, grid):
                 or value.data_ptr() != storage.data_ptr() + offset
             ):
                 return None
+            if not value.is_contiguous():
+                # A full-storage matrix transpose is physically dense: for
+                # shape (r, c), stride (1, r), the last element is r*c - 1.
+                # Thus the existing numel-byte extent proves the entire span.
+                # Keep the original view for raw storage binding and source
+                # stride arithmetic; do not gather, rebase or substitute it.
+                if (
+                    declared not in {"*fp16", "*fp32"}
+                    or value.dim() != 2
+                    or any(d <= 1 for d in value.shape)
+                    or tuple(value.stride()) != (1, value.shape[0])
+                    or offset != 0
+                    or value.numel() * value.element_size() != size
+                ):
+                    return None
             pointers += 1
         else:
             # Existing scalar representability/declared-width checks have run.
