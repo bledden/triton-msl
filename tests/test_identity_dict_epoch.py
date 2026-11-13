@@ -13,6 +13,7 @@ import pytest
 @pytest.fixture(scope="module")
 def image():
     from triton_msl.backend import _cache_contract as cache
+
     assert cache._validation_native is not None, "this suite requires the selected native helper"
     path = Path(cache._validation_native.__file__).resolve()
     spec = importlib.util.spec_from_file_location("_validation_native", path)

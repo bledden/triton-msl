@@ -223,5 +223,6 @@ assert 'triton_msl.backend.compiler' not in sys.modules
 """
     env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
     from tests.python_child import package_child_command
+
     result = dd.subprocess.run(package_child_command(code), env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

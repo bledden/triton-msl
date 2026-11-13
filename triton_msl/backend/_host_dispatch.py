@@ -3,6 +3,7 @@
 Records are installed before entering the runtime. Only the matching command's
 terminal status may retire a failed submission; no replay or delayed copy-back.
 """
+
 from contextlib import contextmanager
 from threading import Lock
 
@@ -41,7 +42,8 @@ def reap_completed():
                 import Metal
 
                 safe = lease.command.status() in (
-                    Metal.MTLCommandBufferStatusCompleted, Metal.MTLCommandBufferStatusError,
+                    Metal.MTLCommandBufferStatusCompleted,
+                    Metal.MTLCommandBufferStatusError,
                 )
             except Exception:
                 safe = False

@@ -1,4 +1,5 @@
 """All retained fragment compositions through public Triton dispatch."""
+
 import pytest
 import torch
 
@@ -6,7 +7,7 @@ from test_flash_attention import _flash_attn_fwd
 from triton_msl.codegen._fa_fragments import MODES
 
 
-@pytest.mark.parametrize('n', [32, 64])
+@pytest.mark.parametrize("n", [32, 64])
 def test_fragment_compositions_match_reference_and_each_other(n):
     torch.manual_seed(709 + n)
     q, k, v = [torch.randn(1, 1, n, 64, dtype=torch.float16) * 0.25 for _ in range(3)]
@@ -16,10 +17,23 @@ def test_fragment_compositions_match_reference_and_each_other(n):
     for mode in MODES:
         backing = torch.full((n * 64 + 32,), 117, dtype=torch.float16)
         output = backing[16:-16].view_as(q)
-        output.fill_(float('nan'))
+        output.fill_(float("nan"))
         kernel = _flash_attn_fwd[(n // 32, 1)](
-            q, k, v, output, *q.stride(), *k.stride(), *v.stride(), *output.stride(),
-            1, 1, n, BLOCK_M=32, BLOCK_N=32, HEAD_DIM=64, IS_CAUSAL=False,
+            q,
+            k,
+            v,
+            output,
+            *q.stride(),
+            *k.stride(),
+            *v.stride(),
+            *output.stride(),
+            1,
+            1,
+            n,
+            BLOCK_M=32,
+            BLOCK_N=32,
+            HEAD_DIM=64,
+            IS_CAUSAL=False,
             experimental_fa_fragment_lowering=mode,
         )
         torch.mps.synchronize()
@@ -31,6 +45,6 @@ def test_fragment_compositions_match_reference_and_each_other(n):
             baseline = output.clone()
         else:
             assert torch.equal(output, baseline), mode
-        metadata = kernel.metadata._asdict() if hasattr(kernel.metadata, '_asdict') else vars(kernel.metadata)
-        if mode != 'off':
-            assert metadata['fa_fragment_lowering']['selected'] == mode
+        metadata = kernel.metadata._asdict() if hasattr(kernel.metadata, "_asdict") else vars(kernel.metadata)
+        if mode != "off":
+            assert metadata["fa_fragment_lowering"]["selected"] == mode

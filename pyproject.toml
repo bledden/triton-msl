@@ -99,6 +99,10 @@ target-version = "py310"
 # Preserve the pinned third-party source, apart from its package-relative imports.
 extend-exclude = ["triton_msl/_vendor/applegpu/applegpu.py", "triton_msl/_vendor/applegpu/fma.py", "triton_msl/_vendor/applegpu/srgb.py"]
 
+# Preserve the byte-pinned upstream reporter fixture; lint still checks it.
+[tool.ruff.format]
+exclude = ["tests/fixtures/trifast_reporter/kernels.py"]
+
 [tool.ruff.lint]
 select = ["E", "F", "W"]
 # The codebase has a deliberate compact style (inline semicolons in kernels/tests,

@@ -40,9 +40,10 @@ def test_only_ordinary_files_avoid_full_resolution(layout, monkeypatch):
         assert (path, True) in calls
 
 
-@pytest.mark.parametrize("alias_suffix,target_suffix,selected", [
-    (".py", ".so", True), (".so", ".py", False), ("", ".so", True), (".so", ".so", True)
-])
+@pytest.mark.parametrize(
+    "alias_suffix,target_suffix,selected",
+    [(".py", ".so", True), (".so", ".py", False), ("", ".so", True), (".so", ".so", True)],
+)
 def test_symlink_selection_uses_resolved_target(layout, tmp_path, alias_suffix, target_suffix, selected):
     root, executable, roots = layout
     target = tmp_path / ("external" + target_suffix)

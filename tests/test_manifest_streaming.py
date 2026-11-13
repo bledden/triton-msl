@@ -61,7 +61,7 @@ def test_short_read_is_not_eof(tmp_path, monkeypatch, step):
 
     def read(handle, buffer):
         data = handle.read(min(step, len(buffer)))
-        buffer[:len(data)] = data
+        buffer[: len(data)] = data
         counts.append(len(data))
         return len(data)
 
@@ -82,7 +82,7 @@ def test_read_failure_cannot_publish_identity(tmp_path, monkeypatch, failure, af
         if first and after_partial:
             first = False
             data = handle.read(3)
-            buffer[:len(data)] = data
+            buffer[: len(data)] = data
             return len(data)
         if failure == "would_block":
             return None

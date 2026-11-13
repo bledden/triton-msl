@@ -1,4 +1,5 @@
 """CPU admission/identity controls. Real native behavior is checked when equipped."""
+
 import json
 from types import SimpleNamespace
 
@@ -20,16 +21,23 @@ class Storage:
         return self.size
 
 
-@pytest.mark.parametrize("ptr,size,state,expected", [
-    (16 * PAGE, 1024, True, "mirror"), (16 * PAGE + 64, PAGE + 1024, True, "mirror"),
-    (16 * PAGE, PAGE, True, "existing"), (16 * PAGE, PAGE, False, "existing"),
-    (16 * PAGE, PAGE + 1024, False, "mirror"), (0, PAGE + 1024, True, "mirror"),
-    (16 * PAGE, (1 << 64) - 1, True, "mirror"),
-    (16 * PAGE, PAGE + 1024, "unavailable", "mirror"),
-])
+@pytest.mark.parametrize(
+    "ptr,size,state,expected",
+    [
+        (16 * PAGE, 1024, True, "mirror"),
+        (16 * PAGE + 64, PAGE + 1024, True, "mirror"),
+        (16 * PAGE, PAGE, True, "existing"),
+        (16 * PAGE, PAGE, False, "existing"),
+        (16 * PAGE, PAGE + 1024, False, "mirror"),
+        (0, PAGE + 1024, True, "mirror"),
+        (16 * PAGE, (1 << 64) - 1, True, "mirror"),
+        (16 * PAGE, PAGE + 1024, "unavailable", "mirror"),
+    ],
+)
 def test_no_query_paths(ptr, size, state, expected):
     def forbidden(*args):
         raise AssertionError("allocator query on an ineligible path")
+
     assert extent.select(Storage(), ptr, size, state, forbidden)[0] == expected
 
 
@@ -41,9 +49,11 @@ def test_live_owner_and_fresh_replacement():
     st.ptr += PAGE
     assert extent.select(st, ptr, size, True, query)[0] == "refuse"
     assert extent.select(st, st.ptr, size, True, query)[0] == "borrow"
+
     def changes(p, n):
         st.size += 4
         return query(p, n)
+
     assert extent.select(st, st.ptr, size, True, changes)[0] == "refuse"
     assert extent.select(st, st.ptr, st.size, True, query)[0] == "borrow"
 
@@ -59,9 +69,11 @@ def test_owner_storage_replacement_during_query_refuses():
     owner = SimpleNamespace(untyped_storage=lambda: st)
     replacement = Storage()
     replacement.ptr += PAGE
+
     def change(p, n):
         owner.untyped_storage = lambda: replacement
         return 2 * PAGE, "admitted"
+
     assert extent.select(st, st.ptr, st.size, True, change, owner=owner)[0] == "refuse"
 
 
@@ -88,6 +100,7 @@ def test_policy_stamp_and_fast_encoder(monkeypatch, ready, value):
 
 def test_trace_is_copied_and_context_local():
     import contextvars
+
     extent.clear_launch()
     metadata = {}
     extent.record({"route": "mirror", "reason": "geometry"}, metadata)
@@ -105,6 +118,7 @@ def test_real_native_extent_and_interior():
     if native is None or not hasattr(native, "host_extent"):
         pytest.skip("requires the extent-equipped validation helper")
     import torch
+
     if not native.host_extent_ready:
         assert native.host_extent(0, 0) == (0, "unavailable")
         return

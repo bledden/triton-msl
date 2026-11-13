@@ -9206,7 +9206,10 @@ class GenericLowerer(
             op = op_by_id.get(sid)
             if op is None:
                 return None
-            if op.op in ("tt.splat", "tt.broadcast", "tt.expand_dims", "ttg.convert_layout") and len(op.operand_ids or []) == 1:
+            if (
+                op.op in ("tt.splat", "tt.broadcast", "tt.expand_dims", "ttg.convert_layout")
+                and len(op.operand_ids or []) == 1
+            ):
                 return uniform_stride(op.operand_ids[0], seen)
             if op.op == "arith.constant" and "i32" in (op.type_str or ""):
                 value = (op.attrs or {}).get("value")
@@ -9226,7 +9229,7 @@ class GenericLowerer(
             if (sides[0] is None) == (sides[1] is None):
                 return None
             i = 1 if sides[0] is None else 0
-            return op.operand_ids[1-i], sides[i]
+            return op.operand_ids[1 - i], sides[i]
 
         def stride_from_term(tid):
             tid = skip_layout(tid)
@@ -9296,7 +9299,12 @@ class GenericLowerer(
             op = op_by_id.get(addr_id)
             # Triton loads bool storage through an i8 pointer. Both occupy one
             # byte in the Metal ABI; no data cast or other pointer cast is erased.
-            if op is not None and op.op == "tt.bitcast" and len(op.operand_ids or []) == 1 and "!tt.ptr<i8>" in (op.type_str or ""):
+            if (
+                op is not None
+                and op.op == "tt.bitcast"
+                and len(op.operand_ids or []) == 1
+                and "!tt.ptr<i8>" in (op.type_str or "")
+            ):
                 src = op_by_id.get(op.operand_ids[0])
                 if src is not None and "!tt.ptr<i1>" in (src.type_str or ""):
                     op = src
@@ -11006,9 +11014,18 @@ class GenericLowerer(
                         bids = (loop.attrs or {}).get("block_arg_ids", [])
                         lo = op_by_id.get(loop.operand_ids[0])
                         step = op_by_id.get(loop.operand_ids[2])
-                        if (bids and offsets and len(offsets) == 2 and offsets[0] == bids[0]
-                            and lo is not None and lo.op == "arith.constant" and lo.attrs.get("value") == 0
-                            and step is not None and step.op == "arith.constant" and step.attrs.get("value") == 1):
+                        if (
+                            bids
+                            and offsets
+                            and len(offsets) == 2
+                            and offsets[0] == bids[0]
+                            and lo is not None
+                            and lo.op == "arith.constant"
+                            and lo.attrs.get("value") == 0
+                            and step is not None
+                            and step.op == "arith.constant"
+                            and step.attrs.get("value") == 1
+                        ):
                             adv = _res[1][1]
                     if adv is None:
                         _refuse("an i-loop advance stride")
@@ -11419,7 +11436,13 @@ class GenericLowerer(
                 return "0u"
             if isinstance(entry, int) and entry in scalar_pos:
                 return f"_bpk[{scalar_pos[entry]}]" if packed else f"bsc_{entry}"
-            if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "literal" and type(entry[1]) is int and 0 <= entry[1] <= 0xFFFFFFFF:
+            if (
+                isinstance(entry, tuple)
+                and len(entry) == 2
+                and entry[0] == "literal"
+                and type(entry[1]) is int
+                and 0 <= entry[1] <= 0xFFFFFFFF
+            ):
                 return f"{entry[1]}u"
             if isinstance(entry, tuple) and len(entry) == 3 and entry[0] == "mul":
                 return f"({_u(entry[1])} * {_u(entry[2])})"

@@ -6,7 +6,9 @@ import tempfile
 from types import BuiltinFunctionType
 
 # Only the ordinary builtin consumer may omit the per-launch generator.
-_standard_all = all if type(all) is BuiltinFunctionType and all.__module__ == "builtins" and all.__name__ == "all" else None
+_standard_all = (
+    all if type(all) is BuiltinFunctionType and all.__module__ == "builtins" and all.__name__ == "all" else None
+)
 
 from triton.backends.compiler import GPUTarget
 from triton.backends.driver import DriverBase
@@ -738,8 +740,7 @@ def _select_scalar_gate():
         return None
     gate = getattr(_binder_native, "scalar_gate", None)
     for entry, name in ((configure, "configure_scalar"), (gate, "scalar_gate")):
-        if (type(entry) is not BuiltinFunctionType or entry.__self__ is not _binder_native
-                or entry.__name__ != name):
+        if type(entry) is not BuiltinFunctionType or entry.__self__ is not _binder_native or entry.__name__ != name:
             return None
     return gate if configure(_compile_shader_scalars_ok) else None
 
@@ -1018,8 +1019,7 @@ class MetalLauncher:
                         else:
                             # A custom consumer retains its lazy iterator and result.
                             all_mps = all(
-                                isinstance(a, _torch.Tensor) and str(a.device).startswith("mps")
-                                for a in tensors
+                                isinstance(a, _torch.Tensor) and str(a.device).startswith("mps") for a in tensors
                             )
 
                     # --- Quantized-matmul dispatch (compile_shader-only) ---

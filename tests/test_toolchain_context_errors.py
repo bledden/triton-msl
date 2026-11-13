@@ -1,4 +1,5 @@
 """Selection refusal is distinguishable and never becomes a probe fallback."""
+
 import subprocess
 import sys
 import tempfile
@@ -44,12 +45,15 @@ def assert_selection_type(error):
     assert "kernel pattern" not in str(error)
 
 
-@pytest.mark.parametrize("kind,message", [
-    ("empty", "empty Metal compiler selection"),
-    ("layout", "unproved metal toolchain layout"),
-    ("during", "selection changed during compiler context construction"),
-    ("after", "selection changed in this process; restart"),
-])
+@pytest.mark.parametrize(
+    "kind,message",
+    [
+        ("empty", "empty Metal compiler selection"),
+        ("layout", "unproved metal toolchain layout"),
+        ("during", "selection changed during compiler context construction"),
+        ("after", "selection changed in this process; restart"),
+    ],
+)
 def test_explicit_selection_refusals_are_typed(selection, monkeypatch, kind, message):
     saved = None
     if kind == "empty":
@@ -142,5 +146,6 @@ def test_error_import_has_no_compiler_or_runtime_dependency():
         "assert 'triton_msl.backend.compiler' not in sys.modules"
     )
     from tests.python_child import package_child_command
+
     done = subprocess.run(package_child_command(code), capture_output=True, text=True)
     assert done.returncode == 0, done.stderr

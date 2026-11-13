@@ -49,6 +49,7 @@ _FAT_MAGICS = (0xCAFEBABE, 0xCBFEBABE)
 _MH_MAGIC_64 = 0xFEEDFACF
 _MH_CIGAM_64 = 0xCFFAEDFE
 
+
 @dataclass
 class ReflectionMetrics:
     """Reliable static metrics from MTLComputePipelineState reflection."""

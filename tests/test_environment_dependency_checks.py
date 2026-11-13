@@ -42,8 +42,10 @@ def test_builtin_default_lookup_precedes_live_global_lookup():
     guard = guarded_function(namespace, (("first", wanted), ("second", wanted)))
     assert environment._implementation_unchanged(guard)
     assert events == [
-        ("builtin", "first"), ("global", "first"),
-        ("builtin", "second"), ("global", "second"),
+        ("builtin", "first"),
+        ("global", "first"),
+        ("builtin", "second"),
+        ("global", "second"),
     ]
 
 

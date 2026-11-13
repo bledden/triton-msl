@@ -89,5 +89,6 @@ def test_i64_loop_bounds_refuse_not_hang():
     )
     env = dict(os.environ, PYTHONPATH=os.getcwd())
     from tests.python_child import package_child_command
+
     r = subprocess.run(package_child_command(code), capture_output=True, text=True, timeout=60, env=env)
     assert "REFUSED" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr[-400:]!r}"

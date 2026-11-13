@@ -47,9 +47,13 @@ def inventory(root, cache, monkeypatch, *, reuse=True):
 def test_native_digest_seeds_inventory_without_erasing_aliases(bundle, monkeypatch, fat):
     if fat:
         arm, x86 = _image(file_type=2), _image(cpu=X86_64) + b"other-slice payload"
-        payload = (struct.pack(">II", 0xCAFEBABE, 2)
-                   + struct.pack(">IIIII", ARM64, 0, 48, len(arm), 0)
-                   + struct.pack(">IIIII", X86_64, 0, 48 + len(arm), len(x86), 0) + arm + x86)
+        payload = (
+            struct.pack(">II", 0xCAFEBABE, 2)
+            + struct.pack(">IIIII", ARM64, 0, 48, len(arm), 0)
+            + struct.pack(">IIIII", X86_64, 0, 48 + len(arm), len(x86), 0)
+            + arm
+            + x86
+        )
         (bundle / "tool").write_bytes(payload)
     cache = {}
     baseline_graph = collect(bundle, None)
@@ -101,7 +105,9 @@ def test_writable_symlink_escape_is_reread_after_open_mapping_write(bundle, tmp_
     external.write_bytes(_image(file_type=2) + b"old")
     (bundle / "escape").symlink_to(external)
     inode = external.stat().st_ino
-    monkeypatch.setattr(tc, "_read_only_mount", lambda value: not isinstance(value, int) or os.fstat(value).st_ino != inode)
+    monkeypatch.setattr(
+        tc, "_read_only_mount", lambda value: not isinstance(value, int) or os.fstat(value).st_ino != inode
+    )
     cache = {}
     with external.open("r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping:
         collect(bundle, cache)

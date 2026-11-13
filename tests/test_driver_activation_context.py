@@ -1,4 +1,5 @@
 """Activation uses the compiler's selection boundary; CPU-only Metal endpoints."""
+
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -58,8 +59,7 @@ def test_activation_reuses_compiler_context_without_inventory(activation, monkey
     assert driver.MetalDriver.is_active() is True
     assert events["legacy"] == []
     assert events["queries"] == [
-        ([str(resolver.resolve()), "-sdk", "macosx", "--find", "metal"],
-         {"text": True, "stderr": subprocess.PIPE})
+        ([str(resolver.resolve()), "-sdk", "macosx", "--find", "metal"], {"text": True, "stderr": subprocess.PIPE})
     ]
     assert len(events["devices"]) == 2
 
@@ -76,13 +76,16 @@ def test_changed_selection_refuses_before_device(activation, monkeypatch, name):
     assert events["devices"] == []
 
 
-@pytest.mark.parametrize("error", [
-    FileNotFoundError("resolver absent"),
-    PermissionError("resolver inaccessible"),
-    subprocess.CalledProcessError(1, "selected resolver"),
-    subprocess.TimeoutExpired("selected resolver", 5),
-    RuntimeError("unproved selected layout"),
-])
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError("resolver absent"),
+        PermissionError("resolver inaccessible"),
+        subprocess.CalledProcessError(1, "selected resolver"),
+        subprocess.TimeoutExpired("selected resolver", 5),
+        RuntimeError("unproved selected layout"),
+    ],
+)
 def test_context_failure_is_inactive_before_device(activation, monkeypatch, error):
     events, _, _ = activation
 

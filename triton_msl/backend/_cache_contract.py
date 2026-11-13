@@ -48,9 +48,11 @@ import sys as _sys
 
 _validation_native = _select_validation_native(_import_module, _find_spec, _sys.modules)
 # The optional extent capability is frozen only after the helper load-time test.
-_HOST_EXTENT_READY = (_validation_native is not None
-                      and getattr(_validation_native, "host_extent_ready", False) is True
-                      and callable(getattr(_validation_native, "host_extent", None)))
+_HOST_EXTENT_READY = (
+    _validation_native is not None
+    and getattr(_validation_native, "host_extent_ready", False) is True
+    and callable(getattr(_validation_native, "host_extent", None))
+)
 # Optional packed copying must be selected before the first implementation or
 # framework/provider stamp. Broken installed helpers propagate; absence alone
 # retains the original Python copier. No launch can introduce a late native image.
@@ -121,7 +123,9 @@ def _policy_for_environment(environment):
         result[name] = environment.get("TRITON_MSL_" + name, "1") != "0"
     for name in ("INFER_LAYOUT", "LEGACY", "USE_CPP", "FORCE_PYTHON", "CPP_SCALAR_CFG"):
         result[name] = environment.get("TRITON_MSL_" + name) == "1"
-    result["HOST_EXTENT"] = (True if _HOST_EXTENT_READY else "unavailable") if environment.get("TRITON_MSL_HOST_EXTENT") == "1" else False
+    result["HOST_EXTENT"] = (
+        (True if _HOST_EXTENT_READY else "unavailable") if environment.get("TRITON_MSL_HOST_EXTENT") == "1" else False
+    )
     result["FA_HALF_ACCUM"] = environment.get("TRITON_MSL_FA_HALF_ACCUM", "0") in ("1", "true", "True")
     # Preserve exact skip spelling until the caller's split/strip contract is
     # centralized; this can over-invalidate but cannot merge distinct policies.
@@ -306,8 +310,10 @@ def _encode_execution(source, toolchain):
             and policy.keys() == _STAMP_POLICY_FIELDS
             and all(type(policy[key]) is bool for key in _STAMP_FLAGS)
             and type(policy["CPP_SKIP"]) is str
-            and (type(policy["HOST_EXTENT"]) is bool or
-                 (type(policy["HOST_EXTENT"]) is str and policy["HOST_EXTENT"] == "unavailable"))
+            and (
+                type(policy["HOST_EXTENT"]) is bool
+                or (type(policy["HOST_EXTENT"]) is str and policy["HOST_EXTENT"] == "unavailable")
+            )
         ):
             return _encode_known_stamp(
                 source["schema"],

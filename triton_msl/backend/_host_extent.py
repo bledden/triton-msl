@@ -3,6 +3,7 @@
 The trace records preparation decisions, not successful GPU execution. It owns no
 storage or Metal buffer and is local to the current execution context.
 """
+
 from contextvars import ContextVar
 
 _last_launch = ContextVar("triton_msl_host_extent", default=None)
@@ -40,11 +41,16 @@ def select(storage, ptr, length, state, query, page=16384, *, owner=None):
         return "mirror", length, "overflow"
     if state is not True or query is None:
         return "mirror", length, "unavailable"
+
     def agrees():
         try:
             current = storage if owner is None else owner.untyped_storage()
-            return (storage.data_ptr() == ptr and storage.nbytes() == length
-                    and current.data_ptr() == ptr and current.nbytes() == length)
+            return (
+                storage.data_ptr() == ptr
+                and storage.nbytes() == length
+                and current.data_ptr() == ptr
+                and current.nbytes() == length
+            )
         except Exception:
             return False
 

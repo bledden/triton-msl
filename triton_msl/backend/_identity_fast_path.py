@@ -73,14 +73,22 @@ if type(cache._validation_native) is ModuleType:
     _mapping = _owner.__dict__
     if all(type(key) is str for key in _mapping):
         _values = tuple(_mapping.get(name) for name in ("identity_probes", "function_code_is", "dict_keys_exact_str"))
-        if all(type(value) is BuiltinFunctionType and value.__self__ is _owner and value.__name__ == name
-               for name, value in zip(("identity_probes", "function_code_is", "dict_keys_exact_str"), _values)):
-            _GUARD_PRIMITIVES = (_owner, _values[0], (
-                (TYPEOF, _owner, None, None, ModuleType),
-                (DICTGET, cache.__dict__, "_validation_native", None, _owner),
-                *((DICTGET, _mapping, name, None, value) for name, value in zip(
-                    ("identity_probes", "function_code_is", "dict_keys_exact_str"), _values)),
-            ))
+        if all(
+            type(value) is BuiltinFunctionType and value.__self__ is _owner and value.__name__ == name
+            for name, value in zip(("identity_probes", "function_code_is", "dict_keys_exact_str"), _values)
+        ):
+            _GUARD_PRIMITIVES = (
+                _owner,
+                _values[0],
+                (
+                    (TYPEOF, _owner, None, None, ModuleType),
+                    (DICTGET, cache.__dict__, "_validation_native", None, _owner),
+                    *(
+                        (DICTGET, _mapping, name, None, value)
+                        for name, value in zip(("identity_probes", "function_code_is", "dict_keys_exact_str"), _values)
+                    ),
+                ),
+            )
 
 
 def _guard_batch_available(native):
@@ -88,8 +96,7 @@ def _guard_batch_available(native):
     # The captured callback-free primitive checks the live owner and observers.
     # Its exact-key preflight declines before equality on a foreign dictionary
     # key. A custom observer is never called merely to choose a bypass.
-    return (selected is not None and native is selected[0]
-            and selected[1](selected[2]) is True)
+    return selected is not None and native is selected[0] and selected[1](selected[2]) is True
 
 
 _STATE_BATCH = None
@@ -1006,11 +1013,16 @@ def _check_locked(record, native):
             # owner types, complete instance dictionaries, method overrides and
             # class/MRO version tags. Cold admission checked method identities.
             # Keep both live code checks HERE, at their original position.
-            (native.function_code_is(_GUARD_VERIFY, _GUARD_CODE)
-             and native.function_code_is(_READER_CALL, _READER_CODE))
-            if (guard is not None and _GUARD_PRIMITIVES is not None
+            (
+                native.function_code_is(_GUARD_VERIFY, _GUARD_CODE)
+                and native.function_code_is(_READER_CALL, _READER_CODE)
+            )
+            if (
+                guard is not None
+                and _GUARD_PRIMITIVES is not None
                 and guard_probe is _GUARD_PRIMITIVES[1]
-                and _guard_batch_available(native))
+                and _guard_batch_available(native)
+            )
             else _ordinary_guard(guard, native)
         )
         or not native.identity_probes(record[4])

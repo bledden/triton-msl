@@ -254,7 +254,8 @@ def _toolchain_native_dependencies(roots, entries, *, provider_digests=None):
     if cpu is None:
         raise RuntimeError("unproved native toolchain CPU architecture")
     readonly_roots = tuple(
-        root for root in {Path(roots[role]).resolve(strict=True) for role in ("metal", "metallib")}
+        root
+        for root in {Path(roots[role]).resolve(strict=True) for role in ("metal", "metallib")}
         if provider_digests is not None and _read_only_mount(root)
     )
 
@@ -299,9 +300,7 @@ def _toolchain_native_dependencies(roots, entries, *, provider_digests=None):
                     entries[f"{role}-helper:{rel}"] = path
     directory = roots["metal"].resolve(strict=True)
     manifests = {
-        role: dependency_manifest(
-            [path], cpu_type=cpu, executable=path, working_directory=directory, **reader_options
-        )
+        role: dependency_manifest([path], cpu_type=cpu, executable=path, working_directory=directory, **reader_options)
         for role, path in sorted(entries.items())
     }
     for name in _working_directory_lookups({"native_providers": manifests}):
@@ -323,7 +322,9 @@ def compiler_process_context():
     with _lock:
         if _compiler_context is not None:
             if selection != _compiler_context[0]:
-                raise MetalToolchainSelectionError("Metal toolchain selection changed in this process; restart before compiling")
+                raise MetalToolchainSelectionError(
+                    "Metal toolchain selection changed in this process; restart before compiling"
+                )
             return _compiler_context[1]
         resolver = shutil.which("xcrun")
         if resolver is None:
@@ -468,7 +469,8 @@ def _identity_for_environment(environment):
                     options = {"provider_digests": provider_digests} if reuse and provider_digests else {}
                     by_root[inventory] = (
                         _tree_manifest(resolved, reuse_readonly_aliases=True, **options)
-                        if reuse else _tree_manifest(resolved)
+                        if reuse
+                        else _tree_manifest(resolved)
                     )
                 manifests[name] = by_root[inventory]
             if tuple(os.environ.get(key) for key in _SELECTION) != selection:
