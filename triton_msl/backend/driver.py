@@ -18,7 +18,8 @@ def _release_host_pool_buffers(pool, entries):
     """Release every registered lease without hiding an active launch exception."""
     import sys
 
-    active_error = sys.exception()
+    # sys.exc_info() is the Python 3.10 spelling of 3.11's sys.exception().
+    active_error = sys.exc_info()[1]
     cleanup_error = None
     for entry in entries:
         try:
@@ -28,7 +29,11 @@ def _release_host_pool_buffers(pool, entries):
                 pool.release(*entry)
         except Exception as error:
             if active_error is not None:
-                active_error.add_note(f"Host buffer cleanup also failed: {error}")
+                # BaseException.add_note is 3.11+; on 3.10 the note is skipped
+                # and the active exception still propagates unchanged.
+                add_note = getattr(active_error, "add_note", None)
+                if add_note is not None:
+                    add_note(f"Host buffer cleanup also failed: {error}")
             elif cleanup_error is None:
                 cleanup_error = error
     if cleanup_error is not None:

@@ -188,7 +188,10 @@ class Registry:
                 try:
                     self._undo(index, id(module), record)
                 except BaseException as cleanup:
-                    error.add_note("pipeline publication rollback failed: " + repr(cleanup))
+                    # BaseException.add_note is 3.11+; on 3.10 skip the note.
+                    add_note = getattr(error, "add_note", None)
+                    if add_note is not None:
+                        add_note("pipeline publication rollback failed: " + repr(cleanup))
             _empty(index, key, bucket)
             raise
         return record
