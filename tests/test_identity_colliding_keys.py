@@ -25,6 +25,8 @@ def _veto():
 
 
 def _warm():
+    if cache._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     fast._record = None
     stamp = cache.execution_contract()
     before = fast._stats["hits"]

@@ -17,7 +17,6 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
-import tomllib
 import zipfile
 
 HELPERS = ('_validation_native', '_packed_native', '_binder_native')
@@ -46,6 +45,8 @@ def wheel_payload(path):
 
 
 def inspect_bundle(source, dist):
+    import tomllib  # Build/check require Python 3.11+; installed smoke also runs on 3.10.
+
     version = tomllib.loads((source / 'pyproject.toml').read_text())['project']['version']
     stem = 'triton_msl-' + version
     expected = {'native': stem + '-cp314-cp314-macosx_15_0_arm64.whl',

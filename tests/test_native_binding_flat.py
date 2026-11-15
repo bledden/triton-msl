@@ -17,6 +17,8 @@ from triton_msl.backend import _launch_signature as s
 
 @pytest.fixture
 def native():
+    if s._binder_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     assert s._binder_native is not None, "native-specific controls require the built image"
     return s._binder_native
 

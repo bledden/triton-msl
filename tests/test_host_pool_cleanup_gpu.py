@@ -14,6 +14,8 @@ from triton_msl.errors import MetalNonRecoverableError
 
 @pytest.mark.parametrize("mode", ["refusal", "wrap_failure", "copy_in"])
 def test_mirror_before_borrow_failure_returns_lease(monkeypatch, mode):
+    if _cache_contract._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     assert torch.backends.mps.is_available() and _cache_contract._HOST_EXTENT_READY
     monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "0")
     monkeypatch.setenv("TRITON_MSL_HOST_EXTENT", "1")

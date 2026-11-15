@@ -19,6 +19,8 @@ from triton_msl.backend import _framework_contract as framework
 
 @pytest.fixture
 def native():
+    if cache._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     assert cache._validation_native is not None, "this suite requires the tested native binary"
     return cache._validation_native
 

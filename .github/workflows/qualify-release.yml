@@ -1,0 +1,90 @@
+name: Build release qualification bundle
+
+on:
+  push:
+    branches: ['qualify/0.4.0-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: ${{ startsWith(github.ref, 'refs/heads/qualify/0.4.0-') }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14'
+          architecture: arm64
+      - name: Check release bundle rejection controls
+        run: |
+          python -I -B tests/test_release_artifacts.py -v
+          python -I -B tests/test_hosted_artifacts.py -v
+      - name: Build the sole source archive and both wheels
+        run: |
+          python -m pip install build twine
+          python -I -B scripts/release_artifacts.py build --source . --dist dist
+          python -m twine check dist/*
+      - name: Record source, artifact hashes and builder
+        run: |
+          python -I -B scripts/hosted_artifacts.py manifest --source . --dist dist --output provenance/BUILD.json
+          python -m pip freeze > provenance/build-packages.txt
+          xcodebuild -version > provenance/xcode.txt
+          sw_vers > provenance/os.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: dist-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: provenance-${{ github.sha }}
+          path: provenance/
+          if-no-files-found: error
+          retention-days: 90
+
+  installed-smoke:
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {mode: native, python: '3.14'}
+          - {mode: pure, python: '3.10'}
+          - {mode: pure, python: '3.11'}
+          - {mode: pure, python: '3.12'}
+          - {mode: pure, python: '3.13'}
+          - {mode: pure, python: '3.14'}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: dist-${{ github.sha }}
+          path: dist/
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: arm64
+      - name: Install and smoke exact wheel outside checkout
+        env:
+          ARTIFACT_MODE: ${{ matrix.mode }}
+        run: |
+          if [ "$ARTIFACT_MODE" = native ]; then
+            set -- "$GITHUB_WORKSPACE"/dist/*-cp314-cp314-macosx_15_0_arm64.whl
+          else
+            set -- "$GITHUB_WORKSPACE"/dist/*-py3-none-any.whl
+          fi
+          test "$#" -eq 1 && test -f "$1"
+          WHEEL="$1"
+          SMOKE="$GITHUB_WORKSPACE/scripts/release_artifacts.py"
+          NEUTRAL=$(mktemp -d "$RUNNER_TEMP/triton-install.XXXXXX")
+          python -m venv "$NEUTRAL/venv"
+          cd "$NEUTRAL"
+          "$NEUTRAL/venv/bin/python" -I -m pip install "$WHEEL"
+          "$NEUTRAL/venv/bin/python" -I -B "$SMOKE" smoke --wheel "$WHEEL" --mode "$ARTIFACT_MODE"

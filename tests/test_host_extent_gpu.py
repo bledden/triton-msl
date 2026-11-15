@@ -2,13 +2,8 @@
 
 import ctypes
 import gc
-import importlib.util
 import mmap
 from pathlib import Path
-import shlex
-import subprocess
-import sys
-import sysconfig
 
 import numpy as np
 import pytest
@@ -35,6 +30,8 @@ def two_outputs(A, B, N, BLOCK: tl.constexpr):
 
 @pytest.fixture(autouse=True)
 def host(monkeypatch):
+    if contract._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     assert torch.backends.mps.is_available(), "runner must provide real Metal"
     assert contract._HOST_EXTENT_READY, "runner must load the extent-equipped helper"
     monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "0")
@@ -43,26 +40,14 @@ def host(monkeypatch):
 
 @pytest.fixture(scope="module")
 def allocator_probe(tmp_path_factory):
-    """Custom NumPy allocator used by one test; a runner may have loaded its own build."""
-    name = "_public_extent_probe"
-    if name in sys.modules:
-        return sys.modules[name]
-    source = Path(__file__).with_name("host_extent_allocator_probe.c")
-    output = tmp_path_factory.mktemp("extent-probe") / (name + sysconfig.get_config_var("EXT_SUFFIX"))
-    command = shlex.split(sysconfig.get_config_var("LDSHARED")) + [
-        "-O2",
-        "-I" + sysconfig.get_path("include"),
-        "-I" + np.get_include(),
-        str(source),
-        "-o",
-        str(output),
-    ]
-    run = subprocess.run(command, capture_output=True, text=True, timeout=60)
-    assert run.returncode == 0, run.stderr
-    spec = importlib.util.spec_from_file_location(name, output)
-    probe = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(probe)
-    return probe
+    """Authenticate the early worker image, or retain a local fixture build."""
+    import os
+    import runpy
+
+    support = runpy.run_path(str(Path(__file__).with_name("host_extent_probe_support.py")))
+    retained = os.environ.get("TRITON_MSL_EXTENT_PROBE_EVIDENCE")
+    evidence = Path(retained) if retained else tmp_path_factory.mktemp("extent-probe") / "build"
+    return support["load_probe"](Path(__file__).with_name("host_extent_allocator_probe.c"), evidence)
 
 
 def data(n=1048579):

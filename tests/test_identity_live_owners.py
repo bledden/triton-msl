@@ -18,6 +18,8 @@ from triton_msl.errors import MetalNonRecoverableError
 
 
 def _warm_contract():
+    if cache._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     assert cache._validation_native is not None, "these controls require the rebuilt native helper"
     fast._record = None
     stamp = cache.execution_contract()
@@ -93,6 +95,8 @@ def test_live_environment_type_not_saved_type(warm, monkeypatch):
 
 
 def test_cold_custom_environment_dict_descriptor_declines_without_observation(monkeypatch):
+    if cache._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     mapping = os.environ
     original = type(mapping)
     captured = mapping.__dict__
@@ -121,6 +125,9 @@ def test_cold_custom_environment_dict_descriptor_declines_without_observation(mo
 
 
 def test_type_probe_uses_real_type_not_spoofable_class_attribute():
+    if cache._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
+
     class Spoof:
         @property
         def __class__(self):

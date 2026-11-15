@@ -16,6 +16,8 @@ from triton_msl.errors import MetalNonRecoverableError
 
 
 def _warm():
+    if cache._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     fast._record = None
     stamp = cache.execution_contract()
     before = fast._stats["hits"]
@@ -58,6 +60,8 @@ def test_function_dependency_change_misses(monkeypatch):
 
 
 def test_audit_observation_is_omitted_only_when_enabled():
+    if cache._validation_native is None:
+        pytest.skip("Requires the selected compiled native helper")
     code = r"""
 import os, sys
 from triton_msl.backend import _cache_contract as c

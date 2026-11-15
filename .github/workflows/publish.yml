@@ -1,119 +1,88 @@
-name: Publish to PyPI
+name: Publish qualified artifacts to PyPI
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
-  build:
-    runs-on: macos-15
+  qualified-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0 (Node 24)
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0 (Node 24)
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.14'
-          architecture: arm64
-
-      - name: Verify tag matches package version
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          VER=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          test "$TAG" = "$VER" || { echo "::error::tag $TAG does not match pyproject version $VER"; exit 1; }
-          echo "tag $TAG matches package version $VER"
-
-      - name: Check malformed artifact rejection and build isolation
-        run: python -I tests/test_release_artifacts.py -v
-
-      - name: Install build tools
-        run: pip install build twine
-
-      - name: Build and verify the native, pure and source bundle
-        # Native requests are explicit and fail on the wrong interpreter/platform.
-        # Each wheel builds from a separate fresh extraction of the sole sdist.
-        run: python scripts/release_artifacts.py build --source . --dist dist
-
-      - name: Check package
-        run: twine check dist/*
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1 (Node 24)
-        with:
-          name: dist
-          path: dist/
-
-  test-install:
-    needs: build
-    runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - mode: native
-            python: '3.14'
-          - mode: pure
-            python: '3.12'
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0 (Node 24)
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1 (Node 24)
-        with:
-          name: dist
-          path: dist/
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0 (Node 24)
-        with:
-          python-version: ${{ matrix.python }}
-          architecture: arm64
-
-      - name: Verify bundle and install the selected wheel outside checkout
+      - name: Require committed qualification of an exact hosted artifact
+        id: qualified
         env:
-          ARTIFACT_MODE: ${{ matrix.mode }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          python -I -B scripts/hosted_artifacts.py record
+          --record release/QUALIFIED-BUNDLE.json --tag "$RELEASE_TAG"
+          --github-output "$GITHUB_OUTPUT"
+      - name: Read hosted run and artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.qualified.outputs.run_id }}
+          ARTIFACT_ID: ${{ steps.qualified.outputs.artifact_id }}
         run: |
-          WHEEL=$(python scripts/release_artifacts.py select --source . --dist dist --mode "$ARTIFACT_MODE")
-          SMOKE="$GITHUB_WORKSPACE/scripts/release_artifacts.py"
-          NEUTRAL=$(mktemp -d "$RUNNER_TEMP/triton-install.XXXXXX")
-          python -m venv "$NEUTRAL/venv"
-          cd "$NEUTRAL"
-          "$NEUTRAL/venv/bin/python" -I -m pip install "$WHEEL"
-          "$NEUTRAL/venv/bin/python" -I "$SMOKE" smoke --wheel "$WHEEL" --mode "$ARTIFACT_MODE"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > hosted-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > hosted-artifact.json
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.qualified.outputs.artifact_id }}
+          run-id: ${{ steps.qualified.outputs.run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: dist/
+      - name: Verify qualified bytes, source, report, successful run and tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          python -I -B scripts/hosted_artifacts.py verify
+          --record release/QUALIFIED-BUNDLE.json --tag "$RELEASE_TAG"
+          --source . --dist dist --run hosted-run.json --artifact hosted-artifact.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: verified-dist
+          path: dist/
+          if-no-files-found: error
 
   publish-testpypi:
-    needs: test-install
+    needs: qualified-bundle
     runs-on: ubuntu-latest
     environment: testpypi
-    # Best-effort dry run only. TestPyPI lags real PyPI on Metadata-Version 2.4 (PEP 639
-    # `License-Expression`) and 400s on artifacts PyPI accepts (verified: a1 is live on PyPI
-    # with license_expression). Its own lag must not block the real release below.
     continue-on-error: true
     permissions:
       id-token: write
+      actions: read
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1 (Node 24)
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: dist
+          name: verified-dist
           path: dist/
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e  # v1.13.0
+      - name: Publish qualified files to TestPyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e
         with:
           repository-url: https://test.pypi.org/legacy/
 
   publish-pypi:
-    needs: [test-install, publish-testpypi]
-    # Runs after the TestPyPI dry run but is NOT gated by it (test-install is the real gate);
-    # PyPI validates independently and fails safe if anything is actually wrong.
-    if: ${{ always() && needs.test-install.result == 'success' }}
+    needs: [qualified-bundle, publish-testpypi]
+    if: ${{ always() && needs.qualified-bundle.result == 'success' }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
+      actions: read
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1 (Node 24)
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: dist
+          name: verified-dist
           path: dist/
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e  # v1.13.0
+      - name: Publish the same qualified files to PyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e
