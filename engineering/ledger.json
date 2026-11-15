@@ -755,10 +755,10 @@
     {
       "id": "artifact/native_and_pure",
       "state": "evidence_ready",
-      "next_experiment": "2026-11-07 independently reviewed dense-transpose successor installed native/pure artifacts, fullCPU1318/1226pass,normal and relocatedsmokes; sourcebound1f79f3c2. Scope cloned retained dependencyenvs,notfreshdependencyinstall. Prior receipt/artifacts preserved. No general release/performance qualification.",
+      "next_experiment": "2026-11-10: formatted successor af9d576f (commit 4a3f55b). Installed CPU qualification of the native and pure wheels by Astra: 1318/1226 pass, zero failures, node outcomes and skips equal to the Nov 7 parent, normal and relocated smokes. Reviewed by Sol 6.1, a subagent of the producing session; 2026-11-12 second read by Opus 5.5 for Fable reproduced the source and wheel binding and the recount. Limits: the function-call trace covers four files only (driver, generic_lowerer, msl_emitter, mlir_walker); profiling/disasm.py is not exercised; the receipt does not hash-bind the raw phase reports (hashes recorded in opus-formatted-qualification-review-20261112/RAW-RECORDS-SHA256.txt); PROTOCOL.txt was edited during the run; cloned dependency stacks; no GPU or timing qualification. Prior receipt preserved.",
       "receipt": {
-        "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/transposed-dense-direct-20261107/ARTIFACT-RECEIPT.json",
-        "sha256": "9c88abd6b790d11afa769cab1796a5d09d7a25ca735cee201183604912aa95ef"
+        "path": "/Users/bledden/Documents/triton-validation-evidence/2026-09-19-0.4.0-start/formatted-installed-qualification-20261110/ARTIFACT-RECEIPT.json",
+        "sha256": "88a5038a489bdd310eccf858bfeb9ea166e97dcc80777199cc98955e7a6ccc8e"
       }
     },
     {
