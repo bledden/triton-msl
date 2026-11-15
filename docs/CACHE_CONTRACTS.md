@@ -162,10 +162,11 @@ strict inventory runs exactly as in strict mode:
   change the loaded-image list that the framework identity binds. The backend
   path and the command line import it first.
 - `TRITON_MSL_IDENTITY_DIR` is set to a relative path.
-- Any path whose stat state the record would trust is not on APFS (below).
+- A bundle, the SDK, a framework root or the executable is not on APFS (below).
 
-Location and format. Records live in `TRITON_MSL_IDENTITY_DIR` if it is set (it
-must be absolute), else in `~/.cache/triton_msl/identity-v1-uid<euid>`. The
+Location and format. Records live in `TRITON_MSL_IDENTITY_DIR` if it is set and
+not empty (it must be absolute), else in
+`~/.cache/triton_msl/identity-v1-uid<euid>`. The
 directory is deliberately not derived from `TRITON_MSL_CACHE_DIR`, which may be
 shared. It is created with mode 0700 and is used only if it is a directory (not a
 symlink) owned by the effective user with no group or other permissions and no
@@ -179,15 +180,18 @@ and the executable dyld started, plus, for the toolchain, the selection
 variables, the resolver and the resolved bundle and SDK paths, and for the
 framework, the selected package paths, the runtime selection settings and the
 ordered list of loaded native images. A different loaded-image list is therefore
-a different record. Files are canonical JSON of at most 1 MiB with mode 0600, one
-link and no extended ACL, read without following symlinks and decoded strictly:
+a different record. Files are canonical JSON of at most 1 MiB, written with mode
+0600 and read only if owned by the effective user with no group or other
+permissions, one link and no extended ACL, without following symlinks, and
+decoded strictly:
 duplicate keys, extra or missing keys, wrong types and malformed digests are
 misses. A record of another schema, package build or locator is a miss. Its
 `record_sha256` detects corruption only; it is not authentication. Records are
 written to a temporary file, synced and renamed into place, so a reader sees a
 complete old or new record; a temporary file that carries an ACL is never
-renamed into place. The newest 64 records of each kind are kept and older ones
-are removed; a temporary file with the writer's own name pattern that is more
+renamed into place. The newest 64 records of each kind, by the time they were
+written, are kept and older ones are removed (using a record does not renew
+it); a temporary file with the writer's own name pattern that is more
 than an hour old (left by a killed writer) is removed too.
 
 Toolchain evidence. The live selection always runs first, exactly as in strict
@@ -237,10 +241,14 @@ Filesystems. Stat evidence is trusted only on APFS, whose timestamps have
 nanosecond resolution. Before an attempt is offered, the bundles, the SDK, the
 framework roots and the executable must be on APFS; every device that a stat
 signature, the executable status, the Xcode seal status or a native provider's
-status relies on is checked again (by `statfs(2)`, once per device) when the
-evidence is collected, both for a lookup and before a publication. On any other
-filesystem, where a same-size rewrite within one timestamp tick can leave every
-stat field unchanged, strict mode runs and no record is read or written.
+status relies on is checked (by `statfs(2)`, once per device for each attempt)
+when the evidence is collected, both for a lookup and before a publication. On
+any other filesystem a same-size rewrite within one timestamp tick can leave
+every stat field unchanged. If one of the paths checked before the attempt is
+off APFS, no record is read or written; if a device found while collecting
+evidence is (a symlink's target, a native provider), the record may already have
+been read, but it is not used and none is published. Strict mode runs in both
+cases.
 
 A record is published only after a strict inventory succeeded and only if the
 evidence observed before that inventory equals the evidence observed after it, and
@@ -251,9 +259,11 @@ What strict mode guarantees that a record does not. Strict mode derives the
 identity from bytes the process read itself. A record relies on metadata
 evidence, and the following changes are not detected:
 
-- a write through a shared memory mapping that stays open across the change, on a
-  writable framework root (or a writable toolchain bundle), can leave the file's
-  size and times unchanged until the mapping is closed;
+- a write through a shared memory mapping that stays open across the change can
+  leave a file's size and times unchanged until the mapping is closed. This
+  applies to any writable file the record trusts by status: a framework root, a
+  writable toolchain bundle, the executable, and native provider images outside
+  the roots (for example a package manager's Python library);
 - with the SDK anchor policy, edits to SDK files other than the anchor files; a
   non-anchor SDK entry that would make strict mode refuse (an unsupported file
   kind, an unreadable file) is likewise not seen by a record hit;
@@ -276,8 +286,9 @@ Command line. `python -m triton_msl.tools.identity` takes one command, imports
 `triton_msl.backend._cache_contract` before computing anything (as the backend
 path does) and creates no GPU device:
 
-- `status` prints the mode, the directory and each record's kind, creation time,
-  producer and whether it decodes for the running package;
+- `status` prints the mode, the directory and each record's kind, creation time
+  and producer version, whether it decodes, and whether it belongs to the running
+  package;
 - `refresh` runs the strict toolchain and framework inventories and publishes;
 - `clear` deletes the record files (`toolchain-*.json`, `framework-*.json`) in the
   directory, and nothing else; a directory that does not exist holds none
@@ -290,8 +301,11 @@ path does) and creates no GPU device:
   was compared.
 
 Exit status 0 means success (for `verify`, every digest agreed), 1 means `verify`
-found and removed a differing record, and 2 means an error, for example an
-untrusted record directory.
+found and removed a differing record, and 2 means an error: a record directory
+that cannot be used (untrusted, or a relative `TRITON_MSL_IDENTITY_DIR`), for
+every command, or a `refresh` that published no record for a component. A
+directory that does not exist yet is not an error; the first publication creates
+it.
 
 Because the framework record depends on the ordered loaded native images,
 `refresh` and `verify` cover only the framework record of the command's own

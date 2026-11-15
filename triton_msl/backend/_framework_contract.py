@@ -16,8 +16,8 @@ build, every native provider's state and every path answer of the native graph
 recorded, all on APFS; the guard is then rebuilt and verified exactly as the
 strict inventory leaves it, and only then is the outcome a hit. Stat signatures
 cannot see a same-size write through a mapping held open across the change;
-strict mode (``TRITON_MSL_IDENTITY_RECORD=0``) and ``python -m
-triton_msl.tools.identity verify`` re-read bytes.
+strict mode (``TRITON_MSL_IDENTITY_RECORD=0``) re-reads bytes, as does ``python
+-m triton_msl.tools.identity verify`` for the record of its own process shape.
 """
 
 import hashlib

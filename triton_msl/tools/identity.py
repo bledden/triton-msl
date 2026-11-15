@@ -11,8 +11,9 @@ verify   compare each record this process would use with a strict inventory;
          that nothing earlier was compared
 
 Exit status: 0 on success (for verify: every digest agreed), 1 when verify
-found and removed a differing record, 2 on an error (for example an untrusted
-record directory).
+found and removed a differing record, 2 on an error: a record directory that
+cannot be used (untrusted, or a relative TRITON_MSL_IDENTITY_DIR) for any
+command, or a refresh that published no record for a component.
 
 The framework record is specific to the ordered list of loaded native images,
 so ``refresh`` and ``verify`` cover only the framework record that matches this
@@ -57,6 +58,15 @@ def _run(kind, compute, reset, policy):
     return digest, outcome
 
 
+def _require_usable_directory():
+    """Raise (exit status 2) if records cannot be kept; a directory not yet created can."""
+    from triton_msl.backend import _identity_record as record
+
+    report = record.status()
+    if report["error"] is not None:
+        raise RuntimeError(f"record directory unusable: {report['error']}")
+
+
 def _status(_args):
     from triton_msl.backend import _identity_record as record
 
@@ -65,6 +75,9 @@ def _status(_args):
     print(f"directory: {report['directory']}")
     if report["error"] is not None:
         print(f"directory unusable: {report['error']}")
+        return 2
+    if not report["exists"]:
+        print("no records (the directory is created by the first publication)")
     for entry in report["records"]:
         producer = entry["producer"] or {}
         print(
@@ -77,10 +90,14 @@ def _status(_args):
 
 
 def _refresh(_args):
+    _require_usable_directory()
+    unpublished = 0
     for kind, compute, reset in _components():
         digest, outcome = _run(kind, compute, reset, "refresh")
-        print(f"{kind}: {digest} {outcome[0] if outcome else 'not published'}")
-    return 0
+        state = outcome[0] if outcome else "unavailable"
+        unpublished += state != "published"
+        print(f"{kind}: {digest} {state if state == 'published' else 'not published (' + state + ')'}")
+    return 2 if unpublished else 0
 
 
 def _clear(_args):
@@ -93,6 +110,7 @@ def _clear(_args):
 def _verify(_args):
     from triton_msl.backend import _identity_record as record
 
+    _require_usable_directory()
     differences = 0
     for kind, compute, reset in _components():
         recorded, outcome = _run(kind, compute, reset, "1")

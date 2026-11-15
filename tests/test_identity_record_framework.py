@@ -513,10 +513,37 @@ def test_cli_verify_without_earlier_records_says_nothing_was_compared(both, reco
     assert capsys.readouterr().out.count("ok (hit)") == 2
 
 
-def test_cli_reports_an_untrusted_directory(both, records, monkeypatch, capsys):
+def test_cli_every_command_exits_2_on_an_untrusted_directory(both, records, monkeypatch, capsys):
     records.mkdir(mode=0o755)
     os.chmod(records, 0o755)
-    assert cli.main(["status"]) == 0
+    assert cli.main(["status"]) == 2
     assert "directory unusable" in capsys.readouterr().out
-    assert cli.main(["clear"]) == 2
-    assert "untrusted" in capsys.readouterr().err
+    for command in ("refresh", "verify", "clear"):
+        assert cli.main([command]) == 2
+        assert "untrusted" in capsys.readouterr().err
+    assert not list(records.iterdir())
+
+
+def test_cli_every_command_exits_2_on_a_relative_directory(both, records, monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(rec.DIRECTORY, "relative-records")
+    for command in ("status", "refresh", "verify", "clear"):
+        assert cli.main([command]) == 2
+    assert not (tmp_path / "relative-records").exists()
+
+
+def test_cli_status_before_the_first_publication_is_not_an_error(both, records, capsys):
+    assert not records.exists()
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "no records" in out and "unusable" not in out
+    assert not records.exists()
+
+
+def test_cli_refresh_that_publishes_nothing_exits_2(both, records, monkeypatch, capsys):
+    # Stat evidence is refused off APFS, so nothing can be published.
+    monkeypatch.setattr(rec, "_filesystem_type", lambda path: "hfs")
+    assert cli.main(["refresh"]) == 2
+    out = capsys.readouterr().out
+    assert out.count("not published (unavailable)") == 2
+    assert not list(records.glob("*.json")) if records.exists() else True

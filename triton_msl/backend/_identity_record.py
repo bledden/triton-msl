@@ -999,10 +999,21 @@ def framework_attempt(environment, policy, roots, selection):
 def status(environment=None):
     """Plain data about the record directory; never creates it."""
     environment = os.environ if environment is None else environment
-    result = {"mode": mode(environment), "directory": None, "trusted": False, "error": None, "records": []}
+    result = {
+        "mode": mode(environment),
+        "directory": None,
+        "exists": True,
+        "trusted": False,
+        "error": None,
+        "records": [],
+    }
     try:
         result["directory"] = path = directory(environment)
         fd = _open_directory(path)
+    except FileNotFoundError:
+        # The state before the first publication, which creates it; not an error.
+        result["exists"] = False
+        return result
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
         return result
