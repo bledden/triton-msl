@@ -164,6 +164,8 @@ class ReleaseArtifacts(unittest.TestCase):
                 self.assertEqual(env["TRITON_MSL_BUILD_VALIDATION_NATIVE"], env["TRITON_MSL_BUILD_PACKED_NATIVE"])
                 self.assertEqual(env["TRITON_MSL_BUILD_BINDER_NATIVE"], env["TRITON_MSL_BUILD_PACKED_NATIVE"])
                 self.assertEqual(env["MACOSX_DEPLOYMENT_TARGET"], "15.0")
+                self.assertEqual(env["ARCHFLAGS"], "-arch arm64")
+                self.assertEqual(env["_PYTHON_HOST_PLATFORM"], "macosx-15.0-arm64")
                 wheel = self.wheels[mode][0]
                 output.joinpath(wheel.name).write_bytes(wheel.read_bytes())
                 (root / "contamination.so").write_bytes(b"cannot enter the other build")

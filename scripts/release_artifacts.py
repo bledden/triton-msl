@@ -105,7 +105,11 @@ def build_bundle(source, dist):
     native_platform()  # Fail before any build; requested native cannot become pure.
     require(not dist.exists(), 'Output directory already exists')
     dist.mkdir(parents=True)
-    env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET='15.0',
+    # Hosted Python may be universal2 even when executing its arm64 slice.
+    # Pin both the actual compiler architecture and the matching wheel tag.
+    # inspect_bundle still verifies every helper's thin arm64 Mach-O header.
+    env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET='15.0', ARCHFLAGS='-arch arm64',
+               _PYTHON_HOST_PLATFORM='macosx-15.0-arm64',
                TRITON_MSL_BUILD_VALIDATION_NATIVE='0', TRITON_MSL_BUILD_PACKED_NATIVE='0',
                TRITON_MSL_BUILD_BINDER_NATIVE='0')
     env.pop('PYTHONPATH', None)
