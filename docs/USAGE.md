@@ -87,7 +87,10 @@ file bytes.
 checks has changed, and on request. Otherwise a later process validates a small
 per-user record and reuses the recorded identity. The record holds the identity the full computation
 produced, so cache keys are the same in both modes unless a change listed
-below goes unseen. Its effect on start-up time: not yet measured for this release.
+below goes unseen. On one M4 Max, the first `@triton.jit` call of a later process
+with compiled kernels cached took a median 7.03 s with the record switched off and
+0.96 s with it in use (native wheel, one workload, 24 processes each); see the
+[0.4.0 guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.4.0.md#performance) for the table and its limits.
 
 | Setting | Effect |
 |---------|--------|

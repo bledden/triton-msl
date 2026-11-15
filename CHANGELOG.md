@@ -56,7 +56,13 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   change); a change to an SDK file other than the SDK's version files; a privileged
   change to file times or to the raw device; and a record altered by the same user.
   `docs/CACHE_CONTRACTS.md` has the details.
-- Effect on start-up time: not yet measured for this release.
+- Start-up, measured on one M4 Max with one workload (a new process makes its
+  first `@triton.jit` vector add; compiled kernels cached; 24 processes each way):
+  the median first call took 7.03 s with the record switched off and 0.96 s with
+  the record in use on the native wheel, and 7.06 s and 0.93 s on the pure wheel.
+  The first process, which does the full computation and writes the record, is
+  not shortened. Other machines and workloads were not measured. The table is in
+  `docs/releases/0.4.0.md`.
 
 ### Fixes
 
@@ -134,13 +140,24 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   unresolved; on small single-launch workloads the paired excess was about 18–24 µs
   for the native wheel and about 45–54 µs for the pure wheel.
 
+### Validation
+
+Run on November 14 on local builds of the release source (one M4 Max, macOS 26.7,
+Xcode 27.2, CPython 3.14):
+
+- Project suite with the compiled helpers: 7,386 passed, 62 skipped, 0 failed.
+  From a tree without the helpers: 7,042 passed, 119 skipped; the 287 tests that
+  need a compiled helper did not pass there.
+- Upstream Triton `test_core.py`: 5,780 passed, 3,562 skipped, 0 failed of 9,342,
+  with each wheel's package files.
+- Installed device-free selection: native 1,480 passed and 6 skipped; pure 1,388
+  passed and 98 skipped; 0 failed.
+
 ### Not tested
 
 - M1, M2, M3 and M5 hardware; all testing used one M4 Max.
 - Native wheels on Python versions other than CPython 3.14. Python 3.10 was not run.
 - Older macOS releases and toolchains.
-- Full project, upstream and installed suites on the final 0.4.0 build: not yet run
-  for this release.
 
 ## 0.3.0 - 2026-09-16
 
