@@ -2,8 +2,13 @@
 
 import ctypes
 import gc
+import importlib.util
 import mmap
+from pathlib import Path
+import shlex
+import subprocess
 import sys
+import sysconfig
 
 import numpy as np
 import pytest
@@ -34,6 +39,30 @@ def host(monkeypatch):
     assert contract._HOST_EXTENT_READY, "runner must load the extent-equipped helper"
     monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "0")
     monkeypatch.setenv("TRITON_MSL_HOST_EXTENT", "1")
+
+
+@pytest.fixture(scope="module")
+def allocator_probe(tmp_path_factory):
+    """Custom NumPy allocator used by one test; a runner may have loaded its own build."""
+    name = "_public_extent_probe"
+    if name in sys.modules:
+        return sys.modules[name]
+    source = Path(__file__).with_name("host_extent_allocator_probe.c")
+    output = tmp_path_factory.mktemp("extent-probe") / (name + sysconfig.get_config_var("EXT_SUFFIX"))
+    command = shlex.split(sysconfig.get_config_var("LDSHARED")) + [
+        "-O2",
+        "-I" + sysconfig.get_path("include"),
+        "-I" + np.get_include(),
+        str(source),
+        "-o",
+        str(output),
+    ]
+    run = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    spec = importlib.util.spec_from_file_location(name, output)
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    return probe
 
 
 def data(n=1048579):
@@ -110,9 +139,8 @@ def test_mixed_foreign_or_interior_keeps_only_its_mirror(monkeypatch, kind):
     assert extent.last_launch()[0]["reason"] == "no_malloc_extent"
 
 
-def test_delegating_custom_handler_gpu_tail_and_lifetime(monkeypatch):
-    probe = sys.modules.get("_public_extent_probe")
-    assert probe is not None, "runner must load the retained custom allocator before identity"
+def test_delegating_custom_handler_gpu_tail_and_lifetime(monkeypatch, allocator_probe):
+    probe = allocator_probe
     before = probe.stats()
     old = probe.install()
     try:
