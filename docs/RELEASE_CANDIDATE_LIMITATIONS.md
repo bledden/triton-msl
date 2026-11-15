@@ -1,4 +1,10 @@
-# 0.3.0 — validation scope and limitations
+# 0.3.0 validation record and limitations
+
+This is the 0.3.0 validation and performance record. In it, "candidate" means the
+0.3.0 release candidate, and "public main" or "main" means commit `182c1820`, whose
+code equals 0.2.0. 0.4.0 did not rerun these measurements. For what 0.4.0 changes,
+read the [0.4.0 release guide](releases/0.4.0.md). A "0.4.0 note" marks a
+statement that the 0.4.0 tree changes; the rest was not re-checked line by line.
 
 Version 0.3.0 supersedes the unpublished rc1–rc4 snapshots. Earlier wheel hashes do
 not identify the final artifacts; the runtime-payload binding is described below.
@@ -184,6 +190,8 @@ source patterns as suspect until using a validated corrected artifact; no adviso
 Packet 883 measured the existing execution-contract capture at 17.53 s, including 10.03 s for the tree stage and 6.52 s for the first resolver. In three fresh-process optimistic screens with a preloaded manifest, identity work alone took 2.11–2.23 s (median 2.16173 s). Those screens excluded stat traversal, cache I/O, compiler and GPU work, so the tree-only proposal could not meet the declared approximately 1.5 s target under its own optimistic conditions.
 
 No persistent memo was implemented or adopted, and exact871 is unchanged. This is not a finding of no possible benefit, an absolute performance ceiling, or proof that another mechanism cannot improve cold start. The default continues to content-hash the relevant trees once per interpreter. The p879 first-specialization figures are retained pre-format observations; the formatted cold subset is reported separately above.
+
+0.4.0 note: this describes 0.3.0. In 0.4.0, a later process can instead validate and reuse a per-user identity record that holds the identity the full computation produced. `TRITON_MSL_IDENTITY_RECORD=0` keeps the 0.3.0 behaviour. See the [0.4.0 release guide](releases/0.4.0.md#start-up-identity-record).
 
 ## Latest composed main-relative evidence: exact 871 (pre-format)
 

@@ -84,10 +84,11 @@ the packed buffer cannot fit. This is scalar-buffer packing, not permission to
 pack arbitrary Metal pointers. Template signatures and assertion-bearing kernels
 have their own restrictions; inspect the actual emitted signature.
 
-In 0.3.0, the Python MPS `compile_shader` route implements this overflow packing.
-The host-copy route refuses an over-limit binding before any dispatch instead of
-implementing the packed ABI. An external metallib consumer needs its own matching
-implementation.
+In 0.3.0, only the Python MPS `compile_shader` route implements this overflow
+packing; the host-copy route refuses an over-limit binding before any dispatch.
+In 0.4.0 the host-copy route also implements it when the compiler has certified the
+packed layout, and still refuses an unproved layout before dispatch. An external
+metallib consumer needs its own matching implementation.
 
 ### Grid and threadgroup geometry
 

@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 # PEP 541 confusability check, so this ships as `triton-msl` — a distinct stem
 # (MSL = Metal Shading Language, which this backend emits). Import name: triton_msl.
 name = "triton-msl"
-version = "0.4.0rc1"
+version = "0.4.0"
 description = "Metal (Apple Silicon) backend for Triton"
 readme = "README.md"
 # PEP 639 SPDX expression (Metadata-Version 2.4). Do NOT also add a

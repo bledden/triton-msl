@@ -1,31 +1,146 @@
 # Changelog
 
-## 0.4.0rc1 - unreleased candidate
+## 0.4.0
 
-Local candidate on `dev/0.4.0-candidate-20261103`. Not published. Release evidence
-is on hold: one artifact row of the engineering ledger is accepted and 58 rows are
-pending. Scope, artifacts and limits are in `docs/RELEASE_CANDIDATE_0.4.0.md`.
+Compatibility and safety update. It runs on the Xcode 27 toolchain, which the
+published 0.3.0 refuses, and fixes defects found in 0.3.0. No general speedup is
+claimed. The user guide is `docs/releases/0.4.0.md`.
 
-- Add opt-in cooperative source-program export, an installed `triton-msl-export`
-  command and generic backward stride lowering for the external reporter workflow.
-  The regular Python launcher still refuses the pending source-program descriptor.
-- Add seven dense attention fragment compositions behind the existing default-off
-  option, with source and precision admission checks and a public GPU test for each.
+### Compatibility
+
+- Support the Xcode 27 toolchain. On it, 0.3.0 refuses every kernel with
+  `cannot establish Metal compiler/SDK identity: unsupported native load command 0x27`:
+  its Mach-O dependency parser rejects the `LC_DYLD_ENVIRONMENT` load command.
+  0.4.0 accepts that command only in a main executable and only for
+  `DYLD_VERSIONED_FRAMEWORK_PATH`. Any other embedded variable still refuses.
+- Qualify the Metal language-standard probe by creating a compute pipeline, not only
+  by loading a library (GitHub issue #12). Where a standard's library loads but
+  pipeline creation fails, 0.3.0 selected that standard and kernels then failed.
+  0.4.0 moves on to the next older standard.
+- Keep the declared Python 3.10 support. Two cleanup paths added during 0.4.0
+  development called Python 3.11 APIs (`sys.exception()` and
+  `BaseException.add_note`). They now use `sys.exc_info()` and add the note only
+  when the exception has `add_note`; the original exception still propagates.
+  Python 3.10 itself was not run: the check is a static source test and unit tests
+  on Python 3.14.
+- The package licence expression is now `MIT AND BSD-3-Clause`. The `applegpu`
+  static decoder is vendored as `triton_msl._vendor.applegpu` under its BSD-3-Clause
+  licence, so the disassembly helper works from an installed wheel. 0.3.0 looked
+  for a repository-relative `third_party/applegpu`, which a wheel does not contain,
+  and reported the decoder unavailable.
+
+### Start-up identity record
+
+- In 0.3.0, every new Python process recomputed the compiler, SDK and framework
+  identities from full file bytes before its first kernel. 0.4.0 keeps that full
+  computation for the first process, whenever anything it checks has changed, and
+  on request. Otherwise a later process validates a small per-user record and
+  reuses the recorded identity. The record holds the identity the full computation
+  produced, so cache keys are the same in both modes unless a change listed
+  below goes unseen.
+- `TRITON_MSL_IDENTITY_RECORD=0` forces the full computation in every process and
+  reads or writes no record. `TRITON_MSL_IDENTITY_RECORD=refresh` recomputes and
+  rewrites the record. The default is on.
+- Records live in `~/.cache/triton_msl/identity-v1-uid<uid>/` unless
+  `TRITON_MSL_IDENTITY_DIR` is set. They are private to the user: the directory is
+  mode 0700 and the files 0600.
+- `python -m triton_msl.tools.identity status|refresh|clear|verify` manages the
+  records. `verify` runs the full computation and compares. `refresh` and `verify`
+  reach the framework record of the command's own process only; for an application,
+  use `clear` or run it once with `TRITON_MSL_IDENTITY_RECORD=refresh`.
+- The record is used only where file metadata is on APFS and the record folder
+  carries no access control list; otherwise the full computation runs.
+- The record relies on file metadata, so it does not see what only the full
+  computation sees: a byte change that leaves a file's size, times and inode
+  unchanged (for example a write through a memory mapping held open across the
+  change); a change to an SDK file other than the SDK's version files; a privileged
+  change to file times or to the raw device; and a record altered by the same user.
+  `docs/CACHE_CONTRACTS.md` has the details.
+- Effect on start-up time: not yet measured for this release.
+
+### Fixes
+
+- Opt-in C++ route (`TRITON_MSL_USE_CPP=1` with a separately built extension):
+  a masked `tt.load` was lowered to an unconditional load followed by a select, so
+  inactive lanes could read outside their allocation. The load is now control
+  dependent on the mask. The typed-pointer rewrite on that route now keeps
+  `volatile` on loads; 0.3.0 dropped it.
+- Host-copy route: if submission or waiting raised, 0.3.0 dropped its references to
+  the launch's buffers and owners while GPU work could still be pending. 0.4.0 retains
+  them until the GPU's access has provably ended: the failure came before any commit
+  attempt, or the command buffer reports completion or error. Until then, later host
+  launches raise `triton_msl.errors.PostSubmitError`. See "Host dispatch failures
+  with uncertain completion" in `docs/USAGE.md`.
+- Host-copy route: pooled buffer leases are released when preparation raises.
+  0.3.0 released them only on the normal path.
+- Kernels with more than 31 arguments now run on the host-copy route when the
+  packed argument layout is certified by the compiler. 0.3.0 refused them there; the
+  MPS route already supported them.
+- Compiler and probe subprocesses run with a fixed working directory and absolute
+  operands. 0.3.0 ran them in the application's working directory.
+- A changed or unusable compiler selection raises the typed
+  `triton_msl.errors.MetalToolchainSelectionError`.
+- Framework discovery now retains the import machinery whose `id()` values key its
+  memo. 0.3.0 did not, so after that machinery was replaced and an address reused,
+  the memo could return stale results.
+- Loaded Metal pipelines are owned by the loader that acquired them and released
+  after its matching unload. 0.3.0 kept them in a process-global table for the life
+  of the process.
+
+### Additions
+
+- Source-program export: an installed `triton-msl-export` command (also
+  `python -m triton_msl.tools.export_source_program`) writes the Metal source, an
+  optional metallib and a manifest for a proved saved-LSE attention program, for use
+  by an external Metal driver. The 128-thread cooperative lowering is opt-in
+  (`--cooperative`, or `MetalOptions(experimental_source_program_cooperative=True)`).
+  The scalar source-program emission is not opt-in: a kernel whose arguments are
+  seven pointers followed by four scalars and that uses `tt.dot` with `exp2`, `log`
+  or `maxnumf` enters the source-program proof by default. If the proof succeeds,
+  the regular Python launcher refuses to run the result with
+  `MetalNonRecoverableError`. If it fails, compilation refuses with no fallback.
+- Generic backward stride lowering for the reporter's triangle-attention backward
+  kernels, which use derived contiguous strides and boolean masks.
+- Add seven dense attention fragment compositions behind the new default-off
+  `MetalOptions(experimental_fa_fragment_lowering=...)` option (default `"off"`),
+  with source and precision admission checks and a public GPU test for each.
 - Admit full-storage, zero-offset dense rank-two fp16/fp32 transposes to the direct
   MPS route. Offset, partial, overlapping and gappy transposes keep the host route.
   Four transposed-B matmul cases fall from 1.08–1.26 ms to 0.21–0.26 ms per public
-  call plus sync on an M4 Max in both installed modes. This is a descriptive
-  workflow result, not a release performance qualification.
+  call plus sync on an M4 Max in both installed modes, against the November 3
+  development wheels. This is a descriptive workflow result, not a release
+  performance qualification, and it was not compared with 0.3.0.
+- New default-off options: `TRITON_MSL_HOST_EXTENT=1` (host storage extent
+  borrowing), `TRITON_MSL_CPP_SCALAR_CFG=1` (LLVM scalar cleanup on the opt-in C++
+  route), `MetalOptions(experimental_cooperative_attention=True)` and
+  `MetalOptions(experimental_tiled_k_layout=True)`. See `docs/USAGE.md`.
 - Compose four host fast paths: guard reuse, shared binder census, scalar
   eligibility and packed-key reuse. Installed correctness passes. In the November 9
-  nine-case comparison with the November 3 wheels, the native wheel's mean call time
-  is higher in all nine cases (+1.47% to +10.07%) and the pure wheel is mixed
-  (−8.14% to +13.23%). Two workers per arm: the panel establishes no general
-  speedup and attributes the difference to no cause.
-- Carry forward toolchain, cache, ownership, import/identity and launch-contract
-  repairs, and the pure-Python environment-snapshot and tensor-classification changes.
-- Not tested: M1 and M5 hardware; native wheels on Python versions other than
-  CPython 3.14; older macOS releases and toolchains.
+  nine-case comparison with the November 3 development wheels, the native wheel's
+  mean call time is higher in all nine cases (+1.47% to +10.07%) and the pure wheel
+  is mixed (−8.14% to +13.23%). Two workers per arm: the panel establishes no
+  general speedup and attributes the difference to no cause.
+- Carry forward the pure-Python environment-snapshot and tensor-classification
+  changes.
+
+### Performance
+
+- An October 18 comparison of an October 11 installed development build against
+  released 0.3.0 resolved none of its 36 cases as faster or slower. It used an older
+  retained Metal compiler, because 0.3.0 cannot compile with the current toolchain.
+  The final 0.4.0 build has not been timed against 0.3.0.
+- The per-launch host cost over 0.2.0 that shipped in 0.3.0 remains. In the same
+  comparison, 10 of 36 cases were resolved as slower than 0.2.0 and the rest were
+  unresolved; on small single-launch workloads the paired excess was about 18–24 µs
+  for the native wheel and about 45–54 µs for the pure wheel.
+
+### Not tested
+
+- M1, M2, M3 and M5 hardware; all testing used one M4 Max.
+- Native wheels on Python versions other than CPython 3.14. Python 3.10 was not run.
+- Older macOS releases and toolchains.
+- Full project, upstream and installed suites on the final 0.4.0 build: not yet run
+  for this release.
 
 ## 0.3.0 - 2026-09-16
 

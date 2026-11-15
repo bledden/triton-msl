@@ -1,4 +1,8 @@
-# Capability & refusal evidence register — 0.3.0 release candidate
+# Capability & refusal evidence register: 0.3.0 record and 0.4.0 transitions
+
+Parts 1 to 3 record the 0.3.0 release-candidate evidence unchanged. Section 2e
+lists transitions in 0.4.0. Their evidence is the named code and tests, not a new
+census of every kernel.
 
 triton-msl follows a **correct-or-refuse** contract: a kernel it accepts is meant to compute
 correctly, and one it cannot prove it can lower safely raises `MetalNonRecoverableError` rather
@@ -140,6 +144,19 @@ regression suites; it is summarised here, not re-enumerated.)
 
 **A refusal is designed behaviour, not a crash.** Over-refusal is a real defect class here — report
 it. A **wrong number without a refusal** is a P0 and the most valuable thing to send us.
+
+### 2e. 0.4.0 transitions
+
+| what | 0.3.0 | 0.4.0 | code | pinned in |
+|---|---|---|---|---|
+| Xcode 27 toolchain identity (`LC_DYLD_ENVIRONMENT`, load command 0x27) | every kernel refuses: `cannot establish Metal compiler/SDK identity: unsupported native load command 0x27` | accepted only in a main executable and only for `DYLD_VERSIONED_FRAMEWORK_PATH`; any other embedded variable refuses | `_native_dependencies.py` | `test_native_dependency_contract.py`, `test_toolchain_native_dependencies.py` |
+| Metal language-standard probe (issue #12) | a library load alone selected a standard; kernels then failed where pipeline creation fails | pipeline creation required; the probe tries the next older standard | `device_detect.py` | `test_device_probe_contract.py` |
+| more than 31 arguments on the host-copy route | refuse | computes with a compiler-certified packed layout; unproved layouts refuse | `driver.py`, `_argument_abi.py` | `test_issue4_trifast.py::test_over_31_buffer_args_refuses_clearly` (historical name) |
+| host launch after a failed dispatch with uncertain completion | owners dropped; later launches proceed | owners retained; later host launches raise `PostSubmitError` until completion is proven | `_host_dispatch.py` | `test_host_dispatch_lifetime.py` |
+| source-program envelope: seven pointer then four scalar arguments, `tt.dot` with `exp2`, `log` or `maxnumf` | not recorded here | proved program: emitted with a pending descriptor that the Python launcher refuses before dispatch; unproved: compile-time refusal with no fallback; `triton-msl-export` exports proved programs | `codegen/_source_program/entry.py`, `driver.py` | `test_source_program_admission.py`, `test_source_program_export.py`, `test_source_program_integration.py` |
+| reporter triangle-attention backward kernels with derived contiguous strides and boolean masks | not recorded here | lower on the default path | `generic_lowerer.py` | `test_trifast_backward_strides.py` |
+| full-storage, zero-offset, dense rank-two fp16/fp32 transposes | not admitted to the direct route | direct MPS route; offset, partial, overlapping and gappy transposes keep the host route | `_generic_launch.py` | `test_dense_transpose_admission.py` |
+| opt-in C++ route masked `tt.load` | unconditional load then select: inactive lanes could read out of bounds | load control-dependent on the mask | `csrc/lib/Conversion/ElementwiseOpToLLVM.cpp` | `test_cpp_masked_load_lowering.py` |
 
 ---
 

@@ -8,7 +8,7 @@ preserves the source recurrence, mask, output and saved-LSE computation. A faile
 proof remains terminal. This is a lowering of the proved program, not recognition
 by a kernel name or source hash.
 
-After installing the candidate wheel, export a retained TTGIR fixture with Triton and the Metal toolchain installed:
+After installing triton-msl 0.4.0, export a retained TTGIR fixture with Triton and the Metal toolchain installed:
 
 ```sh
 python -I -B -m triton_msl.tools.export_source_program \

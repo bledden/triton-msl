@@ -14,13 +14,21 @@ numerical precision and performance depend on the backend.
 **Status: alpha.** The goal is to preserve the source computation or refuse an
 unsupported kernel explicitly. This is not a universal correctness guarantee.
 
-## 0.4.0 release candidate
+## What's new in 0.4.0
 
-`0.4.0rc1` is a local, unpublished candidate. It adds opt-in source-program export
-with an installed `triton-msl-export` command, default-off dense attention fragment
-compositions and a direct route for full-storage dense transposes. No general
-speedup is claimed and it has not been timed against 0.3.0 here. See
-[docs/RELEASE_CANDIDATE_0.4.0.md](docs/RELEASE_CANDIDATE_0.4.0.md).
+0.4.0 runs on the Xcode 27 toolchain, which 0.3.0 refuses, and fixes defects found
+in 0.3.0. These include an out-of-bounds read on the opt-in C++ route and a buffer
+lifetime gap after a failed host launch. It adds a `triton-msl-export` command for
+external Metal drivers, a direct route for full-storage dense transposes and
+default-off attention fragment compositions. A later Python process can reuse a
+validated per-user record of the compiler, SDK and framework identities instead of
+recomputing them from file bytes.
+
+No general speedup is claimed. The 0.4.0 release build has not been timed against
+0.3.0; an October comparison of a development build against 0.3.0 resolved none of
+36 cases as faster or slower. The per-launch costs that 0.3.0 added over 0.2.0
+remain. [Read the 0.4.0 release guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.4.0.md)
+for compatibility, fixes, performance and limitations.
 
 ## What's new in 0.3.0
 
@@ -58,12 +66,12 @@ pip install git+https://github.com/triton-lang/triton.git@4da2e268dcccf090370e7b
 which may lag main. For source development, see
 [CONTRIBUTING.md](https://github.com/bledden/triton-msl/blob/main/CONTRIBUTING.md).
 
-The 0.3.0 native wheel targets **GIL-enabled CPython 3.14, macOS 15+, arm64**.
+The native wheel targets **GIL-enabled CPython 3.14, macOS 15+, arm64**.
 Other supported setups use the Python fallback, with different latency.
 See [installation details](https://github.com/bledden/triton-msl/blob/main/docs/USAGE.md#installation-details)
 for the Metal compiler component, optional host helpers and the matching
-unofficial Triton wheel. M1 compatibility is a target, not independent 0.3.0
-hardware validation.
+unofficial Triton wheel. M1 compatibility is a target; 0.4.0 was tested on one
+M4 Max, not on M1 hardware.
 
 ## Quick start
 
@@ -123,8 +131,9 @@ sources and precision settings—not universal byte-identical results.
 
 ## Documentation
 
-- [0.3.0 release guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.3.0.md)
+- [0.4.0 release guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.4.0.md)
   — changes, performance, validation and known limitations.
+  [0.3.0 release guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.3.0.md).
 - [Usage](https://github.com/bledden/triton-msl/blob/main/docs/USAGE.md)
   · [Architecture](https://github.com/bledden/triton-msl/blob/main/docs/ARCHITECTURE.md)
   · [Portability](https://github.com/bledden/triton-msl/blob/main/PORTABILITY.md)
@@ -133,4 +142,5 @@ sources and precision settings—not universal byte-identical results.
   · [Citing](https://github.com/bledden/triton-msl/blob/main/CITING.md)
   · [References](https://github.com/bledden/triton-msl/blob/main/REFERENCES.md)
 
-[MIT license](https://github.com/bledden/triton-msl/blob/main/LICENSE).
+[MIT license](https://github.com/bledden/triton-msl/blob/main/LICENSE). The vendored
+`applegpu` decoder in `triton_msl/_vendor/applegpu` is BSD-3-Clause.

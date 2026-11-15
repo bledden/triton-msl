@@ -1,9 +1,9 @@
 # Usage and installation
 
-[Back to the project](https://github.com/bledden/triton-msl/blob/main/README.md) · [0.3.0 release guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.3.0.md)
+[Back to the project](https://github.com/bledden/triton-msl/blob/main/README.md) · [0.4.0 release guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.4.0.md) · [0.3.0 release guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.3.0.md)
 
 These examples document the launch interfaces, not universal support or performance.
-Historical throughput figures below are not requalified for 0.3.0.
+Historical throughput figures below are not requalified for 0.3.0 or 0.4.0.
 
 Compiling MSL or metallib for Julia, XLA custom calls or your own Metal driver?
 Read the [external-driver contract](EXTERNAL_DRIVER.md). The compiled library
@@ -14,13 +14,15 @@ does not carry the Python launcher's allocation, argument and assertion checks.
 ### Requirements
 
 - Apple Silicon Mac (M1 or later)
-- macOS 14 (Sonoma) or later — validated through macOS 26.6 (Tahoe)
+- macOS 14 (Sonoma) or later. 0.3.0 was validated through macOS 26.6 (Tahoe).
+  0.4.0 was tested on macOS 26.7 with Xcode 27.2; older macOS releases and
+  toolchains were not retested.
 - Xcode Command Line Tools: `xcode-select --install`
   - On **macOS 26 (Tahoe) / Xcode 26**, the Metal shader compiler ships as a
     separate on-demand component. If `xcrun metal --version` reports a missing
     Metal Toolchain, install it once with
     `sudo xcodebuild -downloadComponent MetalToolchain`.
-- Python 3.10+
+- Python 3.10+. 0.4.0 testing used CPython 3.14.4; Python 3.10 to 3.13 were not run.
 - PyTorch 2.12+ (2.5+ for the zero-copy MPS fast path; `torch.compile` is developed + tested against 2.12) and Triton 3.7.0
 
 ### Install
@@ -73,6 +75,57 @@ If you're on the exact platform tuple **Python 3.14 / macOS 15+ / Apple Silicon 
 ```bash
 pip install https://github.com/bledden/triton-msl/releases/download/triton-wheel-3.7.0-cp314-macos-arm64/triton-3.7.0+git4da2e268-cp314-cp314-macosx_15_0_arm64.whl
 ```
+
+### Start-up identity record
+
+Before the first kernel, triton-msl computes the identity of the Metal compiler,
+the SDK and the Python frameworks it depends on. That identity enters every
+kernel cache key. In 0.3.0, every new Python process recomputed it from full
+file bytes.
+
+0.4.0 keeps that full computation for the first process, whenever anything it
+checks has changed, and on request. Otherwise a later process validates a small
+per-user record and reuses the recorded identity. The record holds the identity the full computation
+produced, so cache keys are the same in both modes unless a change listed
+below goes unseen. Its effect on start-up time: not yet measured for this release.
+
+| Setting | Effect |
+|---------|--------|
+| default | The record is used |
+| `TRITON_MSL_IDENTITY_RECORD=0` | Full computation in every process; no record is read or written |
+| `TRITON_MSL_IDENTITY_RECORD=refresh` | Recompute and rewrite the record |
+| `TRITON_MSL_IDENTITY_DIR=<path>` | Keep records in `<path>` instead of `~/.cache/triton_msl/identity-v1-uid<uid>/` |
+
+Records are private to the user: the directory is mode 0700 and the files 0600.
+Inspect or manage them with:
+
+```bash
+python -m triton_msl.tools.identity status
+python -m triton_msl.tools.identity refresh
+python -m triton_msl.tools.identity clear
+python -m triton_msl.tools.identity verify   # runs the full computation and compares
+```
+
+`refresh` and `verify` reach the framework record of the command's own process
+only, because that record depends on the native libraries a process has loaded.
+For an application, use `clear`, or run the application once with
+`TRITON_MSL_IDENTITY_RECORD=refresh`.
+
+The record is used only where file metadata is on APFS and the record folder
+carries no access control list. Otherwise the full computation runs.
+
+The record relies on file metadata, so it does not see what only the full
+computation sees:
+
+- a byte change that leaves a file's size, times and inode unchanged (for example
+  a write through a memory mapping that was held open across the change);
+- a change to an SDK file other than the SDK's version files;
+- a privileged change to file times or to the raw device;
+- a record altered by the same user.
+
+If your setup can change in these ways, set `TRITON_MSL_IDENTITY_RECORD=0`. The
+full contract is in
+[`docs/CACHE_CONTRACTS.md`](https://github.com/bledden/triton-msl/blob/main/docs/CACHE_CONTRACTS.md).
 
 ## Quick Start
 
@@ -134,7 +187,7 @@ with torch.no_grad():
 
 **Performance and coverage.** This enables Inductor's supported fused kernels on MPS;
 it does not promise a speedup over eager MPS. Historical model coverage included transformer
-blocks, a small GPT, a ViT, ResNets and LSTMs. See the [0.3.0 results](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.3.0.md) for the measured regressions and current validation scope.
+blocks, a small GPT, a ViT, ResNets and LSTMs. See the [0.3.0 results](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.3.0.md) for the measured regressions and the [0.4.0 release guide](https://github.com/bledden/triton-msl/blob/main/docs/releases/0.4.0.md) for the current validation scope.
 
 **Coverage.** Transformer/attention, RNN, **CNN (incl. BatchNorm)**, normalization, and the
 reductions (sum, product, mean, max/min incl. NaN-propagating, var/std, argmax/argmin, softmax,
@@ -368,7 +421,7 @@ Before another host launch, failed records are inspected. A failure before any c
 attempt can be retired; after a commit attempt, only the matching command buffer's
 `Completed` or `Error` status proves that GPU access has ended. A missing command witness,
 a nonterminal status or a status-query error retains the record and refuses the new host
-launch. Failed records are discarded after that proof; their buffers are not recycled
+launch with `triton_msl.errors.PostSubmitError`. This refusal is new in 0.4.0. Failed records are discarded after that proof; their buffers are not recycled
 into the pool and their results are never copied back later. Normal successful launches
 retain the existing pool cleanup and output behavior. This protection also applies with
 host extent borrowing off; it does not change the separate `compile_shader` route or
