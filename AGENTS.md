@@ -9,8 +9,9 @@ Blake's direct instruction in the September 23 recovery discussion was:
 Apply that instruction when historical roadmap priorities conflict with it. Preserve
 correctness, numerical fidelity, safety, capability, performance, compatibility,
 distribution and maintainability together. Do not infer approval to compromise one.
-The standing decisions in `engineering/CONTRACT.md` remain in force, including SDK
-byte reads, default-off experimental routes, and deferred byte-offset extension.
+The standing decisions in `engineering/CONTRACT.md` remain in force, including the
+full-byte identity inventories with their persisted record, default-off experimental
+routes, and deferred byte-offset extension.
 
 For a change, identify the user outcome, falsifiable hypothesis, affected obligations,
 baseline and acceptance criteria before implementation. Record actual results and

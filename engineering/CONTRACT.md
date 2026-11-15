@@ -15,8 +15,21 @@ the boundary of our investigation.
   approval does not waive observation, frame, recursion or scheduling semantics
   for a future native full-observer engine. Installed costs remain measured and
   separately disclosed; this correctness repair is not a performance win.
-- Preserve the full-byte SDK inventory contract. Timestamps remain a research idea,
-  not an admitted substitute for those byte reads.
+- The full-byte toolchain, SDK and framework inventories remain the definition of
+  those identities. On November 14 Blake replaced the September 21 rule that every
+  process must repeat them. The proposal put to him was a persisted per-user identity
+  record: the full inventory once and whenever the recorded evidence changes, a
+  metadata check afterwards, the full inventory on request; record use on by default;
+  the SDK checked by its version files rather than a walk of every file; the compiler
+  binaries checked by metadata on their read-only mount rather than re-hashed. His
+  answer: "okay well yes you have my full go to address this completely". In force:
+  a record may return only a digest that a full-byte inventory produced; any doubt is
+  a miss followed by the unchanged full inventory, never an error or a refusal;
+  `TRITON_MSL_IDENTITY_RECORD=0` keeps the full inventory in every process. What a
+  record does not see is listed in docs/CACHE_CONTRACTS.md, "Persisted identity
+  records". Trusting less evidence than that section states, or a shared record
+  directory, needs a new decision. This records a design decision for the candidate;
+  it is not a timing result, a performance claim or a release approval.
 - Host-owned extent borrowing stays opt-in and default-off. Preserve its live-owner,
   allocator/VM proof, self-test and dispatch-lifetime guarantees.
 - The C++ route and scalar-CFG optimization stay opt-in and default-off; preserve
