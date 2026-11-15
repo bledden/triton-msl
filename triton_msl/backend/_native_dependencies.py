@@ -349,6 +349,10 @@ def working_directory_lookups(rows):
     return tuple(dict.fromkeys(names))
 
 
+def _unobserved(kind, path, result):
+    """Default probe observer: the graph's own output never depends on observation."""
+
+
 def _installed_system_image(candidate):
     """Whether dyld's search would find this OS-prefixed candidate: on disk or in the cache."""
     if candidate.exists():
@@ -365,7 +369,7 @@ def _expand(reference, loader, executable):
     raise ValueError(f"unproved native dependency provider: {reference}")
 
 
-def _versioned_framework_candidates(setting, executable):
+def _versioned_framework_candidates(setting, executable, observe=_unobserved):
     """The ``Name.framework/Name`` images dyld would consider for one setting.
 
     Mirrors ProcessConfig::PathOverrides::addEnvVar + processVersionedPaths:
@@ -384,19 +388,42 @@ def _versioned_framework_candidates(setting, executable):
             raise ValueError("empty native versioned framework directory entry")
         directory = _expand(entry, executable, executable)
         if not directory.is_dir():
+            observe("listing", directory, None)
             continue
-        for child in sorted(directory.iterdir(), key=lambda p: p.name):
-            if child.suffix != ".framework" or child.is_symlink() or not child.is_dir():
+        children = sorted(directory.iterdir(), key=lambda p: p.name)
+        kinds = None
+        if observe is not _unobserved:
+            # A ``.framework`` child's own kind decides candidacy as much as its
+            # name does, so the observed answer binds both and the decision below
+            # uses that answer. Other children are never queried, as without an
+            # observer; their rows carry (False, False).
+            kinds = {
+                child.name: (child.is_symlink(), child.is_dir()) if child.suffix == ".framework" else (False, False)
+                for child in children
+            }
+            observe("listing", directory, tuple((child.name, *kinds[child.name]) for child in children))
+        for child in children:
+            if child.suffix != ".framework":
+                continue
+            if kinds is None:
+                if child.is_symlink() or not child.is_dir():
+                    continue
+            elif kinds[child.name] != (False, True):
                 continue
             candidate = child / child.stem
             if candidate.exists():
+                if observe is not _unobserved:
+                    # The graph interns this path later; its resolution is the observed answer.
+                    observe("present", candidate, candidate.resolve(strict=True))
                 candidates.append(candidate)
             elif candidate.is_symlink():
                 raise ValueError(f"broken native versioned framework candidate: {candidate}")
+            else:
+                observe("absent", candidate, None)
     return candidates
 
 
-def _override_key(candidate, cpu_type, bind_comparison, working_directory):
+def _override_key(candidate, cpu_type, bind_comparison, working_directory, observe=_unobserved, ambient_cwd=False):
     """dyld's checkVersionedPath for one candidate: (effective override key, comparison input).
 
     The candidate's install name is opened literally (SyscallDelegate::getDylibInfo
@@ -422,6 +449,10 @@ def _override_key(candidate, cpu_type, bind_comparison, working_directory):
 
     A key of None means exactly "proved not selectable through this mechanism";
     the candidate is still a bound node in every branch.
+
+    ``observe`` sees each filesystem answer this decision rests on. When the
+    working directory is the process's own (``ambient_cwd``), a relative lookup
+    is reported by name so that an observer re-checks it where it is next used.
     """
     target = candidate.install_name
     path = Path(target)
@@ -429,12 +460,18 @@ def _override_key(candidate, cpu_type, bind_comparison, working_directory):
         literal = working_directory / target
         if literal.exists() or literal.is_symlink():
             raise ValueError(f"working directory shadows native versioned comparison lookup: {target}")
+        if ambient_cwd:
+            observe("absent-cwd", target, None)
+        else:
+            observe("absent", literal, None)
         return target, ("absent-relative", target)
     if path.exists():
         if _system(path):
             header, comparison = _image_header(path, cpu_type), None
         else:
-            index, header = bind_comparison(path.resolve(strict=True))
+            actual = path.resolve(strict=True)
+            observe("present", path, actual)
+            index, header = bind_comparison(actual)
             comparison = ("comparison", index)
         if header.file_type != 6 or header.install_name is None or not _macos_loadable(header):
             raise ValueError(f"unproved native versioned comparison library: {path}")
@@ -444,6 +481,7 @@ def _override_key(candidate, cpu_type, bind_comparison, working_directory):
         return key, comparison
     if path.is_symlink():
         raise ValueError(f"broken native versioned comparison library: {path}")
+    observe("absent", path, None)
     canonical = _shared_cache_canonical(path)
     if canonical is None:
         raise ValueError(f"cannot prove native versioned comparison library: {path}")
@@ -452,7 +490,16 @@ def _override_key(candidate, cpu_type, bind_comparison, working_directory):
     return canonical, ("shared-cache", canonical)
 
 
-def dependency_graph(seed_paths, *, cpu_type, executable, loaded_paths=(), working_directory=None, image_reader=None):
+def dependency_graph(
+    seed_paths,
+    *,
+    cpu_type,
+    executable,
+    loaded_paths=(),
+    working_directory=None,
+    image_reader=None,
+    probe_observer=None,
+):
     """Ordered provider graph, with indices preserving each root/edge association.
 
     Logical root order is supplied by the package inventory. Absolute resolved paths
@@ -478,11 +525,19 @@ def dependency_graph(seed_paths, *, cpu_type, executable, loaded_paths=(), worki
     re-interned under the requesting node's RPATH context, which is the search
     stack dyld gives it when it replaces that edge; both alternatives stay bound
     because the AMFI embedded-variable gate is not observable here.
+
+    ``probe_observer(kind, path, result)`` receives every non-system path answer
+    the graph used: "present" (resolved target), "absent", "absent-cwd", "resolve"
+    (an RPATH directory's resolution) and "listing" (a versioned framework
+    directory's ``(name, is_symlink, is_dir)`` rows, the kind queried only for
+    ``.framework`` children, or None). It is optional and never changes the result.
     """
     read_image = parse_image if image_reader is None else image_reader
+    observe = _unobserved if probe_observer is None else probe_observer
     executable = Path(executable).resolve(strict=True)
     # The directory dyld will open relative comparison lookups in: the compiler
     # subprocess inherits the process working directory unless launched elsewhere.
+    ambient_cwd = working_directory is None
     working_directory = Path(os.getcwd() if working_directory is None else working_directory)
     parsed, indices, pending, rows = {}, {}, [], []
     loaded_names = {}
@@ -501,7 +556,7 @@ def dependency_graph(seed_paths, *, cpu_type, executable, loaded_paths=(), worki
         if path not in parsed:
             parsed[path] = read_image(path, cpu_type)
         image = parsed[path]
-        own = tuple(_expand(ref, path, executable).resolve() for ref in image.rpaths)
+        own = tuple(_resolved_rpath(_expand(ref, path, executable), observe) for ref in image.rpaths)
         context = tuple(dict.fromkeys((*own, *inherited)))
         key = path, context
         if key not in indices:
@@ -533,15 +588,19 @@ def dependency_graph(seed_paths, *, cpu_type, executable, loaded_paths=(), worki
     main = parsed[executable]
     overrides, environment_edges = {}, []
     if main.environment:
-        main_context = tuple(dict.fromkeys(_expand(ref, executable, executable).resolve() for ref in main.rpaths))
+        main_context = tuple(
+            dict.fromkeys(_resolved_rpath(_expand(ref, executable, executable), observe) for ref in main.rpaths)
+        )
         for variable, setting in main.environment:
             bound = []
-            for candidate in _versioned_framework_candidates(setting, executable):
+            for candidate in _versioned_framework_candidates(setting, executable, observe):
                 index = intern(candidate, main_context)
                 image = parsed[pending[index][0]]
                 if image.file_type != 6 or image.install_name is None or not _macos_loadable(image):
                     raise ValueError(f"unproved native versioned framework candidate: {candidate}")
-                key, comparison = _override_key(image, cpu_type, comparison_node, working_directory)
+                key, comparison = _override_key(
+                    image, cpu_type, comparison_node, working_directory, observe, ambient_cwd
+                )
                 if key is not None:
                     overrides.setdefault(key, []).append(pending[index][0])
                 bound.append((index, key, comparison))
@@ -576,9 +635,12 @@ def dependency_graph(seed_paths, *, cpu_type, executable, loaded_paths=(), worki
                         resolved[str(candidate)] = "system-build"
                     elif candidate.exists():
                         actual = candidate.resolve(strict=True)
+                        observe("present", candidate, actual)
                         resolved[str(actual)] = actual
                     elif candidate.is_symlink():
                         raise ValueError(f"broken native dependency provider: {candidate}")
+                    else:
+                        observe("absent", candidate, None)
                 if len(resolved) > 1:
                     raise ValueError(f"ambiguous native rpath dependency provider: {reference}")
                 if not resolved:
@@ -601,8 +663,18 @@ def dependency_graph(seed_paths, *, cpu_type, executable, loaded_paths=(), worki
     return tuple(rows), frozenset(path for path, _context in pending)
 
 
-def dependency_manifest(seed_paths, *, cpu_type, executable, working_directory=None, image_reader=None):
+def _resolved_rpath(path, observe):
+    resolved = path.resolve()
+    observe("resolve", path, resolved)
+    return resolved
+
+
+def dependency_manifest(
+    seed_paths, *, cpu_type, executable, working_directory=None, image_reader=None, probe_observer=None
+):
     options = {} if image_reader is None else {"image_reader": image_reader}
+    if probe_observer is not None:
+        options["probe_observer"] = probe_observer
     return dependency_graph(
         seed_paths, cpu_type=cpu_type, executable=executable, working_directory=working_directory, **options
     )[0]

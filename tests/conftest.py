@@ -11,6 +11,10 @@ import pytest
 
 from triton_msl.profiling.cache_session import private_directory
 
+# Named through this conftest's own package: ``pytest tests/`` imports it as
+# ``tests.conftest`` and does not put ``tests/`` itself on ``sys.path``.
+pytest_plugins = ((__package__ + "." if __package__ else "") + "identity_record_plugin",)
+
 
 def _has_metal():
     try:

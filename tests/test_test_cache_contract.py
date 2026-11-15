@@ -249,6 +249,8 @@ def test_pytest_sessions_own_cold_inductor_caches(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     shutil.copyfile(Path(__file__).with_name("conftest.py"), project / "conftest.py")
+    # The conftest registers this plugin by module name; it travels with it.
+    shutil.copyfile(Path(__file__).with_name("identity_record_plugin.py"), project / "identity_record_plugin.py")
     # Capture cache state DURING collection, then assert it survives session setup.
     # All deletion targets on the unpatched side are disposable owned canaries.
     (project / "test_probe.py").write_text(

@@ -2,9 +2,20 @@
 
 Installed package/toolchain/SDK contents are immutable within an interpreter:
 upgrades require restarting it. Selector-environment changes are refused, not
-silently combined with cached device/AIR probes. No persistent stat-only memo is
-trusted. The first lookup reads actual bytes; subsequent lookups reuse that
-process snapshot. Whole-tree inventory is intentionally conservative.
+silently combined with cached device/AIR probes. The strict inventory reads
+actual bytes; subsequent lookups reuse that process snapshot. Whole-tree
+inventory is intentionally conservative.
+
+Across processes, a per-user identity record (``_identity_record``) may supply
+the digest an earlier strict inventory produced. The live selection (xcrun
+queries, OS build, the resolver's bytes) always runs; the record is used only if
+each bundle's full stat signature (symlink targets included), root status and
+version files, plus its mount identity when read-only, the SDK root status and
+anchor files, the Xcode version and seal, every native provider's state and
+every path answer of the native graph equal what was recorded, and every path
+whose stat state is trusted is on APFS. Otherwise the strict inventory runs
+unchanged. ``TRITON_MSL_IDENTITY_RECORD=0`` keeps strict mode: no record is read
+or written.
 
 A toolchain executable's embedded DYLD_VERSIONED_FRAMEWORK_PATH can make dyld
 open a relative comparison name (``@rpath/...``) literally. Compiler and linker
@@ -25,6 +36,7 @@ import subprocess
 import threading
 
 from triton_msl.errors import MetalToolchainSelectionError
+from . import _identity_record
 
 
 _SELECTION = ("PATH", "DEVELOPER_DIR", "SDKROOT", "TOOLCHAINS")
@@ -245,7 +257,64 @@ def _tree_manifest(
     return records
 
 
-def _toolchain_native_dependencies(roots, entries, *, provider_digests=None):
+def _signature_fields(status):
+    return status.st_size, status.st_mtime_ns, status.st_ctime_ns, status.st_ino, status.st_dev, status.st_mode
+
+
+def _stat_signature(root, *, ignore_bytecode=False, exclude_root_names=(), allow_empty=False, devices=None):
+    """Metadata of exactly the entries ``_tree_manifest`` reads, without opening a file.
+
+    Same order, exclusions, back-edge records, refusals and empty-tree rule. A
+    symlink contributes its own state and text and then, like the inventory,
+    whatever it resolves to. Any error raises; callers treat that as a miss.
+    ``devices``, if given, receives one path per ``st_dev`` the signature
+    relies on, so a caller can check where each state came from.
+    """
+    root = Path(root).resolve(strict=True)
+    digest = hashlib.sha256()
+    records = 0
+
+    def feed(*fields):
+        digest.update(json.dumps(fields, separators=(",", ":")).encode() + b"\n")
+
+    def visit(path, rel, ancestors):
+        nonlocal records
+        link = os.lstat(path)
+        if stat.S_ISLNK(link.st_mode):
+            feed(rel, "symlink", os.readlink(path), *_signature_fields(link))
+            if devices is not None:
+                devices.setdefault(link.st_dev, path.parent)  # the link itself lives there
+        before = path.stat()
+        if devices is not None:
+            devices.setdefault(before.st_dev, path)
+        inode = before.st_dev, before.st_ino
+        if stat.S_ISDIR(before.st_mode):
+            if inode in ancestors:
+                feed(rel, "directory-back-edge", ancestors[inode], *_signature_fields(before))
+                records += 1
+                return
+            # Membership changes move the directory's own times too, but the
+            # sorted children below are what the inventory actually visits.
+            feed(rel, "directory", *_signature_fields(before))
+            for child in sorted(path.iterdir(), key=lambda p: p.name):
+                if not rel and child.name in exclude_root_names:
+                    continue
+                if ignore_bytecode and (child.name == "__pycache__" or child.suffix in (".pyc", ".pyo")):
+                    continue
+                visit(child, f"{rel}/{child.name}" if rel else child.name, ancestors | {inode: rel})
+        elif stat.S_ISREG(before.st_mode):
+            feed(rel, "file", *_signature_fields(before))
+            records += 1
+        else:
+            raise RuntimeError(f"unsupported toolchain input kind: {path}")
+
+    visit(root, "", {})
+    if not records and not allow_empty:
+        raise RuntimeError(f"empty toolchain input tree: {root}")
+    return digest.hexdigest()
+
+
+def _toolchain_native_dependencies(roots, entries, *, provider_digests=None, observer=None):
     """Bind subprocess entry points and executable helpers, not only their bundle."""
     from ._native_dependencies import dependency_manifest, is_native, _image_header, _read_image
     import platform
@@ -276,6 +345,18 @@ def _toolchain_native_dependencies(roots, entries, *, provider_digests=None):
         return _read_image(path, cpu_type, digest=True, digest_observer=observe_digest)
 
     reader_options = {"image_reader": read_provider} if readonly_roots else {}
+    if observer is not None:
+        # The identity record needs each provider's state when its bytes were
+        # hashed. These are the same reads, parses and digests as without it.
+        def observe_read(path, fd, before, opened, after, digest):
+            if readonly_roots:
+                observe_digest(path, fd, before, opened, after, digest)
+            observer.image(path, fd, before, opened, after, digest)
+
+        def read_observed(path, cpu_type):
+            return _read_image(path, cpu_type, digest=True, digest_observer=observe_read)
+
+        reader_options = {"image_reader": read_observed, "probe_observer": observer.probe}
     entries = dict(entries)
     visited = set()
     for role in ("metal", "metallib"):
@@ -363,7 +444,12 @@ def _working_directory_lookups(metadata):
     return tuple(sorted(names))
 
 
-def _resolve_toolchain(*, provider_digests=None):
+def _select_toolchain():
+    """Live selection: xcrun queries, OS build and resolver bytes, never bundle contents.
+
+    Returns ``(roots, entries, metadata)``. Every process runs this, with or
+    without an identity record; ``_resolve_toolchain`` adds the native providers.
+    """
     try:
         resolver, directory = compiler_process_context()
     except FileNotFoundError as exc:
@@ -412,8 +498,16 @@ def _resolve_toolchain(*, provider_digests=None):
     }
     if not metadata["os_build"]:
         raise RuntimeError("OS build identity is unavailable")
+    return roots, entries, metadata
+
+
+def _resolve_toolchain(*, provider_digests=None, selected=None, observer=None):
+    roots, entries, metadata = _select_toolchain() if selected is None else selected
     options = {} if provider_digests is None else {"provider_digests": provider_digests}
-    metadata["native_providers"] = _toolchain_native_dependencies(roots, entries, **options)
+    if observer is not None:
+        options["observer"] = observer
+    # A copy, so a caller's selection keeps describing the live selection only.
+    metadata = {**metadata, "native_providers": _toolchain_native_dependencies(roots, entries, **options)}
     return roots, metadata
 
 
@@ -455,8 +549,24 @@ def _identity_for_environment(environment):
                 )
             return _snapshot[1]
         try:
+            attempt, options = None, {}
+            policy = _identity_record.mode(environment)
+            if policy != "strict":
+                selected = _select_toolchain()
+                options["selected"] = selected
+                attempt = _identity_record.toolchain_attempt(environment, policy, selection, selected)
+                recorded = None if attempt is None else attempt.lookup()
+                if recorded is not None:
+                    if tuple(os.environ.get(key) for key in _SELECTION) != selection:
+                        attempt.rejected()
+                        raise RuntimeError("toolchain selection changed during fingerprint construction")
+                    _snapshot = selection, recorded["digest"]
+                    attempt.used()
+                    return _snapshot[1]
+                if attempt is not None:
+                    options["observer"] = attempt
             provider_digests = {}  # Discarded on success or failure; never a process cache.
-            roots, metadata = _resolve_toolchain(provider_digests=provider_digests)
+            roots, metadata = _resolve_toolchain(provider_digests=provider_digests, **options)
             # Deduplicate physical roots only as a read-cost optimization; each
             # named compiler role retains the complete same manifest in the key.
             manifests = {}
@@ -480,6 +590,8 @@ def _identity_for_environment(environment):
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             raise MetalNonRecoverableError(f"cannot establish Metal compiler/SDK identity: {exc}") from exc
         _snapshot = selection, digest
+        if attempt is not None:
+            attempt.publish(digest)
         return digest
 
 

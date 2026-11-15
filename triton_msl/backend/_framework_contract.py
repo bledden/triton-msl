@@ -4,6 +4,20 @@ Includes headers consumed by torch.mps.compile_shader, not only Python/version
 strings. System framework build identity is separately in the Metal toolchain
 contract. This inventory does not purport to authenticate arbitrary injected
 libraries or a foreign pipeline; those are separate boundaries.
+
+Across processes, a per-user identity record (``_identity_record``) may supply
+the digest an earlier strict inventory produced for the same selection and the
+same ordered loaded-image list. Discovery and the snapshot/guard checks always
+run live. No record is consulted for a call made before ``_cache_contract`` is
+imported (a direct call), whose loaded-image list a record lookup could change.
+The record is used only if every root's stat signature, the executable, the OS
+build, every native provider's state and every path answer of the native graph
+(versioned framework listings bind each child's kind) still equal what was
+recorded, all on APFS; the guard is then rebuilt and verified exactly as the
+strict inventory leaves it, and only then is the outcome a hit. Stat signatures
+cannot see a same-size write through a mapping held open across the change;
+strict mode (``TRITON_MSL_IDENTITY_RECORD=0``) and ``python -m
+triton_msl.tools.identity verify`` re-read bytes.
 """
 
 import hashlib
@@ -15,6 +29,7 @@ import sys
 import threading
 from types import MappingProxyType
 
+from . import _identity_record
 from ._toolchain_contract import _tree_manifest
 
 
@@ -37,12 +52,18 @@ _SELECTION_NAMES = (*_REQUIRED_NAMES, "torch", "numpy", "mlx", "triton_msl", "tr
 
 def _python_roots():
     """The executable dyld actually started, plus the standard-library providers."""
-    import ctypes
     import sysconfig
 
     roots = {}
     for name in ("stdlib", "platstdlib"):
         roots["python-" + name] = (Path(sysconfig.get_path(name)).resolve(strict=True),)
+    roots["python-executable"] = (_native_executable(),)
+    return roots
+
+
+def _native_executable():
+    import ctypes
+
     if sys.platform == "darwin":
         function = ctypes.CDLL(None)._NSGetExecutablePath
         function.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
@@ -54,11 +75,8 @@ def _python_roots():
         buffer = ctypes.create_string_buffer(size.value)
         if function(buffer, ctypes.byref(size)) != 0:
             raise RuntimeError("cannot discover actual native executable")
-        executable = Path(os.fsdecode(buffer.value)).resolve(strict=True)
-    else:
-        executable = Path(sys.executable).resolve(strict=True)
-    roots["python-executable"] = (executable,)
-    return roots
+        return Path(os.fsdecode(buffer.value)).resolve(strict=True)
+    return Path(sys.executable).resolve(strict=True)
 
 
 def _native_entrypoints(roots):
@@ -110,9 +128,9 @@ def _native_entrypoints(roots):
     return seeds
 
 
-def _native_dependencies(roots):
+def _native_dependencies(roots, observer=None):
     global _native_guard
-    from ._native_dependencies import dependency_graph, parse_image, _system
+    from ._native_dependencies import dependency_graph, parse_image, _read_image, _system
     import platform
 
     if sys.platform != "darwin":
@@ -123,6 +141,14 @@ def _native_dependencies(roots):
     seeds = _native_entrypoints(roots)
     executable = roots["python-executable"][0]
     loaded = _loaded_native_images()
+    read, options = parse_image, {}
+    if observer is not None:
+        # The identity record needs each image's state when its bytes were
+        # hashed and every path answer the graph used; neither changes them.
+        def read(path, cpu_type):
+            return _read_image(path, cpu_type, digest=True, digest_observer=observer.image)
+
+        options = {"image_reader": read, "probe_observer": observer.probe}
     # Dylibs inherit an importing extension's RPATH stack. Treating every dylib
     # as a separately dlopened entry loses that context (e.g. MLX libjaccl).
     # All package bytes are still inventoried. An application can also have
@@ -130,7 +156,11 @@ def _native_dependencies(roots):
     # first snapshot (e.g. a model tokenizer). Those are real cache inputs, not
     # a reason to reject every subsequent compilation or a basename exemption.
     loaded_paths = tuple(Path(os.fsdecode(raw)).resolve(strict=True) for raw in loaded if not _system(os.fsdecode(raw)))
-    rows, providers = dependency_graph(seeds, cpu_type=cpu, executable=executable, loaded_paths=loaded_paths)
+    if observer is not None:
+        names = (os.fsdecode(raw) for raw in loaded if not _system(os.fsdecode(raw)))
+        for name, path in zip(names, loaded_paths):
+            observer.probe("present", name, path)
+    rows, providers = dependency_graph(seeds, cpu_type=cpu, executable=executable, loaded_paths=loaded_paths, **options)
     ambient = []
     order = []
     for raw in loaded:
@@ -142,14 +172,14 @@ def _native_dependencies(roots):
         # Binding loaded order prevents different provider/interposition orders
         # from accidentally sharing a persistent product key. Paths remain a
         # live guard, not persistent relocation identity; contents are hashed.
-        order.append(("native", parse_image(path, cpu).digest))
+        order.append(("native", read(path, cpu).digest))
         if path not in providers and path not in ambient:
             ambient.append(path)
     if ambient:
         # Use the existing closed resolver, including its RPATH/ambiguity and
         # malformed-image refusals. Never auto-certify a directory or all .so's.
         rows, providers = dependency_graph(
-            [*seeds, *ambient], cpu_type=cpu, executable=executable, loaded_paths=loaded_paths
+            [*seeds, *ambient], cpu_type=cpu, executable=executable, loaded_paths=loaded_paths, **options
         )
     guard = _LoadedNativeGuard(providers)
     guard.verify()
@@ -367,6 +397,31 @@ def _selection_identity(roots, metadata):
     return _format_selection(roots, metadata)
 
 
+def _inventory_options(name):
+    """Exclusions and empty-tree allowance of one logical root's inventory."""
+    excludes = ("site-packages", "dist-packages") if name in ("python-stdlib", "python-platstdlib") else ()
+    # A venv's platstdlib may contain only site-packages;
+    # its real stdlib/dynload provider is inventoried through
+    # python-stdlib. Record the empty supplemental inventory,
+    # never omit the root or waive an empty primary stdlib.
+    return excludes, name == "python-platstdlib"
+
+
+def _adopt_record(roots, metadata, record):
+    """Finish from a validated identity record exactly as the strict inventory finishes."""
+    global _native_guard
+    evidence = record["evidence"]
+    guard = _LoadedNativeGuard(frozenset(Path(path) for path in evidence["guard"]))
+    guard.verify()
+    if [os.fsdecode(raw) for raw in _loaded_native_images()] != evidence["base"]["loaded"]:
+        raise RuntimeError("native image selection changed during identity record use")
+    again, again_metadata = _discover_selection()
+    if again != roots or again_metadata != metadata:
+        raise RuntimeError("framework selection changed during identity record use")
+    _native_guard = guard
+    return record["digest"]
+
+
 def _json_metadata(metadata):
     owned = _owned_selection
     if owned is not None and metadata is owned[1]:
@@ -403,18 +458,29 @@ def framework_identity():
                     pass
                 else:
                     return _snapshot[1]
+            attempt = None
+            policy = _identity_record.mode(os.environ)
+            if policy != "strict":
+                digest = None
+                try:
+                    attempt = _identity_record.framework_attempt(os.environ, policy, roots, selection)
+                    recorded = None if attempt is None else attempt.lookup()
+                    if recorded is not None:
+                        digest = _adopt_record(roots, metadata, recorded)
+                        attempt.used()
+                except Exception:
+                    # A failed record use leaves no trace; the strict inventory follows.
+                    _snapshot, _native_guard = previous_snapshot, previous_guard
+                    if attempt is not None:
+                        attempt.rejected()
+                if digest is not None:
+                    _snapshot = selection, digest
+                    return digest
             physical, manifests = {}, {}
             for name, paths in sorted(roots.items()):
                 parts = []
                 for path in paths:
-                    excludes = (
-                        ("site-packages", "dist-packages") if name in ("python-stdlib", "python-platstdlib") else ()
-                    )
-                    # A venv's platstdlib may contain only site-packages;
-                    # its real stdlib/dynload provider is inventoried through
-                    # python-stdlib. Record the empty supplemental inventory,
-                    # never omit the root or waive an empty primary stdlib.
-                    allow_empty = name == "python-platstdlib"
+                    excludes, allow_empty = _inventory_options(name)
                     physical_key = path, excludes, allow_empty
                     if physical_key not in physical:
                         physical[physical_key] = _tree_manifest(
@@ -425,7 +491,7 @@ def framework_identity():
                         )
                     parts.append(physical[physical_key])
                 manifests[name] = parts
-            native = _native_dependencies(roots)
+            native = _native_dependencies(roots) if attempt is None else _native_dependencies(roots, attempt)
             again, again_metadata = _discover_selection()
             if again != roots or again_metadata != metadata:
                 raise RuntimeError("framework selection changed during content inventory")
@@ -436,6 +502,8 @@ def framework_identity():
             )
             digest = hashlib.sha256(payload.encode()).hexdigest()
             _snapshot = selection, digest
+            if attempt is not None and _native_guard is not None:
+                attempt.publish(digest, _native_guard.providers)
             return digest
         except BaseException as exc:
             # _native_dependencies constructs a new guard before the final

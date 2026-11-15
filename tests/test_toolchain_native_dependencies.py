@@ -58,14 +58,19 @@ def selection(tmp_path, monkeypatch):
     return entries, external
 
 
+@pytest.mark.parametrize("records", ["0", "1"])
 @pytest.mark.parametrize("role", ["selector", "linker", "compiler", "resolver", "helper"])
-def test_same_tool_versions_changed_external_bytes_rekey(selection, monkeypatch, role):
+def test_same_tool_versions_changed_external_bytes_rekey(selection, monkeypatch, role, records, tmp_path):
+    # "1": the first identity publishes a per-user record; the restart must miss it.
+    monkeypatch.setenv("TRITON_MSL_IDENTITY_RECORD", records)
+    monkeypatch.setenv("TRITON_MSL_IDENTITY_DIR", str(tmp_path / "records"))
     entries, external = selection
     entries[role].write_bytes(_image(external))
     before = tc.toolchain_identity()
     external.write_bytes(_image() + b"replacement external implementation")
     monkeypatch.setattr(tc, "_snapshot", None)  # installation upgrade / restart
     assert tc.toolchain_identity() != before
+    assert (tmp_path / "records").exists() == (records == "1")
 
 
 @pytest.mark.parametrize("damage", ["missing", "unknown_token", "malformed"])
