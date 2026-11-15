@@ -60,9 +60,11 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   first `@triton.jit` vector add; compiled kernels cached; 24 processes each way):
   the median first call took 7.03 s with the record switched off and 0.96 s with
   the record in use on the native wheel, and 7.06 s and 0.93 s on the pure wheel.
-  The first process, which does the full computation and writes the record, is
-  not shortened. Other machines and workloads were not measured. The table is in
-  `docs/releases/0.4.0.md`.
+  The toolchain files were already in the operating system's file cache and the
+  machine was doing other work. The record does not apply to the first process,
+  which does the full computation and writes it; four single observations of a
+  first process took 7.73 to 14.82 s. Other machines, other workloads and a cold
+  file cache were not measured. The table is in `docs/releases/0.4.0.md`.
 
 ### Fixes
 
@@ -147,7 +149,7 @@ Xcode 27.2, CPython 3.14):
 
 - Project suite with the compiled helpers: 7,386 passed, 62 skipped, 0 failed.
   From a tree without the helpers: 7,042 passed, 119 skipped; the 287 tests that
-  need a compiled helper did not pass there.
+  need a compiled helper failed (127) or errored at setup (160) there.
 - Upstream Triton `test_core.py`: 5,780 passed, 3,562 skipped, 0 failed of 9,342,
   with each wheel's package files.
 - Installed device-free selection: native 1,480 passed and 6 skipped; pure 1,388
@@ -156,7 +158,8 @@ Xcode 27.2, CPython 3.14):
 ### Not tested
 
 - M1, M2, M3 and M5 hardware; all testing used one M4 Max.
-- Native wheels on Python versions other than CPython 3.14. Python 3.10 was not run.
+- Python versions other than CPython 3.14. The native wheel is built for 3.14
+  only, and the pure wheel was not run on Python 3.10 to 3.13.
 - Older macOS releases and toolchains.
 
 ## 0.3.0 - 2026-09-16
