@@ -62,9 +62,10 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   the record in use on the native wheel, and 7.06 s and 0.93 s on the pure wheel.
   The toolchain files were already in the operating system's file cache and the
   machine was doing other work. The record does not apply to the first process,
-  which does the full computation and writes it; four single observations of a
-  first process took 7.73 to 14.82 s. Other machines, other workloads and a cold
-  file cache were not measured. The table is in `docs/releases/0.4.0.md`.
+  which does the full computation and writes it; in four single observations the
+  first call of a first process took 7.73 to 14.82 s. Other machines, other
+  workloads and a cold file cache were not measured. The table is in
+  `docs/releases/0.4.0.md`.
 
 ### Fixes
 
