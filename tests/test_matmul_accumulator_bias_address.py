@@ -45,13 +45,13 @@ def _source(m=32, step=1, offset=0, masked=False):
 @pytest.mark.parametrize("m", [32, 64])
 def test_contiguous_column_bias_keeps_template(m):
     source = _source(m=m)
-    assert "Bias[col]" in source
+    assert "_mmarg2[col]" in source  # Bias is argument 2; the template names it positionally
 
 
 @pytest.mark.parametrize("step,offset,masked", [(2, 0, False), (1, 3, False), (1, 0, True), (2, 3, True)])
 def test_noncanonical_bias_uses_generic_source_replay(step, offset, masked):
     source = _source(step=step, offset=offset, masked=masked)
-    assert "Bias[col]" not in source
+    assert "_mmarg2[col]" not in source and "_mmarg" not in source
     assert "kernel void" in source
 
 

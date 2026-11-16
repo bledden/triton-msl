@@ -153,13 +153,23 @@ def test_scalar_checked_bytes_are_representable_by_raw_bridge(case, declared, va
 
 
 @pytest.mark.parametrize("mode", ["clean", "assertion", "dispatch_error", "exit_error", "compile_miss", "bad_scalar"])
-def test_public_launcher_keeps_validation_and_no_replay(case, monkeypatch, mode):
+@pytest.mark.parametrize("with_tail_bounds", [False, True])
+def test_public_launcher_keeps_validation_and_no_replay(case, monkeypatch, mode, with_tail_bounds):
     import triton.backends
     from triton_msl.backend import driver, _cache_contract, _launch_contract, _launch_signature
     from triton_msl.errors import PostSubmitError, MetalDeviceAssertionError, MetalNonRecoverableError
 
     stub, args, sigs, meta, grid = case
     meta[11] = {"schema": 1, "messages": ["controlled assertion"], "buffer_index": 3}
+    if with_tail_bounds:
+        meta[10] = [
+            "matmul_full_k_storage_v1",
+            32,
+            [0, 1, 1],
+            [["literal", 32, "i32"], ["literal", 32, "i32"], ["arg", 2, "i32"]],
+            [["literal", 1, "i64"]] * 6,
+            [["i32", "i32", False]] * 3,
+        ]
     events = []
     flags = []
 
@@ -214,6 +224,7 @@ def test_public_launcher_keeps_validation_and_no_replay(case, monkeypatch, mode)
         (_cache_contract, "validate_execution_contract"),
         (_launch_contract, "validate_packed_launch"),
         (_launch_signature, "bind_arguments_with_plan"),
+        (driver, "_matmul_tail_bounds_reason"),
     ):
         original = getattr(obj, name)
 
@@ -260,3 +271,6 @@ def test_public_launcher_keeps_validation_and_no_replay(case, monkeypatch, mode)
         else:
             assert "dispatch" not in events
     assert events[:3] == ["validate_execution_contract", "validate_packed_launch", "bind_arguments_with_plan"]
+    if with_tail_bounds and mode != "bad_scalar":
+        assert events[3] == "_matmul_tail_bounds_reason"
+        assert events.count("_matmul_tail_bounds_reason") == (2 if mode == "clean" else 1)

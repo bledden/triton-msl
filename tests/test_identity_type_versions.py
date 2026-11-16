@@ -5,6 +5,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from tests.native_helper_policy import require_selected_native
 
 from identity_framework_fixture import ordinary_framework
 
@@ -53,8 +54,7 @@ def test_inherited_descriptor_exact_outcome_and_callback_count(monkeypatch, base
 
 @pytest.mark.parametrize("level", [0, 1, 2])
 def test_type_tag_invalidates_on_each_ancestor_and_stays_invalid_after_restore(level):
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
 
     class A:
         pass
@@ -80,8 +80,7 @@ def test_type_tag_invalidates_on_each_ancestor_and_stays_invalid_after_restore(l
 
 
 def test_changed_bases_invalidates_tag():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
 
     class A:
         pass
@@ -100,8 +99,7 @@ def test_changed_bases_invalidates_tag():
 
 
 def test_uncacheable_custom_mro_and_zero_tag_decline():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
 
     class Meta(type):
         def mro(cls):
@@ -116,8 +114,7 @@ def test_uncacheable_custom_mro_and_zero_tag_decline():
 
 
 def test_raw_mro_read_never_executes_descriptor_or_metaclass():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     calls = []
 
     class Meta(type):
@@ -140,8 +137,7 @@ def test_raw_mro_read_never_executes_descriptor_or_metaclass():
 
 
 def test_type_compaction_checks_expected_schema_not_just_current_tag():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
 
     class C:
         field = object()
@@ -154,8 +150,7 @@ def test_type_compaction_checks_expected_schema_not_just_current_tag():
 
 @pytest.mark.parametrize("kind", [fast.EQATTRDEF, fast.EQTUPLEATTRDEF])
 def test_spec_value_subclass_declines_without_user_equality(kind):
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     calls = []
 
     class Text(str):
@@ -171,8 +166,7 @@ def test_spec_value_subclass_declines_without_user_equality(kind):
 
 
 def test_spec_locations_decline_without_bool_or_iter():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     calls = []
 
     class Locations:

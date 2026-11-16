@@ -4,14 +4,14 @@ import builtins
 import types
 
 import pytest
+from tests.native_helper_policy import require_selected_native
 
 from triton_msl.backend import _cache_contract as cache, _identity_fast_path as fast
 
 
 @pytest.fixture
 def sample():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     native = cache._validation_native
     assert native is not None and fast._STATE_BATCH is not None
 

@@ -5,6 +5,7 @@ import mmap
 
 import numpy as np
 import pytest
+from tests.native_helper_policy import require_selected_native
 import torch
 
 from tests.test_host_extent_gpu import add, data, launch_checked
@@ -14,8 +15,7 @@ from triton_msl.errors import MetalNonRecoverableError
 
 @pytest.mark.parametrize("mode", ["refusal", "wrap_failure", "copy_in"])
 def test_mirror_before_borrow_failure_returns_lease(monkeypatch, mode):
-    if _cache_contract._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(_cache_contract._validation_native, "validation")
     assert torch.backends.mps.is_available() and _cache_contract._HOST_EXTENT_READY
     monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "0")
     monkeypatch.setenv("TRITON_MSL_HOST_EXTENT", "1")

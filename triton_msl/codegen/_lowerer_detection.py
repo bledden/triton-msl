@@ -2474,6 +2474,15 @@ class _DetectionMixin:
         if is_fa:
             return
 
+        # A specialized one-iteration dot can have literal boundary masks
+        # (e.g. M == 1). The complete budgeted masked-dot graph is lowered by
+        # the existing generic staged-fill path, which replays those masks;
+        # it must not be refused by a guard for mask-dropping templates.
+        # _detect_simple_dot still rejects its masked operand loads, and
+        # _requires_matmul_template uses this same predicate to exclude it.
+        if self._masked_dot_generic_eligible():
+            return
+
         if self._template_output_mask_nontrivial(is_fa=False):
             from triton_msl.errors import MetalNonRecoverableError
 

@@ -4,14 +4,14 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+from tests.native_helper_policy import require_selected_native
 
 
 @pytest.fixture(scope="module")
 def native():
     from triton_msl.backend import _cache_contract as cache
 
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     assert cache._validation_native is not None, "this suite requires the selected native helper"
     image = Path(cache._validation_native.__file__).resolve()
     assert image.is_file()

@@ -102,11 +102,15 @@ def test_native_template_scalar_buffer_type(kind):
     setattr(obj, maker, witness)
     msl = obj.lower()
     assert hits == [maker], "must exercise the named template, not generic fallback"
-    assert "device float* S_buf" in msl
-    assert "device int* S_buf" not in msl
+    # The matmul templates emit every argument positionally (``_mmargN``); S is
+    # argument 6 of ``_matrix`` and argument 3 of ``_simple``; shape templates
+    # preserve S as argument 2.
+    s = {"loop": "_mmarg6", "strided": "_mmarg6", "simple": "_mmarg3"}.get(kind, "_mmarg2")
+    assert f"device float* {s}_buf" in msl
+    assert f"device int* {s}_buf" not in msl
     if kind in ("loop", "strided"):
-        assert "float S = S_buf[0];" in msl
-        assert "int S = S_buf[0];" not in msl
+        assert f"float {s} = {s}_buf[0];" in msl
+        assert f"int {s} = {s}_buf[0];" not in msl
 
 
 def test_native_scalar_widths_and_integer_control():
@@ -132,9 +136,9 @@ def test_native_scalar_widths_and_integer_control():
         # operations carry signedness. The storage load must still read 8 bytes.
         if dtype == "u64":
             assert next(a for a in obj.graph.args if a.name == "S").elem_type == "i64"
-        assert f"device {msltype}* S_buf [[buffer(6)]]" in msl, dtype
-        assert f"{msltype} S = S_buf[0];" in msl, dtype
-        assert "device int* M_buf" in msl and "int M = M_buf[0];" in msl
+        assert f"device {msltype}* _mmarg6_buf [[buffer(6)]]" in msl, dtype
+        assert f"{msltype} _mmarg6 = _mmarg6_buf[0];" in msl, dtype
+        assert "device int* _mmarg3_buf" in msl and "int _mmarg3 = _mmarg3_buf[0];" in msl
 
     from triton_msl.backend._launch_signature import scalar_bytes
     import struct
@@ -197,7 +201,7 @@ def test_scalar_signature_templates_execute_without_changing_matmul(monkeypatch,
     assert len(calls) == 1 and calls[0][0] is expected_pipeline
     assert tuple(calls[0][1]) == (2, 2, 1)
     msl = handle.asm.get("msl", handle.asm.get("metal", ""))
-    assert "device float* S_buf" in msl and "float S = S_buf[0];" in msl
+    assert "device float* _mmarg6_buf" in msl and "float _mmarg6 = _mmarg6_buf[0];" in msl
     assert ("float _sum" in msl) if mode else ("simdgroup_multiply_accumulate" in msl)
     expected = ac.double() @ (bc[:, ::2] if mode else bc).double()
     assert torch.equal(out.cpu(), expected.float())

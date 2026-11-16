@@ -8,6 +8,7 @@ of independent 2-D matmuls.
 """
 
 import os
+import re
 
 import numpy as np
 import pytest
@@ -466,10 +467,10 @@ def test_b2_lowering_replays_batch_stride_and_uniform_barriers():
     assert "for (uint batch = 0u; batch < 2u; batch++)" in msl
     # Preserve the source's signed stride semantics while widening the
     # coordinate product.  Casting a negative stride to uint silently wraps.
-    assert "batch * (long)stride_ab" in msl
-    assert "batch * (long)stride_bb" in msl
-    assert "batch * (long)stride_cb" in msl
-    assert "(uint)stride_" not in msl
+    assert "batch * (long)_mmarg3" in msl
+    assert "batch * (long)_mmarg6" in msl
+    assert "batch * (long)_mmarg9" in msl
+    assert not re.search(r"\(uint\)_mmarg(?:[3-9]|10|11)\b", msl)
     assert lowerer._batched_dot_bounds == (
         "batched_dot_host_bounds_v1",
         2,
@@ -530,8 +531,8 @@ def test_int8_lowering_uses_exact_float_accumulation_envelope():
     assert "for (uint batch = 0u; batch < 8u; batch++)" in msl
     assert "threadgroup float tg_A[256]" in msl
     assert "threadgroup float tg_B[256]" in msl
-    assert "device const char* A" in msl
-    assert "device int* C" in msl
+    assert "device const char* _mmarg0" in msl
+    assert "device int* _mmarg2" in msl
     assert "= int(tg_store[" in msl
 
 
@@ -544,9 +545,9 @@ def test_flattened_rank6_lowering_replays_inner_transposes_and_batch_loop():
     # One batch stride at each A/B staging site, plus one in each of the four
     # statically emitted output-tile copy loops.
     assert msl.count("batch * 1024l") == 6
-    assert "device const bfloat* X" in msl
-    assert "device const bfloat* Y" in msl
-    assert "device float* Z" in msl
+    assert "device const bfloat* _mmarg0" in msl
+    assert "device const bfloat* _mmarg1" in msl
+    assert "device float* _mmarg2" in msl
     assert "pid3.x * 32u" not in msl
     assert "pid3.y * 32u" not in msl
     assert lowerer._used_pid_axes == set()

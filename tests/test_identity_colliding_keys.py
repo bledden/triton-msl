@@ -5,6 +5,7 @@ import sys
 from types import ModuleType
 
 import pytest
+from tests.native_helper_policy import require_selected_native
 
 from identity_framework_fixture import ordinary_framework
 from triton_msl.backend import _cache_contract as cache
@@ -25,8 +26,7 @@ def _veto():
 
 
 def _warm():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     fast._record = None
     stamp = cache.execution_contract()
     before = fast._stats["hits"]

@@ -25,7 +25,7 @@ def _msl_only_policy(execution_contract):
         return False
 
 
-def generic_2d_geometry(launcher, arguments, signatures, metadata, grid):
+def generic_2d_geometry(launcher, arguments, signatures, metadata, grid, *, validated_tail_bounds=None):
     """Match existing sealed generic host geometry and direct buffer ABI.
 
     No source/name recognition. The launcher resolves a policy-checked source
@@ -33,6 +33,11 @@ def generic_2d_geometry(launcher, arguments, signatures, metadata, grid):
     Unknown templates, packing, geometry or representations keep the host path.
     Tensor aliases are passed as the original views of the same Metal storage;
     no mirror, base-view substitution or deduplication is needed.
+
+    A full-K descriptor is admissible only when the caller supplies that exact
+    checked snapshot after validating it against this call's bound arguments.
+    This is invocation-local evidence, never a cached launcher property. Other
+    address contracts retain their existing route restrictions.
     """
     import torch
 
@@ -42,7 +47,16 @@ def generic_2d_geometry(launcher, arguments, signatures, metadata, grid):
         or not _msl_only_policy(launcher._execution_contract)
         or len(metadata) != 12
         or metadata[5] is not True
-        or any(v is not None for v in metadata[6:11])
+        or any(v is not None for v in metadata[6:10])
+        or (
+            metadata[10] is not None
+            and (
+                metadata[10] is not validated_tail_bounds
+                or type(validated_tail_bounds) not in (tuple, list)
+                or len(validated_tail_bounds) != 6
+                or validated_tail_bounds[0] != "matmul_full_k_storage_v1"
+            )
+        )
         or type(launcher._msl_block_size) is not int
         or not 1 <= launcher._msl_block_size <= 1024
         or launcher._msl_block_size != metadata[3]

@@ -238,7 +238,7 @@ shape, not the strides of a transposed or sliced view.
 
 ### MPS tensors: zero-copy
 
-The same `@triton.jit` kernel runs **zero-copy** on `torch` MPS tensors: the driver
+Eligible `@triton.jit` kernels run **zero-copy** on `torch` MPS tensors: the driver
 dispatches the emitted Metal through `torch.mps.compile_shader`, avoiding the host
 round-trip (on by default, no code change):
 
@@ -249,9 +249,30 @@ out = torch.empty(n, device="mps")
 add_kernel[(n + 255) // 256,](x, y, out, n, BLOCK=256)  # runs on the GPU, no copy
 ```
 
+Generic 2-D kernels can use this route with a recognized full-K allocation
+descriptor after its bounds check succeeds for the current invocation. The
+descriptor does not itself force a host round trip. Tensor layout, argument ABI,
+geometry and ownership checks still apply. An unmasked partial K requires enough
+backing storage for the source's entire final block; otherwise the launch refuses
+before submission. Offset or gappy transposes retain the host route. A failure
+after possible submission never retries the kernel through another route.
+
 ### Matmul (`tl.dot`)
 
-fp16/fp32 matmuls (K%8) on MPS tensors take a direct simdgroup-matrix path, dispatched
+Strided operands, including a transposed B, use source-width address expressions.
+A bounded 32×32 fp32 tile stages operands in 8,448 bytes of shared memory. When
+the compiler supports matrix instructions, the SIMD width is 32 and the effective
+K is divisible by 32, it uses fp32 matrix fragments without converting inputs to
+half precision. Other reductions use the staged scalar loop in K order. Other
+tile/type cases and exceptional index ranges retain the original scalar path.
+Inline matmul, fused matmul epilogues and constant-dot templates use positional
+compiler-owned argument names, so source names such as `m`, `n`, `k` or `c`
+cannot be shadowed by their generated loops. Source names remain available for validation; launch metadata retains source
+argument positions. This does not claim name hygiene for every other template. Matrix reduction can associate differently; numerical
+acceptance is unchanged. This optimization does not bypass launch checks or
+establish an ordering for overlapping reads/writes across independent programs.
+
+Eligible contiguous fp16/fp32 matmuls (K%8) on MPS tensors take a direct simdgroup-matrix path, dispatched
 zero-copy. A deterministic, occupancy-gated tile selector picks the coarsest blocking the
 shape's M and N alignment allow: **M%32 + N%32** runs the `(4,4)` tile at ~11–12 TFLOP/s on
 M4 Max; **M%8 or N%8** (not %32) runs a finer rescue tile (lower, but still far above the

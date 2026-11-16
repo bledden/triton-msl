@@ -164,12 +164,22 @@ def extract_msl_for_mlx(
 
         if len(expected_signature) != n_buffers:
             raise MetalNonRecoverableError("MLX route: source signature and kernel buffer counts differ.")
+        emitted_names = [name for name, _ in ptr_args + scalar_args]
+        original_names = [_sanitize_msl_name(expected_signature[pos][0]) for pos in arg_positions]
+        positional_names = [f"_mmarg{pos}" for pos in arg_positions]
+        # A template may use the complete compiler-owned positional namespace.
+        # Never mix schemes per argument: a source name could itself look like
+        # another position's alias, admitting duplicate identifiers.
+        if len(set(emitted_names)) != len(emitted_names) or emitted_names not in (original_names, positional_names):
+            raise MetalNonRecoverableError(
+                "MLX route: emitted argument names do not preserve a complete source binding map."
+            )
         for ordinal, ((name, dtype), source_pos) in enumerate(zip(ptr_args + scalar_args, arg_positions)):
             source_name, source_type = expected_signature[source_pos]
             is_ptr = ordinal < len(ptr_args)
             source_ptr = source_type.startswith("*")
             source_dtype = triton_type_to_msl(source_type[1:] if source_ptr else source_type)
-            if name != _sanitize_msl_name(source_name) or is_ptr != source_ptr or dtype != source_dtype:
+            if is_ptr != source_ptr or dtype != source_dtype:
                 raise MetalNonRecoverableError(
                     f"MLX route: buffer {source_pos} does not preserve source argument '{source_name}' "
                     f"({source_type}); emitted '{name}' is {'pointer' if is_ptr else 'scalar'} {dtype}. Refusing."

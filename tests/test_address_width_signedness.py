@@ -46,7 +46,26 @@ def _emit(fn, signature, constants=None):
     metadata = {}
     module = backend.make_ttir(module, metadata, options)
     module = backend.make_ttgir(module, metadata, options)
-    return backend.make_msl(module, metadata, options)
+    emitted = backend.make_msl(module, metadata, options)
+    # These tests evaluate address arithmetic, not variable spelling. Validate
+    # positional bindings before translating compiler-owned argument identifiers
+    # back to fixture names for the existing independent integer evaluator.
+    # Shadowing itself is checked on unmodified output in test_matmul_symbol_hygiene.
+    runtime = [name for name, dtype in signature.items() if dtype != "constexpr" and name not in constants]
+    if "_mmarg0 [[buffer(0)]]" in emitted:
+        mapping = {}
+        for i, name in enumerate(runtime):
+            alias = f"_mmarg{i}"
+            pointer = signature[name].startswith("*")
+            declared = alias if pointer else alias + "_buf"
+            # Fused templates bind scalar references directly.
+            if not pointer and f"& {alias} [[buffer({i})]]" in emitted:
+                declared = alias
+            assert f"{declared} [[buffer({i})]]" in emitted
+            mapping[alias] = name
+            mapping[alias + "_buf"] = name + "_buf"
+        emitted = re.sub(r"\b_mmarg\d+(?:_buf)?\b", lambda match: mapping[match.group()], emitted)
+    return emitted
 
 
 # --------------------------------------------------------------------------
@@ -372,7 +391,7 @@ def test_unsigned_extension_is_not_accepted_as_a_proven_width():
 
 def test_extents_are_signed_and_full_width_so_a_negative_extent_masks_everything():
     msl = _strided_msl("i32")
-    assert "long _M = 32;" in msl and "long _N = 32;" in msl
+    assert "long _M = (long)32;" in msl and "long _N = (long)32;" in msl
     assert "uint _M" not in msl and "uint _N" not in msl and "uint _K" not in msl
     assert "if (m >= _M || n >= _N) continue;" in msl
     # uint index vs long extent promotes the index: the comparison is SIGNED, so a
@@ -606,14 +625,14 @@ def test_fused_corpus_kernel_still_admitted_with_its_new_address_text():
     msl = corpus._fused_msl()
     assert "simdgroup_multiply_accumulate" in msl
     assert (
-        "tg_A[i] = float(A[(long)as_type<int>((uint)(mstrip + r) * (uint)(K))"
+        "tg_A[i] = float(_mmarg0[(long)as_type<int>((uint)(mstrip + r) * (uint)(_mmarg6))"
         " + (long)as_type<int>((uint)(kk + c) * (uint)(1))]);"
     ) in msl
     assert (
-        "tg_B[i] = float(B[(long)as_type<int>((uint)(kk + r) * (uint)(N)) + (long)as_type<int>((uint)c * (uint)(1))]);"
+        "tg_B[i] = float(_mmarg1[(long)as_type<int>((uint)(kk + r) * (uint)(_mmarg5)) + (long)as_type<int>((uint)c * (uint)(1))]);"
     ) in msl
     assert (
-        "C[(long)as_type<int>((uint)(mstrip + row) * (uint)(N))"
+        "_mmarg3[(long)as_type<int>((uint)(mstrip + row) * (uint)(_mmarg5))"
         " + (long)as_type<int>((uint)col * (uint)(1))] = (float)tg_C[i];"
     ) in msl
 

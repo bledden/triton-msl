@@ -593,6 +593,7 @@ class _BatchedDotMixin:
             self._batched_dot_dtype(a_arg.id, pointer=True)
         )
         output_type = triton_type_to_msl(self._batched_dot_dtype(c_arg.id, pointer=True))
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         scalar_names = {arg.name for arg in self.graph.args if not arg.is_ptr}
         arg_indices = {arg.id: i for i, arg in enumerate(self.graph.args)}
         arg_name_indices = {arg.name: i for i, arg in enumerate(self.graph.args)}
@@ -602,7 +603,7 @@ class _BatchedDotMixin:
                 # Coordinates are uint, but source strides are signed.  A
                 # signed 64-bit product preserves negative i32 strides and
                 # avoids overflowing a 32-bit coordinate*stride product.
-                return f"(long){value}"
+                return f"(long){source_bindings[value]}"
             return f"{int(value)}l"
 
         def _stride_ref(value):
@@ -646,9 +647,9 @@ class _BatchedDotMixin:
             if arg.is_ptr:
                 msl_type = triton_type_to_msl(self._batched_dot_dtype(arg.id, pointer=True))
                 const = "const " if arg.id != c_arg.id else ""
-                declarations.append(f"    device {const}{msl_type}* {arg.name} [[buffer({i})]]")
+                declarations.append(f"    device {const}{msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
-                declarations.append(f"    device const int* {arg.name}_buf [[buffer({i})]]")
+                declarations.append(f"    device const int* {source_bindings[arg.name]}_buf [[buffer({i})]]")
         lines.append(",\n".join(declarations) + ",")
         lines.extend(
             [
@@ -661,7 +662,7 @@ class _BatchedDotMixin:
         )
         for arg in self.graph.args:
             if not arg.is_ptr:
-                lines.append(f"    int {arg.name} = {arg.name}_buf[0];")
+                lines.append(f"    int {source_bindings[arg.name]} = {source_bindings[arg.name]}_buf[0];")
         if info.get("pid_tiled", True):
             row_base = f"pid3.x * {m}u"
             col_base = f"pid3.y * {n}u"
@@ -682,11 +683,11 @@ class _BatchedDotMixin:
                 f"        for (uint kk = 0u; kk < {k}u; kk += 8u) {{",
                 f"            for (uint i = tiitg; i < {m * 8}u; i += 128u) {{",
                 "                uint r = i / 8u, q = i % 8u;",
-                f"                tg_A[i] = {stage_cast}({a_arg.name}[batch * {ab} + (row_base + r) * {am} + (kk + q) * {ak}]);",
+                f"                tg_A[i] = {stage_cast}({source_bindings[a_arg.name]}[batch * {ab} + (row_base + r) * {am} + (kk + q) * {ak}]);",
                 "            }",
                 f"            for (uint i = tiitg; i < {8 * n}u; i += 128u) {{",
                 f"                uint q = i / {n}u, c = i % {n}u;",
-                f"                tg_B[i] = {stage_cast}({b_arg.name}[batch * {bb} + (kk + q) * {bk} + (col_base + c) * {bn}]);",
+                f"                tg_B[i] = {stage_cast}({source_bindings[b_arg.name]}[batch * {bb} + (kk + q) * {bk} + (col_base + c) * {bn}]);",
                 "            }",
                 "            threadgroup_barrier(mem_flags::mem_threadgroup);",
                 "            simdgroup_load(b_frag, tg_B + sgitg * 8u, 32);",
@@ -710,7 +711,7 @@ class _BatchedDotMixin:
                     "        for (uint i = laneid; i < 64u; i += 32u) {",
                     f"            uint r = {tile * 8}u + i / 8u;",
                     "            uint c = sgitg * 8u + i % 8u;",
-                    f"            {c_arg.name}[batch * {cb} + (row_base + r) * {cm} + (col_base + c) * {cn}] = {output_type}(tg_store[sgitg * 64u + i]);",
+                    f"            {source_bindings[c_arg.name]}[batch * {cb} + (row_base + r) * {cm} + (col_base + c) * {cn}] = {output_type}(tg_store[sgitg * 64u + i]);",
                     "        }",
                     "        threadgroup_barrier(mem_flags::mem_threadgroup);",
                 ]

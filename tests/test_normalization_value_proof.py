@@ -182,8 +182,8 @@ def test_runtime_row_length_does_not_extend_source_tile(routes, family):
     text = _build_lowerer(fn, {"x_ptr": "*fp32", "o_ptr": "*fp32", "N": "i32"}, {"BLOCK": 64, "MODE": 0}).lower()
     # Do NOT launch the pre-fix out-of-bounds shared-memory kernel. This is a
     # lowering-boundary bite, followed by a hardware preservation pin after fix.
-    assert "int _norm_cols = clamp(int(N), 0, 64);" in text
-    assert "i < (uint)N" not in text and "int n_v = N / 4" not in text
+    assert "int _norm_cols = clamp(int(_mmarg2), 0, 64);" in text
+    assert "i < (uint)_mmarg2" not in text and "int n_v = _mmarg2 / 4" not in text
     torch.manual_seed(193)
     cpu = torch.randn(4, 80)
     x = cpu.to("mps")

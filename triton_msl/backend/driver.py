@@ -917,6 +917,7 @@ class MetalLauncher:
         # dispatch route, using the immutable checked descriptor snapshot.
         address_bounds = kernel_metadata[10]
         tail_access_bounds = batched_dot_bounds = None
+        validated_tail_bounds = None
         if address_bounds is not None:
             if not isinstance(address_bounds, (tuple, list)) or not address_bounds:
                 from triton_msl.errors import MetalNonRecoverableError
@@ -952,6 +953,9 @@ class MetalLauncher:
                     "Refusing unmasked partial-K matmul launch: " + _tail_reason,
                     op_name="tt.dot",
                 )
+            # Evidence belongs only to this checked metadata snapshot and live
+            # invocation. Never remember successful bounds on the launcher.
+            validated_tail_bounds = tail_access_bounds
         if batched_dot_bounds is not None:
             _bounds_reason = _batched_dot_host_bounds_reason(batched_dot_bounds, flat_args, (gridX, gridY, gridZ))
             if _bounds_reason is not None:
@@ -1137,7 +1141,12 @@ class MetalLauncher:
                             # and argument-buffer packing keep the host route.
                             if len(kargs) == len(flat_args) and all(a is b for a, b in zip(kargs, flat_args)):
                                 _generic_geometry = generic_2d_geometry(
-                                    self, kargs, flat_sigs, kernel_metadata, (gridX, gridY, gridZ)
+                                    self,
+                                    kargs,
+                                    flat_sigs,
+                                    kernel_metadata,
+                                    (gridX, gridY, gridZ),
+                                    validated_tail_bounds=validated_tail_bounds,
                                 )
                         if (
                             all_mps

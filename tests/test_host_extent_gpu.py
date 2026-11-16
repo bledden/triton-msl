@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from tests.native_helper_policy import require_selected_native
 import torch
 import triton
 import triton.language as tl
@@ -30,8 +31,7 @@ def two_outputs(A, B, N, BLOCK: tl.constexpr):
 
 @pytest.fixture(autouse=True)
 def host(monkeypatch):
-    if contract._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(contract._validation_native, "validation")
     assert torch.backends.mps.is_available(), "runner must provide real Metal"
     assert contract._HOST_EXTENT_READY, "runner must load the extent-equipped helper"
     monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "0")

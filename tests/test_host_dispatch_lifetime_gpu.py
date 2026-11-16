@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import weakref
 
 import pytest
+from tests.native_helper_policy import require_selected_native
 import torch
 import triton
 import triton.language as tl
@@ -23,8 +24,8 @@ def increment(X, O):
 @pytest.mark.parametrize("host_extent", ["0", "1"])
 @pytest.mark.parametrize("boundary", ["commit", "wait"])
 def test_submitted_failure_keeps_borrowed_and_pooled_owners_without_replay(monkeypatch, boundary, host_extent):
-    if host_extent == "1" and _cache_contract._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    if host_extent == "1":
+        require_selected_native(_cache_contract._validation_native, "validation")
     assert torch.backends.mps.is_available() and (host_extent == "0" or _cache_contract._HOST_EXTENT_READY)
     assert lifetime.reap_completed() == 0 and not lifetime._retained
     monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "0")

@@ -86,7 +86,7 @@ def test_unmasked_source_replays_complete_final_block_and_bites_parent():
     ttgir, msl = _emit(_unmasked)
     assert "scf.for" in ttgir and "step %c32_i32" in ttgir
     assert "tt.load %ap" in ttgir and "tt.load %bp" in ttgir
-    assert msl.count("long _K = (long)K;") == 2
+    assert msl.count("long _K = (long)_mmarg5;") == 2
     assert msl.count("long _K_source = _K;") == 2
     assert msl.count("((_K_source + 31L) / 32L) * 32L") == 2
     a = [1.0] * 33 + [2.0] * 31

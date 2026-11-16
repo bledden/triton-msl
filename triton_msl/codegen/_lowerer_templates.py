@@ -23,18 +23,20 @@ from triton_msl.codegen.msl_types import triton_type_to_msl
 from triton_msl.codegen._lowerer_helpers import _mlir_to_triton_dtype
 
 
-def _scalar_buffer_decl(arg, index):
+def _scalar_buffer_decl(arg, index, source_bindings=None):
     """Match the driver's scalar storage ABI, not a template's index type.
 
     Even an unused scalar keeps its native positional argument slot. Declaration
     and unpacking share the type mapping so a float's bits cannot become an int,
     or a narrow/wide integer be read at the wrong width (GitHub issue11).
     """
-    return f"    device {triton_type_to_msl(arg.elem_type)}* {arg.name}_buf [[buffer({index})]]"
+    name = (source_bindings or {}).get(arg.name, arg.name)
+    return f"    device {triton_type_to_msl(arg.elem_type)}* {name}_buf [[buffer({index})]]"
 
 
-def _scalar_unpack(arg):
-    return f"    {triton_type_to_msl(arg.elem_type)} {arg.name} = {arg.name}_buf[0];"
+def _scalar_unpack(arg, source_bindings=None):
+    name = (source_bindings or {}).get(arg.name, arg.name)
+    return f"    {triton_type_to_msl(arg.elem_type)} {name} = {name}_buf[0];"
 
 
 def _emit_masked_staged_store(lines, *, acc, scratch, gr, gc, cond, dst, out_type, store_pfx="", indent="    "):
@@ -210,7 +212,7 @@ class _TemplateMixin:
             )
         self._tail_access_bounds = descriptor
 
-    def _k_extent_line(self, info, BLOCK_K, has_K, BLOCK_M=None, BLOCK_N=None):
+    def _k_extent_line(self, info, BLOCK_K, has_K, BLOCK_M=None, BLOCK_N=None, source_bindings=None):
         """MSL statement setting ``_K`` (the matmul reduction extent), resolved
         STRUCTURALLY from the scf.for upper bound (``k_extent_arg``, works for any arg
         name); the name-based ``has_K`` is kept only as a no-regression fallback. Refuses
@@ -218,13 +220,14 @@ class _TemplateMixin:
         over a single BLOCK_K tile (GitHub issue #4.1 -- renaming the reduction extent
         ``K -> DIM`` dropped the K-loop and returned ``A[:, :BLOCK_K] @ B[:BLOCK_K, :]``
         with no error). Single source of truth for every matmul template's ``_K``."""
+        source_bindings = source_bindings or {}
         k_extent_arg = info.get("k_extent_arg")
         scf_iters = info.get("scf_iters")
         has_k_loop = bool(info.get("has_k_loop"))
         if has_k_loop:
             mode = info.get("k_tail_mode")
             source = k_extent_arg if k_extent_arg is not None else ("K" if has_K else info.get("k_extent_const"))
-            source_expr = str(source) if str(source).isidentifier() else f"({source})"
+            source_expr = source_bindings.get(source, str(source)) if str(source).isidentifier() else f"({source})"
             if source is not None and mode == "masked_zero":
                 return f"    long _K = (long){source_expr};  // both operands prove a zero-masked K tail"
             if source is not None and mode == "full_blocks":
@@ -277,9 +280,9 @@ class _TemplateMixin:
                     op_name="tt.dot",
                 )
         if k_extent_arg is not None:
-            return f"    long _K = (long){k_extent_arg};"
+            return f"    long _K = (long){source_bindings.get(k_extent_arg, k_extent_arg)};"
         if has_K:  # legacy fallback: arg literally named K (structural trace missed it)
-            return "    long _K = (long)K;"
+            return f"    long _K = (long){source_bindings.get('K', 'K')};"
         if has_k_loop and scf_iters is not None and scf_iters >= 1:
             return f"    long _K = {BLOCK_K * scf_iters};  // BLOCK_K * scf.for iters"
         if not has_k_loop:
@@ -718,7 +721,7 @@ class _TemplateMixin:
                 return (a.elem_type or "").strip()
         return None
 
-    def _checked_signed_stride(self, desc, scalar_names, what):
+    def _checked_signed_stride(self, desc, scalar_names, what, source_bindings=None):
         """A stride descriptor rendered as a plain MSL operand, or refuse.
 
         The function signature Triton hands the walker is SIGNLESS (``tl.uint32``
@@ -741,9 +744,9 @@ class _TemplateMixin:
                 "(correct-or-refuse).",
                 op_name="tt.dot",
             )
-        return str(desc)
+        return (source_bindings or {}).get(desc, str(desc))
 
-    def _width_faithful_addr(self, terms, row_width, col_width, fused, *, what, scalar_names):
+    def _width_faithful_addr(self, terms, row_width, col_width, fused, *, what, scalar_names, source_bindings=None):
         """Build the MSL index expression for one operand address.
 
         ``terms`` is ``[(row_index_expr, row_stride), (col_index_expr, col_stride)]``.
@@ -779,7 +782,7 @@ class _TemplateMixin:
         """
 
         def _u_term(idx, desc, width):
-            s = self._checked_signed_stride(desc, scalar_names, what)
+            s = self._checked_signed_stride(desc, scalar_names, what, source_bindings)
             # A compound index ("mstrip + r") must be parenthesised before the cast,
             # or ``(uint)mstrip + r`` would cast only the first addend.
             i = idx if str(idx).isidentifier() else f"({idx})"
@@ -893,6 +896,7 @@ class _TemplateMixin:
         block_n,
         threads,
         scalar_names,
+        source_bindings=None,
         indent="        ",
     ):
         """Width-faithful scalar matmul over THIS threadgroup's output tile.
@@ -921,18 +925,21 @@ class _TemplateMixin:
             *widths["A"],
             what="K-loop matmul scalar fallback operand A",
             scalar_names=scalar_names,
+            source_bindings=source_bindings,
         )
         b_addr = self._width_faithful_addr(
             [("k", b_row), ("n", b_col)],
             *widths["B"],
             what="K-loop matmul scalar fallback operand B",
             scalar_names=scalar_names,
+            source_bindings=source_bindings,
         )
         c_addr = self._width_faithful_addr(
             [("m", c_row), ("n", c_col)],
             *widths["C"],
             what="K-loop matmul scalar fallback output C",
             scalar_names=scalar_names,
+            source_bindings=source_bindings,
         )
         i = indent
         return [
@@ -950,6 +957,109 @@ class _TemplateMixin:
             f"{i}}}",
         ]
 
+    @staticmethod
+    def _strided_matrix_stage_lines(a_name, b_name, c_name, a_addr, b_addr, c_addr):
+        """Transpose strided operands into FP32 matrix fragments without conversion.
+
+        Eight 32-lane SIMD groups own two 8x8 outputs each. Loads and stores
+        retain the source address expressions. The final input barrier makes
+        reusing A's shared tile for disjoint output fragments safe, including
+        race-free single-program input/output aliases. Partial K uses the scalar
+        path so no extra zero products are introduced by an 8-wide MMA.
+        """
+        return [
+            "#if defined(__HAVE_SIMDGROUP_MATRIX__)",
+            "        if (_matrix_width == 32u && _K % 32L == 0L) {",
+            "            uint _matrix_row = (_matrix_sg / 4u) * 16u;",
+            "            uint _matrix_col = (_matrix_sg % 4u) * 8u;",
+            "            metal::simdgroup_float8x8 _matrix_acc0(0), _matrix_acc1(0);",
+            "            metal::simdgroup_float8x8 _matrix_a0, _matrix_a1, _matrix_b;",
+            "            for (uint _kb = 0u; _kb < _K; _kb += 32u) {",
+            "                for (uint _t = lid; _t < 1024u; _t += 256u) {",
+            "                    uint m = row_base + _t / 32u;",
+            "                    uint n = col_base + _t / 32u;",
+            "                    uint k = _kb + _t % 32u;",
+            f"                    _stage_a[(_t / 32u) * 33u + _t % 32u] = m < _M ? (float){a_name}[{a_addr}] : 0.0f;",
+            f"                    _stage_b[(_t % 32u) * 33u + _t / 32u] = n < _N ? (float){b_name}[{b_addr}] : 0.0f;",
+            "                }",
+            "                threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "                for (uint _kk = 0u; _kk < 32u; _kk += 8u) {",
+            "                    metal::simdgroup_load(_matrix_a0, _stage_a + _matrix_row * 33u + _kk, 33);",
+            "                    metal::simdgroup_load(_matrix_a1, _stage_a + (_matrix_row + 8u) * 33u + _kk, 33);",
+            "                    metal::simdgroup_load(_matrix_b, _stage_b + _kk * 33u + _matrix_col, 33);",
+            "                    metal::simdgroup_multiply_accumulate(_matrix_acc0, _matrix_a0, _matrix_b, _matrix_acc0);",
+            "                    metal::simdgroup_multiply_accumulate(_matrix_acc1, _matrix_a1, _matrix_b, _matrix_acc1);",
+            "                }",
+            "                threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "            }",
+            "            metal::simdgroup_store(_matrix_acc0, _stage_a + _matrix_row * 33u + _matrix_col, 33);",
+            "            metal::simdgroup_store(_matrix_acc1, _stage_a + (_matrix_row + 8u) * 33u + _matrix_col, 33);",
+            "            threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "            for (uint _t = lid; _t < 1024u; _t += 256u) {",
+            "                uint m = row_base + _t / 32u, n = col_base + _t % 32u;",
+            f"                if (m < _M && n < _N) {c_name}[{c_addr}] = _stage_a[(_t / 32u) * 33u + _t % 32u];",
+            "            }",
+            "            return;",
+            "        }",
+            "#endif",
+        ]
+
+    @staticmethod
+    def _strided_scalar_stage_lines(a_name, b_name, c_name, a_addr, b_addr, c_addr):
+        """Stage a bounded 32x32 FP32 dot with a scalar fallback.
+
+        Matrix-capable targets use FP32 fragments for complete K chunks. The
+        scalar path retains K order without conversion for other reductions.
+        The old scalar loop remains the fallback for exceptional index ranges. All lanes cross both barriers;
+        masked output lanes still own their shared loads. Padded shared row strides
+        avoid broadcasting different B rows through the same shared-memory bank.
+        """
+        lines = [
+            "    if (_M > 0L && _N > 0L && _K > 0L && _K <= 2147483647L",
+            "        && row_base <= 4294967264u && col_base <= 4294967264u",
+            "        && (long)row_base < _M && (long)col_base < _N) {",
+            "        threadgroup float _stage_a[1056];",
+            "        threadgroup float _stage_b[1056];",
+        ]
+        lines.extend(_TemplateMixin._strided_matrix_stage_lines(a_name, b_name, c_name, a_addr, b_addr, c_addr))
+        for slot in range(4):
+            lines += [
+                f"        uint _m{slot} = row_base + (lid + {slot * 256}u) / 32u;",
+                f"        uint _n{slot} = col_base + (lid + {slot * 256}u) % 32u;",
+                f"        float _acc{slot} = 0.0f;",
+            ]
+        lines += [
+            "        for (uint _kb = 0u; _kb < _K; _kb += 32u) {",
+            "            for (uint _t = lid; _t < 1024u; _t += 256u) {",
+            "                uint m = row_base + _t / 32u;",
+            "                uint n = col_base + _t / 32u;",
+            "                uint k = _kb + _t % 32u;",
+            f"                _stage_a[(_t / 32u) * 33u + _t % 32u] = m < _M && k < _K ? (float){a_name}[{a_addr}] : 0.0f;",
+            f"                _stage_b[(_t / 32u) * 33u + _t % 32u] = n < _N && k < _K ? (float){b_name}[{b_addr}] : 0.0f;",
+            "            }",
+            "            threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "            for (uint _kk = 0u; _kk < 32u && _kb + _kk < _K; _kk++) {",
+        ]
+        for slot in range(4):
+            lines.append(
+                f"                _acc{slot} += _stage_a[((lid + {slot * 256}u) / 32u) * 33u + _kk]"
+                f" * _stage_b[((lid + {slot * 256}u) % 32u) * 33u + _kk];"
+            )
+        lines += [
+            "            }",
+            "            threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "        }",
+        ]
+        for slot in range(4):
+            lines += [
+                "        {",
+                f"            uint m = _m{slot}, n = _n{slot};",
+                f"            if (m < _M && n < _N) {c_name}[{c_addr}] = _acc{slot};",
+                "        }",
+            ]
+        lines += ["        return;", "    }"]
+        return lines
+
     def _lower_strided_scalar_matmul(self, info, descriptors):
         """Fully stride-aware scalar matmul for a NON-contiguous-inner operand.
 
@@ -959,19 +1069,25 @@ class _TemplateMixin:
         load/store addresses through the 6 inferred strides
         ``A[m*a_row + k*a_col]``, ``B[k*b_row + n*b_col]``,
         ``C[m*c_row + n*c_col]`` (each stride emitted as a literal or a runtime
-        ``int`` arg), so it is correct for ANY layout. Slower than the simdgroup
-        fast path, but that path is correctness-impossible here; the common
-        contiguous case never reaches this method.
+        ``int`` arg), so it is correct for ANY layout. A bounded 32x32 fp32 case cooperatively stages its operands without
+        using FP32 matrix fragments where available, with scalar accumulation
+        as the fallback; other cases retain scalar loads.
+        The common contiguous case never reaches this method.
 
         Handles both the pid-tiled K-loop form (runtime M/N/K, grid tiles over
         BLOCK_M/BLOCK_N) and the single-tile form (constexpr dims).
         """
         a_row, a_col, b_row, b_col, c_row, c_col = descriptors
         ptr_args = info["ptr_args"]
+        # Emitted argument names belong to a separate compiler namespace. Source
+        # names remain in the graph, stride proofs, and launch metadata; only MSL
+        # references change. In particular m/n/k and pointer c cannot be captured
+        # by template loops, and source names resembling these aliases are safe.
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         a_arg, b_arg, c_arg = self._dot_template_ptr_roles()  # P0 (065): dataflow, not position
-        a_name = a_arg.name
-        b_name = b_arg.name
-        c_name = c_arg.name
+        a_name = source_bindings[a_arg.name]
+        b_name = source_bindings[b_arg.name]
+        c_name = source_bindings[c_arg.name]
         a_msl = triton_type_to_msl(a_arg.elem_type)
         b_msl = triton_type_to_msl(b_arg.elem_type)
         c_msl = triton_type_to_msl(c_arg.elem_type)
@@ -1019,6 +1135,12 @@ class _TemplateMixin:
         self.effective_block_size = block_size
         tile = BLOCK_M * BLOCK_N
 
+        use_staging = (BLOCK_M, BLOCK_N, BLOCK_K) == (32, 32, 32) and (a_msl, b_msl, c_msl) == (
+            "float",
+            "float",
+            "float",
+        )
+
         safe_name = _sanitize_msl_name(self.graph.func_name)
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -1029,9 +1151,9 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 m = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {m}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {m}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
-                arg_decls.append(_scalar_buffer_decl(arg, i))
+                arg_decls.append(_scalar_buffer_decl(arg, i, source_bindings))
         lines.append(",\n".join(arg_decls) + ",")
         if has_pid:
             self._used_pid_axes = {0, 1}
@@ -1039,16 +1161,30 @@ class _TemplateMixin:
             # uint3 for both when multi-axis dispatch is in play.
             lines.append("    uint3 pid3 [[threadgroup_position_in_grid]],")
             lines.append("    uint3 _lid3 [[thread_position_in_threadgroup]]")
+            if use_staging:
+                lines += [
+                    "#if defined(__HAVE_SIMDGROUP_MATRIX__)",
+                    "    , uint _matrix_sg [[simdgroup_index_in_threadgroup]]",
+                    "    , uint _matrix_width [[threads_per_simdgroup]]",
+                    "#endif",
+                ]
             lines.append(") {")
             lines.append("    uint lid = _lid3.x;")
             # pid_m / pid_n follow the extents (the proven 1-D mapping needs _M).
         else:
             lines.append("    uint pid [[threadgroup_position_in_grid]],")
             lines.append("    uint lid [[thread_position_in_threadgroup]]")
+            if use_staging:
+                lines += [
+                    "#if defined(__HAVE_SIMDGROUP_MATRIX__)",
+                    "    , uint _matrix_sg [[simdgroup_index_in_threadgroup]]",
+                    "    , uint _matrix_width [[threads_per_simdgroup]]",
+                    "#endif",
+                ]
             lines.append(") {")
             lines.append("    uint pid_m = 0u, pid_n = 0u;")
         for arg in all_scalar_args:
-            lines.append(_scalar_unpack(arg))
+            lines.append(_scalar_unpack(arg, source_bindings))
 
         # Output extents resolved structurally from the store mask (issue #4.5): any arg
         # name works, so a square N x N matmul clips both axes correctly instead of _M=BLOCK_M.
@@ -1058,14 +1194,41 @@ class _TemplateMixin:
         # everything. ``(uint)`` made ``-1`` admit every row; ``(long)`` sign-extends an
         # i32 extent, keeps an i64 one whole, and leaves the ``uint`` index promoted for
         # a signed comparison at every ``< _M`` / ``>= _M`` site below.
-        lines.append(f"    long _M = {f'(long){m_ext}' if m_ext else ('(long)M' if has_M else f'{BLOCK_M}')};")
-        lines.append(f"    long _N = {f'(long){n_ext}' if n_ext else ('(long)N' if has_N else f'{BLOCK_N}')};")
-        lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N))
+        m_ext_expr = source_bindings[m_ext] if m_ext else (source_bindings["M"] if has_M else str(BLOCK_M))
+        lines.append(f"    long _M = (long){m_ext_expr};")
+        n_ext_expr = source_bindings[n_ext] if n_ext else (source_bindings["N"] if has_N else str(BLOCK_N))
+        lines.append(f"    long _N = (long){n_ext_expr};")
+        lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N, source_bindings))
         if has_pid:
             lines.extend(self._pid_map_lines(info, BLOCK_M))
         lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
         lines.append(f"    uint col_base = pid_n * {BLOCK_N}u;")
         lines.append("")
+        _a_addr = self._width_faithful_addr(
+            [("m", a_row), ("k", a_col)],
+            *_widths["A"],
+            what="strided matmul operand A",
+            scalar_names=scalar_names,
+            source_bindings=source_bindings,
+        )
+        _b_addr = self._width_faithful_addr(
+            [("k", b_row), ("n", b_col)],
+            *_widths["B"],
+            what="strided matmul operand B",
+            scalar_names=scalar_names,
+            source_bindings=source_bindings,
+        )
+        _c_addr = self._width_faithful_addr(
+            [("m", c_row), ("n", c_col)],
+            *_widths["C"],
+            what="strided matmul output C",
+            scalar_names=scalar_names,
+            source_bindings=source_bindings,
+        )
+        # Shared staging is a layout/tile optimization, never source-name matching.
+        # Retain the fully stride-aware scalar path for all other shapes/types.
+        if use_staging:
+            lines.extend(self._strided_scalar_stage_lines(a_name, b_name, c_name, _a_addr, _b_addr, _c_addr))
         # Each thread strides over the BLOCK_M x BLOCK_N tile.
         lines.append(f"    for (uint _e = lid; _e < {tile}u; _e += {block_size}u) {{")
         lines.append(f"        uint _lm = _e / {BLOCK_N}u;")
@@ -1075,15 +1238,6 @@ class _TemplateMixin:
         lines.append("        if (m >= _M || n >= _N) continue;")
         lines.append("        float _sum = 0.0f;")
         lines.append("        for (uint k = 0u; k < _K; k++) {")
-        _a_addr = self._width_faithful_addr(
-            [("m", a_row), ("k", a_col)], *_widths["A"], what="strided matmul operand A", scalar_names=scalar_names
-        )
-        _b_addr = self._width_faithful_addr(
-            [("k", b_row), ("n", b_col)], *_widths["B"], what="strided matmul operand B", scalar_names=scalar_names
-        )
-        _c_addr = self._width_faithful_addr(
-            [("m", c_row), ("n", c_col)], *_widths["C"], what="strided matmul output C", scalar_names=scalar_names
-        )
         lines.append(f"            _sum += (float){a_name}[{_a_addr}]")
         lines.append(f"                  * (float){b_name}[{_b_addr}];")
         lines.append("        }")
@@ -1201,10 +1355,15 @@ class _TemplateMixin:
         # 128 threads = 4 SIMD groups x 32 threads
         self.effective_block_size = 128
 
+        # Emitted argument names belong to a separate compiler namespace. Source
+        # names remain in the graph, stride proofs, and launch metadata; only MSL
+        # references change. In particular m/n/k and pointer c cannot be captured
+        # by template loops, and source names resembling these aliases are safe.
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         a_arg, b_arg, c_arg = self._dot_template_ptr_roles()  # P0 (065): dataflow, not position
-        a_name = a_arg.name
-        b_name = b_arg.name
-        c_name = c_arg.name
+        a_name = source_bindings[a_arg.name]
+        b_name = source_bindings[b_arg.name]
+        c_name = source_bindings[c_arg.name]
 
         # Determine input element type from A pointer arg. ``triton_type_to_msl``
         # handles bf16 → bfloat, fp16 → half, fp64 → float (with warning), etc.;
@@ -1245,10 +1404,10 @@ class _TemplateMixin:
         for _i, _arg in enumerate(self.graph.args):
             if _arg.is_ptr:
                 _m = triton_type_to_msl(_arg.elem_type)
-                _const = "const " if _arg.name != c_name else ""
-                lines.append(f"    device {_const}{_m}* {_arg.name} [[buffer({_i})]],")
+                _const = "const " if _arg.id != c_arg.id else ""
+                lines.append(f"    device {_const}{_m}* {source_bindings[_arg.name]} [[buffer({_i})]],")
             else:
-                lines.append(_scalar_buffer_decl(_arg, _i) + ",")
+                lines.append(_scalar_buffer_decl(_arg, _i, source_bindings) + ",")
         lines.append(f"    uint sgitg [[simdgroup_index_in_threadgroup]],")
         lines.append(f"    uint tiitg [[thread_index_in_threadgroup]]")
         lines.append(f") {{")
@@ -1408,10 +1567,15 @@ class _TemplateMixin:
         # Signal 2D grid dispatch (pid_m on axis 0, pid_n on axis 1)
         self._used_pid_axes = {0, 1}
 
+        # Emitted argument names belong to a separate compiler namespace. Source
+        # names remain in the graph, stride proofs, and launch metadata; only MSL
+        # references change. In particular m/n/k and pointer c cannot be captured
+        # by template loops, and source names resembling these aliases are safe.
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         a_arg, b_arg, c_arg = self._dot_template_ptr_roles()  # P0 (065): dataflow, not position
-        a_name = a_arg.name
-        b_name = b_arg.name
-        c_name = c_arg.name
+        a_name = source_bindings[a_arg.name]
+        b_name = source_bindings[b_arg.name]
+        c_name = source_bindings[c_arg.name]
 
         # Determine input/output element types via the shared mapping —
         # see the simple-dot variant for the bf16 stride bug this avoids.
@@ -1463,9 +1627,9 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
-                arg_decls.append(_scalar_buffer_decl(arg, i))
+                arg_decls.append(_scalar_buffer_decl(arg, i, source_bindings))
         lines.append(",\n".join(arg_decls) + ",")
         lines.append(f"    uint3 pid3 [[threadgroup_position_in_grid]],")
         lines.append(f"    uint sgitg [[simdgroup_index_in_threadgroup]],")
@@ -1474,7 +1638,7 @@ class _TemplateMixin:
 
         # Unpack scalar args from buffers
         for arg in all_scalar_args:
-            lines.append(_scalar_unpack(arg))
+            lines.append(_scalar_unpack(arg, source_bindings))
 
         lines.append(f"")
         # pid_m / pid_n are defined AFTER the extents below: the proven 1-D grid mapping
@@ -1499,18 +1663,18 @@ class _TemplateMixin:
 
         m_ext, n_ext = self._matmul_output_extent_args()  # structural extents (issue #4.5)
         if m_ext:
-            lines.append(f"    long _M = (long){m_ext};")
+            lines.append(f"    long _M = (long){source_bindings[m_ext]};")
         elif has_M:
-            lines.append(f"    long _M = (long)M;")
+            lines.append(f"    long _M = (long){source_bindings['M']};")
         else:
             lines.append(f"    long _M = {BLOCK_M};  // no M arg, single tile")
         if n_ext:
-            lines.append(f"    long _N = (long){n_ext};")
+            lines.append(f"    long _N = (long){source_bindings[n_ext]};")
         elif has_N:
-            lines.append(f"    long _N = (long)N;")
+            lines.append(f"    long _N = (long){source_bindings['N']};")
         else:
             lines.append(f"    long _N = {BLOCK_N};  // no N arg, single tile")
-        lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N))
+        lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N, source_bindings))
         lines.extend(self._pid_map_lines(info, BLOCK_M))
 
         # Leading dims for the simdgroup loads/stores = each operand's ROW stride.
@@ -1537,7 +1701,7 @@ class _TemplateMixin:
                 # 32 bits here, so a row stride past 4 Gi elements addressed the wrong
                 # row on every load, store and leading-dim argument.
                 _msl = triton_type_to_msl(self._declared_int_elem_type(row_desc) or "i32")
-                return f"({'ulong' if _msl in ('long', 'ulong') else 'uint'}){row_desc}"
+                return f"({'ulong' if _msl in ('long', 'ulong') else 'uint'}){source_bindings[row_desc]}"
             try:
                 return f"{int(str(row_desc))}u"  # compile-time literal row stride
             except (TypeError, ValueError):
@@ -1588,6 +1752,7 @@ class _TemplateMixin:
                     block_n=BLOCK_N,
                     threads=128,
                     scalar_names=scalar_names,
+                    source_bindings=source_bindings,
                 )
             )
             lines.append(f"        return;")
@@ -1798,9 +1963,16 @@ class _TemplateMixin:
             lines.append(f"    uint tiitg [[thread_index_in_threadgroup]]")
             lines.append(f") {{")
             for arg in all_scalar_args:
-                lines.append(_scalar_unpack(arg))
-            lines.append(f"    long _M = (long)M, _N = (long)N;")
-            lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N))
+                lines.append(_scalar_unpack(arg, source_bindings))
+            # Bind the extents by ROLE, exactly as the staged entry above does: the
+            # store-mask extents when they resolve, else the names. Binding by the
+            # names alone sent a kernel whose arguments named M/N/K play other roles
+            # (``(A, B, C, M, K, N)``, or M and N exchanged) to the wrong tiles.
+            _direct_m = m_ext or "M"
+            _direct_n = n_ext or "N"
+            _direct_k = info.get("k_extent_arg") or "K"
+            lines.append(f"    long _M = (long){source_bindings[_direct_m]}, _N = (long){source_bindings[_direct_n]};")
+            lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N, source_bindings))
             # Packet 106: the direct variant replays the SAME proven grid mapping as the
             # staged kernel (the tutorial's 1-D split, and tile 0 on an axis the source
             # kernel does not tile) — it used to hard-code ``pid3.x / pid3.y``, so the
@@ -1827,6 +1999,7 @@ class _TemplateMixin:
                         block_n=BLOCK_N,
                         threads=128,
                         scalar_names=scalar_names,
+                        source_bindings=source_bindings,
                     )
                 )
                 lines.append(f"        return;")
@@ -1861,9 +2034,9 @@ class _TemplateMixin:
                 "direct_name": dn,
                 "block_m": BLOCK_M,
                 "block_n": BLOCK_N,
-                "m_idx": _argnames.index("M"),
-                "n_idx": _argnames.index("N"),
-                "k_idx": _argnames.index("K"),
+                "m_idx": _argnames.index(_direct_m),
+                "n_idx": _argnames.index(_direct_n),
+                "k_idx": _argnames.index(_direct_k),
             }
 
         return "\n".join(lines)
@@ -1893,15 +2066,19 @@ class _TemplateMixin:
 
         msl_type = triton_type_to_msl(elem_type)
 
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
         arg_decls = []
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
-                arg_decls.append(_scalar_buffer_decl(arg, i))
+                arg_decls.append(_scalar_buffer_decl(arg, i, source_bindings))
+
+        x_ptr = source_bindings[x_ptr]
+        z_ptr = source_bindings[z_ptr]
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -1990,17 +2167,22 @@ class _TemplateMixin:
         _out_msl = triton_type_to_msl(_out_elem) if _out_elem else "float"
         _store_cast = "" if _out_msl == "float" else f"({_out_msl})"
 
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
         arg_decls = []
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
                 # Scalar arg passed as constant&
                 arg_msl_type = triton_type_to_msl(arg.elem_type) if arg.elem_type else "int"
-                arg_decls.append(f"    constant {arg_msl_type}& {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    constant {arg_msl_type}& {source_bindings[arg.name]} [[buffer({i})]]")
+
+        input_arg = source_bindings[input_arg]
+        output_arg = source_bindings[output_arg]
+        n_arg = source_bindings[n_arg]
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -2158,22 +2340,27 @@ class _TemplateMixin:
         _out_msl = triton_type_to_msl(_out_elem) if _out_elem else "float"
         _store_cast = "" if _out_msl == "float" else f"({_out_msl})"
 
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
         arg_decls = []
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
                 arg_msl_type = triton_type_to_msl(arg.elem_type) if arg.elem_type else "int"
-                arg_decls.append(f"    constant {arg_msl_type}& {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    constant {arg_msl_type}& {source_bindings[arg.name]} [[buffer({i})]]")
 
         # eps comes from the KERNEL's own rsqrt(var + eps) (extracted by the detector,
         # exact-or-refuse), NOT a hardcoded default — a wrong eps is a silent-wrong
         # (worst on low-variance rows). ``info["eps"]`` is always present (the detector
         # refuses when it can't resolve the constant).
         eps_literal = f"{float(info['eps'])!r}f"
+
+        input_arg = source_bindings[input_arg]
+        output_arg = source_bindings[output_arg]
+        n_arg = source_bindings[n_arg]
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -2292,6 +2479,7 @@ class _TemplateMixin:
         block_size = info["block_size"]  # = M * N
 
         msl_type = triton_type_to_msl(elem_type)
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
         num_warps = self.options.num_warps if self.options else 4
@@ -2301,10 +2489,13 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
                 arg_msl_type = triton_type_to_msl(arg.elem_type) if arg.elem_type else "int"
-                arg_decls.append(f"    constant {arg_msl_type}& {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    constant {arg_msl_type}& {source_bindings[arg.name]} [[buffer({i})]]")
+
+        input_arg = source_bindings[input_arg]
+        output_arg = source_bindings[output_arg]
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -2354,6 +2545,7 @@ class _TemplateMixin:
         output_arg = info["output_arg"]
         # Pointer element types come from each arg's own elem_type in the
         # arg-decl loop below; no kernel-wide msl_type needed here.
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
         num_warps = self.options.num_warps if self.options else 4
         threads = num_warps * 32
@@ -2362,10 +2554,13 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
                 arg_msl_type = triton_type_to_msl(arg.elem_type) if arg.elem_type else "int"
-                arg_decls.append(f"    constant {arg_msl_type}& {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    constant {arg_msl_type}& {source_bindings[arg.name]} [[buffer({i})]]")
+
+        input_arg = source_bindings[input_arg]
+        output_arg = source_bindings[output_arg]
 
         lines = [
             "#include <metal_stdlib>",
@@ -2403,6 +2598,7 @@ class _TemplateMixin:
         surviving = info["surviving"]  # [(in_stride, size, out_stride), ...]
 
         msl_type = triton_type_to_msl(out_elem)
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
         num_warps = self.options.num_warps if self.options else 4
         threads = num_warps * 32
@@ -2411,10 +2607,10 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
                 arg_msl_type = triton_type_to_msl(arg.elem_type) if arg.elem_type else "int"
-                arg_decls.append(f"    constant {arg_msl_type}& {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    constant {arg_msl_type}& {source_bindings[arg.name]} [[buffer({i})]]")
 
         # out_cell(i) = sum_k ((i / in_stride_k) % size_k) * out_stride_k
         oc_terms = []
@@ -2422,6 +2618,9 @@ class _TemplateMixin:
             coord = f"((i / {in_s}u) % {size}u)"
             oc_terms.append(coord if out_s == 1 else f"{coord} * {out_s}u")
         oc_expr = " + ".join(oc_terms) if oc_terms else "0u"
+
+        in_arg = source_bindings[in_arg]
+        out_arg = source_bindings[out_arg]
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -2469,6 +2668,7 @@ class _TemplateMixin:
         the simdgroup tile (8) — currently ``min(M, 32)`` which handles
         the 64×64 and 128×128 test_dot softmax cases.
         """
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         M = info["M"]
         N = info["N"]
         K = info["K"]
@@ -2574,8 +2774,9 @@ class _TemplateMixin:
                 *_widths[role],
                 what=f"fused matmul+softmax/epilogue operand {role}",
                 scalar_names=_scalar_names,
+                source_bindings=source_bindings,
             )
-            return f"{base}[{expr}]"
+            return f"{source_bindings[base]}[{expr}]"
 
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
@@ -2583,10 +2784,10 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 m = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {m}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {m}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
                 m = triton_type_to_msl(arg.elem_type) if arg.elem_type else "int"
-                arg_decls.append(f"    constant {m}& {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    constant {m}& {source_bindings[arg.name]} [[buffer({i})]]")
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -2659,7 +2860,11 @@ class _TemplateMixin:
         # per element on the staged tg_C, then write. Early-return leaves the
         # softmax path below untouched.
         if info.get("epilogue_ops"):
-            lines.extend(self._emit_matmul_epilogue_loop(info, m_block, N, c_ptr, c_row_s, c_col_s, c_msl_type, _addr))
+            lines.extend(
+                self._emit_matmul_epilogue_loop(
+                    info, m_block, N, c_ptr, c_row_s, c_col_s, c_msl_type, _addr, source_bindings
+                )
+            )
             lines.append("        threadgroup_barrier(mem_flags::mem_threadgroup);")
             lines.append("    }  // end M-strip loop")
             lines.append("}")
@@ -2733,7 +2938,9 @@ class _TemplateMixin:
         "math.absf": "fabs",
     }
 
-    def _emit_matmul_epilogue_loop(self, info, m_block, N, c_ptr, c_row_s, c_col_s, c_msl_type, _addr):
+    def _emit_matmul_epilogue_loop(
+        self, info, m_block, N, c_ptr, c_row_s, c_col_s, c_msl_type, _addr, source_bindings=None
+    ):
         """Per-element fused-epilogue loop body (#158).
 
         Lowers the topologically-ordered epilogue op chain to scalar MSL on the
@@ -2744,10 +2951,11 @@ class _TemplateMixin:
         from triton_msl.codegen._lowerer_detection import _EPI_PASSTHROUGH
 
         by_id = {ssa.id: ssa for ssa in self.graph.ops}
-        bias = info.get("bias_ptr")
+        source_bindings = source_bindings or {}
+        bias = source_bindings.get(info.get("bias_ptr"), info.get("bias_ptr"))
         # The matmul result staged in tg_C is a@b (accumulators init to 0). If a
         # bias was fused into the dot's accumulator, add it back here.
-        acc_bias = info.get("acc_bias_ptr")
+        acc_bias = source_bindings.get(info.get("acc_bias_ptr"), info.get("acc_bias_ptr"))
         # ROW bias indexes the M-length bias by the GLOBAL row (mstrip + row), NOT the
         # strip-local `row`. _detect_matmul_epilogue refuses the row-bias case when
         # M > m_block (re-audit #8), so here mstrip is always 0 for a row bias and this
@@ -2935,6 +3143,7 @@ class _TemplateMixin:
         # Pick a compute type for comparisons (promote fp16/bf16 to float)
         compute_type = _msl_compute_type(elem_type)
 
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
         # Build argument declarations in the original IR arg order
@@ -2943,16 +3152,19 @@ class _TemplateMixin:
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
                 if arg.name == z_ptr:
-                    arg_decls.append(f"    volatile device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                    arg_decls.append(f"    volatile device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
                 else:
-                    arg_decls.append(f"    device const {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                    arg_decls.append(f"    device const {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
                 scalar_ty = triton_type_to_msl(arg.elem_type or "i32")
-                arg_decls.append(f"    constant {scalar_ty}& {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    constant {scalar_ty}& {source_bindings[arg.name]} [[buffer({i})]]")
 
         # Integer sort? If elem type is integer we just use standard
         # `<` / `>` over the integer values. For floats, use `<` / `>`.
         is_int = elem_type.startswith("i") or elem_type.startswith("u")
+
+        x_ptr = source_bindings[x_ptr]
+        z_ptr = source_bindings[z_ptr]
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -3076,6 +3288,7 @@ class _TemplateMixin:
                 op_name="tt.reduce",
             )
 
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
         # Build argument list (X and Z pointers)
@@ -3083,12 +3296,12 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
-                arg_decls.append(_scalar_buffer_decl(arg, i))
+                arg_decls.append(_scalar_buffer_decl(arg, i, source_bindings))
 
-        x_name = ptr_args[0].name if ptr_args else "X"
-        z_name = ptr_args[1].name if len(ptr_args) > 1 else "Z"
+        x_name = source_bindings[ptr_args[0].name] if ptr_args else "X"
+        z_name = source_bindings[ptr_args[1].name] if len(ptr_args) > 1 else "Z"
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -3196,6 +3409,7 @@ class _TemplateMixin:
             identity = "INT_MIN" if is_max else "INT_MAX"
         cmp_op = ">" if is_max else "<"
 
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
 
         # Build argument list
@@ -3203,12 +3417,12 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
             else:
-                arg_decls.append(_scalar_buffer_decl(arg, i))
+                arg_decls.append(_scalar_buffer_decl(arg, i, source_bindings))
 
-        x_name = ptr_args[0].name if ptr_args else "X"
-        z_name = ptr_args[1].name if len(ptr_args) > 1 else "Z"
+        x_name = source_bindings[ptr_args[0].name] if ptr_args else "X"
+        z_name = source_bindings[ptr_args[1].name] if len(ptr_args) > 1 else "Z"
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -3402,6 +3616,7 @@ class _TemplateMixin:
 
     def _lower_dot_constant_template(self, const_info, ptr_args):
         """Generate MSL for dot product where both inputs are compile-time constants."""
+        source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         const_a, const_b, M, N, K, dot_elem_type = const_info
         safe_name = _sanitize_msl_name(self.graph.func_name)
         total = M * N
@@ -3421,7 +3636,7 @@ class _TemplateMixin:
         for i, arg in enumerate(self.graph.args):
             if arg.is_ptr:
                 arg_msl_type = triton_type_to_msl(arg.elem_type)
-                arg_decls.append(f"    device {arg_msl_type}* {arg.name} [[buffer({i})]]")
+                arg_decls.append(f"    device {arg_msl_type}* {source_bindings[arg.name]} [[buffer({i})]]")
         lines.append(",\n".join(arg_decls) + ",")
         lines.append("    uint lid [[thread_position_in_threadgroup]]")
         lines.append(") {")
@@ -3430,7 +3645,7 @@ class _TemplateMixin:
         lines.append(f"        uint _j = _e % {N}u;")
         # Each element = sum over K of const_a * const_b = K * const_a * const_b
         lines.append(f"        float _sum = (float){K}u * {const_a}f * {const_b}f;")
-        lines.append(f"        {c_ptr.name}[_i * {N}u + _j] = ({c_msl_type})_sum;")
+        lines.append(f"        {source_bindings[c_ptr.name]}[_i * {N}u + _j] = ({c_msl_type})_sum;")
         lines.append(f"    }}")
         lines.append("}")
         lines.append("")
@@ -3505,19 +3720,15 @@ class _TemplateMixin:
             out_dtype=out_dtype,
         )
 
+        # These are identifiers owned by make_matmul_kernel, not source names.
+        # Substitute simultaneously so A->B style source spelling cannot cascade,
+        # and match pointer arithmetic as well as indexed loads/stores.
+        bindings = {name: f"_mmarg{i}" for i, name in enumerate(("A", "B", "C", "M", "N", "K"))}
+        bindings.update({name + "_buf": value + "_buf" for name, value in tuple(bindings.items())[3:]})
+        msl = re.sub(r"\b(?:A|B|C|M|N|K|M_buf|N_buf|K_buf)\b", lambda match: bindings[match.group(0)], msl)
+
         safe_name = _sanitize_msl_name(self.graph.func_name)
         msl = msl.replace("matmul_kernel", safe_name, 1)
-
-        if len(ptr_args) >= 3:
-            a_name, b_name, c_name = a_arg.name, b_arg.name, c_arg.name
-            # Replace parameter declarations -- use regex to match any MSL type (float, half, etc.)
-            msl = re.sub(r"(device\s+const\s+\w+\*)\s+A\s", rf"\1 {a_name} ", msl)
-            msl = re.sub(r"(device\s+const\s+\w+\*)\s+B\s", rf"\1 {b_name} ", msl)
-            msl = re.sub(r"(volatile\s+device\s+\w+\*|device\s+\w+\*)\s+C\s", rf"\1 {c_name} ", msl)
-            # Replace body references
-            msl = re.sub(r"(?<![a-zA-Z_])A\[", f"{a_name}[", msl)
-            msl = re.sub(r"(?<![a-zA-Z_])B\[", f"{b_name}[", msl)
-            msl = re.sub(r"(?<![a-zA-Z_])C\[", f"{c_name}[", msl)
 
         return msl
 

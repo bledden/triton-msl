@@ -204,4 +204,4 @@ def test_nd_transpose_does_not_drop_either_program_address(axis, input_pid, outp
 
 def test_nd_transpose_without_live_pid_still_emits():
     msl = _trans_msl(0, False, False)
-    assert "Out[k] = In[" in msl
+    assert "_mmarg1[k] = _mmarg0[" in msl

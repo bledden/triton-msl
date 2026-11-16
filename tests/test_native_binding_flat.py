@@ -10,6 +10,7 @@ from types import MappingProxyType
 import weakref
 
 import pytest
+from tests.native_helper_policy import require_selected_native
 import torch
 import triton.backends
 from triton_msl.backend import _launch_signature as s
@@ -17,8 +18,7 @@ from triton_msl.backend import _launch_signature as s
 
 @pytest.fixture
 def native():
-    if s._binder_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(s._binder_native, "binder")
     assert s._binder_native is not None, "native-specific controls require the built image"
     return s._binder_native
 

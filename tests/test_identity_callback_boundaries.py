@@ -4,6 +4,7 @@ import copy
 import os
 
 import pytest
+from tests.native_helper_policy import require_selected_native
 
 from identity_framework_fixture import ordinary_framework
 
@@ -213,8 +214,7 @@ def test_recording_does_not_observe_custom_scanner_attributes(monkeypatch):
 
 
 def test_class_member_probe_never_invokes_metaclass_lookup():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     calls = []
 
     class Meta(type):
@@ -255,8 +255,7 @@ def test_native_owner_class_descriptor_is_not_speculatively_replayed(monkeypatch
 
 @pytest.mark.parametrize("saved_custom", [False, True])
 def test_path_comparison_declines_without_user_equality(saved_custom):
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     calls = []
     live = []
 
@@ -274,8 +273,7 @@ def test_path_comparison_declines_without_user_equality(saved_custom):
 
 
 def test_path_comparison_exact_strings_keeps_value_semantics():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     native = cache._validation_native
     live = ["".join(["a-long-path", "-component"])]
     saved = ("a-long-path-component",)

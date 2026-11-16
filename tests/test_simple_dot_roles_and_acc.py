@@ -579,8 +579,8 @@ def test_lowering_boundary_buffer_slots():
     three buffers with C at buffer(2), which is the slot the launcher hands P."""
     lw = _direct_lowerer_for(_four_ptr_bare, {"X": "*fp32", "Y": "*fp32", "P": "*fp32", "C": "*fp32"}, {"S": 32})
     msl = lw.lower()
-    assert "* C [[buffer(3)]]" in msl, "C must bind at its own arg slot (3), not 2"
-    assert "* P [[buffer(2)]]" in msl, "every kernel arg must be declared at its slot"
+    assert "* _mmarg3 [[buffer(3)]]" in msl, "C must bind at its own arg slot (3), not 2"
+    assert "* _mmarg2 [[buffer(2)]]" in msl, "every kernel arg must be declared at its slot"
 
 
 @requires
@@ -1036,18 +1036,20 @@ def test_lowering_boundary_kloop_roles_through_iter_args():
     # Unspecialized runtime strides route this harness to the strided SCALAR
     # template (``_sum += A[m*sam + k*sak] * B[k*sbk + n*sbn]``); a GPU launch
     # specializes the unit strides and takes the simdgroup one (``tg_A[i] = ...``).
-    # Either way the A operand must be read through ``Ap`` and B through ``Bp``.
+    # Either way the A operand must be read through ``Ap`` and B through ``Bp``. The
+    # template names arguments positionally: Bp is _mmarg0, Ap _mmarg1, sam _mmarg6,
+    # sbk _mmarg8.
     lines = msl.splitlines()
     scalar = [i for i, ln in enumerate(lines) if "_sum +=" in ln]
     if scalar:
         read = lines[scalar[0]] + lines[scalar[0] + 1]  # the product spans two lines
-        assert "Ap[" in read and "Bp[" in read, f"A must be read from Ap and B from Bp, got {read!r}"
-        assert "(uint)m * (uint)(sam)" in read and "(uint)k * (uint)(sbk)" in read
+        assert read.index("_mmarg1[") < read.index("_mmarg0["), f"A must be read from Ap and B from Bp, got {read!r}"
+        assert "(uint)m * (uint)(_mmarg6)" in read and "(uint)k * (uint)(_mmarg8)" in read
     else:
         a_stage = [ln for ln in lines if "tg_A[i] =" in ln]
         b_stage = [ln for ln in lines if "tg_B[i] =" in ln]
-        assert a_stage and all("Ap[" in ln for ln in a_stage), f"A must be staged from Ap, got {a_stage}"
-        assert b_stage and all("Bp[" in ln for ln in b_stage), f"B must be staged from Bp, got {b_stage}"
+        assert a_stage and all("_mmarg1[" in ln for ln in a_stage), f"A must be staged from Ap, got {a_stage}"
+        assert b_stage and all("_mmarg0[" in ln for ln in b_stage), f"B must be staged from Bp, got {b_stage}"
 
 
 @requires

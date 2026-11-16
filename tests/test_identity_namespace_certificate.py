@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 import pytest
+from tests.native_helper_policy import require_selected_native
 
 from triton_msl.backend import _cache_contract as cache
 from triton_msl.backend import _identity_fast_path as fast
@@ -15,8 +16,7 @@ from triton_msl.errors import MetalNonRecoverableError
 
 
 def _capture():
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     native = cache._validation_native
     assert native is not None, "this selection requires the built native helper"
     namespace = _NamespacePath("example", ["/first", "/second"], lambda *args: None)
@@ -143,8 +143,7 @@ def test_real_loaded_namespace_gets_hit_without_normalization(monkeypatch):
     """No ordinary_framework fixture; keep other loaded namespaces real too."""
     import numpy
 
-    if cache._validation_native is None:
-        pytest.skip("Requires the selected compiled native helper")
+    require_selected_native(cache._validation_native, "validation")
     original = numpy.__spec__.submodule_search_locations
     namespace = _NamespacePath("numpy", list(original), lambda *args: None)
     try:
