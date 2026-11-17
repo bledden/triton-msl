@@ -123,7 +123,12 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   fp32 B, launch a sub-tiled direct entry: each 32-lane SIMD group computes whole
   32×32 sub-tiles with matrix fragments read in place, at 32 to 128 threads per
   group. The transposed-B form no longer stages its operands for these launches.
-  Unaligned extents and other layouts keep the ordinary entry. See `docs/USAGE.md`.
+  Unaligned extents, an output that shares storage with another pointer argument,
+  a grid with more tiles than the output holds and other layouts keep the ordinary
+  entry. See `docs/USAGE.md`.
+- The strided scalar matmul entry for tiles larger than 32×32 now loads its whole
+  tile before it stores, so a single program whose output is one of its operands
+  no longer reads cells another thread has already overwritten.
 - New default-off options: `TRITON_MSL_HOST_EXTENT=1` (host storage extent
   borrowing), `TRITON_MSL_CPP_SCALAR_CFG=1` (LLVM scalar cleanup on the opt-in C++
   route), `MetalOptions(experimental_cooperative_attention=True)` and

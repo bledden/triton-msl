@@ -901,6 +901,26 @@ class _TemplateMixin:
         return 32 * min((block_m // 32) * (block_n // 32), 4)
 
     @staticmethod
+    def _twin_surplus_program_lines(rows_masked, cols_masked):
+        """A direct twin stores whole tiles, and the launcher proves that the
+        extents are tile multiples, not that the grid has one program per tile.
+        Where the source masks its store by an extent, a program whose tile starts
+        outside that extent stores nothing, and one that starts inside owns a whole
+        in-range tile. Uniform per threadgroup.
+
+        An axis the source stores without a mask has no extent to test: the source
+        stores every launched tile whole, and so does the twin. ``_M``/``_N`` are
+        then only the arguments of those names, which may play another role, and
+        the launcher instead admits no more tiles than the output holds."""
+        tests = ["(long)row_base >= _M"] * bool(rows_masked) + ["(long)col_base >= _N"] * bool(cols_masked)
+        return [f"    if ({' || '.join(tests)}) return;"] if tests else []
+
+    def _bound_argument_index(self, source_bindings, emitted_name):
+        """Position of the kernel argument an emitted pointer name is bound to."""
+        (index,) = [i for i, arg in enumerate(self.graph.args) if source_bindings[arg.name] == emitted_name]
+        return index
+
+    @staticmethod
     def _subtiled_direct_lines(a_name, b_name, c_name, block_m, block_n, acc_frag, in_frag, b_transposed):
         """Body of the sub-tiled direct twin, after the ``_simd_ok`` proof.
 
@@ -1293,19 +1313,31 @@ class _TemplateMixin:
         # Retain the fully stride-aware scalar path for all other shapes/types.
         if use_staging:
             lines.extend(self._strided_scalar_stage_lines(a_name, b_name, c_name, _a_addr, _b_addr, _c_addr))
-        # Each thread strides over the BLOCK_M x BLOCK_N tile.
-        lines.append(f"    for (uint _e = lid; _e < {tile}u; _e += {block_size}u) {{")
-        lines.append(f"        uint _lm = _e / {BLOCK_N}u;")
-        lines.append(f"        uint _ln = _e % {BLOCK_N}u;")
-        lines.append("        uint m = row_base + _lm;")
-        lines.append("        uint n = col_base + _ln;")
-        lines.append("        if (m >= _M || n >= _N) continue;")
+        # Each thread strides over the BLOCK_M x BLOCK_N tile. A program loads its
+        # whole tile before it stores any of it, so every thread keeps its cells
+        # until the threadgroup has finished loading: one program whose output is
+        # also an operand (``C is A``, ``C is B``) then reads no cell another thread
+        # has already replaced, as the staged 32x32 case above has it.
+        cell_loop = [
+            f"    for (uint _e = lid; _e < {tile}u; _e += {block_size}u) {{",
+            f"        uint _lm = _e / {BLOCK_N}u;",
+            f"        uint _ln = _e % {BLOCK_N}u;",
+            "        uint m = row_base + _lm;",
+            "        uint n = col_base + _ln;",
+            "        if (m >= _M || n >= _N) continue;",
+        ]
+        lines.append(f"    float _cell[{-(-tile // block_size)}];")
+        lines.extend(cell_loop)
         lines.append("        float _sum = 0.0f;")
         lines.append("        for (uint k = 0u; k < _K; k++) {")
         lines.append(f"            _sum += (float){a_name}[{_a_addr}]")
         lines.append(f"                  * (float){b_name}[{_b_addr}];")
         lines.append("        }")
-        lines.append(f"        {c_name}[{_c_addr}] = ({c_msl})_sum;")
+        lines.append(f"        _cell[_e / {block_size}u] = _sum;")
+        lines.append("    }")
+        lines.append("    threadgroup_barrier(mem_flags::mem_none);")
+        lines.extend(cell_loop)
+        lines.append(f"        {c_name}[{_c_addr}] = ({c_msl})_cell[_e / {block_size}u];")
         lines.append("    }")
         lines.append("}")
         lines.extend(
@@ -1420,6 +1452,7 @@ class _TemplateMixin:
         lines.extend(self._pid_map_lines(info, block_m))
         lines.append(f"    uint row_base = pid_m * {block_m}u;")
         lines.append(f"    uint col_base = pid_n * {block_n}u;")
+        lines.extend(self._twin_surplus_program_lines(m_ext, n_ext))
         lines.append("#if defined(__HAVE_SIMDGROUP_MATRIX__)")
         lines.extend(self._simd_layout_guard_lines(*lds, b_transposed=True))
         # Sub-tile ownership is by simdgroup index, so it needs the 32-lane
@@ -1462,6 +1495,7 @@ class _TemplateMixin:
             "m_idx": argnames.index(direct_m),
             "n_idx": argnames.index(direct_n),
             "k_idx": argnames.index(direct_k),
+            "c_idx": self._bound_argument_index(source_bindings, c_name),
         }
         return lines
 
@@ -2205,6 +2239,7 @@ class _TemplateMixin:
             lines.extend(self._pid_map_lines(info, BLOCK_M))
             lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
             lines.append(f"    uint col_base = pid_n * {BLOCK_N}u;")
+            lines.extend(self._twin_surplus_program_lines(m_ext, n_ext))
             # Packet 834: the direct twin has no staged path to fall through to, so it
             # carries the SAME uniform proof and the SAME scalar fallback. The fallback
             # uses no threadgroup memory, so this kernel keeps the zero-threadgroup
@@ -2274,6 +2309,7 @@ class _TemplateMixin:
                 "m_idx": _argnames.index(_direct_m),
                 "n_idx": _argnames.index(_direct_n),
                 "k_idx": _argnames.index(_direct_k),
+                "c_idx": self._bound_argument_index(source_bindings, c_name),
             }
 
         return "\n".join(lines)

@@ -143,7 +143,7 @@ def test_matrix_branch_has_execution_witness_and_scalar_counterfactual():
     marker = "#endif\n        uint _m0"
     assert source.count(marker) == 1
     witness = source.replace(marker, "#endif\n        return;\n        uint _m0")
-    marker2 = "    for (uint _e = lid;"
+    marker2 = "    float _cell[4];\n    for (uint _e = lid;"
     assert witness.count(marker2) == 1
     witness = witness.replace(marker2, "    return;\n" + marker2)
     gen = torch.Generator().manual_seed(810)
@@ -179,7 +179,7 @@ def test_outer_guard_false_zero_reduction_executes_unstaged_path():
     source = _source()
     # The real _K > 0 guard is false. Disable only the final scalar fallback
     # in the red control; unchanged source must write zeros, control no values.
-    marker = "    for (uint _e = lid;"
+    marker = "    float _cell[4];\n    for (uint _e = lid;"
     assert source.count(marker) == 1
     a = torch.ones((32, 32), device="mps")
     b = torch.ones((32, 32), device="mps")

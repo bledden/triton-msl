@@ -166,13 +166,14 @@ def pipeline_loader(monkeypatch):
     return load
 
 
-def _invoke_matrix(pipeline, dims=(32, 32, 8), split=True):
-    descriptor = dict(
-        direct_name="kernel__mmdirect", direct_block=64, block_m=32, block_n=32, m_idx=0, n_idx=1, k_idx=2
-    )
-    metadata = (*META[:6], descriptor if split else None, *META[7:])
-    launcher = _launcher(["M", "N", "K"], dict(M="i32", N="i32", K="i32"), metadata)
-    launcher(1, 1, 1, None, pipeline, metadata, None, None, None, *dims)
+TWIN = dict(direct_name="kernel__mmdirect", direct_block=64, block_m=64, block_n=32, m_idx=1, n_idx=2, k_idx=3, c_idx=0)
+TWIN_NAMES, TWIN_SIGNATURE = ["C", "M", "N", "K"], dict(C="*fp32", M="i32", N="i32", K="i32")
+
+
+def _invoke_matrix(pipeline, dims=(64, 32, 8), split=True, cells=64 * 32, programs=1):
+    metadata = (*META[:6], dict(TWIN) if split else None, *META[7:])
+    launcher = _launcher(TWIN_NAMES, TWIN_SIGNATURE, metadata)
+    launcher(programs, 1, 1, None, pipeline, metadata, None, None, None, torch.zeros(cells), *dims)
 
 
 def test_loader_owns_primary_until_matching_unload(pipeline_loader):
@@ -201,11 +202,11 @@ def test_colliding_foreign_pipeline_keeps_staged_fallback(monkeypatch, recording
 @pytest.mark.parametrize(
     "dims,split,direct",
     [
-        ((32, 32, 8), True, True),
-        ((31, 32, 8), True, False),
-        ((32, 31, 8), True, False),
-        ((32, 32, 7), True, False),
-        ((32, 32, 8), False, False),
+        ((64, 32, 8), True, True),
+        ((63, 32, 8), True, False),
+        ((64, 31, 8), True, False),
+        ((64, 32, 7), True, False),
+        ((64, 32, 8), False, False),
     ],
 )
 def test_matching_pipeline_keeps_alignment_and_metadata_checks(recording_host, pipeline_loader, dims, split, direct):
@@ -227,26 +228,36 @@ def test_matching_pipeline_keeps_alignment_and_metadata_checks(recording_host, p
         dict(direct_block=256),
         dict(direct_block=True),
         dict(direct_name=""),
+        dict(direct_block=128),  # a 64x32 tile is two sub-tiles: 64 threads
         dict(block_m=0),
-        dict(m_idx=3),
+        dict(m_idx=4),
+        dict(c_idx=4),
         dict(extra=1),
         "missing-width",
+        "missing-output",
     ],
 )
 def test_unrecognised_twin_descriptor_keeps_staged_entry(recording_host, pipeline_loader, monkeypatch, change):
     primary = pipeline_loader("A")
-    descriptor = dict(
-        direct_name="kernel__mmdirect", direct_block=64, block_m=32, block_n=32, m_idx=0, n_idx=1, k_idx=2
-    )
-    if change == "missing-width":
-        del descriptor["direct_block"]
+    descriptor = dict(TWIN)
+    if isinstance(change, str):
+        del descriptor["direct_block" if change == "missing-width" else "c_idx"]
     else:
         descriptor.update(change)
     metadata = (*META[:6], descriptor, *META[7:])
-    launcher = _launcher(["M", "N", "K"], dict(M="i32", N="i32", K="i32"), metadata)
-    launcher(1, 1, 1, None, primary, metadata, None, None, None, 32, 32, 8)
+    launcher = _launcher(TWIN_NAMES, TWIN_SIGNATURE, metadata)
+    launcher(1, 1, 1, None, primary, metadata, None, None, None, torch.zeros(64 * 32), 64, 32, 8)
     assert recording_host.calls[-1][0] is primary
     assert recording_host.groups[-1] == (META[3], 1, 1)
+
+
+@pytest.mark.parametrize(
+    "cells,programs,direct", [(6144, 3, True), (6143, 3, False), (2048, 3, False), (10240, 5, True)]
+)
+def test_twin_needs_room_for_a_whole_tile_per_program(recording_host, pipeline_loader, cells, programs, direct):
+    primary = pipeline_loader("A")
+    _invoke_matrix(primary, (64, 64, 8), cells=cells, programs=programs)
+    assert recording_host.calls[-1][0].name == ("A direct" if direct else "A staged")
 
 
 @pytest.mark.parametrize("checked", [False, True])

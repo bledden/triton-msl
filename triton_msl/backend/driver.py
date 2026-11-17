@@ -1182,7 +1182,7 @@ class MetalLauncher:
                             if _generic_geometry is not None and kernel_metadata[6] is not None:
                                 from ._generic_launch import direct_twin
 
-                                _twin = direct_twin(kernel_metadata[6], kargs)
+                                _twin = direct_twin(kernel_metadata[6], kargs, gridX * gridY * gridZ)
                                 if _twin:
                                     _entry, _twin_width = _twin
                                     threads = (threads[0] // group_size[0] * _twin_width, *threads[1:])
@@ -1749,7 +1749,7 @@ class MetalLauncher:
                 if direct_ps is not None:
                     from ._generic_launch import direct_twin
 
-                    _twin = direct_twin(mm_two, flat_args)
+                    _twin = direct_twin(mm_two, flat_args, gridX * gridY * gridZ)
                     if _twin:
                         # The twin runs the same grid at its own threadgroup width.
                         dispatch_fn = direct_ps
