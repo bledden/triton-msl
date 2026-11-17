@@ -225,29 +225,38 @@ def _multi_program_dot_runtime(a, b, c, M, N):
     tl.store(c + rows[:, None] * N + cols[None, :], result, (rows[:, None] < M) & (cols[None, :] < N))
 
 
-def test_constexpr_multi_program_dot_remains_refused(monkeypatch, tmp_path):
-    """The original hardware003 fixture was outside the existing MSL envelope.
+def test_constexpr_multi_program_dot_deroutes_with_proved_strides_and_grid(monkeypatch, tmp_path):
+    """Literal strides and the proved 2D grid now define each full source tile.
 
-    Keep it as a refusal control; do not weaken the MSL extent guard merely to
-    obtain a positive C++ de-routing test. This refuses before binary production.
+    C++ still declines this dot; faithful MSL reaches binary production without
+    requiring runtime scalars named M/N. No binary is built by this CPU control.
     """
     from triton.compiler.compiler import ASTSource
-    from triton_msl.errors import MetalNonRecoverableError
 
     monkeypatch.setenv("TRITON_MSL_USE_CPP", "1")
     monkeypatch.setenv("TRITON_ALWAYS_COMPILE", "1")
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
     monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path / "msl"))
 
+    class SourceProduced(Exception):
+        pass
+
     def forbidden(*args, **kwargs):
-        raise AssertionError("refused source reached binary production")
+        raise AssertionError("multi-program dot entered experimental C++ binary production")
+
+    def source_produced(source, metadata, options):
+        assert "long _M = (long)((long)row_base + 32L);" in source
+        assert "long _N = (long)((long)col_base + 32L);" in source
+        assert "uint pid_m = pid3.x;" in source and "uint pid_n = pid3.y;" in source
+        assert "(uint)(64)" in source  # source B/C leading stride, not the tile width
+        raise SourceProduced
 
     monkeypatch.setattr(compiler.MetalBackend, "make_metallib_from_llir", staticmethod(forbidden))
-    monkeypatch.setattr(compiler.MetalBackend, "make_metallib", staticmethod(forbidden))
+    monkeypatch.setattr(compiler.MetalBackend, "make_metallib", staticmethod(source_produced))
     src = ASTSource(
         fn=_multi_program_dot, signature={"a": "*fp16", "b": "*fp16", "c": "*fp32"}, constexprs={"K": 32, "N": 64}
     )
-    with pytest.raises(MetalNonRecoverableError, match="M/N are baked as constexpr"):
+    with pytest.raises(SourceProduced):
         triton.compile(src, target=GPUTarget("metal", "apple-m4", 32))
 
 
@@ -311,3 +320,29 @@ def test_multi_program_dot_deroutes_and_writes_every_output(monkeypatch, tmp_pat
     assert compiled.metadata.binary_route == "msl"
     assert "tt.dot" in compiled.metadata.cpp_fallback_reason
     assert cpp_calls == []
+
+
+def test_constexpr_multi_program_dot_writes_the_proved_full_grid(monkeypatch, tmp_path):
+    import torch
+    from triton.compiler.compiler import ASTSource
+
+    if not torch.backends.mps.is_available():
+        pytest.skip("Metal GPU needed")
+    monkeypatch.setenv("TRITON_MSL_USE_CPP", "1")
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "0")
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton"))
+    monkeypatch.setenv("TRITON_MSL_CACHE_DIR", str(tmp_path / "msl"))
+    src = ASTSource(_multi_program_dot, {"a": "*fp16", "b": "*fp16", "c": "*fp32"}, {"K": 32, "N": 64})
+    kernel = triton.compile(src, target=GPUTarget("metal", "apple-m4", 32))
+    assert kernel.metadata.binary_route == "msl"
+    generator = torch.Generator().manual_seed(32064)
+    ah = torch.randint(-3, 4, (64, 32), generator=generator).half()
+    bh = torch.randint(-3, 4, (32, 64), generator=generator).half()
+    a, b = ah.to("mps"), bh.to("mps")
+    owner = torch.full((64 * 64 + 64,), -17391.0, device="mps")
+    c = owner[32:-32].view(64, 64)
+    kernel[(2, 2, 1)](a, b, c)
+    expected = (ah.double() @ bh.double()).float()
+    torch.testing.assert_close(c.cpu(), expected, atol=0, rtol=0)
+    assert torch.all(owner[:32].cpu() == -17391.0) and torch.all(owner[-32:].cpu() == -17391.0)
+    assert torch.equal(a.cpu(), ah) and torch.equal(b.cpu(), bh)

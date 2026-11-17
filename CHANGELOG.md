@@ -6,6 +6,20 @@ Compatibility and safety update. It runs on the Xcode 27 toolchain, which the
 published 0.3.0 refuses, and fixes defects found in 0.3.0. No general speedup is
 claimed. The user guide is `docs/releases/0.4.0.md`.
 
+### Matmul source domains
+
+- Derive ordinary and direct-entry row/column clipping from source masks rather
+  than arguments named `M` and `N`. Unmasked stores write whole launched tiles;
+  operand load masks and flattened/grouped grid divisors retain separate roles.
+- Validate grid-dependent source storage and integer address ranges before either
+  entry runs, including aligned K. Incomplete flat/grouped grids use an exact union
+  of at most three rectangles, preserving valid sparse output allocations.
+- Complete all single-program operand reads before ordinary contiguous or scalar
+  fallback stores can replace aliased input cells. The direct entry continues to
+  require an output whose storage no input shares.
+- These changes require fresh integrated hardware and installed-artifact
+  qualification. Earlier source-tree matmul timings do not measure their cost.
+
 ### Compatibility
 
 - Support the Xcode 27 toolchain. On it, 0.3.0 refuses every kernel with

@@ -14,9 +14,8 @@ try:
     import torch
     import triton
     import triton.language as tl
-    import Metal
 
-    HAS = Metal.MTLCreateSystemDefaultDevice() is not None
+    HAS = torch.backends.mps.is_available()
 except Exception:
     HAS = False
 
@@ -212,15 +211,52 @@ if HAS:
 
 @requires_metal
 @pytest.mark.parametrize("N", [520, 528, 544])  # %8-not-%16, %16-not-%32, %32 (all unaligned vs (4,4))
-def test_matmul_unaligned_N_rescue_byte_exact(N):
-    # The N%32 perf-cliff fix: N%8==0 shapes now reach the fast path (finer rc tile). Must be
-    # byte-exact regardless of which tile the selector picks (a partial strip would OOB).
+def test_matmul_unaligned_N_rescue_byte_exact(monkeypatch, N):
+    # Exact allocations require the source's own M/N/K masks. The fast route
+    # must still cover N%8, N%16 and N%32 without a partial SIMD strip overrun.
+    from tests.test_fast_matmul_gate import _spy
+
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    seen = _spy(monkeypatch)
     M = K = 512
-    a = torch.randn(M, K, dtype=torch.float32) * 0.1
-    b = torch.randn(K, N, dtype=torch.float32) * 0.1
-    c = torch.zeros(M, N, dtype=torch.float32)
-    _mm[(triton.cdiv(M, 32), triton.cdiv(N, 32))](a, b, c, M, N, K, BM=32, BN=32, BK=32)
-    np.testing.assert_allclose(c.numpy(), (a @ b).numpy(), atol=2e-2, rtol=2e-2)
+    generator = torch.Generator().manual_seed(20160626 + N)
+    ah = torch.randn(M, K, generator=generator) * 0.1
+    bh = torch.randn(K, N, generator=generator) * 0.1
+    a, b = ah.to("mps"), bh.to("mps")
+    c = torch.zeros(M, N, dtype=torch.float32, device="mps")
+    _mm_masked[(triton.cdiv(M, 32), triton.cdiv(N, 32))](a, b, c, M, N, K, BM=32, BN=32, BK=32)
+    assert seen == ["simdgroup_matmul_fast"]
+    expected = (ah.double() @ bh.double()).float()
+    np.testing.assert_allclose(c.cpu().numpy(), expected.numpy(), atol=2e-2, rtol=2e-2)
+    assert torch.equal(a.cpu(), ah) and torch.equal(b.cpu(), bh)
+
+
+@requires_metal
+@pytest.mark.parametrize("N", [520, 528])
+def test_unmasked_rescue_fixture_refuses_its_outside_allocation_tiles(monkeypatch, N):
+    """The old unmasked BN32 source requires nonexistent final B/C columns."""
+    from tests.cache_helpers import patch_live_singleton_method
+    from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
+    from triton_msl.backend.driver import MetalUtils, _get_utils, _get_compile_shader_runtime
+    from triton_msl.errors import MetalNonRecoverableError
+
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    M = K = 512
+    a, b, c = torch.ones(M, K), torch.ones(K, N), torch.full((M, N), -17391.0)
+    before = (a.clone(), b.clone(), c.clone())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unsafe unmasked source reached submission")
+
+    monkeypatch.setattr(CompileShaderRuntime, "dispatch", forbidden)
+    monkeypatch.setattr(MetalUtils, "launch", forbidden)
+    patch_live_singleton_method(monkeypatch, _get_compile_shader_runtime, "dispatch", lambda *args: forbidden)
+    patch_live_singleton_method(monkeypatch, _get_utils, "launch", lambda *args: forbidden)
+    with pytest.raises(MetalNonRecoverableError, match="outside"):
+        _mm[(triton.cdiv(M, 32), triton.cdiv(N, 32))](a, b, c, M, N, K, BM=32, BN=32, BK=32)
+    assert all(torch.equal(value, saved) for value, saved in zip((a, b, c), before))
 
 
 @requires_metal

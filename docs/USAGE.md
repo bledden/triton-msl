@@ -289,6 +289,21 @@ the scalar loop at the same width when it does not hold. A single program whose
 output is one of its operands keeps the ordinary entry, which loads its whole tile
 before it stores; overlapping reads and writes across programs remain unordered.
 
+The ordinary and second entries derive output clips from the source store mask,
+not from scalar names. An unmasked axis stores every launched tile in full, even
+when an argument named `M` or `N` is a stride or a different dimension. Source
+load masks remain separate: an unmasked output can contain zeros or nonfinite
+products from masked operand contributions. Flattened and grouped grids retain
+their own source divisors. Grid domains with unproved nonpositive or wrapping
+divisors refuse before dispatch.
+
+When full source tiles require a grid address plan, both entries validate operand
+and output backing allocations and source address widths before dispatch, including
+aligned K. An incomplete flattened or grouped grid uses its exact tile union for
+the output proof. The check can add host work per launch; its cost and the integrated
+shader performance require fresh qualification and are not established by earlier
+matmul timings.
+
 Eligible contiguous fp16/fp32 matmuls (K%8) on MPS tensors take a direct simdgroup-matrix path, dispatched
 zero-copy. A deterministic, occupancy-gated tile selector picks the coarsest blocking the
 shape's M and N alignment allow: **M%32 + N%32** runs the `(4,4)` tile at ~11–12 TFLOP/s on

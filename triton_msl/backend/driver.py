@@ -229,14 +229,22 @@ def _batched_dot_host_bounds_reason(descriptor, kargs, grid):
         return "the batched-dot runtime address bounds could not be proven"
 
 
-def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloads=None):
+def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloads=None, grid=None):
     """Return a refusal reason for an unmasked rounded-K access plan, else None."""
     try:
+        grid_plan = (
+            type(descriptor) in (tuple, list) and len(descriptor) == 7 and descriptor[0] == "matmul_grid_storage_v1"
+        )
         if not (
-            type(descriptor) in (tuple, list) and len(descriptor) == 6 and descriptor[0] == "matmul_full_k_storage_v1"
+            grid_plan
+            or (
+                type(descriptor) in (tuple, list)
+                and len(descriptor) == 6
+                and descriptor[0] == "matmul_full_k_storage_v1"
+            )
         ):
             return "the K-tail allocation descriptor is missing or malformed; mask the K tail"
-        block_k, tensor_indices, extent_refs, stride_refs, arithmetic = descriptor[1:]
+        block_k, tensor_indices, extent_refs, stride_refs, arithmetic = descriptor[1:6]
         if (
             type(block_k) is not int
             or block_k <= 0
@@ -277,24 +285,50 @@ def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloa
                 raise ValueError("runtime scalar is outside its declared source width")
             return value
 
-        # K alone decides whether this launch has a tail obligation. Do not
-        # re-observe unrelated scalar providers for ordinary aligned launches.
+        # Legacy fully-masked plans need only their rounded-K obligation. A
+        # grid plan proves the source's complete domain even for aligned K.
         k = _value(extent_refs[2])
-        if k <= 0 or k % block_k == 0:
+        if not grid_plan and (k <= 0 or k % block_k == 0):
             return None
-        m, n = (_value(ref) for ref in extent_refs[:2])
-        rounded_k = ((k + block_k - 1) // block_k) * block_k
+        rounded_k = ((max(k, 0) + block_k - 1) // block_k) * block_k
         if rounded_k > (1 << 63) - 1:
             return "rounded K exceeds the signed source address range; mask the K tail"
         strides = tuple(_value(ref) for ref in stride_refs)
-        roles = (
-            ("A", tensor_indices[0], (max(m, 0), rounded_k), strides[0:2], arithmetic[0]),
-            ("B", tensor_indices[1], (rounded_k, max(n, 0)), strides[2:4], arithmetic[1]),
-            ("C", tensor_indices[2], (max(m, 0), max(n, 0)), strides[4:6], arithmetic[2]),
+        if grid_plan:
+            from ._matmul_domain import matmul_grid_rectangles
+
+            rectangles = matmul_grid_rectangles(descriptor[6], grid, _value)
+            full_m, full_n = max(r[1] for r in rectangles), max(r[3] for r in rectangles)
+            load_refs, full_k = descriptor[6][5:]
+
+            def clipped(ref, full):
+                return full if ref is None else min(full, max(0, _value(ref)))
+
+            store_m, store_n = (clipped(ref, full) for ref, full in zip(extent_refs[:2], (full_m, full_n)))
+            load_m, load_n = (clipped(ref, full) for ref, full in zip(load_refs, (full_m, full_n)))
+            load_k = rounded_k if full_k else max(k, 0)
+            role_ranges = [((0, load_m), (0, load_k)), ((0, load_k), (0, load_n))]
+            role_ranges.extend(((m0, min(m1, store_m)), (n0, min(n1, store_n))) for m0, m1, n0, n1 in rectangles)
+        else:
+            m, n = (_value(ref) for ref in extent_refs[:2])
+            role_ranges = [
+                ((0, max(m, 0)), (0, rounded_k)),
+                ((0, rounded_k), (0, max(n, 0))),
+                ((0, max(m, 0)), (0, max(n, 0))),
+            ]
+        roles = tuple(
+            (
+                ("A", "B", "C")[min(i, 2)],
+                tensor_indices[min(i, 2)],
+                ranges,
+                strides[2 * min(i, 2) : 2 * min(i, 2) + 2],
+                arithmetic[min(i, 2)],
+            )
+            for i, ranges in enumerate(role_ranges)
         )
         signed_min, signed_max = -(1 << 63), (1 << 63) - 1
-        for role, tensor_index, extents, role_strides, arith in roles:
-            if 0 in extents:
+        for role, tensor_index, ranges, role_strides, arith in roles:
+            if any(hi <= lo for lo, hi in ranges):
                 continue
             if (
                 type(arith) not in (tuple, list)
@@ -305,10 +339,10 @@ def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloa
             ):
                 return f"{role} source address widths are malformed; mask the K tail"
             term_ranges = []
-            for extent, stride, width in zip(extents, role_strides, arith[:2]):
-                delta = (extent - 1) * stride
+            for (start, end), stride, width in zip(ranges, role_strides, arith[:2]):
+                endpoints = (start * stride, (end - 1) * stride)
                 width_min, width_max = limits[width]
-                lo, hi = min(0, delta), max(0, delta)
+                lo, hi = min(endpoints), max(endpoints)
                 if lo < width_min or hi > width_max:
                     return f"{role} source {width} address term can wrap; mask the K tail"
                 term_ranges.append((lo, hi))
@@ -325,12 +359,11 @@ def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloa
             ):
                 return f"{role} backing storage cannot be inspected; mask the K tail"
             lower = upper = 0
-            for extent, stride in zip(extents, role_strides):
-                delta = (extent - 1) * stride
-                if not signed_min <= delta <= signed_max:
+            for lo, hi in term_ranges:
+                if not signed_min <= lo <= hi <= signed_max:
                     return f"{role} source address arithmetic can overflow signed 64-bit; mask the K tail"
-                lower += min(0, delta)
-                upper += max(0, delta)
+                lower += lo
+                upper += hi
                 if not signed_min <= lower <= signed_max or not signed_min <= upper <= signed_max:
                     return f"{role} source address sum can overflow signed 64-bit; mask the K tail"
             if not hasattr(tensor, "element_size"):
@@ -933,7 +966,7 @@ class MetalLauncher:
                     "Refusing launch: source-program numerical, storage and dispatch admission is not qualified",
                     op_name="tt.dot",
                 )
-            if address_bounds[0] == "matmul_full_k_storage_v1":
+            if address_bounds[0] in ("matmul_full_k_storage_v1", "matmul_grid_storage_v1"):
                 tail_access_bounds = address_bounds
             elif address_bounds[0] == "batched_dot_host_bounds_v1":
                 batched_dot_bounds = address_bounds
@@ -945,7 +978,9 @@ class MetalLauncher:
                     op_name="tt.dot",
                 )
         if tail_access_bounds is not None:
-            _tail_reason = _matmul_tail_bounds_reason(tail_access_bounds, flat_args, flat_sigs, scalar_payloads)
+            _tail_reason = _matmul_tail_bounds_reason(
+                tail_access_bounds, flat_args, flat_sigs, scalar_payloads, (gridX, gridY, gridZ)
+            )
             if _tail_reason is not None:
                 from triton_msl.errors import MetalNonRecoverableError
 

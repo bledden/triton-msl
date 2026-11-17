@@ -114,7 +114,7 @@ def test_tail_storage_gpu_positive(case, compile_shader, monkeypatch, executed, 
     if case == "masked":
         assert descriptor is None
     else:
-        assert descriptor[0] == "matmul_full_k_storage_v1"
+        assert descriptor[0] == "matmul_grid_storage_v1"
         assert "unmasked source executes complete BLOCK_K iterations" in handle.asm["msl"]
 
 

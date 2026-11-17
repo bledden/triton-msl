@@ -16,7 +16,8 @@ NATURAL = ("A", "B", "C", "M", "N", "K")
 def test_twin_text_does_not_depend_on_which_role_is_named_m_n_k(tmp_path, names):
     source = emit_names(tmp_path, names, False)
     twin = source.split("__mmdirect(", 1)[1]
-    assert "long _M = (long)_mmarg3, _N = (long)_mmarg4;" in twin
+    assert "long _M = (long)(_mmarg3);" in twin
+    assert "long _N = (long)(_mmarg4);" in twin
     assert "long _K = (long)_mmarg5;" in twin
     assert source == emit_names(tmp_path, NATURAL, False)
 

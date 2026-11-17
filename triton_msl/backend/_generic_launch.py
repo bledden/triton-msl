@@ -80,7 +80,9 @@ def direct_twin(descriptor, arguments, programs):
     It also needs an output that holds a whole tile for each of the ``programs``
     launched. The twin clips a surplus program only on an axis whose extent the
     source's store mask proves; on any other it stores every tile whole, where
-    the ordinary entry clips at the arguments named M and N.
+    the ordinary entry follows the same source store domains. The checked grid
+    address plan proves the actual operand loads and output stores before either
+    entry is selected.
     """
     fields = _twin_fields(descriptor, arguments)
     if fields is None:
@@ -133,8 +135,9 @@ def generic_2d_geometry(launcher, arguments, signatures, metadata, grid, *, vali
             and (
                 metadata[10] is not validated_tail_bounds
                 or type(validated_tail_bounds) not in (tuple, list)
-                or len(validated_tail_bounds) != 6
-                or validated_tail_bounds[0] != "matmul_full_k_storage_v1"
+                or len(validated_tail_bounds) not in (6, 7)
+                or (len(validated_tail_bounds), validated_tail_bounds[0])
+                not in ((6, "matmul_full_k_storage_v1"), (7, "matmul_grid_storage_v1"))
             )
         )
         or type(launcher._msl_block_size) is not int

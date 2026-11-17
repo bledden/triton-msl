@@ -1152,7 +1152,7 @@ def test_tutorial_1d_grid_mapping_replayed(cold_gpu_caches, shape):
 @requires
 def test_lowering_boundary_1d_grid_mapping_emitted():
     """Rule 9 (bites on base): the emitted K-loop MSL for the tutorial form must split
-    ``pid3.x`` by ``cdiv(_M, BLOCK_M)`` exactly as the IR does, never read ``pid3.y``."""
+    ``pid3.x`` by the source's ``cdiv(M, BLOCK_M)`` exactly as the IR does, never read ``pid3.y``."""
     sig = {
         "a_ptr": "*fp16",
         "b_ptr": "*fp16",
@@ -1169,7 +1169,7 @@ def test_lowering_boundary_1d_grid_mapping_emitted():
     }
     lw = _direct_lowerer_for(_tut_1d_079, sig, {"BM": 32, "BN": 32, "BK": 32})
     msl = lw.lower()
-    assert "pid3.x % _npm" in msl and "pid3.x / _npm" in msl and "((uint)_M + 32u - 1u) / 32u" in msl, (
+    assert "pid3.x % _npm" in msl and "pid3.x / _npm" in msl and "((uint)_mmarg3 + 32u - 1u) / 32u" in msl, (
         "1-D grid split not replayed"
     )
     assert "pid3.y" not in msl, "the 2-D mapping leaked into a 1-D-grid kernel"

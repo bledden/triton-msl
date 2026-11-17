@@ -149,10 +149,12 @@ def test_native_ir_producer_binds_roles_extents_strides_and_block():
     module = backend.make_ttgir(module, {}, options)
     lowerer = GenericLowerer(walk_ttgir(module, options), options)
     lowerer.lower()
-    assert lowerer._tail_access_bounds == _desc()
+    # Store clips do not mask the source's complete operand tiles.
+    expected = ("matmul_grid_storage_v1", *_desc()[1:], (32, 32, "2d", (True, True), (None, None), (None, None), True))
+    assert lowerer._tail_access_bounds == expected
     metadata = {"name": "tail_contract"}
     emit_msl(module, metadata, options)
-    assert metadata["batched_dot_bounds"] == _desc()
+    assert metadata["batched_dot_bounds"] == expected
 
     masked = ASTSource(_masked, sig, {"BM": 32, "BN": 32, "BK": 32}).make_ir(
         backend.target, options, backend.get_codegen_implementation(options), backend.get_module_map(), ctx

@@ -1560,21 +1560,26 @@ def _mm_canonical(a, b, c, M, N, K, sam, sak, sbk, sbn, scm, scn, BM: tl.constex
 @requires
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.parametrize("N", [160, 1056])  # %32 but NOT %128 (the routing hole)
-def test_fast_matmul_n_mod32_byte_exact(dtype, N):
+def test_fast_matmul_n_mod32_byte_exact(monkeypatch, dtype, N):
     # The fast-matmul gate required N%128; the template actually guards the boundary
     # column per-simdgroup (strip = 8*rc), so N%32 is correct. Gate relaxed to N%(sel_tn/4)
     # — but ONLY after the descriptor verifies M/N/K binding (the K-loop bound is args[5]),
     # so a non-canonical signature can't mis-bind. N%32-not-%128 now hits the ~11 TF fast
     # path and must be byte-exact (it's a fast path — a bug here is a silent-wrong).
-    import os
+    from tests.test_fast_matmul_gate import _spy
 
-    os.environ["TRITON_MSL_FAST_MATMUL"] = "1"
-    os.environ["TRITON_MSL_COMPILE_SHADER"] = "1"
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    seen = _spy(monkeypatch)
     M, K = 64, 64
-    A = torch.randn(M, K, device="mps", dtype=dtype)
-    B = torch.randn(K, N, device="mps", dtype=dtype)
+    generator = torch.Generator().manual_seed(20160624 + N)
+    ah = torch.randn(M, K, generator=generator).to(dtype)
+    bh = torch.randn(K, N, generator=generator).to(dtype)
+    A, B = ah.to("mps"), bh.to("mps")
     C = torch.empty(M, N, device="mps", dtype=torch.float32)
-    grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
+    # This source has no masks: every launched source column must exist.
+    # N%32-not-%64 needs BN32, regardless of the fast route's internal tile.
+    grid = (triton.cdiv(M, 64), triton.cdiv(N, 32))
     _mm_canonical[grid](
         A,
         B,
@@ -1589,10 +1594,45 @@ def test_fast_matmul_n_mod32_byte_exact(dtype, N):
         C.stride(0),
         C.stride(1),
         BM=64,
-        BN=64,
+        BN=32,
         BK=32,
     )
     torch.mps.synchronize()
-    ref = A.float() @ B.float()
+    assert seen == ["simdgroup_matmul_fast"]
+    ref = (ah.double() @ bh.double()).float()
     rel = (C.float().cpu() - ref.cpu()).abs().max().item() / max(ref.abs().max().item(), 1e-6)
     assert rel < 4e-2, f"N%32 fast-matmul N={N} {dtype}: rel_err {rel}"
+
+
+@requires
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("N", [160, 1056])
+def test_unmasked_n_mod32_with_bn64_refuses_before_submission(monkeypatch, dtype, N):
+    """The original BN64 fixture launches 32 columns past exact B/C storage.
+
+    Preserve it as a negative with dispatch tripwires; it must never execute.
+    """
+    from tests.cache_helpers import patch_live_singleton_method
+    from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
+    from triton_msl.backend.driver import MetalUtils, _get_utils, _get_compile_shader_runtime
+
+    monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", "1")
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    M = K = 64
+    a = torch.ones((M, K), dtype=dtype, device="mps")
+    b = torch.ones((K, N), dtype=dtype, device="mps")
+    c = torch.full((M, N), -17391.0, device="mps")
+    before = (a.cpu(), b.cpu(), c.cpu())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unsafe unmasked source reached submission")
+
+    monkeypatch.setattr(CompileShaderRuntime, "dispatch", forbidden)
+    monkeypatch.setattr(MetalUtils, "launch", forbidden)
+    patch_live_singleton_method(monkeypatch, _get_compile_shader_runtime, "dispatch", lambda *args: forbidden)
+    patch_live_singleton_method(monkeypatch, _get_utils, "launch", lambda *args: forbidden)
+    with pytest.raises(MetalNonRecoverableError, match="outside"):
+        _mm_canonical[(triton.cdiv(M, 64), triton.cdiv(N, 64))](
+            a, b, c, M, N, K, *a.stride(), *b.stride(), *c.stride(), BM=64, BN=64, BK=32
+        )
+    assert all(torch.equal(value.cpu(), saved) for value, saved in zip((a, b, c), before))

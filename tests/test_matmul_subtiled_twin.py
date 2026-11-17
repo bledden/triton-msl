@@ -264,7 +264,7 @@ def test_unstaged_strided_entry_loads_its_whole_tile_before_it_stores(mm, block_
     msl, _ = _compile(mm, "bt", block_m, block_n, masked=True)
     entry = msl[msl.index("kernel void subtiled_mm(") :].split("kernel void subtiled_mm__mmdirect(")[0]
     code = [line.strip() for line in entry.splitlines()]
-    barrier = code.index("threadgroup_barrier(mem_flags::mem_none);")
+    barrier = code.index("threadgroup_barrier(mem_flags::mem_device);")
     assert f"float _cell[{cells}];" in code[:barrier]
     assert code.index("_cell[_e / 256u] = _sum;") < barrier
     assert not any("_mmarg2[" in line for line in code[:barrier])
@@ -326,7 +326,7 @@ def test_contiguous_tile_that_does_not_split_keeps_the_four_strip_twin(mm):
     assert "if (!_simd_ok) {" in twin
 
 
-def _operands(layout, m, n, k, bm, bn, bk, device, integers=True, dtype=torch.float32, slack=0):
+def _operands(layout, m, n, k, bm, bn, bk, device, integers=True, dtype=torch.float32, slack=0, cover=(0, 0)):
     """A, B, a poisoned C with guard bands, and the float64 oracle.
 
     ``slack`` rows follow the M output rows inside C itself: room for the whole
@@ -335,7 +335,7 @@ def _operands(layout, m, n, k, bm, bn, bk, device, integers=True, dtype=torch.fl
     The source's loads are unmasked, so it reads whole tiles and whole K blocks;
     the backing covers those reads and the oracle sums the K blocks it executes.
     """
-    rows, cols, depth = -(-m // bm) * bm, -(-n // bn) * bn, -(-k // bk) * bk
+    rows, cols, depth = max(-(-m // bm) * bm, cover[0]), max(-(-n // bn) * bn, cover[1]), -(-k // bk) * bk
     gen = torch.Generator().manual_seed(977 + m + 3 * n + 5 * k + 7 * bm + 11 * bn)
     if integers:
         a = torch.randint(-3, 4, (rows, depth), generator=gen).float()
@@ -381,8 +381,18 @@ def routes(monkeypatch):
 def _launch(
     fn, layout, m, n, k, bm, bn, bk, masked, device, routes, integers=True, dtype=torch.float32, grid=None, slack=0
 ):
-    (a, w), (aa, ww, bb), owner, cc, oracle = _operands(layout, m, n, k, bm, bn, bk, device, integers, dtype, slack)
     grid = grid or (-(-m // bm) * -(-n // bn),)
+    # SOURCE uses unmasked loads even when its store is masked. Cover every
+    # launched source tile, including surplus programs; a clipped output cannot
+    # establish safety for an unmasked operand load.
+    if "tl.program_id(1)" in fn.src:
+        cover = (grid[0] * bm, (grid[1] if len(grid) > 1 else 1) * bn)
+    else:
+        nt = -(-n // bn)
+        cover = (-(-grid[0] // nt) * bm, min(nt, grid[0]) * bn)
+    (a, w), (aa, ww, bb), owner, cc, oracle = _operands(
+        layout, m, n, k, bm, bn, bk, device, integers, dtype, slack, cover
+    )
     handle = None
     for poison in (-8192.0, 8192.0):
         cc.fill_(poison)
@@ -527,10 +537,30 @@ def test_surplus_programs_of_a_flat_grid_store_nothing(
 @requires_gpu
 @pytest.mark.parametrize("device", ["cpu", "mps"])
 @pytest.mark.parametrize("layout", ["contig", "bt"])
-def test_surplus_programs_of_an_unmasked_store_keep_the_ordinary_entry(mm, routes, layout, device):
-    """Unmasked, the twin would store the surplus tiles whole, past the output."""
-    handle = _launch(mm, layout, 64, 64, 64, 32, 32, 32, False, device, routes, grid=(5,))
-    _assert_route(handle, routes, False, 32)
+def test_surplus_programs_of_an_unmasked_store_refuse_insufficient_storage(mm, routes, layout, device, monkeypatch):
+    """The source stores whole surplus tiles; clipping them would change semantics.
+
+    Insufficient C backing must refuse before any submission. Unlike guard-band
+    views, this C has no backing allocation beyond its logical end.
+    """
+    from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
+    from triton_msl.backend.driver import MetalUtils, _get_utils, _get_compile_shader_runtime
+    from triton_msl.errors import MetalNonRecoverableError
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unsafe source must refuse before dispatch")
+
+    monkeypatch.setattr(CompileShaderRuntime, "dispatch", forbidden)
+    monkeypatch.setattr(MetalUtils, "launch", forbidden)
+    patch_live_singleton_method(monkeypatch, _get_compile_shader_runtime, "dispatch", lambda *args: forbidden)
+    patch_live_singleton_method(monkeypatch, _get_utils, "launch", lambda *args: forbidden)
+    a = torch.ones((96, 64), device=device)
+    b = torch.ones((64, 64), device=device)
+    b = b.t() if layout == "bt" else b
+    c = torch.full((64, 64), -17391.0, device=device)
+    with pytest.raises(MetalNonRecoverableError, match="outside"):
+        mm[(5,)](a, b, c, 64, 64, 64, *a.stride(), *b.stride(), *c.stride(), BM=32, BN=32, BK=32, MASKED=False)
+    assert torch.all(c.cpu() == -17391.0) and not routes
 
 
 @requires_gpu

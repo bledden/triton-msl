@@ -59,6 +59,15 @@ def test_no_blanket_or_stale_descriptor_admission(case, evidence):
     assert generic_2d_geometry(*case, validated_tail_bounds=proof) is None
 
 
+@pytest.mark.parametrize("container", [tuple, list])
+def test_empty_checked_address_descriptor_declines_without_indexing(case, container):
+    _, _, _, meta, _ = case
+    empty = container()
+    meta[10] = empty
+    assert generic_2d_geometry(*case, validated_tail_bounds=empty) is None
+    assert meta[10] is empty
+
+
 @pytest.mark.parametrize("mutation", ["transpose_offset", "holes", "dtype", "subclass", "template", "cpp", "grid"])
 def test_tail_evidence_does_not_bypass_other_route_checks(case, mutation):
     launcher, args, sigs, meta, grid = case

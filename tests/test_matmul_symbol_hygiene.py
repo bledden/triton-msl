@@ -94,7 +94,8 @@ def test_uppercase_direct_twin_uses_same_hygienic_names(tmp_path):
     source = emit_names(tmp_path, ("A", "B", "C", "M", "N", "K"), False)
     assert "__mmdirect(" in source
     twin = source.split("__mmdirect(", 1)[1]
-    assert "long _M = (long)_mmarg3, _N = (long)_mmarg4;" in twin
+    assert "long _M = (long)(_mmarg3);" in twin
+    assert "long _N = (long)(_mmarg4);" in twin
     assert "ulong _lda = (ulong)((uint)_mmarg5);" in twin
     assert "simdgroup_load(a_frag, _mmarg0 + (ulong)(_sr + 0u) * _lda + k, _lda);" in twin
     assert "(uint)K" not in source
@@ -224,8 +225,8 @@ def test_pointer_names_never_supply_missing_scalar_extents(tmp_path, names):
     fn = renamed_tile(tmp_path, _tile_bt, names)
     actual = _emit(fn, {name: "*fp32" for name in names}, {})
     assert actual == reference
-    assert "long _M = (long)32;" in actual
-    assert "long _N = (long)32;" in actual
+    assert "long _M = (long)((long)row_base + 32L);" in actual
+    assert "long _N = (long)((long)col_base + 32L);" in actual
 
 
 def test_mlx_rejects_mixed_and_duplicate_binding_schemes():

@@ -115,8 +115,8 @@ def _primer_matmul(
     acc = tl.zeros((BM, BN), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BK)):
         k_mask = offs_k < K - k * BK
-        a = tl.load(a_ptrs, mask=k_mask[None, :], other=0.0)
-        b = tl.load(b_ptrs, mask=k_mask[:, None], other=0.0)
+        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & k_mask[None, :], other=0.0)
+        b = tl.load(b_ptrs, mask=k_mask[:, None] & (offs_n[None, :] < N), other=0.0)
         acc += tl.dot(a, b)
         a_ptrs += BK * sak
         b_ptrs += BK * sbk

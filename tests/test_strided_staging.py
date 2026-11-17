@@ -27,8 +27,8 @@ def test_staging_retains_full_k_contract_and_scalar_fallback():
     last_barrier = source.rindex("threadgroup_barrier(mem_flags::mem_threadgroup)")
     assert last_barrier < source.index(" = _acc0;")
     # The unstaged loop holds each thread's cells until the threadgroup has loaded.
-    assert source.count("threadgroup_barrier(mem_flags::mem_none)") == 1
-    loaded = source.index("threadgroup_barrier(mem_flags::mem_none)")
+    assert source.count("threadgroup_barrier(mem_flags::mem_device)") == 1
+    loaded = source.index("threadgroup_barrier(mem_flags::mem_device)")
     assert source.index("float _cell[4];") < source.index("_cell[_e / 256u] = _sum;") < loaded
     assert loaded < source.index("] = (float)_cell[_e / 256u];")
     assert "for (uint k = 0u; k < _K; k++)" in source

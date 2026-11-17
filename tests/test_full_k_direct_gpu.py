@@ -49,6 +49,48 @@ def full_k(
         tl.store(cp, acc)
 
 
+def _tuple_tree(value):
+    return tuple(_tuple_tree(v) for v in value) if isinstance(value, (tuple, list)) else value
+
+
+@pytest.mark.parametrize("mask_mn", [False, True])
+def test_full_k_descriptor_matches_source_load_and_store_provenance_cpu(mask_mn):
+    from triton._C.libtriton import ir
+    from triton.backends.compiler import GPUTarget
+    from triton.compiler import ASTSource
+    from triton_msl.backend.compiler import MetalBackend
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+    from triton_msl.codegen.mlir_walker import walk_ttgir
+
+    backend = MetalBackend(GPUTarget("metal", "apple-m4", 32))
+    options = backend.parse_options({"num_warps": 4})
+    context = ir.context()
+    ir.load_dialects(context)
+    constants = dict(BM=32, BN=32, BK=32, MASK_MN=mask_mn)
+    signature = {name: "*fp32" if i < 3 else "i32" for i, name in enumerate(full_k.arg_names)}
+    signature.update({name: "constexpr" for name in constants})
+    source = ASTSource(full_k, signature, constants)
+    module = source.make_ir(
+        backend.target, options, backend.get_codegen_implementation(options), backend.get_module_map(), context
+    )
+    module = backend.make_ttir(module, {}, options)
+    module = backend.make_ttgir(module, {}, options)
+    lowerer = GenericLowerer(walk_ttgir(module, options), options)
+    lowerer.lower()
+    mn = (("arg", 3, "i32"), ("arg", 4, "i32")) if mask_mn else (None, None)
+    expected = (
+        "matmul_full_k_storage_v1" if mask_mn else "matmul_grid_storage_v1",
+        32,
+        (0, 1, 2),
+        (*mn, ("arg", 5, "i32")),
+        tuple(("arg", i, "i32") for i in range(6, 12)),
+        (("i32", "i32", False),) * 3,
+    )
+    if not mask_mn:
+        expected += ((32, 32, ("flat_n", 32), (True, True), (None, ("arg", 4, "i32")), (None, None), True),)
+    assert _tuple_tree(lowerer._tail_access_bounds) == expected
+
+
 def _run(monkeypatch, record_property, m, n, k, dtype, mask_mn, layout="plain"):
     from triton_msl.backend.driver import _get_utils, _get_compile_shader_runtime
 
@@ -149,7 +191,22 @@ def _run(monkeypatch, record_property, m, n, k, dtype, mask_mn, layout="plain"):
         assert handle.metadata.batched_dot_bounds is None
         assert "smem_dot_" in handle.asm["msl"]
     else:
-        assert handle.metadata.batched_dot_bounds[0] == "matmul_full_k_storage_v1"
+        descriptor = handle.metadata.batched_dot_bounds
+        expected_tag = "matmul_full_k_storage_v1" if mask_mn else "matmul_grid_storage_v1"
+        assert descriptor[0] == expected_tag
+        assert len(descriptor) == (6 if mask_mn else 7)
+        expected_mn = (("arg", 3, "i32"), ("arg", 4, "i32")) if mask_mn else (None, None)
+        assert _tuple_tree(descriptor[3]) == (*expected_mn, ("arg", 5, "i32"))
+        if not mask_mn:
+            assert _tuple_tree(descriptor[6]) == (
+                32,
+                32,
+                ("flat_n", 32),
+                (True, True),
+                (None, ("arg", 4, "i32")),
+                (None, None),
+                True,
+            )
     for owner, original in zip(owners, before):
         after = owner.cpu()
         if owner is owners[-1] and layout == "contiguous_offset":

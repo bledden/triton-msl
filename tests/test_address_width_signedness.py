@@ -391,7 +391,8 @@ def test_unsigned_extension_is_not_accepted_as_a_proven_width():
 
 def test_extents_are_signed_and_full_width_so_a_negative_extent_masks_everything():
     msl = _strided_msl("i32")
-    assert "long _M = (long)32;" in msl and "long _N = (long)32;" in msl
+    assert "long _M = (long)((long)row_base + 32L);" in msl
+    assert "long _N = (long)((long)col_base + 32L);" in msl
     assert "uint _M" not in msl and "uint _N" not in msl and "uint _K" not in msl
     assert "if (m >= _M || n >= _N) continue;" in msl
     # uint index vs long extent promotes the index: the comparison is SIGNED, so a
@@ -406,7 +407,7 @@ def test_runtime_extents_sign_extend():
     consts = {"BM": 32, "BN": 32, "BK": 32}
     sig.update({k: "constexpr" for k in consts})
     msl = _emit(_tutorial_mm, sig, consts)
-    assert "long _M = (long)M;" in msl and "long _N = (long)N;" in msl and "long _K = (long)K;" in msl
+    assert "long _M = (long)(M);" in msl and "long _N = (long)(N);" in msl and "long _K = (long)K;" in msl
     assert "uint _M = (uint)M" not in msl
 
 
@@ -419,7 +420,7 @@ def test_pid_mapping_still_replays_the_source_32bit_tile_arithmetic():
     consts = {"BM": 32, "BN": 32, "BK": 32}
     sig.update({k: "constexpr" for k in consts})
     msl = _emit(_tutorial_mm, sig, consts)
-    assert "long _M = (long)M;" in msl
+    assert "long _M = (long)(M);" in msl
     assert "as_type<int>(_M" not in msl and "(_M + 32u" not in msl
 
 
@@ -909,7 +910,18 @@ def test_kloop_scalar_fallback_shape(kernel, width):
     assert "for (long k = 0L; k < _K; k++) {" in fb
     assert "% 8" not in fb
     # fp32 accumulator and the terminal output cast
-    assert "float _facc = 0.0f;" in fb and "= (float)_facc;" in fb
+    assert "float _facc = 0.0f;" in fb
+    if kernel == "_tutorial_mm":
+        assert "_fallback_cells[_fe / 128u] = _facc;" in fb
+        assert "= (float)_fallback_cells[_fe / 128u];" in fb
+        assert (
+            fb.index("_fallback_cells[_fe / 128u] = _facc;")
+            < fb.index("threadgroup_barrier(mem_flags::mem_device)")
+            < fb.index("= (float)_fallback_cells[_fe / 128u];")
+        )
+    else:
+        # The twin excludes output aliases before submission.
+        assert "= (float)_facc;" in fb and "threadgroup_barrier" not in fb
     # width-faithful addresses
     assert "A[(long)as_type<int>((uint)m * (uint)(sam)) + (long)as_type<int>((uint)k * (uint)(1))]" in fb
     assert "B[(long)as_type<int>((uint)k * (uint)(sbk)) + (long)as_type<int>((uint)n * (uint)(1))]" in fb
@@ -936,11 +948,14 @@ def test_mmdirect_fallback_adds_no_threadgroup_memory():
     assert "if (!_simd_ok) {" in body
 
 
-def test_direct_fast_path_entry_condition_is_unchanged_under_the_guard():
-    """The existing tile/K-multiple predicate is untouched; the layout proof is an
-    additional precondition reached before it."""
+def test_direct_fast_path_requires_both_store_and_source_load_coverage():
+    """Layout, store-tile coverage, independent load clips and K alignment must
+    all hold before the ordinary entry reads unmasked matrix fragments."""
     body = _kernels(_kloop_msl("i32"))["_tutorial_mm"]
-    assert "if (row_base + 32u <= _M && col_base + 32u <= _N && (_K % 8u) == 0u) {" in body
+    assert (
+        "if (row_base + 32u <= _M && col_base + 32u <= _N && row_base + 32u <= _A_M && col_base + 32u <= _B_N && (_K % 8u) == 0u) {"
+        in body
+    )
     assert body.index("bool _simd_ok =") < body.index("if (row_base + 32u <= _M")
     assert body.index("if (!_simd_ok) {") < body.index("threadgroup float tg_A")
 

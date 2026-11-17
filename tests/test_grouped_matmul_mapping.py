@@ -97,11 +97,21 @@ def test_grouped_coordinates_are_proved_and_replayed(gm):
     assert "pid_n = as_type<uint>(_within / _group_m)" in msl
 
 
-@pytest.mark.parametrize("mutation", [1, 2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("mutation", [1, 3, 4, 5, 6, 7])
 def test_unreplayed_grouped_near_miss_refuses(mutation):
     lowerer, _ = _lower(mutation=mutation)
     with pytest.raises(MetalNonRecoverableError):
         lowerer.lower()
+
+
+def test_independent_grouped_row_divisor_is_replayed_and_guarded():
+    lowerer, _ = _lower(mutation=2)
+    msl = lowerer.lower()
+    # This source uses cdiv(N, BM) to size the row group. It need not equal
+    # the M bound masking the output, but its own mapping must be preserved.
+    assert "int _npm = as_type<int>((uint)_mmarg4 + 31u) / 32;" in msl
+    assert lowerer._tail_access_bounds[0] == "matmul_grid_storage_v1"
+    assert lowerer._tail_access_bounds[6][4][0] == ("arg", 4, "i32")
 
 
 def _observe_grouped_routes(monkeypatch):

@@ -81,7 +81,7 @@ def test_n_fastest_coordinates_preserve_signed_source_mapping():
     lowerer = _lower()
     msl = lowerer.lower()
     assert "N-fastest source tile mapping" in msl
-    assert "int _npn = as_type<int>((uint)_N + 31u) / 32;" in msl
+    assert "int _npn = as_type<int>((uint)_mmarg4 + 31u) / 32;" in msl
     assert "uint pid_m = as_type<uint>(as_type<int>(pid3.x) / _npn);" in msl
     assert "uint pid_n = as_type<uint>(as_type<int>(pid3.x) % _npn);" in msl
     assert lowerer._fast_matmul is None, "partial source grids cannot become whole-output fast launches"

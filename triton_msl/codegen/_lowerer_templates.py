@@ -156,7 +156,16 @@ class _TemplateMixin:
         except (TypeError, ValueError, OverflowError):
             return None
 
-    def _record_full_block_tail_bounds(self, info, block_m, block_n, block_k, source, has_m, has_n):
+    def _matmul_needs_grid_plan(self, info):
+        store = self._matmul_output_extent_args()
+        grid = info.get("grid_extent_args", (None, None))
+        return (
+            None in store
+            or info.get("load_domain_args", info.get("load_extent_args")) != store
+            or any(bound is not None and bound != clip for bound, clip in zip(grid, store))
+        )
+
+    def _record_full_block_tail_bounds(self, info, block_m, block_n, block_k, source):
         """Bind an unmasked K-tail template to its runtime allocation proof."""
         roles = self._dot_template_ptr_roles()
         strides = self._inferred_stride_descriptors()
@@ -184,11 +193,17 @@ class _TemplateMixin:
                 "unmasked K-loop pointer ownership is unresolved; mask the K tail", op_name="tt.dot"
             )
         m_ext, n_ext = self._matmul_output_extent_args()
-        m_ref = self._tail_ref(m_ext if m_ext is not None else ("M" if has_m else block_m))
-        n_ref = self._tail_ref(n_ext if n_ext is not None else ("N" if has_n else block_n))
+        grid_plan = self._matmul_needs_grid_plan(info)
+        m_ref = self._tail_ref(m_ext) if m_ext is not None else None
+        n_ref = self._tail_ref(n_ext) if n_ext is not None else None
         k_ref = self._tail_ref(source)
         stride_refs = tuple(self._tail_ref(value) for value in strides)
-        if m_ref is None or n_ref is None or k_ref is None or any(ref is None for ref in stride_refs):
+        if (
+            (m_ext is not None and m_ref is None)
+            or (n_ext is not None and n_ref is None)
+            or k_ref is None
+            or any(ref is None for ref in stride_refs)
+        ):
             from triton_msl.errors import MetalNonRecoverableError
 
             raise MetalNonRecoverableError(
@@ -203,6 +218,37 @@ class _TemplateMixin:
             stride_refs,
             tuple(tuple(widths[role]) for role in ("A", "B", "C")),
         )
+        if grid_plan:
+            grid_refs = tuple(
+                self._tail_ref(v) if v is not None else None for v in info.get("grid_extent_args", (None, None))
+            )
+            load_refs = tuple(
+                self._tail_ref(v) if v is not None else None
+                for v in info.get("load_domain_args", info.get("load_extent_args", (None, None)))
+            )
+            source_extents = (
+                *info.get("grid_extent_args", (None, None)),
+                *info.get("load_domain_args", info.get("load_extent_args", (None, None))),
+            )
+            if any(bound is not None and ref is None for bound, ref in zip(source_extents, (*grid_refs, *load_refs))):
+                from triton_msl.errors import MetalNonRecoverableError
+
+                raise MetalNonRecoverableError(
+                    "matmul source extent cannot be represented by the launch ABI", op_name="tt.dot"
+                )
+            descriptor = (
+                "matmul_grid_storage_v1",
+                *descriptor[1:],
+                (
+                    int(block_m),
+                    int(block_n),
+                    info.get("pid_map"),
+                    tuple(info.get("pid_axes") or (False, False)),
+                    grid_refs,
+                    load_refs,
+                    info.get("k_tail_mode") == "full_blocks",
+                ),
+            )
         previous = getattr(self, "_tail_access_bounds", None)
         if previous is not None and previous != descriptor:
             from triton_msl.errors import MetalNonRecoverableError
@@ -229,6 +275,8 @@ class _TemplateMixin:
             source = k_extent_arg if k_extent_arg is not None else ("K" if has_K else info.get("k_extent_const"))
             source_expr = source_bindings.get(source, str(source)) if str(source).isidentifier() else f"({source})"
             if source is not None and mode == "masked_zero":
+                if self._matmul_needs_grid_plan(info):
+                    self._record_full_block_tail_bounds(info, BLOCK_M, BLOCK_N, BLOCK_K, source)
                 return f"    long _K = (long){source_expr};  // both operands prove a zero-masked K tail"
             if source is not None and mode == "full_blocks":
                 # Padding a dynamic i64 extent with ``BLOCK_K - 1`` in signed MSL
@@ -256,16 +304,7 @@ class _TemplateMixin:
                         "unmasked K-loop full-block replay extent exceeds the signed MSL reduction-index range",
                         op_name="tt.dot",
                     )
-                scalar_names = {a.name for a in self.graph.args if not a.is_ptr}
-                self._record_full_block_tail_bounds(
-                    info,
-                    BLOCK_M,
-                    BLOCK_N,
-                    BLOCK_K,
-                    source,
-                    "M" in scalar_names,
-                    "N" in scalar_names,
-                )
+                self._record_full_block_tail_bounds(info, BLOCK_M, BLOCK_N, BLOCK_K, source)
                 return (
                     f"    long _K = (long){source_expr};\n"
                     f"    long _K_source = _K;\n"
@@ -326,18 +365,22 @@ class _TemplateMixin:
             )
 
     @staticmethod
-    def _pid_map_lines(info, block_m):
+    def _pid_map_lines(info, block_m, source_bindings=None):
         """The tile coordinates, replaying the PROVEN grid mapping (packet 080):
         the 2-D form reads ``program_id(0)`` / ``program_id(1)``; the tutorial's 1-D form
         splits ``program_id(0)`` by ``num_pid_m = cdiv(M, BLOCK_M)`` — rows are the
         remainder, cols the quotient. The N-fastest form reverses those roles
         using the proved N extent. Requires ``_M``/``_N`` to be defined already."""
+        source_bindings = source_bindings or {}
+        grid_m, grid_n = info.get("grid_extent_args", (None, None))
+        grid_m = source_bindings.get(grid_m, grid_m) or "_M"
+        grid_n = source_bindings.get(grid_n, grid_n) or "_N"
         pid_map = info.get("pid_map")
         if isinstance(pid_map, tuple) and len(pid_map) == 2 and pid_map[0] == "flat_n":
             block_n = pid_map[1]
             return [
                 "    // N-fastest source tile mapping; preserve signed i32 add/div/rem",
-                f"    int _npn = as_type<int>((uint)_N + {block_n - 1}u) / {block_n};",
+                f"    int _npn = as_type<int>((uint){grid_n} + {block_n - 1}u) / {block_n};",
                 "    uint pid_m = as_type<uint>(as_type<int>(pid3.x) / _npn);",
                 "    uint pid_n = as_type<uint>(as_type<int>(pid3.x) % _npn);",
             ]
@@ -347,8 +390,8 @@ class _TemplateMixin:
                 "    // grouped source tile mapping; retain the short final group",
                 # arith.addi/muli/subi wrap at i32, while divsi/remsi/minsi
                 # interpret those bits as signed. Do not turn the latter unsigned.
-                f"    int _npm = as_type<int>((uint)_M + {block_m - 1}u) / {block_m};",
-                f"    int _npn = as_type<int>((uint)_N + {block_n - 1}u) / {block_n};",
+                f"    int _npm = as_type<int>((uint){grid_m} + {block_m - 1}u) / {block_m};",
+                f"    int _npn = as_type<int>((uint){grid_n} + {block_n - 1}u) / {block_n};",
                 f"    int _span = as_type<int>(as_type<uint>(_npn) * {group}u);",
                 f"    int _first_m = as_type<int>(as_type<uint>(as_type<int>(pid3.x) / _span) * {group}u);",
                 f"    int _group_m = min(as_type<int>(as_type<uint>(_npm) - as_type<uint>(_first_m)), {group});",
@@ -358,7 +401,7 @@ class _TemplateMixin:
             ]
         if pid_map == "1d":
             return [
-                f"    uint _npm = ((uint)_M + {block_m}u - 1u) / {block_m}u;  // cdiv(M, BLOCK_M), as in the IR",
+                f"    uint _npm = ((uint){grid_m} + {block_m}u - 1u) / {block_m}u;  // cdiv(M, BLOCK_M), as in the IR",
                 "    uint pid_m = pid3.x % _npm;",
                 "    uint pid_n = pid3.x / _npm;",
             ]
@@ -380,6 +423,26 @@ class _TemplateMixin:
             f"pid-tiled matmul template reached without a proven grid mapping (pid_map={pid_map!r}). Refusing.",
             op_name="tt.dot",
         )
+
+    def _matmul_tile_extent_lines(self, info, block_m, block_n, source_bindings):
+        """Exact store/load clips; an absent clip means this program's entire tile.
+
+        Grid coordinates have already been recovered from their own source divisor.
+        Local full-tile endpoints keep every SIMD/scalar branch on the same domain
+        without inventing a global extent from an unrelated scalar's spelling.
+        """
+        store = self._matmul_output_extent_args()
+        loads = info.get("load_domain_args", info.get("load_extent_args", store))
+        result = []
+        for name, bound, base, block in (
+            ("_M", store[0], "row_base", block_m),
+            ("_N", store[1], "col_base", block_n),
+            ("_A_M", loads[0], "row_base", block_m),
+            ("_B_N", loads[1], "col_base", block_n),
+        ):
+            expr = source_bindings[bound] if bound is not None else f"(long){base} + {block}L"
+            result.append(f"    long {name} = (long)({expr});")
+        return result
 
     def _dot_template_ptr_roles(self):
         """A/B/C pointer args for a single-dot matmul template, resolved from
@@ -982,6 +1045,7 @@ class _TemplateMixin:
         scalar_names,
         source_bindings=None,
         indent="        ",
+        preserve_alias=True,
     ):
         """Width-faithful scalar matmul over THIS threadgroup's output tile.
 
@@ -1026,18 +1090,36 @@ class _TemplateMixin:
             source_bindings=source_bindings,
         )
         i = indent
-        return [
-            f"{i}// Layout the simdgroup leading-dimension ABI cannot represent: same tile,",
-            f"{i}// same masks, same K tail, same fp32 accumulator, width-faithful addresses.",
+        cell_loop = [
             f"{i}for (uint _fe = tiitg; _fe < {block_m * block_n}u; _fe += {threads}u) {{",
             f"{i}    uint m = row_base + _fe / {block_n}u;",
             f"{i}    uint n = col_base + _fe % {block_n}u;",
             f"{i}    if ((long)m >= _M || (long)n >= _N) continue;",
+        ]
+        if not preserve_alias:
+            return [
+                *cell_loop,
+                f"{i}    float _facc = 0.0f;",
+                f"{i}    for (long k = 0L; k < _K; k++) {{",
+                f"{i}        _facc += (m < _A_M ? (float){a_name}[{a_addr}] : 0.0f) * (n < _B_N ? (float){b_name}[{b_addr}] : 0.0f);",
+                f"{i}    }}",
+                f"{i}    {c_name}[{c_addr}] = ({out_type})_facc;",
+                f"{i}}}",
+            ]
+        return [
+            f"{i}// Layout the simdgroup leading-dimension ABI cannot represent: same tile,",
+            f"{i}// same masks, same K tail, same fp32 accumulator, width-faithful addresses.",
+            f"{i}float _fallback_cells[{-(-(block_m * block_n) // threads)}];",
+            *cell_loop,
             f"{i}    float _facc = 0.0f;",
             f"{i}    for (long k = 0L; k < _K; k++) {{",
-            f"{i}        _facc += (float){a_name}[{a_addr}] * (float){b_name}[{b_addr}];",
+            f"{i}        _facc += (m < _A_M ? (float){a_name}[{a_addr}] : 0.0f) * (n < _B_N ? (float){b_name}[{b_addr}] : 0.0f);",
             f"{i}    }}",
-            f"{i}    {c_name}[{c_addr}] = ({out_type})_facc;",
+            f"{i}    _fallback_cells[_fe / {threads}u] = _facc;",
+            f"{i}}}",
+            f"{i}threadgroup_barrier(mem_flags::mem_device);",
+            *cell_loop,
+            f"{i}    {c_name}[{c_addr}] = ({out_type})_fallback_cells[_fe / {threads}u];",
             f"{i}}}",
         ]
 
@@ -1063,8 +1145,8 @@ class _TemplateMixin:
             "                    uint m = row_base + _t / 32u;",
             "                    uint n = col_base + _t / 32u;",
             "                    uint k = _kb + _t % 32u;",
-            f"                    _stage_a[(_t / 32u) * 33u + _t % 32u] = m < _M ? (float){a_name}[{a_addr}] : 0.0f;",
-            f"                    _stage_b[(_t % 32u) * 33u + _t / 32u] = n < _N ? (float){b_name}[{b_addr}] : 0.0f;",
+            f"                    _stage_a[(_t / 32u) * 33u + _t % 32u] = m < _A_M ? (float){a_name}[{a_addr}] : 0.0f;",
+            f"                    _stage_b[(_t % 32u) * 33u + _t / 32u] = n < _B_N ? (float){b_name}[{b_addr}] : 0.0f;",
             "                }",
             "                threadgroup_barrier(mem_flags::mem_threadgroup);",
             "                for (uint _kk = 0u; _kk < 32u; _kk += 8u) {",
@@ -1118,8 +1200,8 @@ class _TemplateMixin:
             "                uint m = row_base + _t / 32u;",
             "                uint n = col_base + _t / 32u;",
             "                uint k = _kb + _t % 32u;",
-            f"                _stage_a[(_t / 32u) * 33u + _t % 32u] = m < _M && k < _K ? (float){a_name}[{a_addr}] : 0.0f;",
-            f"                _stage_b[(_t / 32u) * 33u + _t % 32u] = n < _N && k < _K ? (float){b_name}[{b_addr}] : 0.0f;",
+            f"                _stage_a[(_t / 32u) * 33u + _t % 32u] = m < _A_M && k < _K ? (float){a_name}[{a_addr}] : 0.0f;",
+            f"                _stage_b[(_t / 32u) * 33u + _t % 32u] = n < _B_N && k < _K ? (float){b_name}[{b_addr}] : 0.0f;",
             "            }",
             "            threadgroup_barrier(mem_flags::mem_threadgroup);",
             "            for (uint _kk = 0u; _kk < 32u && _kb + _kk < _K; _kk++) {",
@@ -1212,7 +1294,7 @@ class _TemplateMixin:
         has_K = "K" in scalar_arg_map
         has_pid = any(s.op == "tt.get_program_id" for s in self.graph.ops)
         # Shared integrity guard (see _refuse_if_pid_tiles_baked_output).
-        self._refuse_if_pid_tiles_baked_output(has_M, has_N, "strided matmul")
+        # The proven source strides and program mapping determine the whole tile.
 
         # 256 threads per threadgroup; each handles a strided subset of the tile.
         block_size = 256
@@ -1270,23 +1352,13 @@ class _TemplateMixin:
         for arg in all_scalar_args:
             lines.append(_scalar_unpack(arg, source_bindings))
 
-        # Output extents resolved structurally from the store mask (issue #4.5): any arg
-        # name works, so a square N x N matmul clips both axes correctly instead of _M=BLOCK_M.
         m_ext, n_ext = self._matmul_output_extent_args()
-        # Extents are SIGNED and full width (packet 825): the source compares a signed
-        # i32 index against a signed i32 extent, so a negative extent must mask
-        # everything. ``(uint)`` made ``-1`` admit every row; ``(long)`` sign-extends an
-        # i32 extent, keeps an i64 one whole, and leaves the ``uint`` index promoted for
-        # a signed comparison at every ``< _M`` / ``>= _M`` site below.
-        m_ext_expr = source_bindings[m_ext] if m_ext else (source_bindings["M"] if has_M else str(BLOCK_M))
-        lines.append(f"    long _M = (long){m_ext_expr};")
-        n_ext_expr = source_bindings[n_ext] if n_ext else (source_bindings["N"] if has_N else str(BLOCK_N))
-        lines.append(f"    long _N = (long){n_ext_expr};")
         lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N, source_bindings))
         if has_pid:
-            lines.extend(self._pid_map_lines(info, BLOCK_M))
+            lines.extend(self._pid_map_lines(info, BLOCK_M, source_bindings))
         lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
         lines.append(f"    uint col_base = pid_n * {BLOCK_N}u;")
+        lines.extend(self._matmul_tile_extent_lines(info, BLOCK_M, BLOCK_N, source_bindings))
         lines.append("")
         _a_addr = self._width_faithful_addr(
             [("m", a_row), ("k", a_col)],
@@ -1330,12 +1402,12 @@ class _TemplateMixin:
         lines.extend(cell_loop)
         lines.append("        float _sum = 0.0f;")
         lines.append("        for (uint k = 0u; k < _K; k++) {")
-        lines.append(f"            _sum += (float){a_name}[{_a_addr}]")
-        lines.append(f"                  * (float){b_name}[{_b_addr}];")
+        lines.append(f"            _sum += (m < _A_M ? (float){a_name}[{_a_addr}] : 0.0f)")
+        lines.append(f"                  * (n < _B_N ? (float){b_name}[{_b_addr}] : 0.0f);")
         lines.append("        }")
         lines.append(f"        _cell[_e / {block_size}u] = _sum;")
         lines.append("    }")
-        lines.append("    threadgroup_barrier(mem_flags::mem_none);")
+        lines.append("    threadgroup_barrier(mem_flags::mem_device);")
         lines.extend(cell_loop)
         lines.append(f"        {c_name}[{_c_addr}] = ({c_msl})_cell[_e / {block_size}u];")
         lines.append("    }")
@@ -1447,17 +1519,20 @@ class _TemplateMixin:
         ]
         for arg in scalars:
             lines.append(_scalar_unpack(arg, source_bindings))
-        lines.append(f"    long _M = (long){source_bindings[direct_m]}, _N = (long){source_bindings[direct_n]};")
         lines.append(self._k_extent_line(info, block_k, has_K, block_m, block_n, source_bindings))
-        lines.extend(self._pid_map_lines(info, block_m))
+        lines.extend(self._pid_map_lines(info, block_m, source_bindings))
         lines.append(f"    uint row_base = pid_m * {block_m}u;")
         lines.append(f"    uint col_base = pid_n * {block_n}u;")
+        lines.extend(self._matmul_tile_extent_lines(info, block_m, block_n, source_bindings))
         lines.extend(self._twin_surplus_program_lines(m_ext, n_ext))
         lines.append("#if defined(__HAVE_SIMDGROUP_MATRIX__)")
         lines.extend(self._simd_layout_guard_lines(*lds, b_transposed=True))
         # Sub-tile ownership is by simdgroup index, so it needs the 32-lane
         # simdgroup it was laid out for. Both verdicts are uniform.
         lines.append("    _simd_ok = _simd_ok && _sgw == 32u;")
+        lines.append(
+            f"    _simd_ok = _simd_ok && (long)row_base + {block_m}L <= _A_M && (long)col_base + {block_n}L <= _B_N;"
+        )
         lines.append("#else")
         lines.append("    bool _simd_ok = false;")
         lines.append("#endif")
@@ -1473,6 +1548,7 @@ class _TemplateMixin:
                 block_m=block_m,
                 block_n=block_n,
                 threads=width,
+                preserve_alias=False,
                 scalar_names=scalar_names,
                 source_bindings=source_bindings,
             )
@@ -1912,23 +1988,11 @@ class _TemplateMixin:
         # stride 32 instead of 192 -> ~98% mismatch). The full dim is baked
         # in as constexpr and isn't recoverable here, so refuse rather than
         # emit wrong numbers. Shared guard (_refuse_if_pid_tiles_baked_output).
-        self._refuse_if_pid_tiles_baked_output(has_M, has_N, "K-loop matmul")
+        # The proven source strides and program mapping determine the whole tile.
 
-        m_ext, n_ext = self._matmul_output_extent_args()  # structural extents (issue #4.5)
-        if m_ext:
-            lines.append(f"    long _M = (long){source_bindings[m_ext]};")
-        elif has_M:
-            lines.append(f"    long _M = (long){source_bindings['M']};")
-        else:
-            lines.append(f"    long _M = {BLOCK_M};  // no M arg, single tile")
-        if n_ext:
-            lines.append(f"    long _N = (long){source_bindings[n_ext]};")
-        elif has_N:
-            lines.append(f"    long _N = (long){source_bindings['N']};")
-        else:
-            lines.append(f"    long _N = {BLOCK_N};  // no N arg, single tile")
+        m_ext, n_ext = self._matmul_output_extent_args()
         lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N, source_bindings))
-        lines.extend(self._pid_map_lines(info, BLOCK_M))
+        lines.extend(self._pid_map_lines(info, BLOCK_M, source_bindings))
 
         # Leading dims for the simdgroup loads/stores = each operand's ROW stride.
         # This path only handles contiguous-INNER operands (the stride-aware gate routed
@@ -1971,6 +2035,7 @@ class _TemplateMixin:
         lines.append(f"")
         lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
         lines.append(f"    uint col_base = pid_n * {BLOCK_N}u;")
+        lines.extend(self._matmul_tile_extent_lines(info, BLOCK_M, BLOCK_N, source_bindings))
 
         # Packet 834: prove the simdgroup leading-dimension ABI can represent this
         # launch's layout before using it, and take a width-faithful scalar route
@@ -2083,7 +2148,9 @@ class _TemplateMixin:
         # matmuls. Partial/edge tiles (and half output) fall through to the
         # boundary-safe staged path below — direct simdgroup_load can't mask.
         if output_msl_type == "float":
-            lines.append(f"    if (row_base + {BLOCK_M}u <= _M && col_base + {BLOCK_N}u <= _N && (_K % 8u) == 0u) {{")
+            lines.append(
+                f"    if (row_base + {BLOCK_M}u <= _M && col_base + {BLOCK_N}u <= _N && row_base + {BLOCK_M}u <= _A_M && col_base + {BLOCK_N}u <= _B_N && (_K % 8u) == 0u) {{"
+            )
             lines.append(f"        for (uint k = 0u; k < _K; k += 8u) {{")
             for c in range(col_tiles):
                 g = _col_guard(c)
@@ -2102,6 +2169,7 @@ class _TemplateMixin:
                         f"            {pfx}simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});"
                     )
             lines.append(f"        }}")
+            lines.append("        threadgroup_barrier(mem_flags::mem_device);")
             for t in range(n_row_tiles):
                 for c in range(col_tiles):
                     g = _col_guard(c)
@@ -2123,14 +2191,18 @@ class _TemplateMixin:
         lines.append(f"        for (uint i = tiitg; i < {tg_a_size}u; i += 128u) {{")
         lines.append(f"            uint r = i / {STAGE_DEPTH}u, c = i % {STAGE_DEPTH}u;")
         lines.append(f"            uint gr = row_base + r, gc = _k + c;")
-        lines.append(f"            tg_A[i] = (gr < _M && gc < _K) ? {stage_cast}({a_name}[gr * {a_ld} + gc]) : {pad};")
+        lines.append(
+            f"            tg_A[i] = (gr < _A_M && gc < _K) ? {stage_cast}({a_name}[gr * {a_ld} + gc]) : {pad};"
+        )
         lines.append(f"        }}")
 
         # Cooperative masked load B tile (STAGE_DEPTH x BLOCK_N).
         lines.append(f"        for (uint i = tiitg; i < {tg_b_size}u; i += 128u) {{")
         lines.append(f"            uint r = i / {BLOCK_N}u, c = i % {BLOCK_N}u;")
         lines.append(f"            uint gr = _k + r, gc = col_base + c;")
-        lines.append(f"            tg_B[i] = (gr < _K && gc < _N) ? {stage_cast}({b_name}[gr * {b_ld} + gc]) : {pad};")
+        lines.append(
+            f"            tg_B[i] = (gr < _K && gc < _B_N) ? {stage_cast}({b_name}[gr * {b_ld} + gc]) : {pad};"
+        )
         lines.append(f"        }}")
         lines.append(f"        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append(f"")
@@ -2230,15 +2302,15 @@ class _TemplateMixin:
             _direct_m = m_ext or "M"
             _direct_n = n_ext or "N"
             _direct_k = info.get("k_extent_arg") or "K"
-            lines.append(f"    long _M = (long){source_bindings[_direct_m]}, _N = (long){source_bindings[_direct_n]};")
             lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N, source_bindings))
             # Packet 106: the direct variant replays the SAME proven grid mapping as the
             # staged kernel (the tutorial's 1-D split, and tile 0 on an axis the source
             # kernel does not tile) — it used to hard-code ``pid3.x / pid3.y``, so the
             # host path's aligned-shape swap mis-mapped both forms.
-            lines.extend(self._pid_map_lines(info, BLOCK_M))
+            lines.extend(self._pid_map_lines(info, BLOCK_M, source_bindings))
             lines.append(f"    uint row_base = pid_m * {BLOCK_M}u;")
             lines.append(f"    uint col_base = pid_n * {BLOCK_N}u;")
+            lines.extend(self._matmul_tile_extent_lines(info, BLOCK_M, BLOCK_N, source_bindings))
             lines.extend(self._twin_surplus_program_lines(m_ext, n_ext))
             # Packet 834: the direct twin has no staged path to fall through to, so it
             # carries the SAME uniform proof and the SAME scalar fallback. The fallback
@@ -2250,6 +2322,9 @@ class _TemplateMixin:
                     # The sub-tile ownership below is by simdgroup index, so it also
                     # needs the 32-lane simdgroup it was laid out for (uniform too).
                     lines.append("    _simd_ok = _simd_ok && _sgw == 32u;")
+                lines.append(
+                    f"    _simd_ok = _simd_ok && (long)row_base + {BLOCK_M}L <= _A_M && (long)col_base + {BLOCK_N}L <= _B_N;"
+                )
                 lines.append(f"    if (!_simd_ok) {{")
                 lines.extend(
                     self._scalar_tile_fallback_lines(
@@ -2262,6 +2337,7 @@ class _TemplateMixin:
                         block_m=BLOCK_M,
                         block_n=BLOCK_N,
                         threads=_twin_width or 128,
+                        preserve_alias=False,
                         scalar_names=scalar_names,
                         source_bindings=source_bindings,
                     )

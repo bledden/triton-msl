@@ -107,7 +107,7 @@ def run_fused_softmax():
 
 # ===========================================================================
 # Kernel 3 — Tiled matmul (Triton tutorial 03). 2-D program grid, K-loop,
-# masked K-tail loads, and a boundary store mask on the C tile. This is the
+# masked M/N/K-tail loads, and a boundary store mask on the C tile. This is the
 # kernel that most directly leans on the correct-or-refuse masked-store work:
 # on a non-multiple M/N the C-store mask (rm < M) & (rn < N) must be honored
 # exactly, or the padding rows/cols would be clobbered with garbage.
@@ -127,8 +127,8 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
     acc = tl.zeros((BM, BN), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BK)):
         k_mask = offs_k < K - k * BK
-        a = tl.load(a_ptrs, mask=k_mask[None, :], other=0.0)
-        b = tl.load(b_ptrs, mask=k_mask[:, None], other=0.0)
+        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & k_mask[None, :], other=0.0)
+        b = tl.load(b_ptrs, mask=k_mask[:, None] & (offs_n[None, :] < N), other=0.0)
         acc += tl.dot(a, b)
         a_ptrs += BK * sak
         b_ptrs += BK * sbk

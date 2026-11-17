@@ -796,11 +796,61 @@ class _DetectionMixin:
                     None,
                 )
 
-        # The extents the templates clip with (same resolution as _k_extent_line /
-        # _matmul_output_extent_args): structural from the store mask, else by name.
+        # Store clips, load clips and grid divisors are separate source facts.
+        # Scalar spelling cannot establish any of these roles.
         scalar_names = {a.name for a in self.graph.args if not a.is_ptr}
         m_ext, n_ext = self._matmul_output_extent_args()
-        mn_names = (m_ext or ("M" if "M" in scalar_names else None), n_ext or ("N" if "N" in scalar_names else None))
+        mn_names = (m_ext, n_ext)
+        grid_names = [None, None]
+
+        def load_extent(role):
+            load = loads[role]
+            if len(load.operand_ids or []) < 2:
+                return None
+            target = index_ids[role][0 if role == "A" else 1]
+            pending, seen = [load.operand_ids[1]], set()
+            while pending:
+                value = pending.pop()
+                if value in seen:
+                    continue
+                seen.add(value)
+                op = op_by_id.get(value)
+                if op is None:
+                    continue
+                if op.op == "arith.cmpi" and len(op.operand_ids or []) == 2:
+                    index, bound = op.operand_ids
+                    index = self._strip_wrappers(
+                        index, op_by_id, ("tt.expand_dims", "tt.broadcast", "ttg.convert_layout", "tt.reshape")
+                    )
+                    if index == target:
+                        arg = self._trace_bound_arg(bound, op_by_id, arg_by_id)
+                        if arg is not None:
+                            return arg.name
+                else:
+                    pending.extend(op.operand_ids or [])
+            return None
+
+        load_names = (load_extent("A"), load_extent("B"))
+
+        def cdiv_source(value, block):
+            op = op_by_id.get(self._strip_wrappers(value, op_by_id, self._IDX_CASTS))
+            if op is None or not block or len(op.operand_ids or []) != 2:
+                return None
+            numerator, denominator = op.operand_ids
+            if self._const_int(denominator, op_by_id) != block:
+                return None
+            if op.op == "arith.ceildivsi":
+                arg = arg_by_id.get(numerator)
+                return arg.name if arg is not None and not arg.is_ptr else None
+            add = op_by_id.get(numerator)
+            if op.op != "arith.divsi" or add is None or add.op != "arith.addi" or len(add.operand_ids or []) != 2:
+                return None
+            x, y = add.operand_ids
+            for v, c in ((x, y), (y, x)):
+                arg = arg_by_id.get(v)
+                if self._const_int(c, op_by_id) == block - 1 and arg is not None and not arg.is_ptr:
+                    return arg.name
+            return None
 
         # ---- tile index shapes (grid mapping, no residual addends, K form) ----
         # Packet 106 (the 103 class on the bare templates): each tile index must be EXACTLY
@@ -877,13 +927,11 @@ class _DetectionMixin:
                     ):
                         x, y = add.operand_ids
                         if any(
-                            v in arg_by_id
-                            and not arg_by_id[v].is_ptr
-                            and arg_by_id[v].name == mn_names[1]
-                            and self._const_int(c, op_by_id) == bn - 1
+                            v in arg_by_id and not arg_by_id[v].is_ptr and self._const_int(c, op_by_id) == bn - 1
                             for v, c in ((x, y), (y, x))
                         ) and i32_index_dag(d):
                             flat_n_divisor = d
+                            grid_names[1] = cdiv_source(d, bn)
 
         def dot_index_shape(value):
             sh = self._index_shape(value, op_by_id, arg_by_id, iv, iv_scale, allow_grouped=True)
@@ -897,6 +945,7 @@ class _DetectionMixin:
 
         _has_pid = {}
         k_form = {}
+        load_modulo_args = [None, None]
         for role, ax, want_pid, is_k in (
             ("A", 0, 0, False),
             ("A", 1, None, True),
@@ -957,6 +1006,11 @@ class _DetectionMixin:
                         None,
                         None,
                     )
+                # The source wraps this load axis by the very bound that clips
+                # its output axis. Within stored rows/columns the modulo is the
+                # identity; outside, zero-staging is unobservable. Retain this
+                # proof separately from an actual source load mask.
+                load_modulo_args[0 if role == "A" else 1] = want
             if is_k:
                 if sh["pid"] is not None or sh["iv"] > 1:
                     return (f"{role} K index is not 'range' or 'k + range'", set(), None, None)
@@ -1029,37 +1083,18 @@ class _DetectionMixin:
 
             _, group, npm, npn = grouped
             bm, bn = _blk.get(("C", 0)), _blk.get(("C", 1))
-            if None in mn_names or not cdiv_extent(npm, mn_names[0], bm) or not cdiv_extent(npn, mn_names[1], bn):
+            grid_names[:] = (cdiv_source(npm, bm), cdiv_source(npn, bn))
+            if None in grid_names or not cdiv_extent(npm, grid_names[0], bm) or not cdiv_extent(npn, grid_names[1], bn):
                 return ("grouped grid extents do not match the source M/N tiles", set(), None, None)
             pid_map = ("grouped", group, bn)
         elif divs and divs != {None}:
             d = next(iter(divs))
             block_m = opnd_shape[-2] if opnd_shape and len(opnd_shape) >= 2 else None
             dop = op_by_id.get(self._strip_wrappers(d, op_by_id, self._IDX_CASTS))
-            ok = False
-            if dop is not None and block_m:
-                if dop.op == "arith.ceildivsi" and len(dop.operand_ids or []) == 2:
-                    ok = self._const_int(dop.operand_ids[1], op_by_id) == block_m and self._is_k_extent(
-                        dop.operand_ids[0], mn_names[0], op_by_id, arg_by_id
-                    )
-                elif (
-                    dop.op == "arith.divsi"
-                    and len(dop.operand_ids or []) == 2
-                    and self._const_int(dop.operand_ids[1], op_by_id) == block_m
-                ):
-                    num = op_by_id.get(self._strip_wrappers(dop.operand_ids[0], op_by_id, self._IDX_CASTS))
-                    if num is not None and num.op in ("arith.addi", "arith.add") and len(num.operand_ids or []) == 2:
-                        x, y = num.operand_ids
-                        ok = (
-                            self._const_int(y, op_by_id) == block_m - 1
-                            and self._is_k_extent(x, mn_names[0], op_by_id, arg_by_id)
-                        ) or (
-                            self._const_int(x, op_by_id) == block_m - 1
-                            and self._is_k_extent(y, mn_names[0], op_by_id, arg_by_id)
-                        )
-            if not ok or mn_names[0] is None:
+            grid_names[0] = cdiv_source(d, block_m)
+            if grid_names[0] is None:
                 return (
-                    "the 1-D grid split divisor is not cdiv(<the M extent the template clips with>, BLOCK_M)",
+                    "the 1-D grid split divisor is not a source cdiv(runtime extent, BLOCK_M)",
                     set(),
                     None,
                     None,
@@ -1183,7 +1218,7 @@ class _DetectionMixin:
                         k_for,
                         k_extent,
                         index_ids,
-                        mn_names,
+                        load_names,
                         op_by_id,
                         arg_by_id,
                         iv_scale,
@@ -1297,7 +1332,20 @@ class _DetectionMixin:
                 )
         if (pid_map == "1d" or isinstance(pid_map, tuple)) and pid_axes != (True, True):
             return ("a 1-D grid split needs program_id on both tile axes", set(), None, None)
-        return (None, proven, (a_arg, b_arg, c_arg), pid_map, pid_axes, k_tail_mode)
+        return (
+            None,
+            proven,
+            (a_arg, b_arg, c_arg),
+            pid_map,
+            pid_axes,
+            k_tail_mode,
+            {
+                "grid_extent_args": tuple(grid_names),
+                "load_extent_args": load_names,
+                "load_modulo_args": tuple(load_modulo_args),
+                "load_domain_args": tuple(mask or mod for mask, mod in zip(load_names, load_modulo_args)),
+            },
+        )
 
     def _resolve_load_store_ptr_roles(self, load_ssa, store_ssa):
         """Resolve one-load/one-store template roles from pointer dataflow.
@@ -2849,6 +2897,7 @@ class _DetectionMixin:
                 # a proven mapping does not reach a template).
                 "pid_map": _pid_map,
                 "pid_axes": _pid_axes,
+                **(_vp[6] if len(_vp) > 6 else {}),
                 "BLOCK_M": BLOCK_M,
                 "BLOCK_N": BLOCK_N,
                 "BLOCK_K": BLOCK_K,
@@ -3164,6 +3213,7 @@ class _DetectionMixin:
         return {
             "pid_map": _pid_map,
             "pid_axes": _pid_axes,
+            **(_vp[6] if len(_vp) > 6 else {}),
             "M": M,
             "N": N,
             "K": K,
