@@ -431,6 +431,15 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   exact classification, finite controls and order-robust bounds. Welford m2 checks are
   admissibility checks, not an exact non-finite recurrence oracle or exhaustive coverage.
 
+- **In-place outputs:** a matmul whose output overlaps an operand keeps the source's
+  load-then-store order by leaving the replacement template; the quantized routes and the
+  attention kernels refuse such a launch by name, except the wide biased row route, which keeps
+  the order behind a barrier and computes in place. A generic kernel that permutes a tensor
+  in place within one program (reverse, transpose, shift) is neither detected nor refused: lanes
+  load and store their own elements with no barrier between the program's loads and stores, and
+  one-program in-place reverse and transpose launches were wrong in 100 of 100 launches on an
+  M4 Max at 256 elements and above. A kernel in which each lane loads and stores the same cell
+  is unaffected. Write a permuted result to a separate tensor.
 - **Scratch aliasing:** the conservative 529 allocator and 527 store fixes have bounded focused
   evidence and passing combined 589 gates. Cross-vendor/artifact evidence remains separate.
 

@@ -820,6 +820,9 @@ def emit_msl(mod, metadata, options):
             metadata["quant_matmul"] = getattr(lowerer, "_quant_matmul", None)
             # FlashAttention zero-copy-dispatch descriptor; None for other kernels.
             metadata["flash_attention"] = getattr(lowerer, "_flash_attention", None)
+            # Outputs of an attention-shaped kernel, for the launcher's overlap refusal.
+            # Outside the packed descriptor: it grants no route, it only refuses.
+            metadata["attention_outputs"] = getattr(lowerer, "_attention_outputs", None)
             # Batched-dot host-roundtrip address-bounds descriptor; None for
             # other kernels. Runtime strides must stay inside each view mirror.
             # Mutually exclusive address-plan union, sealed by the packed

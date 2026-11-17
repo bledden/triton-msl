@@ -1058,6 +1058,13 @@ class MetalLauncher:
 
         # Kernel name for the compile_shader fast-path MSL lookup (Phase 4).
         self.kernel_name = getattr(metadata, "name", None)
+        # Stored arguments of an attention-shaped kernel (see __call__); None otherwise.
+        _stored = getattr(metadata, "attention_outputs", None)
+        self._attention_outputs = (
+            tuple(_stored)
+            if type(_stored) in (list, tuple) and _stored and all(type(i) is int and i >= 0 for i in _stored)
+            else None
+        )
         # Resolve the MSL source by the kernel's content hash (msl_hash), NOT by
         # name: inductor reuses kernel names across compiled graphs in one
         # process, so a name lookup can return a DIFFERENT kernel's MSL and the
@@ -1139,6 +1146,25 @@ class MetalLauncher:
             from triton_msl.errors import MetalNonRecoverableError
 
             raise MetalNonRecoverableError("source signature: output index is outside the constexpr-free argument list")
+        _attention_outputs = getattr(self, "_attention_outputs", None)
+        if _attention_outputs is not None:
+            # A source program loads before it stores, so an output that shares memory
+            # with an input is defined there. Only the wide-row replay keeps that order
+            # (two other shapes computed from overwritten inputs) and it publishes no
+            # outputs, so refuse the rest before any hook.
+            from triton_msl.autotuning._operand_overlap import overlapping_output
+
+            _pair = overlapping_output(flat_args, _attention_outputs)
+            if _pair is not None:
+                from triton_msl.errors import MetalNonRecoverableError
+
+                _output, _other = (self.arg_names[flat_origin[i]] for i in _pair)
+                raise MetalNonRecoverableError(
+                    f"attention kernel: output argument {_output} shares memory with argument {_other}. "
+                    "The attention lowering does not keep the source's load-then-store order for an output "
+                    "that overlaps another tensor argument, so the result could be computed from overwritten "
+                    "inputs. Write the output to a separate tensor."
+                )
         import ctypes
 
         if launch_enter_hook:
@@ -1514,8 +1540,11 @@ class MetalLauncher:
                 "launch grid differs from the kernel's program mapping (the quantized "
                 "template computes the FULL output, so it stands in only for a launch of "
                 "exactly cdiv(M, BM) x cdiv(N, BN) programs; a partial or padded grid is "
-                "refused). Pad the dims / launch the full grid, or dequantize the weight "
-                "on the host and pass a float/half weight to a normal matmul."
+                "refused), or its output overlaps one of its operands in memory (the "
+                "template stores finished tiles while others still load, so an in-place "
+                "output is refused). Pad the dims / launch the full grid / write to a "
+                "separate output, or dequantize the weight on the host and pass a "
+                "float/half weight to a normal matmul."
             )
 
         # MLA (nope/rope) attention is compile_shader-only: the 'mla' descriptor's

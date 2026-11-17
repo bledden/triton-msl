@@ -25,7 +25,8 @@ class _Library:
 
 def _case(family, monkeypatch):
     # CPU buffers/metadata only. The library call below records effects; no GPU work.
-    t = torch.zeros(4096)
+    # The output is its own buffer: a replacement declines an output that overlaps an operand.
+    t, out = torch.zeros(4096), torch.zeros(4096)
     if family == "mla":
 
         class View:
@@ -51,29 +52,29 @@ def _case(family, monkeypatch):
     if family == "matmul":
         desc = ("source", 3, 4, 5, 32, 128, None, None, (), ("2d", 32, 128, True, True))
         return lambda rt, hook, **kw: dispatch_fast_matmul(
-            rt, desc, [t, t, t, 32, 128, 32], grid=(1, 1, 1), launch_exit_hook=hook, **kw
+            rt, desc, [t, t, out, 32, 128, 32], grid=(1, 1, 1), launch_exit_hook=hook, **kw
         )
     if family == "splitk":
         # Uses actual split-K allocation on CPU and both real helper dispatch sites.
         monkeypatch.setenv("TRITON_MSL_MATMUL_AUTOTUNE", "0")
         desc = ("source", 3, 4, 5, 32, 32, "float", "float", (), ("2d", 32, 32, True, True))
         return lambda rt, hook, **kw: dispatch_fast_matmul(
-            rt, desc, [t, t, t, 32, 32, 2048], grid=(1, 1, 1), launch_exit_hook=hook, **kw
+            rt, desc, [t, t, out, 32, 32, 2048], grid=(1, 1, 1), launch_exit_hook=hook, **kw
         )
     if family == "int8":
         desc = ("source", 5, 6, 7, 32, 32, (), (32, 32))
         return lambda rt, hook, **kw: dispatch_quant_matmul(
-            rt, desc, [t, t, t, t, t, 32, 32, 32], grid=(1, 1, 1), launch_exit_hook=hook, **kw
+            rt, desc, [t, t, out, t, t, 32, 32, 32], grid=(1, 1, 1), launch_exit_hook=hook, **kw
         )
     if family == "gemv":
         desc = ("gemv", "source", 0, 1, 2, 3, 4, 5, 6, (), 32)
         return lambda rt, hook, **kw: dispatch_quant_matmul(
-            rt, desc, [t, t, t, t, t, 32, 32], grid=(1, 1, 1), launch_exit_hook=hook, **kw
+            rt, desc, [t, t, out, t, t, 32, 32], grid=(1, 1, 1), launch_exit_hook=hook, **kw
         )
     if family == "int4_gemv":
         desc = ("gemv_int4", "source", 0, 1, 2, 3, 4, 5, 6, None, None, None, 32, 32)
         return lambda rt, hook, **kw: dispatch_quant_matmul(
-            rt, desc, [t, t, t, t, t, 32, 32], grid=(1, 1, 1), launch_exit_hook=hook, **kw
+            rt, desc, [t, t, out, t, t, 32, 32], grid=(1, 1, 1), launch_exit_hook=hook, **kw
         )
     if family.startswith("pergroup"):
         tag = "pergroup_int4" if "int4" in family else "pergroup_int8"

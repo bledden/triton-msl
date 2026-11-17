@@ -2327,11 +2327,18 @@ def make_flash_attention_kernel_simdgroup(
     # key its own loop visits, and no other. This tile may span several source
     # iterations: a key past the source's last iteration is no key at all (-inf), not
     # a sentinel. Equal widths visit the same keys and keep the original spelling.
+    # A source block of several tiles reaches past this template's last partial tile: the
+    # tail then walks whole tiles up to the source's last key, each a padding key.
     _unvisited_ni = _NI
+    _sentinel_tiles = None
     if sentinel_kv_block is not None:
         if not runtime_neg_inf or not (bias or mask):
             raise ValueError("a sentinel KV block requires the biased runtime-sentinel route")
-        if sentinel_kv_block != BLOCK_N:
+        if type(sentinel_kv_block) is int and sentinel_kv_block > BLOCK_N and sentinel_kv_block % BLOCK_N == 0:
+            if causal or source_causal_stop is not None:
+                raise ValueError("a sentinel KV block of several tiles requires a non-causal source")
+            _sentinel_tiles = sentinel_kv_block
+        elif sentinel_kv_block != BLOCK_N:
             _unvisited_ni = (
                 "("
                 + _fa_source_tail_guard(sentinel_kv_block, BLOCK_N)
@@ -2554,6 +2561,16 @@ def make_flash_attention_kernel_simdgroup(
         causal_break = causal_tail_guard = ""
         if source_causal_stop:
             _source_stop_decl = "\n    const uint source_kv_stop = min(q_start + BM, N_CTX); // source KV loop stop"
+    _tail_open = (
+        f"    if (n_full * BN < {_stop}{causal_tail_guard}) {{          // one partial tail block (masked staging)\n"
+        "        uint kv_start = n_full * BN;"
+    )
+    if _sentinel_tiles is not None:
+        _tail_open = (
+            f"    const uint source_kv_end = ((N_CTX + {_sentinel_tiles - 1}u) / {_sentinel_tiles}u) * {_sentinel_tiles}u;\n"
+            "    for (uint kv_start = n_full * BN; kv_start < source_kv_end; kv_start += BN) {"
+            "  // tail tiles to the source's last key (masked staging)"
+        )
 
     head = f"""#include <metal_stdlib>
 #include <metal_simdgroup_matrix>
@@ -2597,8 +2614,7 @@ kernel void {kernel_name}(
         uint kv_start = kv_block * BN;
 {causal_break}{block_full}
     }}
-    if (n_full * BN < {_stop}{causal_tail_guard}) {{          // one partial tail block (masked staging)
-        uint kv_start = n_full * BN;
+{_tail_open}
 {block_tail}
     }}
 {lse_store}
@@ -4061,6 +4077,11 @@ kernel void {kernel_name}(
     }}
 }}
 """
+
+
+def flash_attention_tiled_bytes(head_dim, block_m, block_n, Dc):
+    """Threadgroup memory the tiled maker declares: scores, accumulator, K/V slice, row max and sum."""
+    return 4 * (block_m * block_n + block_m * head_dim + max(block_m, block_n) * Dc + 2 * block_m)
 
 
 def flash_attention_tiled_threads(block_m, block_n):
@@ -5776,18 +5797,35 @@ def _varlen_kmax_expr(maxs):
 def _varlen_length(cu, unsigned=False, wide=False):
     """One sequence's length from its cumulative lengths, in the signedness the source compares it.
 
-    The source subtracts two entries and masks ``index < length``. Compared signed, cumulative
-    lengths that decrease give a negative length, which selects no row and no key. Compared
-    unsigned (uint32 or uint64 tensors) the difference wraps to a length above every launched
-    index. A 64-bit length (``wide``) that does not fit the template's 32 bits is likewise above
-    every launched index, so it saturates rather than keeping its low word.
+    The source subtracts two entries in the tensor's own width, where the difference wraps,
+    and masks ``index < length``. Compared signed, a wrapped difference that is zero or
+    negative selects no row and no key, whichever entry is the larger: two entries further
+    apart than the width holds wrap to a negative length too. Compared unsigned (uint32 or
+    uint64 tensors) the difference wraps to a length above every launched index. A 64-bit
+    length (``wide``) that does not fit the template's 32 bits is likewise above every
+    launched index, so it saturates rather than keeping its low word.
     """
-    length = f"({cu}[bb + 1u] - {cu}[bb])"
     if unsigned:
+        length = f"({cu}[bb + 1u] - {cu}[bb])"
         return f"uint(min(ulong{length}, ulong(0xFFFFFFFFu)))" if wide else f"uint{length}"
+    # Subtract unsigned: the wrap is defined there, and reinterpreting it gives the source's sign.
     if wide:
-        length = f"(min({length}, long(0x7FFFFFFF)))"
-    return f"(({cu}[bb + 1u] > {cu}[bb]) ? uint{length} : 0u)"
+        return f"uint(clamp(long(ulong({cu}[bb + 1u]) - ulong({cu}[bb])), long(0), long(0x7FFFFFFF)))"
+    return f"uint(max(int(uint({cu}[bb + 1u]) - uint({cu}[bb])), 0))"
+
+
+def _varlen_start(name, cu, unsigned=False):
+    """Declare one sequence's first row from its cumulative lengths.
+
+    The source adds the entry to the row index and multiplies by the row stride in signed
+    arithmetic, so a negative entry addresses rows before the pointer (a view into a larger
+    storage). A signed entry therefore stays signed and 64 bits wide here: every address
+    formed from it is exact, where 32 unsigned bits wrapped a negative start to an index
+    about 2**32 elements past the tensor. An unsigned entry is a plain row count.
+    """
+    if unsigned:
+        return f"uint {name} = uint({cu}[bb]);"
+    return f"long {name} = long({cu}[bb]);"
 
 
 def make_varlen_flash_attention(
@@ -5883,10 +5921,10 @@ kernel void {kernel_name}(
     uint m_block = tgpos.x, bh = tgpos.y;
     uint bb = bh / nheads, h = bh % nheads;
 
-    uint q_start = uint({b["CUQ"]}[bb]);
+    {_varlen_start("q_start", b["CUQ"], b.get("unsigned_q", False))}
     uint seqlen_q = {_varlen_length(b["CUQ"], b.get("unsigned_q", False), b.get("wide_q", False))};
     if (m_block * BM >= seqlen_q) return;
-    uint k_start = uint({b["CUK"]}[bb]);
+    {_varlen_start("k_start", b["CUK"], b.get("unsigned_k", False))}
     uint seqlen_k = {_varlen_length(b["CUK"], b.get("unsigned_k", False), b.get("wide_k", False))};
 
     uint row = lid;
@@ -6046,8 +6084,10 @@ kernel void {kernel_name}(
 
     uint m_block = tgpos.x, bh = tgpos.y;
     uint bb = bh / nheads, h = bh % nheads;
-    uint q_start = uint({b["CUQ"]}[bb]);   uint seqlen_q = {_varlen_length(b["CUQ"], b.get("unsigned_q", False), b.get("wide_q", False))};
-    uint k_start = uint({b["CUK"]}[bb]);   uint seqlen_k = {_varlen_length(b["CUK"], b.get("unsigned_k", False), b.get("wide_k", False))};
+    {_varlen_start("q_start", b["CUQ"], b.get("unsigned_q", False))}
+    uint seqlen_q = {_varlen_length(b["CUQ"], b.get("unsigned_q", False), b.get("wide_q", False))};
+    {_varlen_start("k_start", b["CUK"], b.get("unsigned_k", False))}
+    uint seqlen_k = {_varlen_length(b["CUK"], b.get("unsigned_k", False), b.get("wide_k", False))};
     if (m_block * BM >= seqlen_q) return;
     uint kmax = {kmax_expr};
 

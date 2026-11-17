@@ -17,6 +17,19 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 - Complete all single-program operand reads before ordinary contiguous or scalar
   fallback stores can replace aliased input cells. The direct entry continues to
   require an output whose storage no input shares.
+- Keep the source's load-then-store order when a matmul output overlaps an
+  operand. One program loads every operand before it stores, so a
+  single-program launch that writes its result over `A` or `B` is defined. The
+  fast replacement spreads that program over several threadgroups, which
+  store finished tiles while others still load: a 256 by 256 in-place product
+  was wrong in 4 or 5 of 300 launches on an M4 Max. A launch whose output
+  bytes intersect an operand's now stays on the compiled entry or the host
+  path. The quantized replacements (int8 and int4 GEMM and GEMV) had the same
+  race, 7 to 11 of 200 launches for an in-place GEMV; they have no compiled
+  entry to fall back to, so an output that overlaps any operand now refuses
+  by name. This is a change for an in-place quantized launch that ran
+  before. Views of one storage that do not intersect keep the replacement on
+  every route.
 - Offer the fast matmul replacement only where it is that source domain. It
   computes exactly `args[3]` by `args[4]`, so a store clip, load clip, load
   modulus or flat-grid divisor that is a separate argument now stays on the
@@ -95,10 +108,20 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   subtracts two cumulative lengths and masks `index < length`. Cumulative
   lengths that decrease give a negative length, which selects no row and no
   key; the template read it as a large unsigned length, attended every key
-  and stored every row. A length from an unsigned tensor wraps, as it does in
-  the source, and a 64-bit length above 32 bits selects every launched index
-  rather than keeping its low word. A kernel that compares one length signed
-  in one mask and unsigned in another refuses.
+  and stored every row. The same holds for a difference that overflows the
+  tensor's width (int32 entries of opposite sign near the ends of the range):
+  the source's wrapped difference is negative, and the template now takes the
+  sign of that wrapped difference instead of comparing the two entries. A
+  length from an unsigned tensor wraps, as it does in the source. A 64-bit
+  length above 32 bits selects every launched index rather than keeping its
+  low word. A kernel that compares one length signed in one mask and unsigned
+  in another refuses.
+- Address a varlen sequence from a signed start. The source adds the
+  cumulative entry to the row index in signed arithmetic, so a negative entry
+  addresses rows before the tensor's first row, which is defined on a view
+  into a larger storage. The templates held the start in 32 unsigned bits and
+  addressed about 2**32 elements past the view. A signed entry now stays
+  signed.
 - Store the biased log-sum-exp at its tensor's element type. The templates
   wrote it through a 32-bit float pointer, so a half or bfloat16 tensor
   received four bytes for every two it holds: wrong values, and writes past
@@ -152,29 +175,80 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   for every operand row past the sequence length. The loaded key mask may
   supply any constant: a key past the sequence gets the sentinel score
   whatever the mask holds there.
-- On the biased backward routes, prove the axis of the loaded bias and key
-  mask. A bias tile loaded transposed (`Bias[key, row]`) and a key mask
-  broadcast along the rows ran as the canonical kernel; on a whole tile the
-  two have the same shape. Both now refuse.
-- Count only the keys the source loop visits on the biased fp32 route with a
-  finite runtime sentinel. The template walks 64 keys at a time. Over a
-  source loop of 32 keys and an odd number of key tiles it gave the 32 keys
-  past the last source iteration the sentinel score, where the source never
-  visits them: a row with every key masked, or a sentinel that is not very
-  negative, returned other values. Those keys now score negative infinity.
-  A source block that does not divide 64 runs on the tiled template, which
-  walks the source's own block.
+- On the biased backward routes, prove the loaded bias and key mask along
+  the axes their addresses walk. A bias tile loaded transposed
+  (`Bias[key, row]`), a bias load masked by the key boundary on its rows or
+  by a key bound one short, and a key-mask load masked by the query-row
+  boundary or by a key bound one short ran as the canonical kernel. With a
+  sequence length that is not a whole number of tiles they returned other
+  gradients; on whole tiles every such mask is all true and the result
+  agreed. Each now refuses, whatever the length. A key mask broadcast along
+  the rows in the score select already refused.
+- Count the keys the source loop visits on the biased fp32 route, and no
+  others. The template walks 64 keys at a time. Over a source loop of 32 keys
+  and an odd number of key tiles it gave the 32 keys past the last source
+  iteration the sentinel score, where the source never visits them. With a
+  finite runtime sentinel, a row with every key masked, or a sentinel that is
+  not very negative, returned other values. Those keys now score negative
+  infinity. A source block of 128 keys or more visits whole 64-key tiles past
+  the template's last one, each a padding key that carries the sentinel; the
+  template now walks them. Every power-of-two key block therefore stays on
+  this template.
+- Fit the tiled biased template into Metal's 32 KB of threadgroup memory. A
+  half or bfloat16 source whose key block is not 64, and any source with
+  strides the 64-key template cannot take, runs on the tiled template, which
+  walks the source's own block. Its scores and accumulator are fixed by the
+  source; the staged head-dim slice now narrows until the working set fits.
+  bfloat16 at head dim 64 or 128 with a 64-key block, and half types at head
+  dim 32 or 64 with a 128-key block, failed at pipeline creation and now
+  compute.
+  Where no slice fits (head dim 128 with a 128-key block, a 256-key block)
+  the kernel refuses by name with the size it would need.
 - Accept a boundary written bound first (`N > m_idxs`, `seqlen_k > kn`) on the
   load, store and select masks of the biased and varlen routes and on the
   load masks of the MLA route. These spellings refused before. The MLA causal
   select written bound first still refuses.
 - Name the proof that failed when a softmax kernel with several dots refuses
-  for unresolved roles. The message ended at "refusing rather than guess"; it
-  now adds the unproved field.
+  after its four pointer roles resolved. The message ended at "refusing
+  rather than guess"; it now adds the unproved field. A kernel refused before
+  its roles resolve keeps the shorter message, which names no attention role.
 - Refuse by name a dense attention kernel whose K, V and Out tensors do not
   share one float element type, or whose Q is bfloat beside half tiles. These
   reached the Metal compiler and failed there. A Q of another float type that
   the template casts still runs.
+
+### Outputs that share memory with an input
+
+- Refuse an attention launch whose output shares memory with another tensor
+  argument. A source program loads its rows, keys and values before it
+  stores, so such a launch is defined in the source. The attention lowerings
+  do not keep that order, and two shapes returned other values in 40 of 40
+  launches on an M4 Max. A dense
+  head dim 64 float32 launch with a 64-row block and the output over the keys
+  or the values runs as two 32-row passes, and rows 32 and up were computed
+  from rows the first pass had stored. The dQ backward template stores delta
+  before it loads the log-sum-exp, so with delta over that tensor every dQ
+  cell was wrong. Only the wide biased row route proves the order: it runs one
+  threadgroup per program with a barrier between its last load and its
+  stores, and it keeps computing in place. Every other forward attention
+  kernel (two or more dots, an exponential and a max) and every backward
+  attention template now refuses, by argument name and before anything runs,
+  when a tensor it stores through overlaps another tensor argument. This is a
+  change for in-place launches that computed before, such as the output over
+  the queries: of 230 in-place probe cases that ran on those routes, 208
+  returned the source's result and now refuse with the 22 that did not.
+  Inputs that share memory with each other, such as one tensor as query, key
+  and value, are not compared and still compute. Views of one storage that do
+  not intersect still compute. A two-dot kernel that is not attention stays
+  on the generic lowering and is not refused.
+- Known limitation, not changed here: a generic kernel that permutes a tensor
+  in place within one program. Each lane loads and stores its own elements
+  with no barrier between the program's loads and its stores, so a lane can
+  load a cell another lane has already stored. On an M4 Max a one-program
+  in-place reverse was wrong in 100 of 100 launches at 256 elements and
+  above, an in-place transpose at 16 by 16 and above, and an in-place shift
+  in some launches. An in-place kernel in which each lane loads and stores
+  the same cell is unaffected. Write a permuted result to a separate tensor.
 
 ### Compatibility
 

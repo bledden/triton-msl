@@ -24,6 +24,7 @@ _VARIANT_MSL_CACHE = {}
 _SPLITK_MSL = None
 
 
+from triton_msl.autotuning._operand_overlap import output_overlaps_operand
 from triton_msl.autotuning._submission import SubmissionState
 
 
@@ -226,6 +227,14 @@ def dispatch_fast_matmul(
                 return False
             if actual != expected:
                 return False
+
+        # OUTPUT ALIAS: the replacement's threadgroups store finished tiles while others
+        # still load. A source program loads every operand before it stores, so an output
+        # that overlaps an operand is defined there and a race here. The row-major
+        # contract above gives each tensor's exact extent; an overlap keeps the compiled
+        # entry, which preserves the source order. Also gates split-K below.
+        if output_overlaps_operand(kargs, 2, M * N, {0: M * K, 1: K * N}, exact=True):
+            return False
 
         # --- SPLIT-K for skinny/deep fp32 (occupancy-starved) ---
         # A few output tiles → a few threadgroups → the serial K-loop is ~0.1-0.4x

@@ -24,6 +24,7 @@ import math as _math
 _BK = 32
 
 
+from triton_msl.autotuning._operand_overlap import output_overlaps_operand
 from triton_msl.autotuning._submission import SubmissionState
 
 
@@ -171,6 +172,9 @@ def dispatch_quant_matmul(
         # LAUNCH CONTRACT (packet 105 B): descriptor[7] = the source (BM, BN).
         if not _gemm_grid_ok(grid, descriptor[7] if len(descriptor) > 7 else None, M, N):
             return False
+        # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles load.
+        if output_overlaps_operand(kargs, 2, M * N, {0: M * K}):
+            return False
 
         n_groups = _math.ceil(M / tile_m) * _math.ceil(N / tile_n)
         lib = rt.get_library(fast_msl)
@@ -229,6 +233,9 @@ def _dispatch_int4_gemv(
             return False
         if not _gemv_grid_ok(grid, descriptor[13] if len(descriptor) > 13 else None, N):
             return False
+        # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles load.
+        if output_overlaps_operand(kargs, out_idx, N, {in_idx: K}):
+            return False
         gsz = 256
         threads = ((N * 32 + gsz - 1) // gsz) * gsz
         buffers = [kargs[in_idx], kargs[w_idx], kargs[out_idx], kargs[scale_idx], kargs[zero_idx], K, N]
@@ -275,6 +282,9 @@ def _dispatch_sym_int8(
         if not (M > 0 and N > 0 and K > 0):
             return False
         if not _gemm_grid_ok(grid, descriptor[6] if len(descriptor) > 6 else None, M, N):  # packet 105 B
+            return False
+        # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles load.
+        if output_overlaps_operand(kargs, 2, 0, {}):
             return False
         _s = lambda i: (int(kargs[i]) if i >= 0 else 1)
         scale = kargs[3]
@@ -340,6 +350,9 @@ def _dispatch_pergroup_int8(
             return False
         # LAUNCH CONTRACT (packet 105 B) — checked BEFORE the fast sub-path selection below.
         if not _gemm_grid_ok(grid, descriptor[11] if len(descriptor) > 11 else None, M, N):
+            return False
+        # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles load.
+        if output_overlaps_operand(kargs, 2, 0, {}):
             return False
         # a stride index of -1 means the stride was folded to a compile-time 1.
         strides = [(int(kargs[i]) if i >= 0 else 1) for i in sidx]
@@ -472,6 +485,9 @@ def _dispatch_gemv(
             return False
         # LAUNCH CONTRACT (packet 105 B): descriptor[10] = the source BN.
         if not _gemv_grid_ok(grid, descriptor[10] if len(descriptor) > 10 else None, N):
+            return False
+        # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles load.
+        if output_overlaps_operand(kargs, out_idx, N, {in_idx: K}):
             return False
 
         group = 256

@@ -309,6 +309,9 @@ class GenericLowerer(
         # metadata. Routes the 2-D-grid FA kernel through compile_shader (its
         # 2-D grid blocks the generic 1-D fast-path). None for every other kernel.
         self._flash_attention = None
+        # Argument positions an attention-shaped kernel stores through. The launcher
+        # refuses such a launch when one of them overlaps another tensor argument.
+        self._attention_outputs = None
         self._argument_abi = None
         self._tail_access_bounds = None
         self.options = options
@@ -914,6 +917,7 @@ class GenericLowerer(
         if self._assert_plan is not None:
             # Templates do not replay assertions. The proved generic path below
             # owns both the rendezvous and the sealed host-result check.
+            self._attention_outputs = self._attention_store_arguments(forward_only=True)
             return self._lower_generic()
 
         # Integrity prescan (never silent-wrong): FlashAttention-style kernels
@@ -950,6 +954,7 @@ class GenericLowerer(
         if len(_fa_dots) >= 2 and _fa_has_exp and not _fa_has_max:
             _bwd_info = self._detect_biased_fa_backward()
             if _bwd_info is not None:
+                self._attention_outputs = self._attention_store_arguments()
                 return self._lower_biased_fa_backward(_bwd_info)
 
         # SYSTEMIC anti-silent-wrong gate for the remaining matmul/forward-FA
@@ -962,6 +967,7 @@ class GenericLowerer(
         self._refuse_nontrivial_template_output_mask()
 
         if len(_fa_dots) >= 2 and _fa_has_exp and _fa_has_max:
+            self._attention_outputs = self._attention_store_arguments()
             # VARLEN (packed cu_seqlens) FA-2: the dominant real-world FA shape (flash-attn /
             # vLLM), which the dense [Z,H,N,D] templates can't express and the generic path
             # runs ~0.04 TF. Route the tiled varlen template FIRST — its 4-float + 2-int-ptr +
@@ -1004,6 +1010,11 @@ class GenericLowerer(
             if _wide_row_plan is not None:
                 self._source_biased_replay = True
                 scalar = _lower_wide_biased_rows(self, _wide_row_plan)
+                # One threadgroup per program with a barrier between its last load and
+                # its stores, and the cooperative candidate checks overlap itself: an
+                # output over an input keeps the source's result (pinned in
+                # tests/test_attention_capability.py), so there is nothing to refuse.
+                self._attention_outputs = None
                 if getattr(self.options, "experimental_cooperative_attention", False) is True:
                     from ._cooperative_attention import build_candidate, make_descriptor
 
@@ -3104,6 +3115,47 @@ class GenericLowerer(
             return False
 
         return _check_ops(self.graph.ops)
+
+    def _attention_store_arguments(self, forward_only=False):
+        """Argument positions an attention kernel stores through, for the launch refusal.
+
+        OUTPUT ALIAS: a source program loads its rows, keys and values before it stores,
+        so one whose output shares memory with an input is defined. The attention
+        lowerings do not keep that order (a 64-row program runs as two 32-row passes;
+        the dQ backward template stores delta before it loads lse) and only the
+        wide-row replay proves it. Every other forward attention kernel (two or more
+        dots, an exponential and a max) and every backward template route publishes
+        these positions, and the launcher refuses one that overlaps another tensor
+        argument. A two-dot kernel that is neither stays on the generic lowering, which
+        stages every dot operand behind a barrier, and publishes nothing.
+
+        ``forward_only`` is for the caller that has not tested the shape. None when a
+        store's pointer does not trace to an argument: with no output to compare, the
+        refusal would have to cover inputs that share memory, and attention over one
+        tensor as query, key and value is ordinary.
+        """
+
+        def walk(ops):
+            for ssa in ops:
+                yield ssa
+                yield from walk(ssa.region_ops or ())
+                yield from walk(ssa.else_ops or ())
+
+        ops = list(walk(self.graph.ops))
+        if forward_only and (
+            sum(ssa.op == "tt.dot" for ssa in ops) < 2
+            or not any(_op_is_exp(ssa.op) for ssa in ops)
+            or not any("max" in (ssa.op or "") for ssa in ops)
+        ):
+            return None
+        stored = set()
+        for ssa in ops:
+            if ssa.op in ("tt.store", "tt.atomic_rmw") and ssa.operand_ids:
+                arg = self._trace_ptr_source(ssa.operand_ids[0])
+                if arg is None:
+                    return None
+                stored.add(arg.id)
+        return [index for index, arg in enumerate(self.graph.args) if arg.id in stored] or None
 
     def _prescan_stores(self):
         """Scan ops to find which pointer args are stored to (outputs).
@@ -7749,11 +7801,16 @@ class GenericLowerer(
 
         # Past this point the kernel IS an FA pattern: any unresolved field is
         # a hard refusal, never a guess.
+        # Before the pointer roles resolve, a kernel that is not attention at all can reach a
+        # refusal: its message must not name an attention role. After, the field is a proof
+        # about a kernel with attention's roles and is worth naming.
+        roles_resolved = False
+
         def _refuse(field):
             if unresolved_subject is not None:
                 raise MetalNonRecoverableError(
                     f"{unresolved_subject}: required pointer/stride roles could not be "
-                    f"resolved; refusing rather than guess (unproved: {field})"
+                    "resolved; refusing rather than guess" + (f" (unproved: {field})" if roles_resolved else "")
                 )
             raise MetalNonRecoverableError(
                 f"FlashAttention recognized but {field} could not be resolved; refusing rather than guess"
@@ -8041,6 +8098,7 @@ class GenericLowerer(
                 _refuse("six distinct MLA pointer roles (q_nope,q_rope,k_nope,k_rope,v,out)")
         elif len({q_idx, k_idx, v_idx, o_idx}) != 4:
             _refuse("four distinct pointer roles")
+        roles_resolved = True
 
         # GQA/MQA GUARD (correct-or-refuse): the FA templates index K/V with the SAME head
         # offset as Q (h = zh % H applied to all three). Grouped-/multi-query attention
@@ -12469,6 +12527,7 @@ class GenericLowerer(
         from triton_msl.codegen.msl_types import triton_type_to_msl
         from triton_msl.codegen._msl_templates import (
             make_flash_attention_kernel_tiled,
+            flash_attention_tiled_bytes,
             flash_attention_tiled_threads,
         )
 
@@ -12730,9 +12789,10 @@ class GenericLowerer(
             # blocks: exact only when the source's kv block is 64. Otherwise the tiled maker
             # (which takes block_n from the source) replays it exactly — slower, correct.
             and (not _rp or block_n == 64)
-            # A 64-wide tile covers whole source iterations only when the source's key block
-            # divides it; the keys of a partial last tile are then told apart in the template.
-            and 64 % block_n == 0
+            # A 64-wide tile lines up with the source's iterations when the source's key block
+            # divides it or is a whole number of tiles; the template then tells the padding
+            # keys the source visits from the ones it never reaches.
+            and (64 % block_n == 0 or block_n % 64 == 0)
         )
         if simd_eligible:
             from triton_msl.codegen._msl_templates import make_flash_attention_kernel_simdgroup
@@ -12763,6 +12823,16 @@ class GenericLowerer(
             self.effective_block_size = 256
         else:
             Dc = head_dim if head_dim <= 64 else 64
+            # The tiled working set must fit Metal's 32 KB of threadgroup memory. Scores and
+            # the accumulator are fixed by the source; only the staged head-dim slice narrows.
+            while flash_attention_tiled_bytes(head_dim, block_m, block_n, Dc) > 32768 and Dc % 16 == 0:
+                Dc //= 2
+            if flash_attention_tiled_bytes(head_dim, block_m, block_n, Dc) > 32768:
+                raise MetalNonRecoverableError(
+                    f"biased FlashAttention: head_dim {head_dim} with a {block_m} x {block_n} block needs "
+                    f"at least {flash_attention_tiled_bytes(head_dim, block_m, block_n, Dc)} bytes of threadgroup "
+                    "memory on the tiled template, above Metal's 32768; refusing."
+                )
             # Only the source-proved triangle family from the paired K-layout
             # screen opts in. Other tiled users (including dense attention) keep
             # the original layout. This changes no source admission or launch ABI.
