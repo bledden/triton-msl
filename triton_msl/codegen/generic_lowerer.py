@@ -12,6 +12,7 @@ Metal-specific considerations:
 - All FP16/BF16 computation done in float, cast at load/store
 """
 
+import math
 import os
 import re
 from typing import Any, Dict, List, Optional
@@ -7262,10 +7263,11 @@ class GenericLowerer(
                 return None
 
         # MAX_SEQLEN BOUND (re-review 2026-08-25 V1): the kernel's kv loop runs to its own
-        # ``max_seqlen`` ARG (masking kn < seqlen_k), i.e. it attends min(seqlen_k,
-        # max_seqlen) keys — but the templates looped to seqlen_k unconditionally, silently
-        # attending MORE keys whenever max_seqlen < seqlen_k (err ~0.6-0.8). Resolve the
-        # scf.for upper bound to its arg so the templates can clamp; unresolvable -> refuse.
+        # ``max_seqlen`` ARG (masking kn < seqlen_k), i.e. it attends the keys below seqlen_k
+        # in its range(0, max_seqlen, 32) tiles — but the templates looped to seqlen_k
+        # unconditionally, silently attending MORE keys whenever max_seqlen < seqlen_k (err
+        # ~0.6-0.8). Resolve the scf.for upper bound to its arg so the templates can clamp
+        # (to max_seqlen rounded up to a whole tile: _varlen_kmax_expr); unresolvable -> refuse.
         _ms_arg = None
         for _sf in ops:
             if _sf.op != "scf.for" or len(_sf.operand_ids or []) < 2:
@@ -7453,6 +7455,67 @@ class GenericLowerer(
             "seqlen_k_id": _seqlen_id_of[cuk_idx],
         }
 
+    def _witness_varlen_flash_attention(self, info: dict) -> dict:
+        """Prove every source address of a varlen kernel is the template's, and bind the strides.
+
+        Template coordinates (``make_varlen_flash_attention`` and its MMA form), with
+        ``b = program id 1 / H`` and ``h = program id 1 % H``: Q and Out are addressed at
+        ``(cu_q[b] + program id 0 * 32 + row) * st + h * sh + d * sk``; K and V at
+        ``(cu_k[b] + loop start + row) * st + h * sh + d * sk`` over ``range(0, max_seqlen, 32)``;
+        the tables are read at ``b`` and ``b + 1`` only. The detector's stride lists are
+        positional ([token, head, depth]); see ``_address_witness``.
+        """
+        from triton_msl.codegen._address_witness import WitnessRefusal, prove_template_addresses
+
+        roles, heads, bound_arg = info["roles"], info["H"], info["max_seqlen"]
+        head_dim = int(info["head_dim"])
+        if type(heads) is not int or type(bound_arg) is not int:
+            raise MetalNonRecoverableError(
+                "varlen FlashAttention: the head count or the key-loop bound is not an argument; refusing."
+            )
+        batch, head = ("div", 1, ("arg", heads)), ("rem", 1, ("arg", heads))
+
+        def _start(table):
+            return lambda env: ("load", table, env.atom(batch))
+
+        def _entries(env):
+            return (env.atom(batch), env.atom(batch) + 1)
+
+        def _rows(atom):
+            return lambda env: [env.atom(atom) * 32 + i for i in range(32)]
+
+        def _role(key, name, access, table, rows):
+            return {
+                "key": key,
+                "name": name,
+                "arg": roles[key],
+                "kind": access,
+                "strides": list(info[key]),
+                "shape": (32, head_dim),
+                "scalars": [(0, _start(table)), (1, head)],
+                "axes": [(0, 0, rows), (2, 1, lambda env: list(range(head_dim)))],
+            }
+
+        spec = [
+            _role("q", "Q", "load", roles["cuq"], _rows(("pid", 0))),
+            _role("k", "K", "load", roles["cuk"], _rows(("t",))),
+            _role("v", "V", "load", roles["cuk"], _rows(("t",))),
+            _role("o", "Out", "store", roles["cuq"], _rows(("pid", 0))),
+            {"name": "cu_seqlens_q", "arg": roles["cuq"], "table": _entries},
+            {"name": "cu_seqlens_k", "arg": roles["cuk"], "table": _entries},
+        ]
+        try:
+            bound = prove_template_addresses(self.graph, spec, (bound_arg, 32))
+        except WitnessRefusal as exc:
+            raise MetalNonRecoverableError(
+                f"varlen FlashAttention: {exc}. The template replays its own coordinates and cannot "
+                "prove they are the source's; refusing."
+            ) from None
+        proved = dict(info)
+        for role in spec[:4]:
+            proved[role["key"]] = bound[role["name"]]
+        return proved
+
     def _lower_varlen_flash_attention(self, info: dict) -> str:
         """Emit the tiled varlen FA-2 template (make_varlen_flash_attention) for a detected
         packed-cu_seqlens kernel + set the native-2-D-grid ('flash_attention', msl, BM=32)
@@ -7491,6 +7554,7 @@ class GenericLowerer(
             kv_cols=32,
             extra_stores=[(roles["o"], "Out", ("Q",), True)],
         )
+        info = self._witness_varlen_flash_attention(info)
         role_of_idx = {
             roles["q"]: "Q",
             roles["k"]: "K",
@@ -11324,6 +11388,107 @@ class GenericLowerer(
             "rounding": _ds.get("rounding") or {},  # packet 174
         }
 
+    def _witness_biased_fa_backward(self, info: dict, kind: str) -> dict:
+        """Prove every source address of a backward kernel is the template's, and bind the strides.
+
+        The detector reads each stride by its position in the address chain. That fixes neither
+        the index a stride multiplies nor the program id a batch stride follows nor the loop
+        advance, and the template replays its own coordinates regardless. ``_address_witness``
+        evaluates the source addresses exactly and compares them with the template's formula
+        below; the returned stride lists are bound by value, so a respelled address is bound to
+        the strides it uses.
+
+        Template coordinates (``_msl_templates.make_flash_attention_bwd_*``): slots are the
+        stride lists' positions. kv / q: [0] follows program id 2 (the mask: program id 2 over
+        H), [1] program id 1, then the tile axes; the grid tile is program id 0 and the other
+        axis is the loop. b: [0] follows program id 2, [1] the i loop, then j and k from program
+        ids 0 and 1.
+        """
+        from triton_msl.errors import MetalNonRecoverableError
+        from triton_msl.codegen._address_witness import WitnessRefusal, prove_template_addresses
+
+        C1 = "c1"
+        block_j, block_k, head_dim = int(info["block_j"]), int(info["block_k"]), int(info["head_dim"])
+        n_ctx, h_div = info["N_CTX"], info["H"]
+        if n_ctx != C1 and type(n_ctx) is not int:
+            raise MetalNonRecoverableError("biased-FA backward: the sequence length is not an argument; refusing.")
+        if h_div != C1 and type(h_div) is not int:
+            raise MetalNonRecoverableError("biased-FA backward: the mask batch divisor is not an argument; refusing.")
+        iteration, looped = ("t",), n_ctx != C1
+
+        def _tile(atom, block):
+            return lambda env: [env.atom(atom) * block + i for i in range(block)]
+
+        if kind == "kv":
+            coords = {"k": (_tile(("pid", 0), block_k), block_k), "j": (_tile(iteration, block_j), block_j)}
+            loop_step = block_j
+        elif kind == "q":
+            coords = {"j": (_tile(("pid", 0), block_j), block_j), "k": (_tile(iteration, block_k), block_k)}
+            loop_step = block_k
+        else:
+            coords = {"j": (_tile(("pid", 0), block_j), block_j), "k": (_tile(("pid", 1), block_k), block_k)}
+            loop_step = 1
+        coords["d"] = (lambda env: list(range(head_dim)), head_dim)
+        mask_batch = ("pid", 2) if h_div == C1 else ("div", 2, ("arg", h_div))
+        if kind == "b":
+            inner = [(1, iteration)] if looped else []
+            batch, mask_scalars, plane = [(0, ("pid", 2))] + inner, [(0, mask_batch)] + inner, [(0, ("pid", 2))]
+        else:
+            batch = plane = [(0, ("pid", 2)), (1, ("pid", 1))]
+            mask_scalars = [(0, mask_batch), (1, ("pid", 1))]
+
+        def _role(key, name, access, scalars, layout):
+            if any(axis not in coords for axis in layout):
+                raise MetalNonRecoverableError(f"biased-FA backward: unproved {name} orientation; refusing.")
+            return {
+                "key": key,
+                "name": name,
+                "arg": info[key][0],
+                "kind": access,
+                "strides": list(info[key][1]),
+                "shape": tuple(coords[axis][1] for axis in layout),
+                "scalars": scalars,
+                "axes": [(2 + i, i, coords[axis][0]) for i, axis in enumerate(layout)],
+            }
+
+        roles = [
+            _role("q", "Q", "load", batch, ("j", "d")),
+            _role("k", "K", "load", batch, tuple(info.get("k_orient") or ())),
+            _role("v", "V", "load", batch, tuple(info.get("v_orient") or ())),
+            _role("do", "dO", "load", batch, ("j", "d")),
+            _role("bias", "Bias", "load", plane, ("j", "k")),
+            _role("mask", "Mask", "load", mask_scalars, ("k",)),
+            _role("lse", "Lse", "load", batch, ("j",)),
+        ]
+        if kind == "kv":
+            roles += [
+                _role("delta", "Delta", "load", batch, ("j",)),
+                _role("dk", "DK", "store", batch, ("k", "d")),
+                _role("dv", "DV", "store", batch, ("k", "d")),
+            ]
+        elif kind == "q":
+            roles += [
+                _role("o", "O", "load", batch, ("j", "d")),
+                _role("delta", "Delta", "store", batch, ("j",)),
+                _role("dq", "DQ", "store", batch, ("j", "d")),
+            ]
+        else:
+            roles += [
+                _role("delta", "Delta", "load", batch, ("j",)),
+                _role("db", "DB", "store", plane, ("j", "k")),
+            ]
+        try:
+            bound = prove_template_addresses(self.graph, roles, (n_ctx, loop_step) if looped else None)
+        except WitnessRefusal as exc:
+            raise MetalNonRecoverableError(
+                f"biased-FA backward: {exc}. The template replays its own coordinates and cannot "
+                "prove they are the source's; refusing."
+            ) from None
+        proved = dict(info)
+        for role in roles:
+            proved[role["key"]] = (info[role["key"]][0], bound[role["name"]])
+        return proved
+
     def _lower_biased_fa_backward(self, info: dict) -> str:
         """Emit the biased-FA backward MSL for a detected backward kernel + set the
         compile_shader dispatch descriptor. Mirrors the forward biased lowering's
@@ -11368,6 +11533,7 @@ class GenericLowerer(
         for i, a in enumerate(args):
             if i != a.index:
                 raise MetalNonRecoverableError("biased-FA backward arg list not densely indexed; refusing.")
+        info = self._witness_biased_fa_backward(info, kind)
 
         if kind == "kv":
             role_name = {
@@ -11717,6 +11883,362 @@ class GenericLowerer(
         self._prescan_stores()
         return msl
 
+    def _fa_unmasked_store_rows(self, row_bound, block_m) -> None:
+        """Carry an unmasked FlashAttention store's row domain to the launcher.
+
+        Every FlashAttention template stores only the rows below the sequence length. A
+        masked source store was proved to be exactly that boundary. An UNMASKED one stores
+        every row of every launched tile, which is the same set only when no launched tile
+        crosses the length, and that is known only from the runtime length and grid. The
+        launcher refuses the launch that would lose rows (``fa_whole_row_tiles_v1``).
+        """
+        from triton_msl.errors import MetalNonRecoverableError
+
+        def _walk(ops):
+            for op in ops:
+                yield op
+                yield from _walk(op.region_ops or [])
+                yield from _walk(op.else_ops or [])
+
+        if all(len(op.operand_ids or []) >= 3 for op in _walk(self.graph.ops) if op.op == "tt.store"):
+            return
+        if isinstance(row_bound, bool) or not isinstance(row_bound, int):
+            raise MetalNonRecoverableError(
+                "FlashAttention with an unmasked store and no runtime sequence-length argument: the "
+                "template stores only the rows below the sequence length and cannot prove the launch "
+                "stores whole tiles. Mask the store with the row boundary. Refusing.",
+                op_name="tt.store",
+            )
+        self._tail_access_bounds = ("fa_whole_row_tiles_v1", int(row_bound), int(block_m))
+
+    def _prove_biased_fa_addresses(self, info: dict) -> dict:
+        """Tie every address the biased/triangle template reconstructs to the source.
+
+        The detector only EXTRACTS strides, by their position in the address
+        expression. It never looks at the index a stride multiplies, the batch
+        coordinate, or what a loop-carried pointer advances by, so before this proof
+        ``(m_idxs + 1)[:, None] * q_sm``, ``(z + 1) * q_sz``, ``kt_ptrs += 2 * BLOCK_N *
+        k_sn`` and the reordered but equivalent ``d_idxs[None, :] * q_sk + m_idxs[:,
+        None] * q_sm`` all ran the template: the first three as another program, the
+        last with its strides bound to the wrong axes.
+
+        Each access must be exactly ``base + batch terms + one term per tile axis``:
+
+        * rows   ``program_id(0) * BLOCK_M + arange(0, BLOCK_M)``
+        * keys   ``start_n + arange(0, BLOCK_N)``, or ``arange(0, BLOCK_N)`` on a pointer
+          the loop carries and advances by exactly ``BLOCK_N * <that term's stride>``
+        * depth  ``arange(0, HEAD_DIM)``
+        * batch  the template's own decode of the grid (``program_id(1) // H`` and
+          ``% H``; ``program_id(2)`` and ``program_id(1)`` on a 3-D grid)
+
+        each multiplied by a scalar argument or by nothing. The strides returned are
+        read from the proved terms, in the detector's slot order, so a respelled
+        address binds the stride of the axis it varies along and not the stride of
+        the term the source happened to add first.
+        """
+        from triton_msl.errors import MetalNonRecoverableError
+
+        C0, C1 = "c0", "c1"
+        casts = self._IDX_CASTS
+        layout = {"tt.broadcast", "ttg.convert_layout"}
+        grid_3d = bool(info.get("grid_3d"))
+        block_m, block_n, head_dim = int(info["block_m"]), int(info["block_n"]), int(info["head_dim"])
+        has_mask = bool(info.get("has_mask", info.get("mask") is not None))
+
+        def _refuse(role, why):
+            raise MetalNonRecoverableError(
+                f"Biased/triangle FlashAttention {role} address is not exactly the template's ({why}). "
+                "The template reconstructs every address from the tile coordinates, so a source "
+                "address it cannot reproduce would be replaced by a different one. Refusing.",
+                op_name="tt.addptr",
+            )
+
+        def _walk(ops):
+            for o in ops:
+                yield o
+                if getattr(o, "region_ops", None):
+                    yield from _walk(o.region_ops)
+                if getattr(o, "else_ops", None):
+                    yield from _walk(o.else_ops)
+
+        ops = list(_walk(self.graph.ops))
+        by_id = {}
+        for o in ops:
+            by_id[o.id] = o
+            for rid in getattr(o, "result_ids", None) or []:
+                by_id[rid] = o
+        arg_by_id = {a.id: a for a in self.graph.args}
+
+        def _scalar_arg(vid):
+            a = arg_by_id.get(self._strip_wrappers(vid, by_id, casts))
+            return a.index if a is not None and not a.is_ptr else None
+
+        def _pid_axis(vid):
+            o = by_id.get(self._strip_wrappers(vid, by_id, casts))
+            if o is None or o.op not in self._PID_OPS:
+                return None
+            try:
+                return int(str(o.attrs.get("axis", o.attrs.get("dim", 0))))
+            except (TypeError, ValueError):
+                return None
+
+        # ---- the one KV loop: range(0, N_CTX, BLOCK_N), and what each carried pointer advances by
+        loops = [o for o in ops if o.op == "scf.for"]
+        if len(loops) != 1:
+            _refuse("K/V", f"expected the one key/value loop, found {len(loops)}")
+        loop = loops[0]
+        bids = list((loop.attrs or {}).get("block_arg_ids", []))
+        lo_hi_step = list(loop.operand_ids or [])[:3]
+        if len(lo_hi_step) != 3 or not bids:
+            _refuse("K/V", "the key/value loop bounds could not be read")
+        iv = bids[0]
+        if self._const_int(self._strip_wrappers(lo_hi_step[0], by_id, casts), by_id) != 0:
+            _refuse("K/V", "the key/value loop does not start at key 0")
+        if self._const_int(self._strip_wrappers(lo_hi_step[2], by_id, casts), by_id) != block_n:
+            _refuse("K/V", f"the key/value loop does not step by BLOCK_N={block_n}")
+        if _scalar_arg(lo_hi_step[1]) != info.get("N_CTX"):
+            _refuse("K/V", "the key/value loop does not end at the sequence-length argument")
+        yields = [o for o in (loop.region_ops or []) if o.op == "scf.yield"]
+        if len(yields) != 1:
+            _refuse("K/V", "the key/value loop does not have exactly one yield")
+        carried = {}
+        for i, init in enumerate(list(loop.operand_ids or [])[3:]):
+            if i + 1 < len(bids) and i < len(yields[0].operand_ids or []):
+                carried[bids[i + 1]] = (init, yields[0].operand_ids[i])
+
+        def _increment(role, bid):
+            """The stride a carried pointer advances by BLOCK_N of each iteration."""
+            nxt = by_id.get(carried[bid][1])
+            if nxt is None or nxt.op != "tt.addptr" or len(nxt.operand_ids or []) != 2 or nxt.operand_ids[0] != bid:
+                _refuse(role, "the loop-carried pointer is not advanced by one addition per iteration")
+            inc = self._strip_wrappers(nxt.operand_ids[1], by_id, layout | {"tt.splat"} | casts)
+            if self._const_int(inc, by_id) == block_n:
+                return C1
+            mul = by_id.get(inc)
+            if mul is not None and mul.op in ("arith.muli", "arith.mul") and len(mul.operand_ids or []) == 2:
+                for x, y in (mul.operand_ids, mul.operand_ids[::-1]):
+                    stride = _scalar_arg(y)
+                    if stride is not None and self._const_int(self._strip_wrappers(x, by_id, casts), by_id) == block_n:
+                        return stride
+            _refuse(role, f"the loop-carried pointer does not advance by BLOCK_N={block_n} keys")
+
+        def _address(role, access, ptr_index):
+            """(offsets, carried block arg or None) of an access rooted at ``ptr_index``."""
+            offsets, bid, cur = [], None, access.operand_ids[0]
+            for _ in range(64):
+                arg = arg_by_id.get(cur)
+                if arg is not None:
+                    if not arg.is_ptr or arg.index != ptr_index:
+                        _refuse(role, f"the address is rooted at argument '{arg.name}'")
+                    return offsets, bid
+                if cur in carried:
+                    if bid is not None:
+                        _refuse(role, "the address crosses more than one loop-carried pointer")
+                    bid, cur = cur, carried[cur][0]
+                    continue
+                o = by_id.get(cur)
+                if o is not None and o.op in (layout | {"tt.splat"}) and len(o.operand_ids or []) == 1:
+                    cur = o.operand_ids[0]
+                elif o is not None and o.op == "tt.addptr" and len(o.operand_ids or []) == 2:
+                    offsets.append(o.operand_ids[1])
+                    cur = o.operand_ids[0]
+                else:
+                    _refuse(role, f"'{o.op if o is not None else 'an unresolved value'}' in the pointer chain")
+            _refuse(role, "the pointer chain exceeds the proved depth")
+
+        def _has_lift(vid, depth=0):
+            o = by_id.get(vid)
+            if o is None or depth > 24:
+                return o is not None
+            return o.op == "tt.expand_dims" or any(_has_lift(x, depth + 1) for x in (o.operand_ids or []))
+
+        def _tile_term(role, vid):
+            """A tensor offset -> (matrix axis it varies along or None, stride, index facts)."""
+            axis, stride, cur = None, None, vid
+            for _ in range(16):
+                cur = self._strip_wrappers(cur, by_id, layout | casts)
+                o = by_id.get(cur)
+                if o is None:
+                    _refuse(role, "an unresolved tile offset")
+                if o.op == "tt.expand_dims" and len(o.operand_ids or []) == 1:
+                    if axis is not None:
+                        _refuse(role, "a tile index is lifted more than once")
+                    try:
+                        # x[:, None] is expand_dims axis 1: the vector then varies along axis 0
+                        axis = 1 - int(str(o.attrs.get("axis")))
+                    except (TypeError, ValueError):
+                        _refuse(role, "a tile index lift has no readable axis")
+                    if axis not in (0, 1):
+                        _refuse(role, "a tile index is lifted outside the 2-D tile")
+                    cur = o.operand_ids[0]
+                    continue
+                if o.op in ("arith.muli", "arith.mul") and len(o.operand_ids or []) == 2 and stride is None:
+                    found = None
+                    for x, y in (o.operand_ids, o.operand_ids[::-1]):
+                        sp = by_id.get(self._strip_wrappers(y, by_id, layout | casts))
+                        if sp is not None and sp.op == "tt.splat" and len(sp.operand_ids or []) == 1:
+                            arg = _scalar_arg(sp.operand_ids[0])
+                            if arg is not None:
+                                found = (arg, x)
+                                break
+                    if found is not None:
+                        stride, cur = found
+                        continue
+                break
+            if _has_lift(cur):
+                _refuse(role, "a tile index is lifted more than once")
+            sh = self._index_shape(cur, by_id, arg_by_id, iv, 1)
+            if sh["bad"] is not None or sh["mod"] is not None or sh["range"] != 1 or sh["bounds"] is None:
+                _refuse(role, f"a tile offset is not a plain tile index ({sh['bad'] or 'no single arange'})")
+            return axis, (C1 if stride is None else stride), sh
+
+        def _is_row(sh):
+            return (
+                sh["bounds"] == (0, block_m)
+                and sh["iv"] == 0
+                and sh["pid"] == 0
+                and sh["pid_div"] is None
+                and sh["coef"] == block_m
+            )
+
+        def _is_key(sh, carried_ptr):
+            return sh["bounds"] == (0, block_n) and sh["pid"] is None and sh["iv"] == (0 if carried_ptr else 1)
+
+        def _is_depth(sh):
+            return sh["bounds"] == (0, head_dim) and sh["pid"] is None and sh["iv"] == 0
+
+        h_arg = info.get("H")
+        proved_mask_div = None
+
+        def _batch_coordinate(role, vid):
+            """A scalar batch coordinate -> its template slot (0 = z, 1 = h), else None."""
+            nonlocal proved_mask_div
+            axis = _pid_axis(vid)
+            if grid_3d:
+                # template: h = program_id(1), z = program_id(2)
+                if axis == 2:
+                    return 0
+                if axis == 1:
+                    return 1
+            elif h_arg == C1:
+                # template: z = program_id(1) / 1, h = 0
+                if axis == 1:
+                    return 0
+            o = by_id.get(self._strip_wrappers(vid, by_id, casts))
+            if o is None or len(o.operand_ids or []) != 2:
+                return None
+            divisor = _scalar_arg(o.operand_ids[1])
+            if divisor is None:
+                return None
+            if grid_3d:
+                # only the shared mask is indexed by (z / divisor)
+                if role == "Mask" and o.op in ("arith.divsi", "arith.divui") and _pid_axis(o.operand_ids[0]) == 2:
+                    proved_mask_div = divisor
+                    return 0
+                return None
+            if h_arg == C1 or divisor != h_arg or _pid_axis(o.operand_ids[0]) != 1:
+                return None
+            if o.op in ("arith.divsi", "arith.divui"):
+                return 0
+            if o.op in ("arith.remsi", "arith.remui"):
+                return 1
+            return None
+
+        def _batch_term(role, vid):
+            vid = self._strip_wrappers(vid, by_id, casts)
+            if vid in arg_by_id:
+                _refuse(role, f"a runtime offset '{arg_by_id[vid].name}'")
+            o = by_id.get(vid)
+            if o is not None and o.op in ("arith.muli", "arith.mul") and len(o.operand_ids or []) == 2:
+                for x, y in (o.operand_ids, o.operand_ids[::-1]):
+                    stride = _scalar_arg(y)
+                    slot = _batch_coordinate(role, x) if stride is not None else None
+                    if slot is not None:
+                        return slot, stride
+            slot = _batch_coordinate(role, vid)
+            if slot is None:
+                _refuse(role, "a batch offset is not the template's batch or head coordinate times a stride")
+            return slot, C1
+
+        # role -> (pointer arg, {matrix axis or None: index kind}, loop-carried allowed)
+        layouts = {
+            "Q": (info["q"], {0: "row", 1: "depth"}, False),
+            "K": (info["k"], {0: "depth", 1: "key"}, True),
+            "V": (info["v"], {0: "key", 1: "depth"}, True),
+            "Out": (info["out"], {0: "row", 1: "depth"}, False),
+            "Bias": (info["bias"], {0: "row", 1: "key"}, True),
+            "Lse": (info["lse"], {None: "row"}, False),
+        }
+        if has_mask:
+            layouts["Mask"] = (info["mask"], {None: "key"}, True)
+        stores = {"Out", "Lse"}
+        # 2-D with H specialized to one: h is identically 0, so the detector's 1 is kept
+        absent = C1 if (not grid_3d and h_arg == C1) else C0
+
+        def _rooted_at(access, limit=64):
+            cur = access.operand_ids[0]
+            for _ in range(limit):
+                if cur in arg_by_id:
+                    return arg_by_id[cur].index
+                if cur in carried:
+                    cur = carried[cur][0]
+                    continue
+                o = by_id.get(cur)
+                if o is None or not o.operand_ids or o.op not in (layout | {"tt.splat", "tt.addptr"}):
+                    return None
+                cur = o.operand_ids[0]
+            return None
+
+        proved = {}
+        for role, (ptr_index, axes, may_carry) in layouts.items():
+            want = "tt.store" if role in stores else "tt.load"
+            found = [o for o in ops if o.op == want and o.operand_ids and _rooted_at(o) == ptr_index]
+            if len(found) != 1:
+                _refuse(role, f"expected exactly one {want.split('.')[-1]}, found {len(found)}")
+            offsets, bid = _address(role, found[0], ptr_index)
+            if bid is not None and not may_carry:
+                _refuse(role, "the pointer is carried through the key/value loop")
+            batch, tile = {}, {}
+            for off in offsets:
+                o = by_id.get(off)
+                if o is not None and o.is_tensor:
+                    axis, stride, sh = _tile_term(role, off)
+                    kind = axes.get(axis) if axis in axes else None
+                    ok = (
+                        (kind == "row" and _is_row(sh))
+                        or (kind == "key" and _is_key(sh, bid is not None))
+                        or (kind == "depth" and _is_depth(sh))
+                    )
+                    if not ok or axis in tile:
+                        _refuse(role, "a tile offset is not this role's row, key or head-dim index on its own axis")
+                    tile[axis] = stride
+                else:
+                    slot, stride = _batch_term(role, off)
+                    if slot in batch:
+                        _refuse(role, "a batch coordinate is added more than once")
+                    batch[slot] = stride
+            if set(tile) != set(axes):
+                _refuse(role, "the address does not index every axis of the tile exactly once")
+            if bid is not None:
+                key_axis = next(a for a, kind in axes.items() if kind == "key")
+                if _increment(role, bid) != tile[key_axis]:
+                    _refuse(role, "the loop-carried pointer does not advance by BLOCK_N of its own key stride")
+            proved[role] = [batch.get(0, C0), batch.get(1, absent)] + [tile[a] for a in (0, 1, None) if a in tile]
+
+        out = {
+            "q_strides": proved["Q"],
+            "k_strides": proved["K"],
+            "v_strides": proved["V"],
+            "o_strides": proved["Out"],
+            "b_strides": proved["Bias"],
+            "lse_strides": proved["Lse"],
+        }
+        if has_mask:
+            out["m_strides"] = proved["Mask"]
+            if grid_3d:
+                out["mask_div"] = proved_mask_div
+        return out
+
     def _lower_biased_flash_attention_template(self, info: dict) -> str:
         """Emit the biased/triangle-attention tiled FA MSL for a detected biased-FA
         kernel (``info`` from ``_detect_biased_flash_attention``) + set the
@@ -11786,7 +12308,10 @@ class GenericLowerer(
             q_rows=block_m,
             kv_cols=block_n,
             extra_loads=[(info["bias"], "Bias", ("Q", "K"))] + ([(info["mask"], "Mask", ("K",))] if has_mask else []),
-            extra_stores=[(info["lse"], "Lse", ("Q",), False)],
+            # A masked store must carry exactly the row boundary. An unmasked one also
+            # writes the rows past N_CTX, which the template does not: the launcher is
+            # handed that condition below (_fa_unmasked_store_rows).
+            extra_stores=[(info["out"], "Out", ("Q",), False), (info["lse"], "Lse", ("Q",), False)],
             # Packet 114: the VALUES — Bias as the dot accumulator, Mask as the select
             # predicate, both selects with ONE sentinel (reported in _bout), the Lse value.
             biased={
@@ -11797,6 +12322,10 @@ class GenericLowerer(
             },
             biased_out=(_bout := {}),
         )
+        # Every stride below is the one the PROVED address multiplies on that axis, not
+        # the detector's positional guess.
+        info = {**info, **self._prove_biased_fa_addresses(info)}
+        self._fa_unmasked_store_rows(info.get("N_CTX"), block_m)
         role_name = {
             info["q"]: "Q",
             info["k"]: "K",
@@ -12054,6 +12583,70 @@ class GenericLowerer(
         self._prescan_stores()
         return msl
 
+    def _witness_mla_attention(self, info: dict) -> dict:
+        """Prove every source address of an MLA kernel is the dispatcher's view, and bind the strides.
+
+        The dispatcher (``_dispatch_mla``) rebuilds each role as a ``[Z, H, N_CTX, width]``
+        view from the role's four strides, with ``z = program id 1 / H`` and
+        ``h = program id 1 % H``: the query roles and Out are addressed at
+        ``z * sz + h * sh + (program id 0 * 32 + row) * sm + d * sk``, the key roles and V at
+        ``z * sz + h * sh + (loop start + row) * sn + d * sk`` over ``range(0, N_CTX, BN)``.
+        The detector's stride lists are positional; see ``_address_witness``.
+        """
+        from triton_msl.codegen._address_witness import WitnessRefusal, prove_template_addresses
+
+        heads, n_ctx, block_n = info["H"], info.get("N_CTX"), info.get("block_n")
+        if type(n_ctx) is not int or type(block_n) is not int or (heads != "c1" and type(heads) is not int):
+            raise MetalNonRecoverableError(
+                "MLA attention: the head count, the sequence length or the key tile is not an "
+                "argument the dispatcher can resolve; refusing.",
+                op_name="tt.dot",
+            )
+        if heads == "c1":
+            scalars = [(0, ("pid", 1))]
+        else:
+            scalars = [(0, ("div", 1, ("arg", heads))), (1, ("rem", 1, ("arg", heads)))]
+
+        def _rows(atom, block):
+            return lambda env: [env.atom(atom) * block + i for i in range(block)]
+
+        def _role(group, key, name, arg, access, rows, block, width):
+            return {
+                "group": group,
+                "key": key,
+                "name": name,
+                "arg": arg,
+                "kind": access,
+                "strides": list(info[group][key]),
+                "shape": (block, int(width)),
+                "scalars": scalars,
+                "axes": [(2, 0, rows), (3, 1, lambda env, width=int(width): list(range(width)))],
+            }
+
+        nope, rope, value = info["nope_dim"], info["rope_dim"], info["v_head_dim"]
+        query, keys = _rows(("pid", 0), 32), _rows(("t",), block_n)
+        spec = [
+            _role("strides", "q", "Q-nope", info["q"], "load", query, 32, nope),
+            _role("mla_strides", "q_rope", "Q-rope", info["q_rope"], "load", query, 32, rope),
+            _role("strides", "k", "K-nope", info["k"], "load", keys, block_n, nope),
+            _role("mla_strides", "k_rope", "K-rope", info["k_rope"], "load", keys, block_n, rope),
+            _role("strides", "v", "V", info["v"], "load", keys, block_n, value),
+            _role("strides", "o", "Out", info["out"], "store", query, 32, value),
+        ]
+        try:
+            bound = prove_template_addresses(self.graph, spec, (n_ctx, block_n))
+        except WitnessRefusal as exc:
+            raise MetalNonRecoverableError(
+                f"MLA attention: {exc}. The dispatcher rebuilds each role from its strides and "
+                "cannot prove that view is the source's; refusing.",
+                op_name="tt.dot",
+            ) from None
+        proved = dict(info)
+        proved["strides"], proved["mla_strides"] = dict(info["strides"]), dict(info["mla_strides"])
+        for role in spec:
+            proved[role["group"]][role["key"]] = bound[role["name"]]
+        return proved
+
     def _lower_mla_attention_template(self, info: dict) -> str:
         """Emit the qk=head_dim / v=v_head_dim simd FA kernel for a detected MLA
         (3-dot nope/rope) attention + set the fail-CLOSED 'mla' dispatch descriptor.
@@ -12130,6 +12723,14 @@ class GenericLowerer(
                 "DROPPING any tighter store mask. Refusing to emit silently-wrong output.",
                 op_name="tt.store",
             )
+        # Every stride the dispatcher receives is the one the PROVED address multiplies on
+        # that axis, not the detector's positional guess.
+        info = self._witness_mla_attention(info)
+        # The template attends the keys below N_CTX and stores the rows below it. The source
+        # attends whole key tiles (a plain load reads storage past N_CTX, a masked one scores
+        # those keys zero) and an unmasked store writes whole row tiles. The two agree only
+        # when N_CTX is a whole number of both tiles, known only at launch.
+        self._tail_access_bounds = ("mla_whole_tiles_v1", info["N_CTX"], math.lcm(32, info["block_n"]))
         # DEFAULT ABI (Q,K,V,Out + strides) — the dispatch supplies the concatenated
         # contiguous Q/K, so no @jit arg_decls/bindings. scale = 1/sqrt(qk_head_dim) as
         # detected (the user's per-part pre-scale is bypassed; the kernel scales Q).
@@ -13955,6 +14556,8 @@ class GenericLowerer(
             kv_cols=info["block_n"],
             dense_tail_out=_dense_tail,
         )
+
+        self._fa_unmasked_store_rows(info.get("query_length", info.get("N_CTX")), block_m)
 
         # Build the [[buffer(N)]] declarations from the ACTUAL arg list so the
         # binding order matches the launcher exactly: pointers as device buffers,

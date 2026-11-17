@@ -51,6 +51,34 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 - These changes require fresh integrated hardware and installed-artifact
   qualification. Earlier source-tree matmul timings do not measure their cost.
 
+### Attention template addresses
+
+- Prove every source load and store address before an attention template stands
+  in for the kernel. The templates rebuild each tensor's address from its
+  strides and their own coordinates; before this, only the strides were read
+  from the source. A row or depth index that was shifted or scaled, a batch or
+  head offset on the wrong tensor, a loop that advanced differently and a key
+  or value tile that ignored the loop variable all ran as the canonical
+  address. This held on the dense, biased and 3-D forward routes, the biased
+  backward routes, the varlen route and the MLA route. Each address is now
+  evaluated exactly on random program ids and stride values and must equal the
+  template's; anything else refuses. Strides are bound by value, so a kernel
+  that passes its strides in another order computes correctly.
+- Stop the FlashAttention output clip from being accepted on the column axis.
+  The sequence length bounds rows only.
+- Refuse, at launch, an unmasked FlashAttention store over a partial last row
+  tile. The templates store the rows below the sequence length; the source
+  stores the whole tile. Mask the store with the row boundary or launch whole
+  tiles.
+- Attend whole key tiles on the varlen route. The source loop is
+  `range(0, max_seqlen, 32)` masked by the sequence's key count, so with
+  `max_seqlen = 40` it attends up to 64 keys. The templates stopped at
+  `max_seqlen` itself and dropped the keys between it and the tile end.
+- Refuse, at launch, an MLA kernel whose sequence length is not a whole number
+  of 32-row tiles. The MLA template has no partial-tile form: the source reads
+  or zero-scores its whole last key tile and, unmasked, stores its whole last
+  row tile, and the template did neither.
+
 ### Compatibility
 
 - Support the Xcode 27 toolchain. On it, 0.3.0 refuses every kernel with

@@ -229,6 +229,86 @@ def _batched_dot_host_bounds_reason(descriptor, kargs, grid):
         return "the batched-dot runtime address bounds could not be proven"
 
 
+def _fa_whole_row_tiles_reason(descriptor, kargs, signatures, scalar_payloads, grid):
+    """Return a refusal reason for an unmasked FlashAttention store over a partial row tile, else None.
+
+    The FlashAttention templates store only the rows below the sequence length. A source
+    store without a mask stores every row of every launched tile, which is the same set
+    only when no launched tile crosses that length.
+    """
+    try:
+        if (
+            type(descriptor) not in (tuple, list)
+            or len(descriptor) != 3
+            or descriptor[0] != "fa_whole_row_tiles_v1"
+            or type(descriptor[1]) is not int
+            or type(descriptor[2]) is not int
+            or descriptor[2] <= 0
+            or not 0 <= descriptor[1] < len(kargs)
+        ):
+            return "the store-domain descriptor is missing or malformed; mask the store with the row boundary"
+        index, block_m = descriptor[1], descriptor[2]
+        declared = signatures[index]
+        if declared not in ("i32", "u32", "i64", "u64"):
+            return "the sequence length is not an integer argument; mask the store with the row boundary"
+        from triton_msl.backend._launch_signature import scalar_bytes
+
+        captured = scalar_payloads[index]
+        if type(captured) is not bytes or scalar_bytes(kargs[index], declared) != captured:
+            return "the sequence length changed after its captured launch payload"
+        # The value the GPU reads, not what __int__ on a subclass reports.
+        rows = int.from_bytes(captured, "little", signed=declared.startswith("i"))
+        tiles = int(grid[0])
+        if tiles * block_m > rows:
+            return (
+                f"the source stores all {tiles * block_m} rows of its {tiles} launched {block_m}-row tiles, "
+                f"but the template stores only the {max(rows, 0)} rows below the sequence length; "
+                "mask the store with the row boundary or launch whole tiles"
+            )
+        return None
+    except Exception as exc:
+        return f"the store domain could not be evaluated ({type(exc).__name__}); mask the store with the row boundary"
+
+
+def _mla_whole_tiles_reason(descriptor, kargs, signatures, scalar_payloads):
+    """Return a refusal reason for an MLA launch whose sequence length is not whole tiles, else None.
+
+    The MLA template attends the keys below the sequence length and stores the rows below
+    it. The source attends whole key tiles and, unmasked, stores whole row tiles; the two
+    agree only when the length is a whole number of tiles.
+    """
+    try:
+        if (
+            type(descriptor) not in (tuple, list)
+            or len(descriptor) != 3
+            or descriptor[0] != "mla_whole_tiles_v1"
+            or type(descriptor[1]) is not int
+            or type(descriptor[2]) is not int
+            or descriptor[2] <= 0
+            or not 0 <= descriptor[1] < len(kargs)
+        ):
+            return "the tile-domain descriptor is missing or malformed"
+        index, block = descriptor[1], descriptor[2]
+        declared = signatures[index]
+        if declared not in ("i32", "u32", "i64", "u64"):
+            return "the sequence length is not an integer argument"
+        from triton_msl.backend._launch_signature import scalar_bytes
+
+        captured = scalar_payloads[index]
+        if type(captured) is not bytes or scalar_bytes(kargs[index], declared) != captured:
+            return "the sequence length changed after its captured launch payload"
+        # The value the GPU reads, not what __int__ on a subclass reports.
+        rows = int.from_bytes(captured, "little", signed=declared.startswith("i"))
+        if rows <= 0 or rows % block:
+            return (
+                f"the sequence length {rows} is not a whole number of {block}-row tiles; the source "
+                "attends and stores its whole last tile, which the template does not replay"
+            )
+        return None
+    except Exception as exc:
+        return f"the tile domain could not be evaluated ({type(exc).__name__})"
+
+
 def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloads=None, grid=None):
     """Return a refusal reason for an unmasked rounded-K access plan, else None."""
     try:
@@ -996,6 +1076,26 @@ class MetalLauncher:
                 tail_access_bounds = address_bounds
             elif address_bounds[0] == "batched_dot_host_bounds_v1":
                 batched_dot_bounds = address_bounds
+            elif address_bounds[0] == "fa_whole_row_tiles_v1":
+                _rows_reason = _fa_whole_row_tiles_reason(
+                    address_bounds, flat_args, flat_sigs, scalar_payloads, (gridX, gridY, gridZ)
+                )
+                if _rows_reason is not None:
+                    from triton_msl.errors import MetalNonRecoverableError
+
+                    raise MetalNonRecoverableError(
+                        "Refusing unmasked FlashAttention store launch: " + _rows_reason,
+                        op_name="tt.store",
+                    )
+            elif address_bounds[0] == "mla_whole_tiles_v1":
+                _tiles_reason = _mla_whole_tiles_reason(address_bounds, flat_args, flat_sigs, scalar_payloads)
+                if _tiles_reason is not None:
+                    from triton_msl.errors import MetalNonRecoverableError
+
+                    raise MetalNonRecoverableError(
+                        "Refusing MLA attention launch: " + _tiles_reason,
+                        op_name="tt.dot",
+                    )
             else:
                 from triton_msl.errors import MetalNonRecoverableError
 

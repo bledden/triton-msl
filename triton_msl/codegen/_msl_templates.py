@@ -5735,6 +5735,13 @@ kernel void int8_matmul_pergroup_fast(
 """
 
 
+def _varlen_kmax_expr(maxs):
+    """Keys the varlen source attends: ``range(0, max_seqlen, 32)`` tiles masked by seqlen_k."""
+    if not maxs:
+        return "seqlen_k"
+    return f"((int({maxs}) <= 0) ? 0u : min(seqlen_k, ((uint({maxs}) - 1u) / 32u + 1u) * 32u))"
+
+
 def make_varlen_flash_attention(
     head_dim=64,
     causal=False,
@@ -5799,12 +5806,14 @@ def make_varlen_flash_attention(
     if missing:
         raise ValueError(f"varlen FA bindings missing {missing}")
     b = bindings
-    # MAXS = the kernel's own kv-loop bound (max_seqlen arg): the kernel attends
-    # min(seqlen_k, max_seqlen) keys, so the template must clamp identically (re-review
-    # 2026-08-25: looping to seqlen_k silently attended MORE keys when max_seqlen was
-    # smaller). Route-only default (no MAXS binding) = seqlen_k, the old behavior.
+    # MAXS = the kernel's own kv-loop bound (max_seqlen arg). The source loop is
+    # ``range(0, max_seqlen, 32)`` and masks only ``kn < seqlen_k``, so it attends whole
+    # 32-key tiles: min(seqlen_k, max_seqlen rounded UP to a tile) keys, not
+    # min(seqlen_k, max_seqlen) (re-review 2026-08-25 clamped at max_seqlen itself, which
+    # attends FEWER keys whenever max_seqlen < seqlen_k is not a multiple of 32).
+    # Route-only default (no MAXS binding) = seqlen_k.
     _maxs = b.get("MAXS")
-    kmax_expr = f"min(seqlen_k, uint({_maxs}))" if _maxs else "seqlen_k"
+    kmax_expr = _varlen_kmax_expr(_maxs)
     causal_guard = "&& (qrow >= krow)" if causal else ""
     sig = ",\n".join(arg_decls)
     return f"""#include <metal_stdlib>
@@ -5957,7 +5966,7 @@ def make_varlen_flash_attention_mma(
     b = bindings
     # MAXS: clamp to the kernel's own kv-loop bound (see make_varlen_flash_attention).
     _maxs = b.get("MAXS")
-    kmax_expr = f"min(seqlen_k, uint({_maxs}))" if _maxs else "seqlen_k"
+    kmax_expr = _varlen_kmax_expr(_maxs)
     SCALE = float(D) ** -0.5 if scale is None else float(scale)
     causal_expr = "(qrow >= kr)" if causal else "true"
     sig = ",\n".join(arg_decls)

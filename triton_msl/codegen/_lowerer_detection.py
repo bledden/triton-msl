@@ -2408,7 +2408,9 @@ class _DetectionMixin:
 
         ``is_fa`` selects the boundary-arg names the template's OWN clip references (FA
         clips output ROWS by N_CTX; matmul clips rows by M and cols by N) — the caller
-        passes the template kind the kernel routes to.
+        passes the template kind the kernel routes to. The FA sequence length (by name or
+        by ``fa_ctx_index``) is a boundary on the ROW axis only: the FA templates store
+        every head-dim column, so the same argument clipping columns is a restricting mask.
 
         SINGLE SOURCE OF TRUTH for the triviality classification, shared by the matmul
         dispatch chokepoint (``_refuse_nontrivial_template_output_mask``) AND the
@@ -2647,8 +2649,10 @@ class _DetectionMixin:
                     axis_args.setdefault(axis, set()).add(arg.id)
                 if not is_fa:
                     return True
+                # The sequence length bounds ROWS only: the FA templates store every head-dim
+                # column, so the same argument on the column axis is a clip they would drop.
                 return arg.name in ok_names or (
-                    fa_ctx_index is not None and getattr(arg, "index", None) == fa_ctx_index
+                    bool(ok_names) and fa_ctx_index is not None and getattr(arg, "index", None) == fa_ctx_index
                 )
             if o is not None and o.op == "arith.constant":
                 try:
