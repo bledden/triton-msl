@@ -78,3 +78,26 @@ def matmul_grid_domain(plan, grid, value):
     """Exclusive row/column maxima; useful for independent operand domains."""
     rects = matmul_grid_rectangles(plan, grid, value)
     return max(r[1] for r in rects), max(r[3] for r in rects)
+
+
+def validate_matmul_no_wrap_moduli(moduli, rectangles, value):
+    """Prove source load moduli are identities on every stored coordinate.
+
+    These are launch obligations, never load zero-fill bounds. Empty output
+    rectangles contribute no coordinates, but a source modulus must still be a
+    positive value representable at its captured source width.
+    """
+    if type(moduli) not in (tuple, list) or len(moduli) != 2 or all(ref is None for ref in moduli):
+        raise ValueError("matmul no-wrap modulo obligations are malformed")
+    for axis, ref in enumerate(moduli):
+        if ref is None:
+            continue
+        modulus = value(ref)
+        if modulus <= 0:
+            raise ValueError("matmul source load modulus must be positive")
+        for m0, m1, n0, n1 in rectangles:
+            if m1 <= m0 or n1 <= n0:
+                continue
+            lo, hi = (m0, m1) if axis == 0 else (n0, n1)
+            if lo < 0 or hi > modulus:
+                raise ValueError("matmul source load modulo would wrap a stored coordinate")

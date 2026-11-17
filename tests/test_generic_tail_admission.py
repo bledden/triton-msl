@@ -125,3 +125,18 @@ def test_each_call_revalidates_live_tail_storage_before_runtime(case, monkeypatc
     with pytest.raises(MetalNonRecoverableError, match="mask the K tail"):
         launcher(*grid, None, None, meta, None, None, None, *args)
     assert len(seen) == 1
+
+
+def test_validated_no_wrap_v2_keeps_the_same_generic_geometry(case):
+    _, args, _, meta, grid = case
+    legacy = meta[10]
+    desc = [
+        "matmul_grid_storage_v2",
+        *legacy[1:3],
+        [None, None, legacy[3][2]],
+        *legacy[4:],
+        [32, 32, ["flat_n", 32], [True, True], [None, legacy[3][1]], [None, None], True, [legacy[3][0], legacy[3][1]]],
+    ]
+    meta[10] = desc
+    assert driver._matmul_tail_bounds_reason(desc, args, grid=grid) is None
+    assert generic_2d_geometry(*case, validated_tail_bounds=desc) == ((768, 1, 1), (256, 1, 1))

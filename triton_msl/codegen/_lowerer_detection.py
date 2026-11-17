@@ -946,6 +946,7 @@ class _DetectionMixin:
         _has_pid = {}
         k_form = {}
         load_modulo_args = [None, None]
+        load_identity_modulo_args = [None, None]
         for role, ax, want_pid, is_k in (
             ("A", 0, 0, False),
             ("A", 1, None, True),
@@ -998,19 +999,37 @@ class _DetectionMixin:
                 mod_arg = arg_by_id.get(
                     self._strip_wrappers(sh["mod"], op_by_id, ("tt.splat",) + tuple(self._IDX_CASTS))
                 )
-                if want is None or k_for is None or mod_arg is None or mod_arg.name != want:
+                load_axis = 0 if (role, ax) == ("A", 0) else (1 if (role, ax) == ("B", 1) else None)
+                if k_for is None or mod_arg is None or load_axis is None or (want is not None and mod_arg.name != want):
                     return (
                         f"{role} {axis_name} index wraps with a modulo the template does not replay "
-                        f"(only a K-loop LOAD row/col index modulo the very M/N extent it clips with)",
+                        f"(only a K-loop LOAD row/col modulo its store clip or a launch-proved no-wrap axis)",
                         set(),
                         None,
                         None,
                     )
-                # The source wraps this load axis by the very bound that clips
-                # its output axis. Within stored rows/columns the modulo is the
-                # identity; outside, zero-staging is unobservable. Retain this
-                # proof separately from an actual source load mask.
-                load_modulo_args[0 if role == "A" else 1] = want
+                if want is None:
+                    direct_modulus = self._strip_wrappers(
+                        sh["mod"],
+                        op_by_id,
+                        ("tt.splat", "tt.broadcast", "ttg.convert_layout", "tt.reshape", "tt.expand_dims"),
+                    )
+                    if direct_modulus != mod_arg.id:
+                        return (
+                            f"{role} {axis_name} no-wrap modulo divisor contains an unreplayed integer cast",
+                            set(),
+                            None,
+                            None,
+                        )
+                    # No store clip owns this axis. Do not turn the modulus
+                    # into a zero-fill bound: every stored coordinate must be
+                    # proved below it at launch, making this source modulo the
+                    # identity on all observable results.
+                    load_identity_modulo_args[load_axis] = mod_arg.name
+                else:
+                    # On a masked axis, modulo is the identity within the very
+                    # store bound it uses. Zero-staging outside is unobservable.
+                    load_modulo_args[load_axis] = want
             if is_k:
                 if sh["pid"] is not None or sh["iv"] > 1:
                     return (f"{role} K index is not 'range' or 'k + range'", set(), None, None)
@@ -1343,6 +1362,7 @@ class _DetectionMixin:
                 "grid_extent_args": tuple(grid_names),
                 "load_extent_args": load_names,
                 "load_modulo_args": tuple(load_modulo_args),
+                "load_identity_modulo_args": tuple(load_identity_modulo_args),
                 "load_domain_args": tuple(mask or mod for mask, mod in zip(load_names, load_modulo_args)),
             },
         )

@@ -249,6 +249,18 @@ class _TemplateMixin:
                     info.get("k_tail_mode") == "full_blocks",
                 ),
             )
+        identity_args = info.get("load_identity_modulo_args", (None, None))
+        if any(value is not None for value in identity_args):
+            identity_refs = tuple(self._tail_ref(value) if value is not None else None for value in identity_args)
+            if not grid_plan or any(
+                value is not None and ref is None for value, ref in zip(identity_args, identity_refs)
+            ):
+                from triton_msl.errors import MetalNonRecoverableError
+
+                raise MetalNonRecoverableError(
+                    "matmul load modulo has no representable no-wrap launch proof", op_name="tt.dot"
+                )
+            descriptor = ("matmul_grid_storage_v2", *descriptor[1:6], (*descriptor[6], identity_refs))
         previous = getattr(self, "_tail_access_bounds", None)
         if previous is not None and previous != descriptor:
             from triton_msl.errors import MetalNonRecoverableError

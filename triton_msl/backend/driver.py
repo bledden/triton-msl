@@ -233,7 +233,9 @@ def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloa
     """Return a refusal reason for an unmasked rounded-K access plan, else None."""
     try:
         grid_plan = (
-            type(descriptor) in (tuple, list) and len(descriptor) == 7 and descriptor[0] == "matmul_grid_storage_v1"
+            type(descriptor) in (tuple, list)
+            and len(descriptor) == 7
+            and descriptor[0] in ("matmul_grid_storage_v1", "matmul_grid_storage_v2")
         )
         if not (
             grid_plan
@@ -273,12 +275,23 @@ def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloa
                 if signatures is not None and scalar_payloads is not None:
                     from triton_msl.backend._launch_signature import scalar_bytes
 
+                    captured = scalar_payloads[index]
                     if (
                         signatures[index] != ref[2]
-                        or scalar_bytes(kargs[index], signatures[index]) != scalar_payloads[index]
+                        or type(captured) is not bytes
+                        or scalar_bytes(kargs[index], signatures[index]) != captured
                     ):
                         raise ValueError("runtime scalar changed after its captured launch payload")
-                value = int(kargs[index])
+                    # __int__ on an int subclass can disagree with the bytes
+                    # packed by the launch ABI. Prove the value the GPU reads.
+                    value = int.from_bytes(captured, "little", signed=ref[2].startswith("i"))
+                elif type(kargs[index]) in (int, bool):
+                    value = kargs[index]
+                else:
+                    from triton_msl.backend._launch_signature import scalar_bytes
+
+                    raw = scalar_bytes(kargs[index], ref[2])
+                    value = int.from_bytes(raw, "little", signed=ref[2].startswith("i"))
             else:
                 value = int(ref[1]) if ref[0] == "literal" else None
             if value is None or not limits[ref[2]][0] <= value <= limits[ref[2]][1]:
@@ -295,16 +308,29 @@ def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloa
             return "rounded K exceeds the signed source address range; mask the K tail"
         strides = tuple(_value(ref) for ref in stride_refs)
         if grid_plan:
-            from ._matmul_domain import matmul_grid_rectangles
+            from ._matmul_domain import matmul_grid_rectangles, validate_matmul_no_wrap_moduli
 
-            rectangles = matmul_grid_rectangles(descriptor[6], grid, _value)
+            source_plan = descriptor[6]
+            identity_refs = None
+            if descriptor[0] == "matmul_grid_storage_v2":
+                if type(source_plan) not in (tuple, list) or len(source_plan) != 8:
+                    return "the matmul no-wrap source grid descriptor is malformed"
+                identity_refs = source_plan[7]
+                source_plan = source_plan[:7]
+            rectangles = matmul_grid_rectangles(source_plan, grid, _value)
             full_m, full_n = max(r[1] for r in rectangles), max(r[3] for r in rectangles)
-            load_refs, full_k = descriptor[6][5:]
+            load_refs, full_k = source_plan[5:]
 
             def clipped(ref, full):
                 return full if ref is None else min(full, max(0, _value(ref)))
 
             store_m, store_n = (clipped(ref, full) for ref, full in zip(extent_refs[:2], (full_m, full_n)))
+            if descriptor[0] == "matmul_grid_storage_v2":
+                stored_rectangles = tuple((m0, min(m1, store_m), n0, min(n1, store_n)) for m0, m1, n0, n1 in rectangles)
+                try:
+                    validate_matmul_no_wrap_moduli(identity_refs, stored_rectangles, _value)
+                except ValueError as exc:
+                    return str(exc)
             load_m, load_n = (clipped(ref, full) for ref, full in zip(load_refs, (full_m, full_n)))
             load_k = rounded_k if full_k else max(k, 0)
             role_ranges = [((0, load_m), (0, load_k)), ((0, load_k), (0, load_n))]
@@ -966,7 +992,7 @@ class MetalLauncher:
                     "Refusing launch: source-program numerical, storage and dispatch admission is not qualified",
                     op_name="tt.dot",
                 )
-            if address_bounds[0] in ("matmul_full_k_storage_v1", "matmul_grid_storage_v1"):
+            if address_bounds[0] in ("matmul_full_k_storage_v1", "matmul_grid_storage_v1", "matmul_grid_storage_v2"):
                 tail_access_bounds = address_bounds
             elif address_bounds[0] == "batched_dot_host_bounds_v1":
                 batched_dot_bounds = address_bounds
