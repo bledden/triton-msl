@@ -17,6 +17,13 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 - Complete all single-program operand reads before ordinary contiguous or scalar
   fallback stores can replace aliased input cells. The direct entry continues to
   require an output whose storage no input shares.
+- Offer the fast matmul replacement only where it is that source domain. It
+  computes exactly `args[3]` by `args[4]`, so a store clip, load clip, load
+  modulus or flat-grid divisor that is a separate argument now stays on the
+  ordinary entry, as does an unmasked store over a partial tile. Before this, a
+  kernel whose store mask named a smaller extent was written through to `M`.
+- Replay a compile-time constant load clip on a tiled index. 0.3.0 accepted the
+  constant and then loaded whole tiles, so rows past it kept their product.
 - These changes require fresh integrated hardware and installed-artifact
   qualification. Earlier source-tree matmul timings do not measure their cost.
 

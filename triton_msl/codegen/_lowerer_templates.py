@@ -452,7 +452,10 @@ class _TemplateMixin:
             ("_A_M", loads[0], "row_base", block_m),
             ("_B_N", loads[1], "col_base", block_n),
         ):
-            expr = source_bindings[bound] if bound is not None else f"(long){base} + {block}L"
+            if type(bound) is int:
+                expr = f"{bound}L"  # a compile-time load clip
+            else:
+                expr = source_bindings[bound] if bound is not None else f"(long){base} + {block}L"
             result.append(f"    long {name} = (long)({expr});")
         return result
 
@@ -6185,6 +6188,27 @@ class _TemplateMixin:
             # Do not mislabel it "2d" and let a full-output replacement reinterpret
             # a partial/swizzled source launch. Fast-grid admission is separate work.
             return None
+        # The replacement computes rows [0, args[3]) by columns [0, args[4]) and nothing
+        # else. Every source domain fact must name that very argument or be absent: a
+        # separate store clip, load clip, load modulus or 1-D grid divisor describes a
+        # different result (GPU: a store clip MS < M was written through to row M).
+        _domain = _vp[6] if len(_vp) > 6 and isinstance(_vp[6], dict) else None
+        if _domain is None:
+            return None
+        _canon = (args[3].name, args[4].name)
+        _store = self._matmul_output_extent_args()
+        for _facts in (
+            _store,
+            _domain.get("grid_extent_args", (None, None)),
+            _domain.get("load_extent_args", (None, None)),
+            _domain.get("load_modulo_args", (None, None)),
+            _domain.get("load_identity_modulo_args", (None, None)),
+        ):
+            if len(_facts) != 2 or any(f is not None and f != c for f, c in zip(_facts, _canon)):
+                return None
+        # An unmasked store axis writes whole tiles, so the dispatcher may replace it
+        # only when that runtime extent is a whole number of source tiles.
+        _whole_tile_axes = (_store[0] is None, _store[1] is None)
         _ops = {o.id: o for o in _all(self.graph.ops)}
         _ash = _extract_shape(_ops[dot_ssa.operand_ids[0]].type_str or "") if dot_ssa.operand_ids[0] in _ops else None
         _bsh = _extract_shape(_ops[dot_ssa.operand_ids[1]].type_str or "") if dot_ssa.operand_ids[1] in _ops else None
@@ -6218,4 +6242,5 @@ class _TemplateMixin:
             _grid_spec,
             _tail_mode,
             _block_k,
+            _whole_tile_axes,
         )

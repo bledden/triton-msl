@@ -558,6 +558,15 @@ class _DetectionMixin:
                         cval = None
                     if cval is None or li[0] is None or cval < li[0]:
                         return f"{role} load mask {kind} bound is not a runtime extent or a constant >= the tile"
+                    if not self._is_bare_tile_range(idx_1d, op_by_id) and (type(want) is not int or cval != want):
+                        # A constant covers a whole tile only while the index IS the tile. On any
+                        # other index the launched coordinates pass the constant, so it must be
+                        # the very load clip the template replays (GPU: a dropped constant left
+                        # rows past it holding their product).
+                        return (
+                            f"{role} load mask {kind} bound is a compile-time constant the template does not "
+                            f"clip with ({want if want is not None else 'no load clip'})"
+                        )
         return None, has_k_clip
 
     def _dot_layout_walk(self, vid, stop, op_by_id, ops=None):
@@ -826,6 +835,16 @@ class _DetectionMixin:
                         arg = self._trace_bound_arg(bound, op_by_id, arg_by_id)
                         if arg is not None:
                             return arg.name
+                        # A compile-time constant clips a tiled index exactly as a runtime
+                        # extent does; on the bare tile range it is the whole tile. "Tiled" is
+                        # anything but that range: a flat grid reaches the program id through
+                        # a remainder that no program-id trace follows.
+                        const = self._const_int(
+                            self._strip_wrappers(bound, op_by_id, ("tt.splat", "tt.broadcast", "ttg.convert_layout")),
+                            op_by_id,
+                        )
+                        if const is not None and not self._is_bare_tile_range(index, op_by_id):
+                            return const
                 else:
                     pending.extend(op.operand_ids or [])
             return None
@@ -2206,6 +2225,17 @@ class _DetectionMixin:
                 stack.extend(o.operand_ids or [])
                 continue
         return (extent, axis, has_pid) if has_range else None
+
+    def _is_bare_tile_range(self, index_id, by_id):
+        """True iff the 1-D index IS ``arange(0, BLOCK)``: one tile at the origin, no program
+        id, offset or wrap of any spelling."""
+        o = by_id.get(index_id)
+        if o is None or o.op != "tt.make_range":
+            return False
+        try:
+            return int(o.attrs.get("start")) == 0
+        except (TypeError, ValueError):
+            return False
 
     def _trace_bound_arg(self, bound_id, by_id, arg_by_id):
         """Trace a mask comparison's BOUND through layout-only wrappers to the kernel arg it

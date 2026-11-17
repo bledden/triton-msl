@@ -168,6 +168,7 @@ def dispatch_fast_matmul(
         grid_spec = descriptor[9] if len(descriptor) > 9 else None
         k_tail_mode = descriptor[10] if len(descriptor) > 10 else None
         source_block_k = descriptor[11] if len(descriptor) > 11 else None
+        whole_tile_axes = descriptor[12] if len(descriptor) > 12 else None
     except (TypeError, ValueError, IndexError):
         return False  # malformed descriptor -> skip
 
@@ -199,6 +200,17 @@ def dispatch_fast_matmul(
         # tile selection below (both are replacement launches).
         if not _fast_grid_ok(grid, grid_spec, M, N):
             return False
+
+        # SOURCE STORE DOMAIN: an unmasked store axis writes every launched tile whole,
+        # the replacement writes exactly M x N. They agree only on whole source tiles.
+        if whole_tile_axes is not None:
+            try:
+                rows_whole, cols_whole = (bool(v) for v in whole_tile_axes)
+                source_bm, source_bn = int(grid_spec[1]), int(grid_spec[2])
+            except (TypeError, ValueError, IndexError):
+                return False
+            if (rows_whole and M % source_bm) or (cols_whole and N % source_bn):
+                return False
 
         # RUNTIME STRIDE CONTRACT: the fast template assumes a ROW-MAJOR layout
         # (leading dims = M/N/K, inner stride 1). When the kernel passes explicit

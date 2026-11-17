@@ -100,7 +100,7 @@ def _dispatch(desc, k):
 
 def test_unmasked_nondisible_tail_stays_on_generic_before_runtime_work():
     desc = _descriptor(_unmasked)
-    assert desc[10:] == ("full_blocks", 32)
+    assert desc[10:12] == ("full_blocks", 32)
     accepted, calls = _dispatch(desc, 40)
     assert accepted is False
     assert calls == []
@@ -116,7 +116,7 @@ def test_unmasked_divisible_tail_retains_fast_replacement():
 
 def test_both_zero_masked_tail_retains_logical_k_fast_replacement():
     desc = _descriptor(_masked)
-    assert desc[10:] == ("masked_zero", 32)
+    assert desc[10:12] == ("masked_zero", 32)
     accepted, calls = _dispatch(desc, 40)
     assert accepted is True
     assert calls[0] == "library"
