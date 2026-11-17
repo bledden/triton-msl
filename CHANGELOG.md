@@ -41,6 +41,13 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   non-strict `<=` clip, and a constant clip on a flat 1-D grid. One `<` clip per
   axis was kept and the rest dropped. The source-replaying K-loop epilogue route
   executes the source loop and store mask as written and keeps all of these.
+- Refuse a store clip on any index other than the one the store addresses,
+  for matmul and for the head_dim 64 and 128 FlashAttention templates.
+  `(rm + 1) < M`, `(rm - 16) < M`, `rm * 2 < M` and a column index used as the
+  row clip all ran as `rm < M`, and `(rn < N)[None, :]` ran as a row clip. A
+  constant clip is whole-tile only on the bare `tl.arange` tile. The epilogue
+  route keeps the matmul forms; `rm[:, None] < M` and `(rm < M)[:, None]` both
+  keep the template.
 - These changes require fresh integrated hardware and installed-artifact
   qualification. Earlier source-tree matmul timings do not measure their cost.
 

@@ -2347,17 +2347,23 @@ class _DetectionMixin:
         for st in allops:
             if st.op != "tt.store" or len(st.operand_ids or []) < 3:
                 continue
-            stack, seen = [st.operand_ids[2]], set()
+            # (mask value, axis of an ``expand_dims`` the comparison itself sits under)
+            stack, seen = [(st.operand_ids[2], None)], set()
             while stack:
-                mid = stack.pop()
+                mid, lifted = stack.pop()
                 if mid in seen:
                     continue
                 seen.add(mid)
                 o = by_id.get(mid)
                 if o is None:
                     continue
+                if o.op == "tt.expand_dims":
+                    try:
+                        lifted = int(o.attrs.get("axis"))
+                    except (TypeError, ValueError):
+                        continue
                 if o.op in ("arith.andi", "tt.broadcast", "ttg.convert_layout", "tt.reshape", "tt.expand_dims"):
-                    stack.extend(o.operand_ids or [])
+                    stack.extend((child, lifted) for child in o.operand_ids or [])
                     continue
                 if o.op != "arith.cmpi" or len(o.operand_ids or []) < 2:
                     continue
@@ -2370,6 +2376,8 @@ class _DetectionMixin:
                     axis, bound_id = i1[1], op0
                 else:
                     continue
+                if axis is None:
+                    axis = lifted  # ``(rn < N)[None, :]`` clips columns (GPU: it clipped rows)
                 arg = self._trace_bound_arg(bound_id, by_id, arg_by_id)
                 if arg is None:
                     continue
@@ -2413,7 +2421,11 @@ class _DetectionMixin:
         argument per axis (``(rm < M) & (rm < X)`` is ``min(M, X)``; GPU: one of the two
         was kept). A constant bound is judged against the index's whole range, so a
         program-id term reached through the flat-grid ``pid % n`` / ``pid // n`` counts.
-        ``replayed=True`` leaves those three requirements out: it is the question the
+        The clipped index must also be the store ADDRESS's own index on that axis: the
+        template clips the row it stores, so ``(rm + 1) < M``, ``rm * 2 < M`` and
+        ``rn[:, None] < M`` are different masks (GPU: all three ran as ``rm < M``). A
+        constant bound is trivial only on the bare ``arange`` tile itself.
+        ``replayed=True`` leaves those requirements out: it is the question the
         source-replaying epilogue route asks, which executes the store mask as written
         (``_refuse_nontrivial_template_output_mask``).
 
@@ -2480,6 +2492,80 @@ class _DetectionMixin:
         # per store: the distinct runtime-argument bounds seen on each axis (0 = columns)
         axis_args = {}
 
+        _LAYOUT = ("tt.broadcast", "ttg.convert_layout", "tt.reshape", *self._IDX_CASTS)
+
+        def _address_indices(store):
+            """``(axis, 1-D index id)`` for the one index the store address lifts onto each
+            axis with ``expand_dims``. An axis summed from several indices ties to none."""
+            lifted, seen, stack = {}, set(), [store.operand_ids[0]]
+            while stack:
+                o = by_id.get(stack.pop())
+                if o is None or o.id in seen:
+                    continue
+                seen.add(o.id)
+                if o.op == "tt.expand_dims" and o.operand_ids:
+                    try:
+                        axis = int(o.attrs.get("axis"))
+                    except (TypeError, ValueError):
+                        return set()
+                    lifted.setdefault(axis, set()).add(self._strip_wrappers(o.operand_ids[0], by_id, _LAYOUT))
+                    continue
+                if o.op in ("tt.addptr", "arith.addi", "arith.muli", "tt.splat", *_LAYOUT):
+                    stack.extend(o.operand_ids or [])
+            return {(axis, next(iter(ids))) for axis, ids in lifted.items() if len(ids) == 1}
+
+        def _scalar(value_id):
+            o = by_id.get(value_id)
+            if o is None:
+                return value_id in arg_by_id  # a loop-carried value is not a base offset
+            return not o.is_tensor or o.op in ("tt.splat", "arith.constant")
+
+        def _flat_address_is(store, index):
+            """Whether a 1-D store address is scalar offsets plus ``index`` once, bare or times
+            a scalar: ``lse + z * sz + offs_m * sm``. ``(offs_m + 1) * sm`` is another index."""
+            found, stack = 0, [store.operand_ids[0]]
+            for _ in range(256):
+                if not stack:
+                    return found == 1
+                value_id = self._strip_wrappers(stack.pop(), by_id, _LAYOUT)
+                if value_id == index:
+                    found += 1
+                    continue
+                if _scalar(value_id):
+                    continue
+                o = by_id.get(value_id)
+                if o is None:
+                    return False
+                if o.op in ("tt.addptr", "arith.addi"):
+                    stack.extend(o.operand_ids or [])
+                    continue
+                factors = [self._strip_wrappers(f, by_id, _LAYOUT) for f in o.operand_ids or []]
+                if o.op != "arith.muli" or not all(f == index or _scalar(f) for f in factors):
+                    return False
+                found += factors.count(index)
+            return False
+
+        address, flat_store = set(), []
+
+        def _address_index(idx_id, lifted):
+            """``(1-D index, axis)`` of this mask operand if the store address uses that same
+            index on that same axis, else None. ``lifted`` is the axis of an ``expand_dims``
+            the comparison itself sits under: ``(rn < N)[None, :]``."""
+            cur = self._strip_wrappers(idx_id, by_id, _LAYOUT)
+            o = by_id.get(cur)
+            axis = lifted
+            if o is not None and o.op == "tt.expand_dims" and o.operand_ids:
+                if lifted is not None:
+                    return None
+                try:
+                    axis = int(o.attrs.get("axis"))
+                except (TypeError, ValueError):
+                    return None
+                cur = self._strip_wrappers(o.operand_ids[0], by_id, _LAYOUT)
+            if axis is None:
+                return (cur, None) if _flat_address_is(flat_store[0], cur) else None
+            return (cur, axis) if (axis, cur) in address else None
+
         def _index_info(start_id):
             """Trace an SSA value back toward a ``tt.make_range`` (a tile-position
             index). Return ``(extent, axis)`` if a make_range is reachable (extent =
@@ -2531,7 +2617,7 @@ class _DetectionMixin:
                 # leaves has_range as-is.
             return (extent, axis, has_pid) if has_range else None
 
-        def _bound_ok(bound_id, ok_names, idx_extent, has_pid, strict, axis):
+        def _bound_ok(bound_id, ok_names, idx_extent, has_pid, strict, axis, tile_end):
             """True iff the comparison's BOUND is the template's output-extent arg for
             this axis (matching name) or a constant >= the tile extent."""
             seen = set()
@@ -2581,10 +2667,14 @@ class _DetectionMixin:
                 # runs to a RUNTIME total -> a const between BLOCK and total clips later
                 # blocks. Only the arg-name case (matching the template's own clip) is
                 # trivial for multi-block. Re-audit 2026-06-28.
+                if not replayed:
+                    # Only the bare tile ``arange`` is bounded by its own end; an offset,
+                    # scaled or program-id index runs past it.
+                    return tile_end is not None and val >= tile_end
                 return (not has_pid) and idx_extent is not None and val >= idx_extent
             return False
 
-        def _leaf_is_trivial(cmp_op):
+        def _leaf_is_trivial(cmp_op, lifted):
             if cmp_op.op != "arith.cmpi":
                 return False  # cmpf value mask, etc. -> not a tile-boundary clip
             pred = str(cmp_op.attrs.get("predicate_name", ""))
@@ -2610,9 +2700,22 @@ class _DetectionMixin:
             extent, axis, has_pid = idx_info
             ok_names = ok_col_names if axis == 0 else ok_row_names
             strict = pred in ("slt", "ult", "sgt", "ugt")
-            return _bound_ok(bound_id, ok_names, extent, has_pid, strict, 0 if axis == 0 else 1)
+            tile_end = None
+            if not replayed:
+                tied = _address_index(op0 if idx_left else op1, lifted)
+                if tied is None:
+                    return False  # a clip on another index than the one the store addresses
+                tied, axis = tied
+                ok_names = ok_col_names if axis == 0 else ok_row_names
+                tile = by_id.get(tied)
+                if tile is not None and tile.op == "tt.make_range" and strict:
+                    try:
+                        tile_end = int(tile.attrs.get("end"))
+                    except (TypeError, ValueError):
+                        tile_end = None
+            return _bound_ok(bound_id, ok_names, extent, has_pid, strict, 0 if axis == 0 else 1, tile_end)
 
-        def _mask_is_trivial(mask_id, depth=0):
+        def _mask_is_trivial(mask_id, depth=0, lifted=None):
             if depth > 64:
                 return False
             o = by_id.get(mask_id)
@@ -2620,15 +2723,26 @@ class _DetectionMixin:
                 return False
             if o.op == "arith.andi":
                 ops = o.operand_ids or []
-                return bool(ops) and all(_mask_is_trivial(c, depth + 1) for c in ops)
+                return bool(ops) and all(_mask_is_trivial(c, depth + 1, lifted) for c in ops)
+            if o.op == "tt.expand_dims" and not replayed:
+                if lifted is not None:
+                    return False
+                try:
+                    lifted = int(o.attrs.get("axis"))
+                except (TypeError, ValueError):
+                    return False
             if o.op in ("tt.broadcast", "ttg.convert_layout", "tt.reshape", "tt.expand_dims"):
-                return bool(o.operand_ids) and _mask_is_trivial(o.operand_ids[0], depth + 1)
+                return bool(o.operand_ids) and _mask_is_trivial(o.operand_ids[0], depth + 1, lifted)
             if o.op == "arith.cmpi":
-                return _leaf_is_trivial(o)
+                return _leaf_is_trivial(o, lifted)
             return False  # arith.ori/xori, cmpf (value mask), splat(true), unknown -> refuse
 
         for st in masked_stores:
             axis_args.clear()
+            address.clear()
+            flat_store[:] = [st]
+            if not replayed:
+                address.update(_address_indices(st))
             if not _mask_is_trivial(st.operand_ids[2]):
                 return True
             if any(len(ids) > 1 for ids in axis_args.values()):

@@ -282,7 +282,8 @@ if HAS:
         """tests/test_fa_biased_routing.py::_biased_fa (trifast's forward spelling) with ONE
         memory boundary varied per MODE: 1 Q value mask, 2 K value mask, 3 V value mask,
         4 Bias value mask (col < 16), 5 Bias row-only mask, 6 Mask-load value mask,
-        7 Lse store value mask, 8 Out store value mask."""
+        7 Lse store value mask, 8 Out store value mask, 9 / 10 Out store clipped on the next
+        row / twice the row."""
         inv_ln2: tl.constexpr = 1.4426950408889634
         ln2: tl.constexpr = 0.6931471824645996
         pid_m = tl.program_id(0)
@@ -355,6 +356,10 @@ if HAS:
         normalize = acc / sm_denom[:, None]
         if MODE == 8:
             tl.store(o_ptrs, normalize.to(q_block.type.element_ty), mask=(m_idxs < 16)[:, None])
+        elif MODE == 9:
+            tl.store(o_ptrs, normalize.to(q_block.type.element_ty), mask=(m_idxs + 1)[:, None] < N)
+        elif MODE == 10:
+            tl.store(o_ptrs, normalize.to(q_block.type.element_ty), mask=(m_idxs * 2)[:, None] < N)
         else:
             tl.store(o_ptrs, normalize.to(q_block.type.element_ty), mask=mask_m[:, None])
         lse = (scores_max * ln2) + tl.log(sm_denom)
@@ -543,9 +548,9 @@ def _biased_oracle(q, k, v, b, mask, sm, mode, out_sentinel, lse_sentinel):
     p = torch.softmax(raw, dim=-1)
     o = torch.nan_to_num(p, nan=0.0) @ v
     lse = torch.logsumexp(raw, dim=-1)
-    if mode == 8:
+    if mode in (8, 9, 10):
         o = o.clone()
-        o[..., 16:, :] = out_sentinel
+        o[..., {8: 16, 9: 63, 10: 32}[mode] :, :] = out_sentinel
     if mode == 7:
         lse = lse.clone()
         lse[..., 16:] = lse_sentinel
@@ -628,11 +633,14 @@ def test_biased_canonical_boundaries_route_and_match(cold_gpu_caches, fa_spy):
         (6, "Mask load value mask cols < 16"),
         (7, "Lse store value mask rows < 16"),
         (8, "Out store value mask rows < 16 (existing output-mask guard)"),
+        (9, "Out store clipped on the next row: row 63 keeps the sentinel"),
+        (10, "Out store clipped on twice the row: rows 32-63 keep the sentinel"),
     ],
 )
 def test_biased_unreplayed_boundaries_refuse_or_match(cold_gpu_caches, fa_spy, mode, label):
     """Bites on e2330ec for modes 1-4, 6, 7 (the biased route checked none of its load
-    masks nor the Lse store mask). Now: refused before any dispatch."""
+    masks nor the Lse store mask) and on 8f2c58f for modes 9, 10 (the Out guard read any
+    index derived from the row as the row). Now: refused before any dispatch."""
     state, (q, k, v, b, mask, sm), o, lse = _run_biased(mode)
     if state == "computed":
         o_ref, lse_ref = _biased_oracle(q, k, v, b, mask, sm, mode, 77.0, 77.0)

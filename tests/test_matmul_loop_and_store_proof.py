@@ -7,7 +7,7 @@ floor count, a count argument and a constant loop beside a stride called ``K`` a
 ``range(0, K, BK)``; a non-looped dot reduced over ``K`` instead of its own tile; and a second
 clip on an axis, ``<=`` and a flat-grid constant clip were dropped (GPU: silent, both matmul
 routes, every device case below). The source-replaying epilogue route executes the loop and the
-mask as written and keeps them. Every device case leaves TRITON_MSL_FAST_MATMUL at its default.
+mask as written and keeps them. Every device case runs at the default and with TRITON_MSL_FAST_MATMUL=0.
 """
 
 import pytest
@@ -66,12 +66,15 @@ UNMASKED = dict(amask="", bmask="")
 POISON = -98765.0
 
 
-def _variant(tmp_path, tag, **slots):
+def _format(text, **slots):
     slots = {**DEFAULT, **slots}
-    text = SOURCE
     for _ in range(4):  # slots nest: body -> masks -> names
         text = text.format(name="{name}", **slots)
-    return _kernel(tmp_path, "loop_store_" + tag, text)
+    return text
+
+
+def _variant(tmp_path, tag, **slots):
+    return _kernel(tmp_path, "loop_store_" + tag, _format(SOURCE, **slots))
 
 
 def _lower(fn, block=32):
@@ -173,6 +176,58 @@ def test_a_flat_grid_constant_store_clip_refuses(tmp_path, smask):
         _lower(_variant(tmp_path, "flat_constant", pid=FLAT, smask=smask))
 
 
+OTHER_INDEX_CLIPS = {
+    "shifted_rows": "((rm + 1)[:, None] < {M}) & (rn[None, :] < {N})",
+    "lowered_rows": "((rm - 16)[:, None] < {M}) & (rn[None, :] < {N})",
+    "scaled_rows": "((rm * 2)[:, None] < {M}) & (rn[None, :] < {N})",
+    "shifted_cols": "(rm[:, None] < {M}) & ((rn + 1)[None, :] < {N})",
+    "columns_as_rows": "(rn[:, None] < {M}) & (rn[None, :] < {N})",
+    "rows_as_columns": "(rm[:, None] < {M}) & (rm[None, :] < {N})",
+    "shifted_constant": "((rk + 16)[:, None] < 32) & (rn[None, :] < {N})",
+}
+
+
+@pytest.mark.parametrize("body", ["loop", "single"])
+@pytest.mark.parametrize("tag", sorted(OTHER_INDEX_CLIPS))
+def test_a_store_clip_on_another_index_than_the_address_refuses(tmp_path, tag, body):
+    # The address is ``rm`` by ``rn``. 34378c9 and 8f2c58f followed add, subtract and multiply to any
+    # arange on the axis, so each of these ran as ``(rm < M) & (rn < N)`` (GPU: 64 to 2048 cells wrong).
+    slots = dict(smask=OTHER_INDEX_CLIPS[tag], **({"body": SINGLE} if body == "single" else {}))
+    with pytest.raises(MetalNonRecoverableError, match="non-tile-boundary output store mask"):
+        _lower(_variant(tmp_path, f"{tag}_{body}", **slots))
+
+
+@pytest.mark.parametrize(
+    "tag,smask",
+    [
+        ("canonical", SMASK),
+        ("bound_on_the_left", "({M} > rm[:, None]) & ({N} > rn[None, :])"),
+        ("columns_first", "(rn[None, :] < {N}) & (rm[:, None] < {M})"),
+        ("rows_only", "rm[:, None] < {M}"),
+        ("compared_before_lifting", "(rm < {M})[:, None] & (rn < {N})[None, :]"),
+    ],
+    ids=["canonical", "bound_on_the_left", "columns_first", "rows_only", "compared_before_lifting"],
+)
+def test_a_store_clip_on_the_address_index_keeps_the_template(tmp_path, tag, smask):
+    lowerer, msl = _lower(_variant(tmp_path, tag, smask=smask))
+    assert not getattr(lowerer, "_store_mask_replay_only", False)
+    assert "simdgroup_store" in msl and not msl.startswith("// Source-replayed K-loop epilogue")
+
+
+ONE_TILE = "pm = 0\n    pn = 0"
+
+
+@pytest.mark.parametrize("bound,kept", [("32", True), ("33", True), ("31", False), ("16", False)])
+def test_a_constant_store_clip_is_judged_against_the_bare_tile(tmp_path, bound, kept):
+    # One program at the origin: the address index IS arange(0, 32), so only a bound of at least 32 is whole.
+    fn = _variant(tmp_path, "one_tile_" + bound, pid=ONE_TILE, smask=f"(rm[:, None] < {bound}) & (rn[None, :] < 32)")
+    if kept:
+        _lower(fn)
+    else:
+        with pytest.raises(MetalNonRecoverableError, match="non-tile-boundary output store mask"):
+            _lower(fn)
+
+
 def test_another_route_may_not_claim_a_replay_only_store_mask(tmp_path, monkeypatch):
     fn = _variant(tmp_path, "replay_only", value="acc * 2.0", smask=STORE_CLIPS["second_row_clip"])
     lowerer, msl = _lower(fn)
@@ -271,6 +326,18 @@ DEVICE = [
         False,
     ),
     (
+        # 8f2c58f read a clip compared before its ``[None, :]`` as a ROW clip: rows < 40, every column.
+        "column_clip_compared_before_lifting",
+        dict(smask="(rn < X)[None, :]"),
+        64,
+        40,
+        (0, 32),
+        True,
+        (64, 40),
+        1,
+        False,
+    ),
+    (
         "epilogue_later_start",
         dict(loop="range(BK, {K}, BK)", value="acc * 2.0"),
         96,
@@ -325,15 +392,52 @@ DEVICE = [
         2,
         True,
     ),
+    (
+        "epilogue_shifted_row_clip",
+        dict(value="acc * 2.0", smask=OTHER_INDEX_CLIPS["shifted_rows"]),
+        64,
+        7,
+        (0, 32),
+        True,
+        lambda rm, rn: (rm + 1 < 64) & (rn < 64),
+        2,
+        True,
+    ),
+    (
+        "epilogue_scaled_row_clip",
+        dict(value="acc * 2.0", smask=OTHER_INDEX_CLIPS["scaled_rows"]),
+        64,
+        7,
+        (0, 32),
+        True,
+        lambda rm, rn: (rm * 2 < 64) & (rn < 64),
+        2,
+        True,
+    ),
+    (
+        "epilogue_rows_as_columns",
+        dict(value="acc * 2.0", smask="(rm[:, None] < {M}) & (rm[None, :] < X)"),
+        64,
+        40,
+        (0, 32),
+        True,
+        lambda rm, rn: (rm < 64) & (rm.reshape(1, -1) < 40),
+        2,
+        True,
+    ),
 ]
 
 
+@pytest.mark.parametrize("fast", ["default", "0"])
 @pytest.mark.parametrize("tag,slots,k,x,offsets,masked,store,scale,replayed", DEVICE, ids=[c[0] for c in DEVICE])
-def test_default_route_runs_the_source_loop_and_store(
-    tmp_path, monkeypatch, routes, tag, slots, k, x, offsets, masked, store, scale, replayed
+def test_both_matmul_routes_run_the_source_loop_and_store(
+    tmp_path, monkeypatch, routes, tag, slots, k, x, offsets, masked, store, scale, replayed, fast
 ):
-    monkeypatch.delenv("TRITON_MSL_FAST_MATMUL", raising=False)
-    fn = _variant(tmp_path, tag, **slots)
+    if fast == "default":
+        monkeypatch.delenv("TRITON_MSL_FAST_MATMUL", raising=False)
+    else:
+        monkeypatch.setenv("TRITON_MSL_FAST_MATMUL", fast)
+    fn = _variant(tmp_path, f"{tag}_fast_{fast}", **slots)
     m = n = 64
     generator = torch.Generator().manual_seed(34378)
     a_cpu = torch.randint(-3, 4, (m * k,), generator=generator).float()
@@ -357,11 +461,12 @@ def test_default_route_runs_the_source_loop_and_store(
         m if masked else None,
         k,
         n,
-        lambda rm, rn: (rm < store[0]) & (rn < store[1]),
+        store if callable(store) else lambda rm, rn: (rm < store[0]) & (rn < store[1]),
         scale,
     )
     # Small-integer data: every sum is exact in fp32, so the default route must reproduce it exactly.
     assert torch.equal(c.cpu(), expected)
     assert torch.all(backing[:32].cpu() == POISON) and torch.all(backing[-32:].cpu() == POISON)
     assert torch.equal(a.cpu(), a_cpu) and torch.equal(b.cpu(), b_cpu)
-    assert all(route[1] != "simdgroup_matmul_fast" for route in routes) or not replayed
+    assert routes
+    assert all(route[1] != "simdgroup_matmul_fast" for route in routes) or not (replayed or fast == "0")
