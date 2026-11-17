@@ -885,6 +885,19 @@ class GenericLowerer(
 
     def lower(self) -> str:
         """Lower the IRGraph to MSL source code."""
+        msl = self._lower_routes()
+        if getattr(self, "_store_mask_replay_only", False) and not getattr(self, "_source_epilogue_replay", False):
+            from triton_msl.errors import MetalNonRecoverableError
+
+            # Fail closed: this store mask was admitted for the mask-executing route only.
+            raise MetalNonRecoverableError(
+                "Refusing to emit silently-wrong output: the output store mask is executed only by the "
+                "source-replayed K-loop epilogue route, and another route claimed this kernel.",
+                op_name="tt.dot",
+            )
+        return msl
+
+    def _lower_routes(self) -> str:
         from .assertions import prepare
 
         self._assert_plan = prepare(self)

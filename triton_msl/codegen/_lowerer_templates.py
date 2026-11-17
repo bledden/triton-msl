@@ -272,19 +272,23 @@ class _TemplateMixin:
 
     def _k_extent_line(self, info, BLOCK_K, has_K, BLOCK_M=None, BLOCK_N=None, source_bindings=None):
         """MSL statement setting ``_K`` (the matmul reduction extent), resolved
-        STRUCTURALLY from the scf.for upper bound (``k_extent_arg``, works for any arg
-        name); the name-based ``has_K`` is kept only as a no-regression fallback. Refuses
+        STRUCTURALLY from the K-loop bounds (``k_extent_arg`` for a runtime argument of
+        any name, ``k_extent_const`` elements for constant bounds; see
+        ``_kloop_source_extent``). A looped kernel never falls back to an argument that is
+        merely NAMED ``K``: with constant bounds, or a count over another argument, that
+        argument is a stride or an unrelated extent (GPU: reduced over it anyway). A
+        non-looped dot reduces its own BLOCK_K tile, whatever the arguments are called
+        (``has_K`` is unused and kept for the callers' signature). Refuses
         when a runtime reduction extent can't be resolved, rather than silently reducing
         over a single BLOCK_K tile (GitHub issue #4.1 -- renaming the reduction extent
         ``K -> DIM`` dropped the K-loop and returned ``A[:, :BLOCK_K] @ B[:BLOCK_K, :]``
         with no error). Single source of truth for every matmul template's ``_K``."""
         source_bindings = source_bindings or {}
         k_extent_arg = info.get("k_extent_arg")
-        scf_iters = info.get("scf_iters")
         has_k_loop = bool(info.get("has_k_loop"))
         if has_k_loop:
             mode = info.get("k_tail_mode")
-            source = k_extent_arg if k_extent_arg is not None else ("K" if has_K else info.get("k_extent_const"))
+            source = k_extent_arg if k_extent_arg is not None else info.get("k_extent_const")
             source_expr = source_bindings.get(source, str(source)) if str(source).isidentifier() else f"({source})"
             if source is not None and mode == "masked_zero":
                 if self._matmul_needs_grid_plan(info):
@@ -297,9 +301,7 @@ class _TemplateMixin:
                 # widening addition below is exact.  Decline wider dynamic bounds
                 # rather than manufacture a wrapped reduction extent.
                 source_width = info.get("k_extent_width")
-                if k_extent_arg is None and has_K:
-                    source_width = self._declared_int_elem_type("K")
-                if k_extent_arg is not None or has_K:
+                if k_extent_arg is not None:
                     if source_width != "i32":
                         from triton_msl.errors import MetalNonRecoverableError
 
@@ -330,13 +332,10 @@ class _TemplateMixin:
                     "K-loop matmul reduction-tail semantics were not proven from both operand loads",
                     op_name="tt.dot",
                 )
-        if k_extent_arg is not None:
-            return f"    long _K = (long){source_bindings.get(k_extent_arg, k_extent_arg)};"
-        if has_K:  # legacy fallback: arg literally named K (structural trace missed it)
-            return f"    long _K = (long){source_bindings.get('K', 'K')};"
-        if has_k_loop and scf_iters is not None and scf_iters >= 1:
-            return f"    long _K = {BLOCK_K * scf_iters};  // BLOCK_K * scf.for iters"
-        if not has_k_loop:
+        else:
+            # A non-looped dot reduces exactly its own tile: the loads are unmasked (the
+            # value-path proof refuses a mask), so an argument named K is A's row stride
+            # or anything else, never the depth (GPU: K=64 over a 32-wide tile summed 64).
             return f"    long _K = {BLOCK_K};  // single, non-looped dot tile"
         from triton_msl.errors import MetalNonRecoverableError
 
@@ -1512,13 +1511,16 @@ class _TemplateMixin:
             or None in lds
             or not (has_M and has_N and has_K)
             or any(name not in argnames for name in ("M", "N", "K"))
+            # The twin's launcher reads the reduction extent from an argument slot: only
+            # the one the loop bounds PROVED, never an argument that is merely named K.
+            or info.get("k_extent_arg") is None
         ):
             return []
         a_name, b_name, c_name = names
         m_ext, n_ext = extent_args
         direct_m = m_ext or "M"
         direct_n = n_ext or "N"
-        direct_k = info.get("k_extent_arg") or "K"
+        direct_k = info["k_extent_arg"]
         dn = f"{safe_name}__mmdirect"
         lines = [
             "",
@@ -2293,6 +2295,10 @@ class _TemplateMixin:
             and "M" in _argnames
             and "N" in _argnames
             and "K" in _argnames
+            # Only a reduction extent the loop bounds PROVED is a launch-time K: with
+            # constant bounds or a count over another argument, the argument named K is
+            # a stride or an unrelated extent (GPU: the twin reduced over it anyway).
+            and info.get("k_extent_arg") is not None
         ):
             dn = f"{safe_name}__mmdirect"
             # Whole 32x32 sub-tiles per simdgroup when the tile splits that way; the
@@ -2316,7 +2322,7 @@ class _TemplateMixin:
             # (``(A, B, C, M, K, N)``, or M and N exchanged) to the wrong tiles.
             _direct_m = m_ext or "M"
             _direct_n = n_ext or "N"
-            _direct_k = info.get("k_extent_arg") or "K"
+            _direct_k = info["k_extent_arg"]
             lines.append(self._k_extent_line(info, BLOCK_K, has_K, BLOCK_M, BLOCK_N, source_bindings))
             # Packet 106: the direct variant replays the SAME proven grid mapping as the
             # staged kernel (the tutorial's 1-D split, and tile 0 on an axis the source

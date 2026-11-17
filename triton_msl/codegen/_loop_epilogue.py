@@ -182,8 +182,10 @@ def eligible(lowerer):
     projected = replace(
         graph, ops=[projected_store if o is store else replacements.get(o.id, o) for o in graph.ops if o.id in keep]
     )
-    proof = type(lowerer)(projected, lowerer.options)._dot_template_value_paths()
-    return proof[0] is None
+    prover = type(lowerer)(projected, lowerer.options)
+    # The loop bounds are replayed, not reduced to a template extent: any spelling is the source's.
+    prover._source_loop_replayed = True
+    return prover._dot_template_value_paths()[0] is None
 
 
 def deferred_wide_ops(lowerer):

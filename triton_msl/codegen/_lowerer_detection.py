@@ -143,6 +143,77 @@ class _DetectionMixin:
             break
         return None
 
+    def _kloop_replayed_mask_extent(self, k_for, block_k, op_by_id):
+        """The K bound a load mask may name on the source-replaying epilogue route.
+
+        That route (``_loop_epilogue``) re-executes the source's own loop and masks, so
+        no template extent exists and any loop bounds are replayed as written. This only
+        keeps the set of load masks the route admits where it was: the loop's upper-bound
+        argument, else an argument named ``K``, else the constant trip count in elements."""
+        k_extent = self._scf_upper_bound_arg(k_for)
+        if k_extent is None and any(a.name == "K" and not a.is_ptr for a in self.graph.args):
+            k_extent = "K"
+        if k_extent is None and block_k:
+            lo, hi, st = (self._const_int(k_for.operand_ids[i], op_by_id) for i in (0, 1, 2))
+            if None not in (lo, hi, st) and st > 0:
+                k_extent = block_k * max(0, (hi - lo + st - 1) // st)
+        return k_extent
+
+    def _kloop_source_extent(self, k_for, block_k, op_by_id):
+        """``(reason, extent)``: the reduction extent the K-loop's OWN bounds prove.
+
+        The K-loop templates reduce elements ``[0, extent)`` in BLOCK_K blocks and never
+        read the loop bounds again, so the bounds must say exactly that: a literal 0
+        start, and either an element-stepped loop to the extent
+        (``range(0, K, BLOCK_K)``) or an iteration count that is the extent's ceiling
+        (``range(0, cdiv(K, BLOCK_K))``). ``extent`` is the runtime argument's NAME (any
+        name; an unrelated argument that happens to be called ``K`` is not consulted) or,
+        for constant bounds, an int of elements. A later start, ``K - BLOCK_K``,
+        ``K // 2``, a floor count ``K // BLOCK_K`` and a bare count argument are other
+        reductions (GPU: every route ran them as ``range(0, K, BLOCK_K)``) and refuse."""
+        ids = k_for.operand_ids or []
+        if len(ids) < 3 or not block_k:
+            return ("the K-loop bounds could not be read", None)
+        lo, hi, step = (self._const_int(ids[i], op_by_id) for i in (0, 1, 2))
+        if step not in (block_k, 1):
+            return (f"the K-loop step ({step}) is neither BLOCK_K ({block_k}) nor 1", None)
+        if lo != 0:
+            return ("the K-loop does not start at literal 0 (the template reduces from element 0)", None)
+        counted = step == 1 and block_k != 1
+        if hi is not None:
+            return (None, block_k * max(0, hi if counted else -(-hi // block_k)))
+        arg_by_id = {a.id: a for a in self.graph.args}
+
+        def _arg(vid):
+            a = arg_by_id.get(self._strip_wrappers(vid, op_by_id, self._IDX_CASTS))
+            return a.name if a is not None else None
+
+        if not counted:
+            name = _arg(ids[1])
+            if name is None:
+                return (
+                    "the K-loop upper bound is neither a runtime argument nor a constant (the template "
+                    "reduces to exactly that extent)",
+                    None,
+                )
+            return (None, name)
+        div = op_by_id.get(self._strip_wrappers(ids[1], op_by_id, self._IDX_CASTS))
+        if div is None or len(div.operand_ids or []) != 2 or self._const_int(div.operand_ids[1], op_by_id) != block_k:
+            div = None
+        elif div.op in ("arith.ceildivsi", "arith.ceildivui") and _arg(div.operand_ids[0]) is not None:
+            return (None, _arg(div.operand_ids[0]))
+        if div is not None and div.op in ("arith.divsi", "arith.divui"):
+            add = op_by_id.get(self._strip_wrappers(div.operand_ids[0], op_by_id, self._IDX_CASTS))
+            if add is not None and add.op == "arith.addi" and len(add.operand_ids or []) == 2:
+                for x, y in (add.operand_ids, add.operand_ids[::-1]):
+                    if self._const_int(y, op_by_id) == block_k - 1 and _arg(x) is not None:
+                        return (None, _arg(x))
+        return (
+            f"the K-loop iteration count is neither a constant nor cdiv(extent, BLOCK_K={block_k}) of a runtime "
+            "argument (a floor count or a separate count argument drops or adds blocks the template cannot see)",
+            None,
+        )
+
     def _const_int(self, vid, op_by_id):
         c = op_by_id.get(vid)
         if c is None or c.op != "arith.constant":
@@ -762,12 +833,16 @@ class _DetectionMixin:
         # The loop's K offset in elements: ``iv`` for ``range(0, K, BLOCK_K)`` (step ==
         # BLOCK_K), ``iv * BLOCK_K`` for ``range(0, cdiv(K, BLOCK_K))`` (step == 1).
         iv_scale = 1
+        k_source_extent = None
         if k_for is not None:
             _step = self._const_int(k_for.operand_ids[2], op_by_id) if len(k_for.operand_ids or []) > 2 else None
             if _step == 1 and block_k_hint:
                 iv_scale = block_k_hint
             elif _step != block_k_hint:
                 return (f"the K-loop step ({_step}) is neither BLOCK_K ({block_k_hint}) nor 1", set(), None, None)
+            _reason, k_source_extent = self._kloop_source_extent(k_for, block_k_hint, op_by_id)
+            if _reason and not getattr(self, "_source_loop_replayed", False):
+                return (_reason, set(), None, None)
 
         # ---- A / B: load -> layout ops -> dot; types (the shared proof; masks are
         # judged below per loop form, so allow them here) ----
@@ -1199,18 +1274,10 @@ class _DetectionMixin:
                 if init != addr_ids[role]:
                     return (f"the {role} stream is seeded from an address other than the traced one", set(), None, None)
                 carried[role] = (ba, y)
-            # the template's K extent, in the priority _k_extent_line uses
-            k_extent = self._scf_upper_bound_arg(k_for)
-            if k_extent is None and "K" in scalar_names:
-                k_extent = "K"
-            if k_extent is None:
-                lo_hi = [op_by_id.get(k_for.operand_ids[i]) for i in (0, 1, 2)]
-                try:
-                    if all(o is not None and o.op == "arith.constant" for o in lo_hi) and block_k:
-                        lo, hi, st = (int(str(o.attrs.get("value", "")).split(":")[0].strip()) for o in lo_hi)
-                        k_extent = block_k * max(0, (hi - lo + st - 1) // st)
-                except (TypeError, ValueError):
-                    k_extent = None
+            # the template's K extent: exactly what the loop bounds proved above
+            k_extent = k_source_extent
+            if getattr(self, "_source_loop_replayed", False):
+                k_extent = self._kloop_replayed_mask_extent(k_for, block_k, op_by_id)
             k_tail_clips = {}
             for role in ("A", "B"):
                 load = loads[role]
@@ -1383,6 +1450,8 @@ class _DetectionMixin:
                 "load_modulo_args": tuple(load_modulo_args),
                 "load_identity_modulo_args": tuple(load_identity_modulo_args),
                 "load_domain_args": tuple(mask or mod for mask, mod in zip(load_names, load_modulo_args)),
+                "k_extent_arg": k_source_extent if isinstance(k_source_extent, str) else None,
+                "k_extent_const": k_source_extent if isinstance(k_source_extent, int) else None,
             },
         )
 
@@ -2310,7 +2379,7 @@ class _DetectionMixin:
                     m_arg = arg.name
         return m_arg, n_arg
 
-    def _template_output_mask_nontrivial(self, is_fa, fa_ctx_index=None):
+    def _template_output_mask_nontrivial(self, is_fa, fa_ctx_index=None, replayed=False):
         """True iff a dot-bearing kernel carries an output ``tt.store`` mask that
         RESTRICTS the output WITHIN the computed tile — a non-tile-boundary mask the
         matmul / FlashAttention TEMPLATES would SILENTLY DROP. They gate writes only on
@@ -2337,6 +2406,16 @@ class _DetectionMixin:
         dispatch chokepoint (``_refuse_nontrivial_template_output_mask``) AND the
         head_dim=128 simdgroup/tiled FA self-refusal (``_lower_flash_attention_template``)
         so the two cannot diverge.
+
+        The template's clip is ONE strict bound per axis (``row < _M``, ``col < _N``), so
+        the proof also requires, per store: a STRICT comparison against a runtime argument
+        (``rm <= M`` stores row M; GPU: clipped at M) and at most ONE distinct runtime
+        argument per axis (``(rm < M) & (rm < X)`` is ``min(M, X)``; GPU: one of the two
+        was kept). A constant bound is judged against the index's whole range, so a
+        program-id term reached through the flat-grid ``pid % n`` / ``pid // n`` counts.
+        ``replayed=True`` leaves those three requirements out: it is the question the
+        source-replaying epilogue route asks, which executes the store mask as written
+        (``_refuse_nontrivial_template_output_mask``).
 
         Structural trivially-true proof (naming mirrors the template's OWN boundary
         clip, which references the kernel arg literally named M / N / N_CTX): the mask
@@ -2384,6 +2463,23 @@ class _DetectionMixin:
             "tt.expand_dims",
         )
 
+        _PID_WRAP = ("arith.remsi", "arith.remui", "arith.divsi", "arith.divui", *self._IDX_CASTS)
+
+        def _reaches_pid(start_id):
+            seen, stack = set(), [start_id]
+            while stack:
+                o = by_id.get(stack.pop())
+                if o is None or o.id in seen:
+                    continue
+                seen.add(o.id)
+                if o.op in ("tt.get_program_id", "tt.program_id", "tt.get_num_programs"):
+                    return True
+                stack.extend(o.operand_ids or [])
+            return False
+
+        # per store: the distinct runtime-argument bounds seen on each axis (0 = columns)
+        axis_args = {}
+
         def _index_info(start_id):
             """Trace an SSA value back toward a ``tt.make_range`` (a tile-position
             index). Return ``(extent, axis)`` if a make_range is reachable (extent =
@@ -2424,12 +2520,18 @@ class _DetectionMixin:
                 if o.op in _IDX_WRAP:
                     stack.extend(o.operand_ids or [])
                     continue
+                if o.op in _PID_WRAP:
+                    # A flat grid spells the tile offset ``(pid % n) * BLOCK``: still a
+                    # multi-block index. Only the program id is looked for below here; a
+                    # range under a remainder is not a tile position.
+                    has_pid = has_pid or (not replayed and _reaches_pid(o.id))
+                    continue
                 # tt.get_program_id / arith.constant: scalar leaves of pid*BLOCK+range;
                 # ignore (they don't disqualify a reachable make_range). Any other op
                 # leaves has_range as-is.
             return (extent, axis, has_pid) if has_range else None
 
-        def _bound_ok(bound_id, ok_names, idx_extent, has_pid):
+        def _bound_ok(bound_id, ok_names, idx_extent, has_pid, strict, axis):
             """True iff the comparison's BOUND is the template's output-extent arg for
             this axis (matching name) or a constant >= the tile extent."""
             seen = set()
@@ -2453,6 +2555,10 @@ class _DetectionMixin:
                 # honored (not dropped) when the store bound IS that same arg -- matched by
                 # NAME ("N_CTX") or, when the seq-len was resolved STRUCTURALLY from a renamed
                 # arg (seqlen, L, ...), by that arg's INDEX (fa_ctx_index).
+                if not replayed:
+                    if not strict:
+                        return False  # ``idx <= ARG`` keeps index ARG; the template clips at ARG
+                    axis_args.setdefault(axis, set()).add(arg.id)
                 if not is_fa:
                     return True
                 return arg.name in ok_names or (
@@ -2469,7 +2575,7 @@ class _DetectionMixin:
                 # to drop; a column mask or any other constant remains subject to
                 # the ordinary multi-block refusal below.
                 if is_fa and fa_ctx_index == "c1" and ok_names == {"N_CTX"}:
-                    return val == 1
+                    return (strict or replayed) and val == 1
                 # a CONSTANT bound on a MULTI-BLOCK index (pid*BLOCK+range) can't be
                 # proven trivial: the make_range extent is the per-block span, the index
                 # runs to a RUNTIME total -> a const between BLOCK and total clips later
@@ -2503,7 +2609,8 @@ class _DetectionMixin:
                 return False
             extent, axis, has_pid = idx_info
             ok_names = ok_col_names if axis == 0 else ok_row_names
-            return _bound_ok(bound_id, ok_names, extent, has_pid)
+            strict = pred in ("slt", "ult", "sgt", "ugt")
+            return _bound_ok(bound_id, ok_names, extent, has_pid, strict, 0 if axis == 0 else 1)
 
         def _mask_is_trivial(mask_id, depth=0):
             if depth > 64:
@@ -2521,8 +2628,11 @@ class _DetectionMixin:
             return False  # arith.ori/xori, cmpf (value mask), splat(true), unknown -> refuse
 
         for st in masked_stores:
+            axis_args.clear()
             if not _mask_is_trivial(st.operand_ids[2]):
                 return True
+            if any(len(ids) > 1 for ids in axis_args.values()):
+                return True  # two clips on one axis: the template keeps a single extent
         return False
 
     def _refuse_nontrivial_template_output_mask(self):
@@ -2583,6 +2693,19 @@ class _DetectionMixin:
 
         if self._template_output_mask_nontrivial(is_fa=False):
             from triton_msl.errors import MetalNonRecoverableError
+
+            # A second clip on an axis, a non-strict clip and a flat-grid constant clip are
+            # dropped by the templates but executed by the source-replaying epilogue route.
+            # Admit them for that route alone; ``lower`` refuses any other route's result.
+            if not self._template_output_mask_nontrivial(is_fa=False, replayed=True):
+                from ._loop_epilogue import eligible
+
+                try:
+                    self._store_mask_replay_only = eligible(self)
+                except MetalNonRecoverableError:
+                    self._store_mask_replay_only = False
+                if self._store_mask_replay_only:
+                    return
 
             raise MetalNonRecoverableError(
                 "matmul with a non-tile-boundary output store mask is not supported: "
@@ -2766,44 +2889,6 @@ class _DetectionMixin:
                 scf_for_ssa = ssa
                 break
 
-        def _const_scf_iters(scf_op):
-            """Return the static iteration count of an scf.for if its
-            bounds are compile-time constants (``%c0_i32 to %cN_i32 step %c1_i32``),
-            else ``None``."""
-            if not scf_op or not scf_op.operand_ids or len(scf_op.operand_ids) < 3:
-                return None
-            op_by_id = {s.id: s for s in self.graph.ops}
-
-            def _const_val(sid):
-                s = op_by_id.get(sid)
-                if not s or s.op != "arith.constant":
-                    return None
-                return s.attrs.get("value")
-
-            lo = _const_val(scf_op.operand_ids[0])
-            hi = _const_val(scf_op.operand_ids[1])
-            step = _const_val(scf_op.operand_ids[2])
-            if lo is None or hi is None or step is None or step == 0:
-                return None
-            try:
-                return max(0, (int(hi) - int(lo) + int(step) - 1) // int(step))
-            except (TypeError, ValueError):
-                return None
-
-        scf_iters = _const_scf_iters(scf_for_ssa)
-        k_extent_const = None
-        if scf_for_ssa is not None and len(scf_for_ssa.operand_ids or []) >= 2:
-            upper = {s.id: s for s in self.graph.ops}.get(scf_for_ssa.operand_ids[1])
-            if upper is not None and upper.op == "arith.constant":
-                try:
-                    k_extent_const = int(str(upper.attrs.get("value")).split(":")[0].strip())
-                except (TypeError, ValueError):
-                    k_extent_const = None
-
-        # Reduction extent traced STRUCTURALLY (any arg name) rather than by matching
-        # the name ``K`` -- renaming it must not silently drop the K-loop (issue #4.1).
-        k_extent_arg = self._scf_upper_bound_arg(scf_for_ssa)
-
         if scf_for_ssa:
             # Check if the scf.for body contains tt.dot
             dot_in_loop = None
@@ -2941,6 +3026,11 @@ class _DetectionMixin:
                     op_name="tt.dot",
                 )
 
+            # The reduction extent is the one the value-path predicate PROVED from the loop
+            # bounds (a runtime argument of any name, or constant elements), never a guess.
+            _kdom = _vp[6] if len(_vp) > 6 else {}
+            k_extent_arg, k_extent_const = _kdom.get("k_extent_arg"), _kdom.get("k_extent_const")
+
             return {
                 # PROVEN grid mapping ("2d" | "1d") from the value-path predicate, replayed
                 # verbatim by the pid-tiled templates (no default: a K-loop route without
@@ -2966,11 +3056,6 @@ class _DetectionMixin:
                 ),
                 "k_extent_const": k_extent_const,
                 "k_tail_mode": _vp[5],
-                # When K is a constexpr (not a runtime scalar arg) the
-                # template can\'t read it from a buffer. Pre-compute the
-                # full ``_K = BLOCK_K * scf_iters`` from the scf.for
-                # bounds when those are constants (``test_dot_mulbroadcasted``).
-                "scf_iters": scf_iters,
             }
 
         # --- Non-K-loop: simple dot without scf.for ---

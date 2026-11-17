@@ -24,6 +24,23 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   kernel whose store mask named a smaller extent was written through to `M`.
 - Replay a compile-time constant load clip on a tiled index. 0.3.0 accepted the
   constant and then loaded whole tiles, so rows past it kept their product.
+- Take a matmul template's reduction extent from the K-loop's own bounds, never
+  from an argument merely named `K`. The templates reduce `[0, extent)`, so a
+  loop is admitted when it starts at 0 and either steps `BLOCK_K` to an argument
+  or constant, or counts `cdiv(extent, BLOCK_K)` or a constant number of blocks.
+  A later start, `K - BK`, `K // 2`, `min(K, X)`, a floor count, a separate
+  count argument, and K-clipped loads beside a loop over something else now
+  refuse on the template routes. Before this they ran as `range(0, K, BK)`. A
+  floor count with `K` a multiple of `BLOCK_K` was right by coincidence and is
+  among the refusals; spell it `tl.cdiv(K, BK)` or step by `BK`.
+- Reduce a single, non-looped `tl.dot` over its own `BLOCK_K` tile. With an
+  argument named `K` larger than the tile it reduced over `K`.
+- Give the direct matmul entry a depth only when the loop proves which argument
+  it is. Constant-bound loops keep the ordinary entry.
+- Refuse a store mask the templates cannot spell: a second clip on one axis, a
+  non-strict `<=` clip, and a constant clip on a flat 1-D grid. One `<` clip per
+  axis was kept and the rest dropped. The source-replaying K-loop epilogue route
+  executes the source loop and store mask as written and keeps all of these.
 - These changes require fresh integrated hardware and installed-artifact
   qualification. Earlier source-tree matmul timings do not measure their cost.
 
