@@ -6769,12 +6769,13 @@ class GenericLowerer(
         cur = score_value_id
         factor = 1.0
         scale_ops = []
+        select_ids = []
         seen = set()
         while cur not in seen and len(seen) < 128:
             if cur in dot_ids:
                 if not (_math.isfinite(factor) and factor > 0.0):
                     return None
-                return {"factor": factor, "op_ids": tuple(scale_ops)}
+                return {"factor": factor, "op_ids": tuple(scale_ops), "select_ids": tuple(select_ids)}
             seen.add(cur)
             op = by_id.get(cur)
             if op is None:
@@ -6790,6 +6791,7 @@ class GenericLowerer(
                 branches = [oid for oid in op.operand_ids[1:] if _depends_on_dot(oid)]
                 if len(branches) != 1:
                     return None
+                select_ids.append(op.id)
                 cur = branches[0]
                 continue
             if op.op == "arith.mulf" and len(op.operand_ids or []) == 2:
@@ -7550,6 +7552,7 @@ class GenericLowerer(
             expected_score_scale=info.get("score_scale"),
             load_mask_policy="varlen",
             varlen_bounds=(info["seqlen_q_id"], info["seqlen_k_id"]),
+            varlen_causal=bool(info.get("causal")),
             q_rows=32,
             kv_cols=32,
             extra_stores=[(roles["o"], "Out", ("Q",), True)],
@@ -7572,7 +7575,15 @@ class GenericLowerer(
                         "varlen FlashAttention has a pointer arg with no resolved role; refusing."
                     )
                 if role in ("CUQ", "CUK"):
-                    arg_decls.append(f"    device const int* {role} [[buffer({a.index})]]")
+                    # The template indexes the cumulative lengths as stored: an int64 tensor
+                    # read through ``int*`` gives every second entry a zero high word.
+                    if a.elem_type not in ("i32", "i64"):
+                        raise MetalNonRecoverableError(
+                            "varlen FlashAttention cumulative sequence lengths are neither int32 nor int64; refusing."
+                        )
+                    arg_decls.append(
+                        f"    device const {triton_type_to_msl(a.elem_type)}* {role} [[buffer({a.index})]]"
+                    )
                 else:
                     msl_ty = triton_type_to_msl(a.elem_type)
                     qual = "device" if role == "Out" else "device const"
@@ -7580,10 +7591,13 @@ class GenericLowerer(
             else:
                 arg_decls.append(f"    constant uint& bsc_{a.index} [[buffer({a.index})]]")
 
-        def _uint_expr(entry):
+        unsigned_args, signed_args = set(), set()
+
+        def _uint_expr(entry, signed=False):
             if entry == C1:
                 return "1u"
             if isinstance(entry, int):
+                (signed_args if signed else unsigned_args).add(entry)
                 return f"bsc_{entry}"
             raise MetalNonRecoverableError(
                 "varlen FlashAttention stride/dim could not be mapped to a kernel arg; refusing."
@@ -7598,7 +7612,8 @@ class GenericLowerer(
             "CUQ": "CUQ",
             "CUK": "CUK",
             "H": _uint_expr(info["H"]),
-            "MAXS": _uint_expr(info["max_seqlen"]),
+            # The key-extent expression reads this one as ``int`` (_varlen_kmax_expr).
+            "MAXS": _uint_expr(info["max_seqlen"], signed=True),
             "q_st": _uint_expr(q[0]),
             "q_sh": _uint_expr(q[1]),
             "q_sk": _uint_expr(q[2]),
@@ -7657,6 +7672,7 @@ class GenericLowerer(
             )
             self.effective_block_size = 32
             self._flash_attention = ("flash_attention", msl, 32)
+        self._attention_unsigned_scalars(unsigned_args, signed_args)
         self._used_pid_axes = {0, 1}
         self._prescan_stores()
         return msl
@@ -8535,6 +8551,55 @@ class GenericLowerer(
                 return "query"
             return None
 
+        _axis_wrappers = {"tt.splat", "tt.broadcast", "tt.expand_dims", "ttg.convert_layout"}
+
+        def _mask_expands(start, stop_ops):
+            """``(op reached, tt.expand_dims passed)`` peeling broadcasts from ``start``."""
+            cur2, seen2, expands = start, set(), []
+            while cur2 not in seen2 and len(seen2) < 64:
+                seen2.add(cur2)
+                op2 = op_by_id.get(cur2)
+                if op2 is None:
+                    return None, expands
+                if op2.op in stop_ops:
+                    return op2, expands
+                if op2.op not in _axis_wrappers or len(op2.operand_ids or []) != 1:
+                    return None, expands
+                if op2.op == "tt.expand_dims":
+                    expands.append(op2)
+                cur2 = op2.operand_ids[0]
+            return None, expands
+
+        def _mask_index_axis(cond_id, side):
+            """The score axis an index of the mask comparison varies along, or None.
+
+            ``_mask_index_kind`` proves WHICH index a side is; on a square tile a query
+            index broadcast along the columns has the same shape and masks other cells.
+            """
+            cmp2, above = _mask_expands(cond_id, {"arith.cmpi"})
+            if cmp2 is None:
+                return None
+            add2, mid = _mask_expands(cmp2.operand_ids[side], {"arith.addi"})
+            if add2 is None:
+                return None
+            below = None
+            for oid in add2.operand_ids or []:
+                rng, got = _mask_expands(oid, {"tt.make_range"})
+                if rng is not None:
+                    if below is not None:
+                        return None
+                    below = got
+            if below is None:
+                return None
+            expands = above + mid + below
+            if len(expands) != 1:
+                return None
+            src = op_by_id.get(expands[0].operand_ids[0])
+            axis = (expands[0].attrs or {}).get("axis")
+            if src is None or len(_extract_shape(src.type_str or "")) != 1 or axis not in (0, 1):
+                return None
+            return 1 - int(axis)
+
         for s in all_ops:
             if s.op != "arith.select" or len(s.operand_ids or []) != 3:
                 continue
@@ -8558,6 +8623,14 @@ class GenericLowerer(
 
             is_bounds = pred in ("slt", "ult") and lhs_kind in ("query", "key") and _mask_is_exact_arg(rhs, n_ctx_index)
             is_causal = pred in ("sge", "uge") and lhs_kind == "query" and rhs_kind == "key"
+            # Queries are the score's rows and keys its columns. The dense templates prove
+            # this in the value-path verifier; the MLA route has no later axis proof.
+            _want = {"query": 0, "key": 1}
+            if is_mla and (
+                (is_bounds and _mask_index_axis(cond_id, 0) != _want[lhs_kind])
+                or (is_causal and (_mask_index_axis(cond_id, 0) != 0 or _mask_index_axis(cond_id, 1) != 1))
+            ):
+                _refuse("a score mask whose query index runs along the rows and key index along the columns")
             if is_bounds:
                 continue
             if is_causal:
@@ -9764,17 +9837,23 @@ class GenericLowerer(
                     return ext
             _refuse("a bounds-select index that is exactly one tile of the source's row/col coordinate")
 
-        def _leaf_sig(cid, n_ctx_arg, extents):
-            """The full coordinate signature of one boundary leaf (structural, remat-proof)."""
+        def _leaf_sig(cid, n_ctx_arg, extents, mirrored_ok=False):
+            """The full coordinate signature of one boundary leaf (structural, remat-proof).
+
+            ``mirrored_ok`` also reads ``N_CTX > index``, the same boundary written the
+            other way round."""
             c_ = op_by_id.get(_peel_ids(cid, _bcast))
+            pred_ = (c_.attrs or {}).get("predicate_name") if c_ is not None else None
             if (
                 c_ is None
                 or c_.op != "arith.cmpi"
-                or (c_.attrs or {}).get("predicate_name") not in ("slt", "ult")
+                or pred_ not in (("slt", "ult", "sgt", "ugt") if mirrored_ok else ("slt", "ult"))
                 or len(c_.operand_ids or []) != 2
             ):
                 _refuse("a strict less-than N_CTX boundary leaf")
             lhs, rhs = c_.operand_ids
+            if pred_ in ("sgt", "ugt"):
+                lhs, rhs = rhs, lhs
             if n_ctx_arg is None or _arg_index(rhs) != n_ctx_arg:
                 _refuse("a boundary leaf comparing the tile index with the kernel's N_CTX argument")
             for iv_ in [None] + [v for v in _ivs if v is not None]:
@@ -10175,9 +10254,9 @@ class GenericLowerer(
                 sv = str((o.attrs or {}).get("value", ""))
                 return ("dense<0" in sv) or sv.strip() in ("0", "0.0", "0.000000e+00")
 
-            def _leaf_coord(cid):
+            def _leaf_coord(cid, mirrored_ok=False):
                 try:
-                    sig = _leaf_sig(cid, n_ctx_arg, {block_j, block_k})
+                    sig = _leaf_sig(cid, n_ctx_arg, {block_j, block_k}, mirrored_ok)
                 except MetalNonRecoverableError:
                     return None
                 return "j" if sig == _qs else "k" if sig == _ks else None
@@ -10413,6 +10492,22 @@ class GenericLowerer(
                 elif _mel not in ("f32", ""):
                     _refuse(f"{what} computed in {_mel}, which the templates cannot replay")
                 return ld[li], m
+
+            # The templates supply ZERO for every element a load's mask drops, and skip the
+            # rows past N_CTX. A source ``other`` is what the source computes with there
+            # (NaN or -inf reach the sums through 0 * x and exp), and an unmasked lse load
+            # reads the tensor there.
+            for _ld in allops:
+                if _ld.op == "tt.load" and len(_ld.operand_ids or []) >= 3 and not _is_zero_const(_ld.operand_ids[2]):
+                    _refuse("every masked load's `other` being absent or zero (the templates supply zero)")
+            _lse_ld = op_by_id.get(_peel_ids(lse_sub_op.operand_ids[1], _bcast))
+            if (
+                _lse_ld is None
+                or _lse_ld.op != "tt.load"
+                or len(_lse_ld.operand_ids or []) < 2
+                or _leaf_coord(_lse_ld.operand_ids[1], mirrored_ok=True) != "j"
+            ):
+                _refuse("the lse load masked by exactly the query-row boundary")
 
             # ---- shared: scores, dP, dS ----
             _need(scores_dot.id, ("j", "k"), "the score dot Q(j,d) @ K(d,k)")
@@ -11608,12 +11703,15 @@ class GenericLowerer(
                     arg_decls.append(f"    constant uint& bsc_{a.index} [[buffer({a.index})]]")
                     scalar_pos[a.index] = a.index
 
+        unsigned_args = set()
+
         def _u(entry):
             if entry == C1:
                 return "1u"
             if entry == "c0":
                 return "0u"
             if isinstance(entry, int) and entry in scalar_pos:
+                unsigned_args.add(entry)
                 return f"_bpk[{scalar_pos[entry]}]" if packed else f"bsc_{entry}"
             if (
                 isinstance(entry, tuple)
@@ -11879,18 +11977,41 @@ class GenericLowerer(
         from triton_msl.backend._argument_abi import producer_record
 
         self._argument_abi = producer_record(args, "biased-backward-v1", msl)
+        self._attention_unsigned_scalars(unsigned_args)
         self._used_pid_axes = {0, 1, 2} if grid_3d else {0, 1}
         self._prescan_stores()
         return msl
+
+    def _attention_unsigned_scalars(self, unsigned, signed=()) -> None:
+        """Carry the arguments an attention template reads as 32-bit values to the launcher.
+
+        Every attention template binds its strides, head count and lengths as ``uint`` and
+        adds them in 32-bit arithmetic. The source reads the same arguments as signed
+        integers of their declared width, so a negative stride (a pointer at the end of a
+        view), a negative length or a 64-bit value gives the template another cell or
+        another loop count. ``signed`` names the arguments a template reinterprets as
+        ``int``: any 32-bit value is the source's. The launcher refuses the other values
+        (``attention_unsigned_scalars_v1``); a route's own launch contract rides inside.
+        """
+        unsigned = {int(i) for i in unsigned}
+        signed = {int(i) for i in signed} - unsigned
+        self._tail_access_bounds = (
+            "attention_unsigned_scalars_v1",
+            tuple(sorted(unsigned)),
+            tuple(sorted(signed)),
+            self._tail_access_bounds,
+        )
 
     def _fa_unmasked_store_rows(self, row_bound, block_m) -> None:
         """Carry an unmasked FlashAttention store's row domain to the launcher.
 
         Every FlashAttention template stores only the rows below the sequence length. A
-        masked source store was proved to be exactly that boundary. An UNMASKED one stores
-        every row of every launched tile, which is the same set only when no launched tile
-        crosses the length, and that is known only from the runtime length and grid. The
-        launcher refuses the launch that would lose rows (``fa_whole_row_tiles_v1``).
+        source store masked by that row boundary is exactly that set. One WITHOUT the row
+        clip (no mask, or a mask that is trivial on the columns alone such as ``offs_d <
+        HEAD_DIM``) stores every row of every launched tile, which is the same set only when
+        no launched tile crosses the length, and that is known only from the runtime length
+        and grid. The launcher refuses the launch that would lose rows
+        (``fa_whole_row_tiles_v1``).
         """
         from triton_msl.errors import MetalNonRecoverableError
 
@@ -11900,7 +12021,9 @@ class GenericLowerer(
                 yield from _walk(op.region_ops or [])
                 yield from _walk(op.else_ops or [])
 
-        if all(len(op.operand_ids or []) >= 3 for op in _walk(self.graph.ops) if op.op == "tt.store"):
+        clipped = set()
+        self._template_output_mask_nontrivial(is_fa=True, fa_ctx_index=row_bound, row_clipped=clipped)
+        if all(op.id in clipped for op in _walk(self.graph.ops) if op.op == "tt.store"):
             return
         if isinstance(row_bound, bool) or not isinstance(row_bound, int):
             raise MetalNonRecoverableError(
@@ -11910,6 +12033,33 @@ class GenericLowerer(
                 op_name="tt.store",
             )
         self._tail_access_bounds = ("fa_whole_row_tiles_v1", int(row_bound), int(block_m))
+
+    def _fa_unmasked_value_keys(self, key_bound, block_n) -> None:
+        """Carry an unmasked FlashAttention V load's key domain to the launcher.
+
+        The biased template supplies zero for the V rows past the sequence length. A source
+        that loads V without a mask reads what the tensor holds there, and those rows carry
+        weight whenever the sentinel leaves them any (a finite sentinel on a fully masked
+        row, a sentinel that is not very negative) or are not finite. The two agree only
+        when the last key tile holds no row past the length, which is known only from the
+        runtime length. The launcher refuses the other launches (``fa_whole_key_tiles_v1``);
+        an unmasked store's row contract rides inside.
+        """
+        from triton_msl.errors import MetalNonRecoverableError
+
+        if isinstance(key_bound, bool) or not isinstance(key_bound, int):
+            raise MetalNonRecoverableError(
+                "FlashAttention with an unmasked V load and no runtime sequence-length argument: the "
+                "template supplies zero past the sequence length and cannot prove the launch attends "
+                "whole key tiles. Mask the V load with the key boundary. Refusing.",
+                op_name="tt.load",
+            )
+        self._tail_access_bounds = (
+            "fa_whole_key_tiles_v1",
+            int(key_bound),
+            int(block_n),
+            self._tail_access_bounds,
+        )
 
     def _prove_biased_fa_addresses(self, info: dict) -> dict:
         """Tie every address the biased/triangle template reconstructs to the source.
@@ -12127,6 +12277,22 @@ class GenericLowerer(
             o = by_id.get(self._strip_wrappers(vid, by_id, casts))
             if o is None or len(o.operand_ids or []) != 2:
                 return None
+            if not grid_3d and h_arg != C1 and o.op == "arith.subi" and _pid_axis(o.operand_ids[0]) == 1:
+                # h spelled as the remainder's definition: program_id(1) - (program_id(1) // H) * H
+                mul = by_id.get(self._strip_wrappers(o.operand_ids[1], by_id, casts))
+                if mul is not None and mul.op in ("arith.muli", "arith.mul") and len(mul.operand_ids or []) == 2:
+                    for x, y in (mul.operand_ids, mul.operand_ids[::-1]):
+                        div = by_id.get(self._strip_wrappers(x, by_id, casts))
+                        if (
+                            _scalar_arg(y) == h_arg
+                            and div is not None
+                            and div.op in ("arith.divsi", "arith.divui")
+                            and len(div.operand_ids or []) == 2
+                            and _pid_axis(div.operand_ids[0]) == 1
+                            and _scalar_arg(div.operand_ids[1]) == h_arg
+                        ):
+                            return 1
+                return None
             divisor = _scalar_arg(o.operand_ids[1])
             if divisor is None:
                 return None
@@ -12261,6 +12427,7 @@ class GenericLowerer(
 
         MAX_BUFFERS = 31  # mirrors driver._MAX_METAL_BUFFERS
         C1 = "c1"
+        _LSE_ELEMS = {"fp32": "float", "f32": "float", "fp16": "half", "f16": "half", "bf16": "bfloat"}
         args = self.graph.args
         for i, a in enumerate(args):
             if i != a.index:
@@ -12326,6 +12493,8 @@ class GenericLowerer(
         # the detector's positional guess.
         info = {**info, **self._prove_biased_fa_addresses(info)}
         self._fa_unmasked_store_rows(info.get("N_CTX"), block_m)
+        if _bout.get("v_unmasked"):
+            self._fa_unmasked_value_keys(info.get("N_CTX"), block_n)
         role_name = {
             info["q"]: "Q",
             info["k"]: "K",
@@ -12358,7 +12527,13 @@ class GenericLowerer(
             if role == "Mask":
                 return f"    device const uchar* Mask [[buffer({buf})]]"
             if role == "Lse":
-                return f"    device float* Lse [[buffer({buf})]]"
+                # The store rounds to the tensor's own element type: a half tensor written
+                # through ``float*`` took four bytes for every two it holds.
+                if a.elem_type not in _LSE_ELEMS:
+                    raise MetalNonRecoverableError(
+                        "biased FlashAttention log-sum-exp tensor is not fp32, fp16 or bf16; refusing."
+                    )
+                return f"    device {_LSE_ELEMS[a.elem_type]}* Lse [[buffer({buf})]]"
             m = triton_type_to_msl(a.elem_type)
             qual = "device" if role == "Out" else "device const"
             return f"    {qual} {m}* {role} [[buffer({buf})]]"
@@ -12382,6 +12557,8 @@ class GenericLowerer(
                     arg_decls.append(f"    constant uint& bsc_{a.index} [[buffer({a.index})]]")
                     scalar_pos[a.index] = a.index
 
+        unsigned_args = set()
+
         def _uint_expr(entry):
             """A stride/dim entry -> MSL uint expression (packed slot / individual
             buffer / baked 1u / baked 0u for a shared-across-i axis)."""
@@ -12390,6 +12567,7 @@ class GenericLowerer(
             if entry == "c0":
                 return "0u"
             if isinstance(entry, int) and entry in scalar_pos:
+                unsigned_args.add(entry)
                 return f"_bpk[{scalar_pos[entry]}]" if packed else f"bsc_{entry}"
             raise MetalNonRecoverableError(
                 "biased FlashAttention stride/dim could not be mapped to a kernel arg; refusing."
@@ -12521,6 +12699,7 @@ class GenericLowerer(
                 bias=True,
                 mask=has_mask,
                 lse=True,
+                lse_elem=_LSE_ELEMS[args[info["lse"]].elem_type],
                 runtime_scale=True,
                 grid_3d=grid_3d,
                 mask_batch_div=mask_batch_div,
@@ -12564,6 +12743,7 @@ class GenericLowerer(
                 bias=True,
                 mask=has_mask,
                 lse=True,
+                lse_elem=_LSE_ELEMS[args[info["lse"]].elem_type],
                 runtime_scale=True,
                 grid_3d=grid_3d,
                 mask_batch_div=mask_batch_div,
@@ -12579,6 +12759,7 @@ class GenericLowerer(
         from triton_msl.backend._argument_abi import producer_record
 
         self._argument_abi = producer_record(args, "biased-forward-v1", msl)
+        self._attention_unsigned_scalars(unsigned_args)
         self._used_pid_axes = {0, 1, 2} if grid_3d else {0, 1}
         self._prescan_stores()
         return msl
@@ -12782,6 +12963,13 @@ class GenericLowerer(
                 for i in (info["q"], info["q_rope"], info["k"], info["k_rope"], info["v"], info["out"])
             ),
         )
+        # The dispatcher reads these as host integers and rebuilds each role's view.
+        self._attention_unsigned_scalars(
+            entry
+            for group in (*self._flash_attention[15].values(), (info["Z"], info["H"], info["N_CTX"]))
+            for entry in group
+            if isinstance(entry, int) and not isinstance(entry, bool)
+        )
         self._prescan_stores()
         return msl
 
@@ -12805,6 +12993,7 @@ class GenericLowerer(
         q_rows=None,
         kv_cols=None,
         varlen_bounds=None,
+        varlen_causal=False,
         extra_loads=(),
         extra_stores=(),
         biased=None,
@@ -13351,16 +13540,94 @@ class GenericLowerer(
                 return sh["bounds"] == (0, _BN) and sh["iv"] == 0 and sh["pid"] is None and sh["pid_div"] is None
             return sh["bounds"] == (0, _BN) and sh["iv"] == 1 and sh["pid"] is None and _kv_iv is not None
 
-        def _boundary_leaf(cid, role, allowed_roles):
-            """One comparison leaf; returns the leaf role it is EXACTLY the boundary of."""
-            cmp_op = _peel_to_core(cid, _mask_wrappers)
+        def _leaf_compare(cid, role, negated=False):
+            """The comparison a mask leaf is, as ``(coordinate id, bound id, expands above it)``.
+
+            ``negated`` reads the complement instead: ``index >= bound`` is true exactly
+            where the boundary ``index < bound`` is false.
+            """
+            cmp_op, above = _peel_expands(cid)
             if cmp_op is None or cmp_op.op != "arith.cmpi" or len(cmp_op.operand_ids or []) != 2:
                 _refuse(role, "the mask is not a sequence-boundary comparison")
-            if (cmp_op.attrs or {}).get("predicate_name") not in ("slt", "ult"):
-                _refuse(role, "the mask is not a strict less-than boundary")
+            pred = (cmp_op.attrs or {}).get("predicate_name")
             lhs, rhs = cmp_op.operand_ids
+            same, mirrored = (("sge", "uge"), ("sle", "ule")) if negated else (("slt", "ult"), ("sgt", "ugt"))
+            if pred in mirrored:
+                # ``N > index`` is the same boundary written from the other side.
+                lhs, rhs = rhs, lhs
+            elif pred not in same:
+                _refuse(role, "the mask is not a strict less-than boundary")
+            return lhs, rhs, above
+
+        def _peel_expands(start_id):
+            """Peel the mask wrappers; returns ``(core op, the tt.expand_dims ops passed)``."""
+            cur, seen, expands = start_id, set(), []
+            while cur not in seen and len(seen) < 64:
+                seen.add(cur)
+                op = _by_id.get(cur)
+                if op is None:
+                    return None, expands
+                if op.op not in _mask_wrappers:
+                    return op, expands
+                if len(op.operand_ids or []) != 1:
+                    return None, expands
+                if op.op == "tt.expand_dims":
+                    expands.append(op)
+                cur = op.operand_ids[0]
+            return None, expands
+
+        def _range_expands(vid, depth=0):
+            """The tt.expand_dims ops between a coordinate and its one make_range, or None."""
+            op = _by_id.get(vid)
+            if op is None or depth > 32:
+                return None
+            if op.op == "tt.make_range":
+                return []
+            for x in op.operand_ids or []:
+                below = _range_expands(x, depth + 1)
+                if below is not None:
+                    return below + ([op] if op.op == "tt.expand_dims" else [])
+            return None
+
+        def _expand_axis(expands):
+            """Where a 1-D coordinate varies in the tensor it was broadcast into.
+
+            ``-1`` while it is still a vector, ``0`` or ``1`` for the matrix axis its single
+            ``tt.expand_dims`` leaves it on, None when that cannot be read. The coordinate
+            proof says WHAT a mask leaf compares; a square tile gives a transposed broadcast
+            the same coordinate and the same shape, so WHERE it varies is read from the
+            expand itself.
+            """
+            if expands is None:
+                return None
+            if not expands:
+                return -1
+            if len(expands) != 1:
+                return None
+            axis = (expands[0].attrs or {}).get("axis")
+            if len(_shape_of(expands[0].operand_ids[0])) != 1 or isinstance(axis, bool) or axis not in (0, 1):
+                return None
+            return 1 - axis
+
+        def _boundary_leaf(cid, role, allowed_roles, axes=None, above=(), negated=False):
+            """One comparison leaf; returns the leaf role it is EXACTLY the boundary of.
+
+            ``axes`` maps a leaf role to the axis its coordinate must vary along in the
+            tensor the mask applies to (``-1`` for a vector); ``above`` are the expands
+            between that tensor and this leaf.
+            """
+            lhs, rhs, own = _leaf_compare(cid, role, negated)
             for r in allowed_roles:
                 if _bound_ok(rhs, r) and _coord_ok(lhs, r):
+                    if axes is not None:
+                        below = _range_expands(lhs)
+                        got = _expand_axis(None if below is None else list(above) + own + below)
+                        if got != axes[r]:
+                            _refuse(
+                                role,
+                                f"the {r} boundary does not vary along the template's axis for this role "
+                                f"(expected axis {axes[r]}, found {got}; a transposed broadcast masks other cells)",
+                            )
                     return r
             _refuse(
                 role,
@@ -13369,16 +13636,30 @@ class GenericLowerer(
                 f"< {'seqlen' if load_mask_policy == 'varlen' else 'N_CTX'}, BM={_BM}, BN={_BN})",
             )
 
-        def _mask_leaf_roles(mid, role, allowed_roles):
-            core = _peel_to_core(mid, _mask_wrappers)
-            if core is not None and core.op == "arith.andi" and len(core.operand_ids or []) == 2:
-                return [_boundary_leaf(x, role, allowed_roles) for x in core.operand_ids]
-            return [_boundary_leaf(mid, role, allowed_roles)]
+        def _mask_leaf_roles(mid, role, allowed_roles, axes, negated=False):
+            core, above = _peel_expands(mid)
+            if not negated and core is not None and core.op == "arith.andi" and len(core.operand_ids or []) == 2:
+                return [_boundary_leaf(x, role, allowed_roles, axes, above) for x in core.operand_ids]
+            return [_boundary_leaf(mid, role, allowed_roles, axes, negated=negated)]
 
-        def _check_load_mask(load, role, allowed_roles=None, exact_leaves=None):
+        def _mask_axes(tensor_id, matrix_axes):
+            """Leaf role -> required axis for a mask on ``tensor_id`` (a vector masks along -1)."""
+            rank = len(_shape_of(tensor_id))
+            if rank == 1:
+                return dict.fromkeys(matrix_axes, -1)
+            if rank != 2:
+                _refuse("Q/K/V", f"a masked tensor of rank {rank} is not a tile the template replays")
+            return matrix_axes
+
+        # Rows of the score are queries and its columns are keys. The dot's left operand
+        # carries its coordinate on axis 0 and K, the right operand, on axis 1; V, the
+        # right operand of P@V, carries the key on axis 0. Each transpose swaps the axes.
+        _LOAD_AXIS = {"Q": 0, "Q-rope": 0, "K": 1, "K-rope": 1, "V": 0}
+
+        def _check_load_mask(load, role, allowed_roles=None, exact_leaves=None, *, axes):
             if load_mask_policy is None or len(load.operand_ids or []) < 2:
                 return
-            leaves = _mask_leaf_roles(load.operand_ids[1], role, allowed_roles or (role,))
+            leaves = _mask_leaf_roles(load.operand_ids[1], role, allowed_roles or (role,), axes)
             if exact_leaves is not None and sorted(leaves) != sorted(exact_leaves):
                 _refuse(role, f"the mask leaves {leaves} are not exactly the template's {list(exact_leaves)} boundary")
             if len(load.operand_ids) >= 3 and _const_value(load.operand_ids[2]) != 0.0:
@@ -13391,7 +13672,9 @@ class GenericLowerer(
                 if mask_required:
                     _refuse(role, "the store is unmasked but the template stores only inside the sequence boundary")
                 return
-            leaves = _mask_leaf_roles(store.operand_ids[2], role, tuple(leaf_roles))
+            # Out is [rows, head_dim] and Lse is [rows]: a row boundary varies along axis 0.
+            axes = _mask_axes(store.operand_ids[1], {"Q": 0, "K": 1})
+            leaves = _mask_leaf_roles(store.operand_ids[2], role, tuple(leaf_roles), axes)
             if sorted(leaves) != sorted(leaf_roles):
                 _refuse(
                     role, f"the store mask leaves {leaves} are not exactly the template's {list(leaf_roles)} boundary"
@@ -13424,7 +13707,7 @@ class GenericLowerer(
                             role,
                             f"the load resolves to arg {ptr_index}, not detector arg {expected_index}",
                         )
-                    _check_load_mask(op, role)
+                    _check_load_mask(op, role, axes=_mask_axes(op.id, {role: _LOAD_AXIS[role] ^ (n_transpose & 1)}))
                     _verified_loads[role] = op
                     return scale_value
                 if op.op in _representation and len(op.operand_ids or []) == 1:
@@ -13493,6 +13776,18 @@ class GenericLowerer(
         )
         _verify_load_path(_dot_qk.operand_ids[1], "K", detected_k_index, transposes=k_transposes)
         _verify_load_path(_dot_pv.operand_ids[1], "V", detected_v_index, transposes=0)
+        # A V load without a mask reads the rows past the boundary; the varlen and biased
+        # templates supply zero there. Q and K past the boundary reach only scores the
+        # proved selects replace and rows the store drops, so their masks are optional.
+        _v_unmasked = len(_verified_loads["V"].operand_ids or []) < 2
+        if _v_unmasked and load_mask_policy == "varlen":
+            _refuse(
+                "V",
+                "the V load is unmasked: the source reads the rows past each sequence's last key, "
+                "where the template supplies zero",
+            )
+        if biased_out is not None:
+            biased_out["v_unmasked"] = _v_unmasked
         if _dot_rope is not None:
             _qr_scale_value = _verify_load_path(
                 _dot_rope.operand_ids[0], "Q-rope", mla_rope[0], scale=q_scale_required, transposes=0
@@ -13606,7 +13901,14 @@ class GenericLowerer(
                 if not _lds:
                     _refuse(_role, f"no load of arg {_idx} was found to verify")
                 for _ld in _lds:
-                    _check_load_mask(_ld, _role, tuple(_leaf_roles), exact_leaves=tuple(_leaf_roles))
+                    # Bias is [rows, keys]; Mask is a vector of keys.
+                    _check_load_mask(
+                        _ld,
+                        _role,
+                        tuple(_leaf_roles),
+                        exact_leaves=tuple(_leaf_roles),
+                        axes=_mask_axes(_ld.id, {"Q": 0, "K": 1}),
+                    )
             for _idx, _role, _leaf_roles, _req in extra_stores:
                 _sts = [
                     o
@@ -13641,6 +13943,21 @@ class GenericLowerer(
                 cur = o.operand_ids[0]
             return cur
 
+        def _expands_to(start, stop, allowed):
+            """The tt.expand_dims ops from ``start`` down to ``stop`` through ``allowed``, or None."""
+            cur, seen, expands = start, set(), []
+            while cur not in seen and len(seen) < 64:
+                if cur == stop:
+                    return expands
+                seen.add(cur)
+                o = _by_id.get(cur)
+                if o is None or o.op not in allowed or o.op == "tt.reshape" or len(o.operand_ids or []) != 1:
+                    return None
+                if o.op == "tt.expand_dims":
+                    expands.append(o)
+                cur = o.operand_ids[0]
+            return None
+
         if biased is not None:
             _dot_ids_all = {_dot_qk.id} | set(getattr(_dot_qk, "result_ids", None) or [])
 
@@ -13666,7 +13983,7 @@ class GenericLowerer(
             _S2 = _by_id.get(_peel_id(_p_core.operand_ids[0], _b_wr))
             if _S2 is None or _S2.op != "arith.select" or len(_S2.operand_ids or []) != 3:
                 _refuse("Score", "the softmax input is not the tile-boundary select the template replays")
-            _leaves = _mask_leaf_roles(_S2.operand_ids[0], "Score", ("Q", "K"))
+            _leaves = _mask_leaf_roles(_S2.operand_ids[0], "Score", ("Q", "K"), _mask_axes(_S2.id, {"Q": 0, "K": 1}))
             if sorted(_leaves) != ["K", "Q"]:
                 _refuse(
                     "Score",
@@ -13697,6 +14014,22 @@ class GenericLowerer(
                     or (_cmp_src[1] == _mask_ld.id and _const_value(_cmp.operand_ids[0]) == 0.0)
                 ):
                     _refuse("Mask", "the loaded-mask select's predicate is not the Mask load compared with zero")
+                # The template masks a KEY: the loaded vector must run along the score's
+                # columns. ``m_block[:, None]`` has the same shape on a square tile and
+                # masks whole query rows instead.
+                _m_side = _cmp.operand_ids[0] if _cmp_src[0] == _mask_ld.id else _cmp.operand_ids[1]
+                _m_path = _expands_to(_S1.operand_ids[0], _cmp.id, _b_bcast)
+                _m_load = _expands_to(_m_side, _mask_ld.id, _b_bcast)
+                if (
+                    len(_shape_of(_S1.id)) != 2
+                    or _m_path is None
+                    or _m_load is None
+                    or _expand_axis(_m_path + _m_load) != 1
+                ):
+                    _refuse(
+                        "Mask",
+                        "the loaded mask is not broadcast along the score's key axis (the template masks keys)",
+                    )
                 if _peel_id(_S1.operand_ids[1], _b_bcast) != _sentinel_id:
                     _refuse(
                         "Mask",
@@ -13765,6 +14098,88 @@ class GenericLowerer(
                 biased_out.update(_biased_snt)
                 biased_out["certified_selects"] = tuple(sorted(_certified_selects))
 
+        _varlen_select = None
+        if load_mask_policy == "varlen":
+            # The template gives every key past the sequence's last a score of negative
+            # infinity. The source does the same only through selects on the score that keep
+            # it and supply negative infinity: the key boundary exactly once (alone, or with
+            # the row boundary, whose extra rows are never stored, and the causal triangle
+            # when the template applies one), and-ed in one select or split over a chain of
+            # them. A masked K load alone leaves those scores at zero.
+            _sels = [s for s in _all if s.op == "arith.select"]
+            if not 1 <= len(_sels) <= 3 or any(len(s.operand_ids or []) != 3 for s in _sels):
+                _refuse("Score", f"expected the key-boundary select on the score, found {len(_sels)} selects")
+            _leaves = []
+
+            def _score_leaf(cid, above, depth, _axes):
+                core, own = _peel_expands(cid)
+                if core is not None and core.op == "arith.andi" and len(core.operand_ids or []) == 2 and depth < 3:
+                    for x in core.operand_ids:
+                        _score_leaf(x, above + own, depth + 1, _axes)
+                    return
+                if (
+                    core is not None
+                    and core.op == "arith.cmpi"
+                    and len(core.operand_ids or []) == 2
+                    and (core.attrs or {}).get("predicate_name") in ("sge", "uge")
+                ):
+                    # The template's causal guard: query row >= key column, within the sequence.
+                    _row, _col = core.operand_ids
+                    _row_x, _col_x = _range_expands(_row), _range_expands(_col)
+                    if not (
+                        _coord_ok(_row, "Q")
+                        and _coord_ok(_col, "K")
+                        and _row_x is not None
+                        and _col_x is not None
+                        and _expand_axis(above + own + _row_x) == 0
+                        and _expand_axis(above + own + _col_x) == 1
+                    ):
+                        _refuse("Score", "a row-versus-key comparison is not the template's lower triangle")
+                    _leaves.append("causal")
+                    return
+                _leaves.append(_boundary_leaf(cid, "Score", ("Q", "K"), _axes, above))
+
+            for _sel in _sels:
+                _cond, _yes, _no = _sel.operand_ids
+                _cond_core = _peel_to_core(_cond, _mask_wrappers)
+                # ``index >= bound`` supplying -inf is the boundary select written the other
+                # way round; ``row >= key`` (both sides coordinates) is the causal triangle.
+                _inverted = (
+                    _cond_core is not None
+                    and _cond_core.op == "arith.cmpi"
+                    and (_cond_core.attrs or {}).get("predicate_name") in ("sge", "uge", "sle", "ule")
+                    and not all(_range_expands(x) is not None for x in _cond_core.operand_ids or [])
+                )
+                _kept, _fill = (_no, _yes) if _inverted else (_yes, _no)
+                _axes = _mask_axes(_sel.id, {"Q": 0, "K": 1})
+                if _inverted:
+                    _leaves += _mask_leaf_roles(_cond, "Score", ("Q", "K"), _axes, negated=True)
+                else:
+                    _score_leaf(_cond, [], 0, _axes)
+                _fill_core = _peel_to_core(_fill, _mask_wrappers)
+                if (
+                    not _depends_on_dot0(_kept)
+                    or _depends_on_dot0(_fill)
+                    or _fill_core is None
+                    or _fill_core.op != "arith.constant"
+                    or (_fill_core.attrs or {}).get("value")
+                    not in (float("-inf"), 0xFC00, 0xFF80, 0xFF800000, 0xFFF0000000000000)
+                ):
+                    _refuse("Score", "the score select does not keep the score inside the key boundary and supply -inf")
+            if (
+                _leaves.count("K") != 1
+                or _leaves.count("Q") > 1
+                or _leaves.count("causal") != (1 if varlen_causal else 0)
+                or len(_leaves) != _leaves.count("K") + _leaves.count("Q") + _leaves.count("causal")
+            ):
+                _refuse(
+                    "Score",
+                    f"the score select's leaves {_leaves} are not the key boundary"
+                    + (" and the lower triangle" if varlen_causal else ""),
+                )
+            _varlen_select = _sels[0]
+            _certified_selects = {s.id for s in _sels}
+
         if verify_score_path:
             _score_scale = self._fa_analyze_constant_score_scale(
                 _score_dot, _dot_pv, certified_selects=_certified_selects
@@ -13774,6 +14189,10 @@ class GenericLowerer(
                     "P",
                     "the QK-result-to-softmax path is not an exact constant scale chain",
                 )
+            if _varlen_select is not None and sorted(_score_scale.get("select_ids") or ()) != sorted(
+                _certified_selects
+            ):
+                _refuse("Score", "a key-boundary select is not on the path from the QK dot to the softmax")
             if expected_score_scale is None:
                 _refuse("P", "the detector supplied no score-scale proof")
             _factor_tol = 1e-7 * max(
@@ -14036,7 +14455,7 @@ class GenericLowerer(
                     # fill for this role, even if its sibling has a masked load.
                     _plain.append(role)
                 else:
-                    _check_load_mask(load, role, exact_leaves=(role,))
+                    _check_load_mask(load, role, exact_leaves=(role,), axes=_mask_axes(load.id, {role: 0}))
                     if _mask_axis(load.operand_ids[1]) != 0:
                         _refuse("Tail", f"{role} boundary is not broadcast along its load rows")
 
@@ -14588,12 +15007,16 @@ class GenericLowerer(
                 arg_decls.append(f"    constant uint& {buf_name} [[buffer({i})]]")
                 name_by_index[i] = buf_name
 
+        unsigned_args = set()
+
         def _expr(entry):
             """Map a detector stride/dim entry (arg index or 'c1') to an MSL
             expression: the buffer arg's name, or the literal 1u when folded."""
             if entry == C1:
                 return "1u"
             if isinstance(entry, int) and entry in name_by_index:
+                if not args[entry].is_ptr:
+                    unsigned_args.add(entry)
                 return name_by_index[entry]
             # Unresolvable — must not silently bake a wrong value.
             raise MetalNonRecoverableError(
@@ -14634,6 +15057,26 @@ class GenericLowerer(
         if _simd_fa_eligible(info) and "query_length" not in info:
             from triton_msl.codegen._fa_fragments import scope_reason, validate_mode
 
+            # The simdgroup template stages Q through a scalar cast but loads K and V and
+            # stores Out as matrices of ONE element type (out_dtype). A K or V of another
+            # float type, or a bfloat Q beside half tiles, has no matching matrix load:
+            # name the refusal here instead of surfacing the Metal compiler's error.
+            _spell = {"fp16": "f16", "half": "f16", "fp32": "f32", "float": "f32", "bfloat16": "bf16"}
+            _role_types = {
+                r: _spell.get(str(args[info[r]].elem_type), str(args[info[r]].elem_type))
+                for r in ("q", "k", "v", "out")
+            }
+            if len({_role_types[r] for r in ("k", "v", "out")}) != 1 or (
+                _role_types["q"] == "bf16" and _role_types["out"] == "f16"
+            ):
+                raise MetalNonRecoverableError(
+                    "FlashAttention: the source roles have element types "
+                    f"Q={_role_types['q']}, K={_role_types['k']}, V={_role_types['v']}, "
+                    f"Out={_role_types['out']} but the simdgroup template loads K and V and stores "
+                    "Out as one matrix element type; refusing a mixed ABI rather than emit a "
+                    "shader that does not compile.",
+                    op_name="tt.dot",
+                )
             requested = validate_mode(getattr(self.options, "experimental_fa_fragment_lowering", "off"))
             half_accumulate = _fa_half_accumulate(info["out_dtype"])
             rounding = getattr(self, "_fa_rounding", {})
@@ -14729,6 +15172,7 @@ class GenericLowerer(
             )
             # Match every cooperative loop's physical stride, even for >1024 scores.
             self.effective_block_size = flash_attention_tiled_threads(block_m, block_n)
+        self._attention_unsigned_scalars(unsigned_args)
         # The kernel uses program_id(0) (q-block) AND program_id(1) (z*h); force
         # the 2-D threadgroup grid (n_q_blocks, Z*H, 1) so the template's pid3.x /
         # pid3.y resolve correctly (emit_msl derives needs_2d_grid from this).

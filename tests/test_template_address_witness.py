@@ -2,10 +2,13 @@
 
 The detectors read each pointer's strides by their POSITION in the address chain. That fixes
 neither the index a stride multiplies, nor the batch coordinate, nor the loop advance, and the
-template then rebuilds every address from its own coordinates. ``_address_witness`` evaluates
-each source load/store address exactly on random integers, requires it to equal the template's
-formula, and binds every stride by value (so an equivalent respelling binds the stride it
-actually uses).
+template then rebuilds every address from its own coordinates. On the varlen, MLA and backward
+routes ``_address_witness`` evaluates each source load/store address exactly on random integers,
+requires it to equal the template's formula, and binds every stride by value (so an equivalent
+respelling binds the stride it actually uses). The biased forward routes (2-D and 3-D) match
+each address term structurally instead (``_prove_biased_fa_addresses``). The dense route has no
+address proof of its own: its detector already refused these variants, and its cases here are
+regression guards.
 
 Sections: the witness itself on small kernels (no device); then, on the GPU, one-change variants
 of the dense, biased (2-D and 3-D), varlen and MLA forward kernels. A variant either refuses
@@ -110,6 +113,20 @@ def test_env_atoms():
     zero = _Env(rng, scalars, has_loop=True, zero=True, ones=(("pid", 1),))
     assert (zero.atom(("pid", 0)), zero.atom(("pid", 1)), zero.atom(("t",))) == (0, 1, 0)
     assert zero.scalar(4) == a.scalar(4)
+    # A quotient and a remainder by an argument derive from the one sampled program id, so an
+    # address spelled with either satisfies the identity that ties them to it.
+    arg, n = ("arg", 4), a.scalar(4)
+    quotient, remainder = a.atom(("div", 1, arg)), a.atom(("rem", 1, arg))
+    assert (quotient, remainder) == divmod(a.atom(("pid", 1)), n) and quotient >= 1 << 20
+    # Raising the quotient to 1 puts the program id at the divisor; the remainder, at 1.
+    one = _Env(rng, scalars, has_loop=True, zero=True, ones=(("div", 1, arg),))
+    assert (one.atom(("div", 1, arg)), one.atom(("rem", 1, arg)), one.atom(("pid", 1))) == (1, 0, n)
+    one = _Env(rng, scalars, has_loop=True, zero=True, ones=(("rem", 1, arg),))
+    assert (one.atom(("div", 1, arg)), one.atom(("rem", 1, arg)), one.atom(("pid", 1))) == (0, 1, 1)
+    # A constant divisor keeps free atoms: a remainder below a small constant would separate
+    # two formulas too rarely.
+    const = ("div", 1, ("const", 4))
+    assert 1 << 20 <= a.atom(const) < 1 << 40 and zero.atom(const) == 0
 
 
 # ---------------------------------------------------------------------------------------
@@ -228,6 +245,48 @@ def test_witness_binds_an_equivalent_spelling_by_value(edit, name, expected):
     assert prove_template_addresses(graph, roles, loop)[name] == [index[n] for n in expected]
 
 
+_HEAD = "    h = bh % NH\n"
+_HEAD_UNSIGNED = "    h = bh.to(tl.uint32) % NH.to(tl.uint32)\n"
+_ZEXT = ".to(tl.uint32).to(tl.int64)"
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        # The remainder spelled by its definition: program_id - (program_id // NH) * NH.
+        [(_HEAD, "    h = bh - b * NH\n")],
+        [(_HEAD, "    h = bh - NH * (bh // NH)\n")],
+        # A zero-extension is followed as the identity: where it is not (a negative operand),
+        # the source address is a multiple of 2**32 elements away, outside any buffer a 32-bit
+        # template addresses.
+        [(_X, _X.replace("(t + j)", "(t + j)" + _ZEXT))],
+        [(_X, _X.replace("c[None, :]", "c" + _ZEXT + "[None, :]"))],
+        [(_Y, _Y.replace("r[:, None]", "r" + _ZEXT + "[:, None]"))],
+        [(_X, _X.replace("(t + j)", "(((t + j) - N)" + _ZEXT + " + N)"))],
+        # The unsigned batch decode: the head times its stride is zero-extended.
+        [("    b = bh // NH\n", "    b = bh.to(tl.uint32) // NH.to(tl.uint32)\n"), (_HEAD, _HEAD_UNSIGNED)],
+    ],
+    ids=[
+        "head_by_subtraction",
+        "head_by_subtraction_inline",
+        "zero_extended_key_index",
+        "zero_extended_column_index",
+        "zero_extended_row_index",
+        "zero_extended_difference",
+        "unsigned_batch_decode",
+    ],
+)
+def test_witness_proves_an_equivalent_coordinate(edits):
+    from triton_msl.codegen._address_witness import prove_template_addresses
+
+    graph = _tile_graph(*edits)
+    roles, loop, index = _tile_roles(graph)
+    assert prove_template_addresses(graph, roles, loop) == {
+        "X": [index[n] for n in ("sxb", "sxh", "sxr", "sxc")],
+        "Y": [index[n] for n in ("syb", "syh", "syr", "syc")],
+    }
+
+
 @pytest.mark.parametrize(
     "edits,message",
     [
@@ -259,12 +318,28 @@ def test_witness_binds_an_equivalent_spelling_by_value(edit, name, expected):
             [(_X, _X.replace("(t + j)", "((t + j) // 2)"))],
             "a division in an address that is not a program id over a scalar",
         ),
-        (
-            [("    b = bh // NH\n", "    b = bh // N\n")],
-            "X: the source address has no stride argument where the template needs its slot-0 stride",
-        ),
+        # Which of the two refusals names it depends on the two arguments' sampled values.
+        ([("    b = bh // NH\n", "    b = bh // N\n")], "X: the source "),
         ([(_Y, "if pid == 0:\n        " + _Y)], "a conditional load or store"),
         ([(_Y, _Y + "\n    tl.store(Y + syc, 1.0)")], "Y: an access that is not one (4, 2) tile"),
+        (
+            [(_HEAD, "    h = bh - b * N\n")],
+            "X: the source address has no stride argument where the template needs its slot-0 stride",
+        ),
+        (
+            [(_HEAD, "    h = bh - (bh // N) * NH\n")],
+            "X: the source address has no stride argument where the template needs its slot-0 stride",
+        ),
+        ([(_HEAD, "    h = bh - b * NH + 1\n")], "X: the source load address is not the template's"),
+        # Below 32 bits a wrap is not a multiple of 2**32 elements away.
+        (
+            [(_X, _X.replace("(t + j)", "(t + j.to(tl.int8))"))],
+            "an integer narrower than 32 bits in an address",
+        ),
+        (
+            [(_X, _X.replace("(t + j)", "(t + j.to(tl.uint16))"))],
+            "an integer narrower than 32 bits in an address",
+        ),
     ],
     ids=[
         "row_plus_1",
@@ -283,6 +358,11 @@ def test_witness_binds_an_equivalent_spelling_by_value(edit, name, expected):
         "batch_divisor_other_argument",
         "conditional_store",
         "second_store_shape",
+        "head_subtraction_other_divisor",
+        "head_subtraction_other_quotient",
+        "head_subtraction_plus_1",
+        "index_through_8_bits",
+        "index_through_16_bits",
     ],
 )
 def test_witness_refuses_a_different_address(edits, message):
@@ -800,6 +880,8 @@ BIASED_CASES = {
     "eq_q_strides_declared_in_another_order": _biased_case(
         [("    q_sm,\n    q_sk,\n", "    q_sk,\n    q_sm,\n")], q_order=(0, 1, 3, 2)
     ),
+    # The head index by the remainder's definition: must compute on the template.
+    "eq_head_by_subtraction": _biased_case([("h = pid_zh % H", "h = pid_zh - z * H")]),
 }
 
 
@@ -963,11 +1045,12 @@ def _packed(s, start, row, h, d):
 VARLEN_FRAGMENT = "varlen FlashAttention:"
 
 
-def _varlen_case(edits=(), fragment=None, q_order=None, **overrides):
+def _varlen_case(edits=(), fragment=None, q_order=None, template=True, **overrides):
     return dict(
         edits=edits,
         fragment=fragment,
         q_order=q_order,
+        template=template,
         **{**dict(q=_packed, k=_packed, v=_packed, o=_packed), **overrides},
     )
 
@@ -1017,6 +1100,10 @@ VARLEN_CASES = {
     "eq_q_strides_declared_in_another_order": _varlen_case(
         [("    stride_qt,\n    stride_qh,\n", "    stride_qh,\n    stride_qt,\n")], q_order=(1, 0, 2)
     ),
+    # The head index by the remainder's definition. The varlen detector reads the head count
+    # from a remainder and declines this spelling before any address is proved, so the program
+    # computes on the generic path: the source's result, without the template.
+    "eq_head_by_subtraction": _varlen_case([("off_h = off_bh % H", "off_h = off_bh - off_b * H")], template=False),
 }
 
 
@@ -1071,7 +1158,7 @@ def test_varlen_variant_refuses_or_computes_the_source(name, fa_hits):
 
     verdict = _refused_or_computed(launch, expected, case["fragment"], fa_hits, tol=1e-3)
     if verdict == "computed" and case["fragment"] is None:
-        assert fa_hits == [True]
+        assert fa_hits == ([True] if case["template"] else [])
 
 
 # ---------------------------------------------------------------------------------------
@@ -1117,6 +1204,8 @@ MLA_CASES = {
     ),
     # An equivalent spelling: must compute (the positional strides ran another program before).
     "eq_qn_batch_term_order": _mla_case([(_MQN, _MQN.replace("z * qnz + h * qnh", "h * qnh + z * qnz"))]),
+    # The head index by the remainder's definition: must compute on the template.
+    "eq_head_by_subtraction": _mla_case([("    h = hz % H\n", "    h = hz - z * H\n")]),
 }
 
 

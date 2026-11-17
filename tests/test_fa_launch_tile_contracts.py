@@ -35,6 +35,13 @@ POISON = -16384.0
 FA_TAG, MLA_TAG = "fa_whole_row_tiles_v1", "mla_whole_tiles_v1"
 
 
+def _tile_contract(lowerer):
+    """The tile contract of a lowered attention template: it rides inside the scalar-domain one."""
+    tag, _unsigned, _signed, inner = lowerer._tail_access_bounds
+    assert tag == "attention_unsigned_scalars_v1"
+    return inner
+
+
 def _variant(kernel, *edits):
     """A fresh JITFunction of ``kernel`` with each (old, new) applied exactly once."""
     fn = triton.JITFunction(kernel.fn)
@@ -294,7 +301,7 @@ def _lower_dense(fn, head_dim=64, n_ctx=None):
 def test_unmasked_dense_store_carries_the_row_tile_descriptor(head_dim):
     lowerer = _lower_dense(_variant(_flash_attn_fwd, (_FA_STORE, _FA_UNMASKED)), head_dim)
     lowerer.lower()
-    tag, index, block = lowerer._tail_access_bounds
+    tag, index, block = _tile_contract(lowerer)
     assert (tag, block) == (FA_TAG, 32)
     assert [a.name for a in lowerer.graph.args if a.index == index] == ["N_CTX"]
 
@@ -302,7 +309,33 @@ def test_unmasked_dense_store_carries_the_row_tile_descriptor(head_dim):
 def test_masked_dense_store_carries_no_row_tile_descriptor():
     lowerer = _lower_dense(_flash_attn_fwd)
     lowerer.lower()
-    assert not (isinstance(lowerer._tail_access_bounds, tuple) and lowerer._tail_access_bounds[0] == FA_TAG)
+    assert _tile_contract(lowerer) is None
+
+
+# A mask on the columns alone bounds no row: the source still stores every launched row.
+_FA_COLUMN_MASKS = {
+    "head_dim": "tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=offs_d[None, :] < HEAD_DIM)",
+    "literal": "tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=offs_d[None, :] < 1000)",
+}
+_FA_ROWS_AND_COLUMNS = (
+    "tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=(offs_m[:, None] < N_CTX) & (offs_d[None, :] < HEAD_DIM))"
+)
+
+
+@pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("columns", sorted(_FA_COLUMN_MASKS))
+def test_column_only_dense_store_mask_carries_the_row_tile_descriptor(columns, head_dim):
+    lowerer = _lower_dense(_variant(_flash_attn_fwd, (_FA_STORE, _FA_COLUMN_MASKS[columns])), head_dim)
+    lowerer.lower()
+    tag, index, block = _tile_contract(lowerer)
+    assert (tag, block) == (FA_TAG, 32)
+    assert [a.name for a in lowerer.graph.args if a.index == index] == ["N_CTX"]
+
+
+def test_row_and_column_dense_store_mask_carries_no_row_tile_descriptor():
+    lowerer = _lower_dense(_variant(_flash_attn_fwd, (_FA_STORE, _FA_ROWS_AND_COLUMNS)))
+    lowerer.lower()
+    assert _tile_contract(lowerer) is None
 
 
 def test_unmasked_dense_store_without_a_length_argument_refuses():
@@ -321,7 +354,7 @@ def test_mla_lowering_carries_the_whole_tile_descriptor():
     sig = {n: t for n, t in sig.items() if n not in const}
     lowerer = _lower(_mla_value_path, sig, const)
     lowerer.lower()
-    tag, index, block = lowerer._tail_access_bounds
+    tag, index, block = _tile_contract(lowerer)
     assert (tag, block) == (MLA_TAG, 32)
     assert [a.name for a in lowerer.graph.args if a.index == index] == ["N_CTX"]
 
@@ -427,7 +460,11 @@ def _launch_dense(fn, q, k, v, out, n_ctx, tiles, causal):
     ],
 )
 def test_unmasked_dense_store_on_whole_tiles_computes(dtype, head_dim, causal, n_ctx, tiles, fa_hits):
-    fn = _variant(_flash_attn_fwd, (_FA_STORE, _FA_UNMASKED))
+    _all_launched_rows_compute(_FA_UNMASKED, dtype, head_dim, causal, n_ctx, tiles, fa_hits)
+
+
+def _all_launched_rows_compute(store, dtype, head_dim, causal, n_ctx, tiles, fa_hits):
+    fn = _variant(_flash_attn_fwd, (_FA_STORE, store))
     gen = torch.Generator().manual_seed(1117 + head_dim + n_ctx)
     alloc = max(tiles * 32, triton.cdiv(n_ctx, 32) * 32)
     q, k, v = [torch.randn(1, 2, alloc, head_dim, generator=gen).to(dtype) for _ in range(3)]
@@ -444,7 +481,11 @@ def test_unmasked_dense_store_on_whole_tiles_computes(dtype, head_dim, causal, n
 @requires_mps
 @pytest.mark.parametrize("head_dim,causal,n_ctx", [(64, False, 80), (128, False, 80), (64, True, 65), (64, False, 33)])
 def test_unmasked_dense_store_over_a_partial_tile_refuses_at_launch(head_dim, causal, n_ctx, fa_hits):
-    fn = _variant(_flash_attn_fwd, (_FA_STORE, _FA_UNMASKED))
+    _partial_tile_refuses_at_launch(_FA_UNMASKED, head_dim, causal, n_ctx, fa_hits)
+
+
+def _partial_tile_refuses_at_launch(store, head_dim, causal, n_ctx, fa_hits):
+    fn = _variant(_flash_attn_fwd, (_FA_STORE, store))
     tiles = triton.cdiv(n_ctx, 32)
     q, k, v = [torch.randn(1, 2, tiles * 32, head_dim, device="mps") for _ in range(3)]
     out = torch.full_like(q, POISON)
@@ -453,6 +494,42 @@ def test_unmasked_dense_store_over_a_partial_tile_refuses_at_launch(head_dim, ca
     assert f"all {tiles * 32} rows of its {tiles} launched 32-row tiles" in str(info.value)
     assert fa_hits == []
     assert bool((out.cpu() == POISON).all())
+
+
+@requires_mps
+@pytest.mark.parametrize("columns", sorted(_FA_COLUMN_MASKS))
+@pytest.mark.parametrize(
+    "dtype,head_dim,causal,n_ctx,tiles",
+    [
+        (torch.float32, 64, False, 96, 3),
+        (torch.float16, 128, True, 64, 2),
+        (torch.float32, 64, False, 80, 2),  # 64 launched rows below N_CTX = 80: no tile crosses it
+    ],
+)
+def test_column_only_dense_store_mask_on_whole_tiles_computes(dtype, head_dim, causal, n_ctx, tiles, columns, fa_hits):
+    _all_launched_rows_compute(_FA_COLUMN_MASKS[columns], dtype, head_dim, causal, n_ctx, tiles, fa_hits)
+
+
+@requires_mps
+@pytest.mark.parametrize("columns", sorted(_FA_COLUMN_MASKS))
+@pytest.mark.parametrize("head_dim,causal,n_ctx", [(64, False, 80), (128, False, 80), (64, True, 65)])
+def test_column_only_dense_store_mask_over_a_partial_tile_refuses_at_launch(head_dim, causal, n_ctx, columns, fa_hits):
+    _partial_tile_refuses_at_launch(_FA_COLUMN_MASKS[columns], head_dim, causal, n_ctx, fa_hits)
+
+
+@requires_mps
+def test_row_and_column_dense_store_mask_over_a_partial_tile_computes(fa_hits):
+    # The row clip is there, and the column term is true on every column: the template's store domain.
+    gen = torch.Generator().manual_seed(1120)
+    q, k, v = [torch.randn(1, 2, 96, 64, generator=gen) for _ in range(3)]
+    out = torch.full((1, 2, 128, 64), POISON)
+    expected = out.double().clone()
+    expected[:, :, :80] = _dense_source(q, k, v, 80, 96, False)[:, :, :80]
+    out = out.to("mps")
+    fn = _variant(_flash_attn_fwd, (_FA_STORE, _FA_ROWS_AND_COLUMNS))
+    _launch_dense(fn, *[x.to("mps") for x in (q, k, v)], out[:, :, :96], 80, 3, False)
+    assert fa_hits == [True]
+    _assert_poisoned_match(out, expected, 2e-3)
 
 
 @requires_mps
@@ -607,8 +684,11 @@ def test_mla_partial_tile_refuses_at_launch(n_ctx, masked, mla_hits):
 
 def _varlen_source(q, k, v, cu_q, cu_k, heads, scale, maxs):
     """Float64 semantics of tests/test_varlen_fa_routing.py::_varlen_fwd for one launch."""
+    if maxs <= 0:
+        # range(0, max_seqlen, 32) runs no tile: every stored row is acc / l_i = 0 / 0.
+        return torch.full(q.shape, float("nan"), dtype=torch.float64)
     out = torch.zeros(q.shape, dtype=torch.float64)
-    keys = triton.cdiv(maxs, 32) * 32 if maxs > 0 else 0
+    keys = triton.cdiv(maxs, 32) * 32
     for b in range(len(cu_q) - 1):
         qs, qe, ks, ke = (int(x) for x in (cu_q[b], cu_q[b + 1], cu_k[b], cu_k[b + 1]))
         n = min(ke - ks, keys)
@@ -631,12 +711,28 @@ def _varlen_source(q, k, v, cu_q, cu_k, heads, scale, maxs):
     ],
 )
 def test_varlen_attends_whole_key_tiles_below_max_seqlen(lens_q, lens_k, maxs, dim, dtype, fa_hits):
+    out, expected = _run_varlen(lens_q, lens_k, maxs, dim, dtype)
+    assert fa_hits == [True]
+    _assert_poisoned_match(out, expected, 2e-2 if dtype == torch.float16 else 1e-3)
+
+
+@requires_mps
+@pytest.mark.parametrize("maxs", [0, -5])
+def test_varlen_without_a_key_tile_stores_nan(maxs, fa_hits):
+    out, expected = _run_varlen([48, 20], [60, 50], maxs, 64, torch.float32)
+    assert fa_hits == [True]
+    out = out.cpu().double()
+    assert torch.equal(out != POISON, expected != POISON)
+    assert bool(out[:68].isnan().all()) and bool(expected[:68].isnan().all())
+
+
+def _run_varlen(lens_q, lens_k, maxs, dim, dtype, cu_dtypes=(torch.int32, torch.int32)):
     from tests.test_varlen_fa_routing import _varlen_fwd
 
     heads, scale = 2, 1.0 / math.sqrt(dim)
     gen = torch.Generator().manual_seed(1122 + maxs + dim)
-    cu_q = torch.tensor([0] + torch.tensor(lens_q).cumsum(0).tolist(), dtype=torch.int32)
-    cu_k = torch.tensor([0] + torch.tensor(lens_k).cumsum(0).tolist(), dtype=torch.int32)
+    cu_q = torch.tensor([0] + torch.tensor(lens_q).cumsum(0).tolist(), dtype=cu_dtypes[0])
+    cu_k = torch.tensor([0] + torch.tensor(lens_k).cumsum(0).tolist(), dtype=cu_dtypes[1])
     tq, tk = int(cu_q[-1]), int(cu_k[-1])
     q, k, v = (torch.randn(t, heads, dim, generator=gen).to(dtype) for t in (tq, tk, tk))
     out = torch.full((tq + 32, heads, dim), POISON, dtype=dtype, device="mps")
@@ -648,7 +744,6 @@ def test_varlen_attends_whole_key_tiles_below_max_seqlen(lens_q, lens_k, maxs, d
         heads, maxs, scale, 32, 32, dim,
     )  # fmt: skip
     torch.mps.synchronize()
-    assert fa_hits == [True]
     expected = torch.full(out.shape, POISON, dtype=torch.float64)
     expected[:tq] = _varlen_source(q, k, v, cu_q, cu_k, heads, scale, maxs)
-    _assert_poisoned_match(out, expected, 2e-2 if dtype == torch.float16 else 1e-3)
+    return out, expected

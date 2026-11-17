@@ -53,23 +53,47 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 
 ### Attention template addresses
 
-- Prove every source load and store address before an attention template stands
-  in for the kernel. The templates rebuild each tensor's address from its
-  strides and their own coordinates; before this, only the strides were read
-  from the source. A row or depth index that was shifted or scaled, a batch or
-  head offset on the wrong tensor, a loop that advanced differently and a key
-  or value tile that ignored the loop variable all ran as the canonical
-  address. This held on the dense, biased and 3-D forward routes, the biased
-  backward routes, the varlen route and the MLA route. Each address is now
-  evaluated exactly on random program ids and stride values and must equal the
-  template's; anything else refuses. Strides are bound by value, so a kernel
-  that passes its strides in another order computes correctly.
+- Prove every source load and store address before a biased, triangle,
+  backward, varlen or MLA attention template stands in for the kernel. The
+  templates rebuild each tensor's address from its strides and their own
+  coordinates; before this, only the strides were read from the source. A row
+  or depth index that was shifted or scaled, a batch or head offset on the
+  wrong tensor, a loop that advanced differently and a key or value tile that
+  ignored the loop variable all ran as the canonical address. This held on the
+  biased 2-D and 3-D forward routes, the biased backward routes, the varlen
+  route and the MLA route; the dense route already refused these. On the
+  backward, varlen and MLA routes each address is now evaluated exactly on
+  random program ids and stride values and must equal the template's. On the
+  biased forward routes each address term is matched against the template's
+  row, key, depth and batch index. Anything else refuses. Strides are bound to
+  the index they multiply, so a kernel that passes its strides in another
+  order computes correctly, and the head index spelled `pid - (pid // H) * H`
+  is the template's `pid % H`.
 - Stop the FlashAttention output clip from being accepted on the column axis.
   The sequence length bounds rows only.
-- Refuse, at launch, an unmasked FlashAttention store over a partial last row
-  tile. The templates store the rows below the sequence length; the source
-  stores the whole tile. Mask the store with the row boundary or launch whole
-  tiles.
+- Refuse, at launch, a FlashAttention store without the row clip over a
+  partial last row tile: an unmasked store, or one masked on the columns alone
+  (`offs_d[None, :] < HEAD_DIM`), which bounds no row. The templates store the
+  rows below the sequence length; the source stores the whole tile. Mask the
+  store with the row boundary or launch whole tiles.
+- Refuse, at launch, an attention template launch whose strides, head count
+  or lengths the template would read differently from the source. The
+  templates bind every integer argument as a 32-bit unsigned value and add
+  addresses in 32-bit arithmetic. A negative stride (a view walked from its
+  last row) was read as a large positive one: on the dense, varlen, biased
+  and backward routes the result was wrong and the stores landed outside the
+  view. A stride, head count or length that is negative or does not fit 31
+  bits now refuses, as does a tensor whose storage exceeds 2**32 elements.
+  Head dimension 32 with 32-row blocks takes the general path and computes
+  negative strides as before.
+- Read the varlen cumulative sequence lengths at the width the tensor holds.
+  The templates indexed them as 32-bit integers, so an int64 tensor, which is
+  what `cumsum` returns, gave every second entry a zero. Int32 and int64 now
+  compute; other widths refuse.
+- Store the biased log-sum-exp at its tensor's element type. The templates
+  wrote it through a 32-bit float pointer, so a half or bfloat16 tensor
+  received four bytes for every two it holds: wrong values, and writes past
+  the rows the kernel stores.
 - Attend whole key tiles on the varlen route. The source loop is
   `range(0, max_seqlen, 32)` masked by the sequence's key count, so with
   `max_seqlen = 40` it attends up to 64 keys. The templates stopped at
@@ -78,6 +102,50 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   of 32-row tiles. The MLA template has no partial-tile form: the source reads
   or zero-scores its whole last key tile and, unmasked, stores its whole last
   row tile, and the template did neither.
+
+### Attention template masks
+
+- Prove where each source mask lands before an attention template stands in
+  for the kernel. The templates rebuild every mask themselves: zero for the
+  operand rows past a sequence boundary, negative infinity for the keys past
+  it, the lower triangle on a causal route. The lowering checked which index a
+  source mask compared and against which bound, but not the axis the
+  comparison was broadcast along. On a square tile `mask_m[None, :]` has the
+  same shape as `mask_m[:, None]` and masks other cells, and such a kernel ran
+  on the template and returned the canonical result. This held for load,
+  store and score-select masks on the biased 2-D and 3-D forward routes and
+  the varlen route, and for the causal select on the MLA route. Each mask
+  must now vary along the template's axis for its role, or the kernel
+  refuses. The dense route already refused these.
+- Prove the varlen score select. The template gives every key past a
+  sequence's last a score of negative infinity. The source select was not
+  checked at all, so a kernel without it, with its branches exchanged, with a
+  fill other than negative infinity, with another bound or, on the causal
+  route, with another triangle ran as the canonical kernel. The select, or a
+  chain of selects, must now keep the score inside the key boundary exactly
+  once, with the row boundary and the causal triangle where the route has
+  them, and supply negative infinity. A finite fill such as `-1e9` refuses:
+  the template supplies negative infinity, and the two differ when a row has
+  no key left.
+- Apply the biased route's loaded key mask per key. A source that broadcast
+  the loaded mask along the rows (`m_block[:, None]`) masked query rows, and
+  the template masked keys.
+- Refuse an unmasked V load that reads past the sequence. The templates
+  supply zero for the V rows past the key boundary; an unmasked source load
+  reads whatever the tensor holds there, and a non-finite value reaches the
+  output through a zero probability. The varlen route refuses the kernel. The
+  biased routes refuse, at launch, a sequence length that is not a whole
+  number of key tiles, and compute whole-tile launches as before.
+- On the biased backward routes, refuse a masked load that supplies a value
+  other than zero and an unmasked log-sum-exp load. The templates supply zero
+  for every operand row past the sequence length.
+- Accept a boundary written bound first (`N > m_idxs`, `seqlen_k > kn`) on the
+  load, store and select masks of the biased, varlen and MLA routes. These
+  spellings refused before.
+- Refuse by name a dense attention kernel whose K, V and Out tensors do not
+  share one float element type, or whose Q is bfloat beside half tiles. These
+  reached the Metal compiler and failed there. A Q of another float type that
+  the template casts still runs.
 
 ### Compatibility
 

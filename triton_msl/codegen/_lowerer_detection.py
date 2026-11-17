@@ -2387,7 +2387,7 @@ class _DetectionMixin:
                     m_arg = arg.name
         return m_arg, n_arg
 
-    def _template_output_mask_nontrivial(self, is_fa, fa_ctx_index=None, replayed=False):
+    def _template_output_mask_nontrivial(self, is_fa, fa_ctx_index=None, replayed=False, row_clipped=None):
         """True iff a dot-bearing kernel carries an output ``tt.store`` mask that
         RESTRICTS the output WITHIN the computed tile — a non-tile-boundary mask the
         matmul / FlashAttention TEMPLATES would SILENTLY DROP. They gate writes only on
@@ -2430,6 +2430,12 @@ class _DetectionMixin:
         ``replayed=True`` leaves those requirements out: it is the question the
         source-replaying epilogue route asks, which executes the store mask as written
         (``_refuse_nontrivial_template_output_mask``).
+
+        ``row_clipped`` (a set, FA only) receives the id of every masked store whose mask
+        carries the sequence-length ROW clip. A mask that is trivial without it (a constant
+        column bound at or above the tile) leaves the rows unmasked: the source then stores
+        every row of every launched tile, exactly as an unmasked store does
+        (``_fa_unmasked_store_rows``).
 
         Structural trivially-true proof (naming mirrors the template's OWN boundary
         clip, which references the kernel arg literally named M / N / N_CTX): the mask
@@ -2491,8 +2497,10 @@ class _DetectionMixin:
                 stack.extend(o.operand_ids or [])
             return False
 
-        # per store: the distinct runtime-argument bounds seen on each axis (0 = columns)
+        # per store: the distinct runtime-argument bounds seen on each axis (0 = columns),
+        # and whether an FA mask leaf was the sequence-length row clip
         axis_args = {}
+        row_clip = [False]
 
         _LAYOUT = ("tt.broadcast", "ttg.convert_layout", "tt.reshape", *self._IDX_CASTS)
 
@@ -2651,9 +2659,11 @@ class _DetectionMixin:
                     return True
                 # The sequence length bounds ROWS only: the FA templates store every head-dim
                 # column, so the same argument on the column axis is a clip they would drop.
-                return arg.name in ok_names or (
+                length = arg.name in ok_names or (
                     bool(ok_names) and fa_ctx_index is not None and getattr(arg, "index", None) == fa_ctx_index
                 )
+                row_clip[0] = row_clip[0] or length
+                return length
             if o is not None and o.op == "arith.constant":
                 try:
                     val = int(o.attrs.get("value"))
@@ -2665,7 +2675,9 @@ class _DetectionMixin:
                 # to drop; a column mask or any other constant remains subject to
                 # the ordinary multi-block refusal below.
                 if is_fa and fa_ctx_index == "c1" and ok_names == {"N_CTX"}:
-                    return (strict or replayed) and val == 1
+                    length = (strict or replayed) and val == 1
+                    row_clip[0] = row_clip[0] or length
+                    return length
                 # a CONSTANT bound on a MULTI-BLOCK index (pid*BLOCK+range) can't be
                 # proven trivial: the make_range extent is the per-block span, the index
                 # runs to a RUNTIME total -> a const between BLOCK and total clips later
@@ -2745,12 +2757,15 @@ class _DetectionMixin:
             axis_args.clear()
             address.clear()
             flat_store[:] = [st]
+            row_clip[0] = False
             if not replayed:
                 address.update(_address_indices(st))
             if not _mask_is_trivial(st.operand_ids[2]):
                 return True
             if any(len(ids) > 1 for ids in axis_args.values()):
                 return True  # two clips on one axis: the template keeps a single extent
+            if row_clip[0] and row_clipped is not None:
+                row_clipped.add(st.id)
         return False
 
     def _refuse_nontrivial_template_output_mask(self):

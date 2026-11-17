@@ -1889,6 +1889,15 @@ def _fa_initial_values(values, source_kv_block):
     return tuple(f"{float(v)!r}f" for v in values)
 
 
+def _lse_store(value, elem):
+    """The log-sum-exp value as the Lse tensor's element type (the source store rounds to it)."""
+    if elem == "float":
+        return value
+    if elem not in ("half", "bfloat"):
+        raise ValueError(f"Lse element type must be float/half/bfloat (got {elem!r})")
+    return f"{elem}({value})"
+
+
 def make_flash_attention_kernel_simdgroup(
     head_dim=128,
     BLOCK_M=32,
@@ -1904,6 +1913,7 @@ def make_flash_attention_kernel_simdgroup(
     bias=False,
     mask=False,
     lse=False,
+    lse_elem="float",
     runtime_scale=False,
     grid_3d=False,
     mask_batch_div=None,
@@ -2142,7 +2152,7 @@ def make_flash_attention_kernel_simdgroup(
             "        uint qr = q_start + lid;\n"
             "        if (qr < N_CTX) {\n"
             "            float lv = tg_l[lid];\n"
-            f"            Lse[lse_base + qr*lse_sm] = {_lse_value};\n"
+            f"            Lse[lse_base + qr*lse_sm] = {_lse_store(_lse_value, lse_elem)};\n"
             "        }\n"
             "    }"
         )
@@ -4065,6 +4075,7 @@ def make_flash_attention_kernel_tiled(
     bias=False,
     mask=False,
     lse=False,
+    lse_elem="float",
     runtime_scale=False,
     grid_3d=False,
     mask_batch_div=None,
@@ -4442,7 +4453,7 @@ def make_flash_attention_kernel_tiled(
             "            float l_val = tg_l[r];\n"
             "            // Preserve a nonfinite source recurrence as NaN; only a genuine\n"
             "            // finite empty denominator maps to logsumexp(empty) = -inf.\n"
-            f"            Lse[lse_base + q_row * lse_sm] = {_lse_value};\n"
+            f"            Lse[lse_base + q_row * lse_sm] = {_lse_store(_lse_value, lse_elem)};\n"
             "        }\n"
             "    }"
         )

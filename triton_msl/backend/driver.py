@@ -270,6 +270,103 @@ def _fa_whole_row_tiles_reason(descriptor, kargs, signatures, scalar_payloads, g
         return f"the store domain could not be evaluated ({type(exc).__name__}); mask the store with the row boundary"
 
 
+# An attention template adds its addresses in 32-bit unsigned arithmetic.
+_ATTENTION_TEMPLATE_ELEMENTS = 1 << 32
+
+
+def _attention_unsigned_scalars_reason(descriptor, kargs, signatures, scalar_payloads):
+    """Return a refusal reason for an attention launch the template would read differently, else None.
+
+    The templates read their strides, head count and lengths as ``uint`` and address in
+    32-bit arithmetic. That is the source's value only for a 32-bit argument that is not
+    negative (any 32-bit value for the ones a template reads as ``int``), and the source's
+    cell only inside a storage of at most 2**32 elements.
+    """
+    try:
+        if (
+            type(descriptor) not in (tuple, list)
+            or len(descriptor) != 4
+            or descriptor[0] != "attention_unsigned_scalars_v1"
+            or any(
+                type(group) not in (tuple, list)
+                or any(type(index) is not int or not 0 <= index < len(kargs) for index in group)
+                for group in descriptor[1:3]
+            )
+        ):
+            return "the scalar-domain descriptor is missing or malformed"
+        from triton_msl.backend._launch_signature import scalar_bytes
+
+        for lowest, group in ((0, descriptor[1]), (-(1 << 31), descriptor[2])):
+            for index in group:
+                declared = signatures[index]
+                if declared not in ("i32", "u32", "i64", "u64"):
+                    return f"argument {index} is not an integer argument"
+                captured = scalar_payloads[index]
+                if type(captured) is not bytes or scalar_bytes(kargs[index], declared) != captured:
+                    return f"argument {index} changed after its captured launch payload"
+                # The value the GPU reads, not what __int__ on a subclass reports.
+                value = int.from_bytes(captured, "little", signed=declared.startswith("i"))
+                if not lowest <= value < (1 << 31):
+                    return (
+                        f"argument {index} is {value}; the template reads it as a 32-bit "
+                        + ("signed" if lowest else "unsigned")
+                        + " value, which is the source's only "
+                        + ("inside 32 bits" if lowest else "from 0 to 2**31 - 1")
+                        + (". Pass a view with non-negative strides" if value < 0 and not lowest else "")
+                    )
+        for index, argument in enumerate(kargs):
+            if hasattr(argument, "untyped_storage"):
+                elements = argument.untyped_storage().nbytes() // argument.element_size()
+                if elements > _ATTENTION_TEMPLATE_ELEMENTS:
+                    return (
+                        f"argument {index} has a storage of {elements} elements; the template "
+                        "addresses in 32-bit arithmetic, at most 2**32 elements"
+                    )
+        return None
+    except Exception as exc:
+        return f"the scalar domain could not be evaluated ({type(exc).__name__})"
+
+
+def _fa_whole_key_tiles_reason(descriptor, kargs, signatures, scalar_payloads):
+    """Return a refusal reason for an unmasked FlashAttention V load over a partial key tile, else None.
+
+    The biased template supplies zero for the V rows past the sequence length. A source V
+    load without a mask reads the tensor there, which is the same only when the last key
+    tile holds no row past that length.
+    """
+    try:
+        if (
+            type(descriptor) not in (tuple, list)
+            or len(descriptor) != 4
+            or descriptor[0] != "fa_whole_key_tiles_v1"
+            or type(descriptor[1]) is not int
+            or type(descriptor[2]) is not int
+            or descriptor[2] <= 0
+            or not 0 <= descriptor[1] < len(kargs)
+        ):
+            return "the key-domain descriptor is missing or malformed; mask the V load with the key boundary"
+        index, block_n = descriptor[1], descriptor[2]
+        declared = signatures[index]
+        if declared not in ("i32", "u32", "i64", "u64"):
+            return "the sequence length is not an integer argument; mask the V load with the key boundary"
+        from triton_msl.backend._launch_signature import scalar_bytes
+
+        captured = scalar_payloads[index]
+        if type(captured) is not bytes or scalar_bytes(kargs[index], declared) != captured:
+            return "the sequence length changed after its captured launch payload"
+        # The value the GPU reads, not what __int__ on a subclass reports.
+        keys = int.from_bytes(captured, "little", signed=declared.startswith("i"))
+        if keys % block_n:
+            return (
+                f"the source reads V without a mask in a last key tile that holds {block_n - keys % block_n} "
+                f"rows past the sequence length {keys}, where the template supplies zero; "
+                "mask the V load with the key boundary or launch whole key tiles"
+            )
+        return None
+    except Exception as exc:
+        return f"the key domain could not be evaluated ({type(exc).__name__}); mask the V load with the key boundary"
+
+
 def _mla_whole_tiles_reason(descriptor, kargs, signatures, scalar_payloads):
     """Return a refusal reason for an MLA launch whose sequence length is not whole tiles, else None.
 
@@ -1057,6 +1154,37 @@ class MetalLauncher:
         address_bounds = kernel_metadata[10]
         tail_access_bounds = batched_dot_bounds = None
         validated_tail_bounds = None
+        if (
+            isinstance(address_bounds, (tuple, list))
+            and address_bounds
+            and address_bounds[0] == "attention_unsigned_scalars_v1"
+        ):
+            _scalars_reason = _attention_unsigned_scalars_reason(address_bounds, flat_args, flat_sigs, scalar_payloads)
+            if _scalars_reason is not None:
+                from triton_msl.errors import MetalNonRecoverableError
+
+                raise MetalNonRecoverableError(
+                    "Refusing attention template launch: " + _scalars_reason,
+                    op_name="tt.load",
+                )
+            if address_bounds[3] is None:
+                # Nothing else rides inside: the generic 2-D route may take this snapshot.
+                validated_tail_bounds = address_bounds
+            address_bounds = address_bounds[3]
+        if (
+            isinstance(address_bounds, (tuple, list))
+            and address_bounds
+            and address_bounds[0] == "fa_whole_key_tiles_v1"
+        ):
+            _keys_reason = _fa_whole_key_tiles_reason(address_bounds, flat_args, flat_sigs, scalar_payloads)
+            if _keys_reason is not None:
+                from triton_msl.errors import MetalNonRecoverableError
+
+                raise MetalNonRecoverableError(
+                    "Refusing unmasked FlashAttention V load launch: " + _keys_reason,
+                    op_name="tt.load",
+                )
+            address_bounds = address_bounds[3]
         if address_bounds is not None:
             if not isinstance(address_bounds, (tuple, list)) or not address_bounds:
                 from triton_msl.errors import MetalNonRecoverableError

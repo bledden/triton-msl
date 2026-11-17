@@ -15,6 +15,25 @@ polynomials of this degree agree on a random point with probability below 2**-15
 uses three. Anything outside that vocabulary (a compare, a select, a min/max, a loaded index, a
 conditional access, a narrowing cast) is refused by name rather than evaluated.
 
+A zero-extension is followed as the identity. On a negative 32-bit value it is not: the source
+address is then a multiple of 2**32 elements away from the one evaluated here. Every template
+computes its addresses in 32-bit arithmetic, so equality over the integers still gives the
+template the source's cell wherever the source address lies inside a buffer of at most 2**32
+elements, and a source address outside its buffer has no defined result to reproduce. The
+launcher holds every attention launch to that: each tensor's storage is at most 2**32 elements
+and each stride and extent the template binds is one it reads as the source does
+(``attention_unsigned_scalars_v1``, ``driver._attention_unsigned_scalars_reason``). (Refusing
+the extension instead turns away the unsigned batch decode, ``pid.to(uint32) % H`` times a
+stride, whose product is zero-extended.) The same holds for a 32-bit sum or product that wraps.
+It does not hold below 32 bits, so an 8- or 16-bit integer in an address is refused.
+
+A program id over an integer ARGUMENT is not a free atom: quotient and remainder are computed
+from the sampled program id and divisor, so ``pid - (pid // H) * H`` is ``pid % H`` here as it
+is on the device. The free quantities are then the quotient, the remainder and the divisor, and
+the identity test is over those. A program id over a small CONSTANT keeps free atoms (a
+remainder below a small constant would separate two formulas too rarely); no template names one,
+so such a source address is refused unless the terms cancel exactly.
+
 The witness also BINDS: each template stride is chosen by value from the source's own strides,
 so an equivalent spelling the positional extraction misreads is bound to the stride it uses
 rather than refused or, worse, run on the wrong one.
@@ -36,6 +55,7 @@ _TRANSPARENT = frozenset(
 )
 _PID_OPS = frozenset({"tt.get_program_id", "tt.program_id"})
 _INT_TYPES = frozenset({"i32", "i64"})
+_NARROW = frozenset({"i1", "i8", "i16"})
 _LOW, _HIGH = 1 << 20, 1 << 40
 _SEED = 0x7A17F0A4
 
@@ -114,7 +134,11 @@ def _broadcast(a, shape):
 
 class _Env:
     """One assignment of the atoms. ``zero`` pins every coordinate atom to 0 (``ones`` to 1),
-    which isolates one template stride at a time; the scalars stay random and are shared."""
+    which isolates one template stride at a time; the scalars stay random and are shared.
+
+    The program id on an axis is sampled once; its quotient and remainder by an integer
+    argument derive from it. Raising a quotient to 1 therefore sets the program id to the
+    divisor, and raising a remainder (or the program id itself) to 1 sets it to 1."""
 
     def __init__(self, rng, scalars, has_loop, zero=False, ones=()):
         self.memo = {}
@@ -129,11 +153,28 @@ class _Env:
     def scalar(self, index):
         return self._draw(("arg", index))
 
+    def _pid(self, axis):
+        key = ("pid", axis)
+        if key not in self._atoms:
+            value = 0 if self._zero else self._rng.randrange(_LOW * _HIGH, _HIGH * _HIGH)
+            for one in self._ones:
+                if one == key or (one[0] == "rem" and one[1] == axis and one[2][0] == "arg"):
+                    value = 1
+                elif one[0] == "div" and one[1] == axis and one[2][0] == "arg":
+                    value = self.scalar(one[2][1])
+            self._atoms[key] = value
+        return self._atoms[key]
+
     def atom(self, key):
         if key == ("t",) and not self._has_loop:
             return 0  # a loop specialised away runs its single iteration at offset zero
         if key == ("trip",):
             return self._draw(key)
+        if key[0] == "pid":
+            return self._pid(key[1])
+        if key[0] in ("div", "rem") and key[2][0] == "arg":
+            pid, divisor = self._pid(key[1]), self.scalar(key[2][1])
+            return pid // divisor if key[0] == "div" else pid % divisor
         if key not in self._atoms:
             if key in self._ones:
                 self._atoms[key] = 1
@@ -282,6 +323,9 @@ class AddressWitness:
         if op is None:
             raise WitnessRefusal("an address operand with no defining operation")
         name, ids = op.op, list(op.operand_ids or [])
+        if op.elem_type in _NARROW and "ptr" not in (op.type_str or ""):
+            # Below 32 bits a wrap or a zero-extension is not a multiple of 2**32 away.
+            raise WitnessRefusal("an integer narrower than 32 bits in an address")
         if name == "arith.constant":
             constant = (op.attrs or {}).get("value")
             if type(constant) is not int:
