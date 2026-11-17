@@ -272,6 +272,18 @@ argument positions. This does not claim name hygiene for every other template. M
 acceptance is unchanged. This optimization does not bypass launch checks or
 establish an ordering for overlapping reads/writes across independent programs.
 
+A K-loop matmul with an fp32 output, unit inner strides and `M`, `N`, `K`
+arguments also carries a second entry point in the same shader; with a transposed
+B the operands must be fp32 as well. The launcher
+selects it only when M and N are multiples of the tile and K is a multiple of 8;
+every other launch uses the ordinary entry. In that entry each 32-lane SIMD group
+computes whole 32×32 sub-tiles with matrix fragments read in place, a transposed B
+through the transposing fragment load, so no operand is staged. A tile of
+32·p × 32·q runs at `32 * min(p * q, 4)` threads per group. A contiguous tile
+that does not split into 32×32 sub-tiles keeps the earlier four-strip entry at
+128 threads. Both entries re-prove the SIMD layout at run time and fall back to
+the scalar loop at the same width when it does not hold.
+
 Eligible contiguous fp16/fp32 matmuls (K%8) on MPS tensors take a direct simdgroup-matrix path, dispatched
 zero-copy. A deterministic, occupancy-gated tile selector picks the coarsest blocking the
 shape's M and N alignment allow: **M%32 + N%32** runs the `(4,4)` tile at ~11–12 TFLOP/s on

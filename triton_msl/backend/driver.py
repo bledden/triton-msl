@@ -1175,8 +1175,20 @@ class MetalLauncher:
                                 # another concurrent launch can poison this flag.
                                 _assert_flag = _assert_torch.zeros(1, dtype=_assert_torch.int32, device="mps")
                                 _dk = list(_dk) + [_assert_flag]
+                            # A coordinate-preserving matmul twin shares this entry's grid
+                            # and buffers; aligned extents run it at its own group width in
+                            # place of the staged entry, as the host route below chooses it.
+                            _entry = self.kernel_name
+                            if _generic_geometry is not None and kernel_metadata[6] is not None:
+                                from ._generic_launch import direct_twin
+
+                                _twin = direct_twin(kernel_metadata[6], kargs)
+                                if _twin:
+                                    _entry, _twin_width = _twin
+                                    threads = (threads[0] // group_size[0] * _twin_width, *threads[1:])
+                                    group_size = (_twin_width, *group_size[1:])
                             _submission.begin()
-                            _rt.dispatch(lib, self.kernel_name, _dk, threads=threads, group_size=group_size)
+                            _rt.dispatch(lib, _entry, _dk, threads=threads, group_size=group_size)
                             if _assert_desc is not None:
                                 check_failure(int(_assert_flag.cpu().item()), _assert_desc)
                             if launch_exit_hook:
@@ -1735,14 +1747,13 @@ class MetalLauncher:
             if mm_two is not None:
                 direct_ps = _direct_pipeline(function)
                 if direct_ps is not None:
-                    try:
-                        _M = int(flat_args[mm_two["m_idx"]])
-                        _N = int(flat_args[mm_two["n_idx"]])
-                        _K = int(flat_args[mm_two["k_idx"]])
-                        if _M % mm_two["block_m"] == 0 and _N % mm_two["block_n"] == 0 and _K % 8 == 0:
-                            dispatch_fn = direct_ps
-                    except Exception:
-                        dispatch_fn = function
+                    from ._generic_launch import direct_twin
+
+                    _twin = direct_twin(mm_two, flat_args)
+                    if _twin:
+                        # The twin runs the same grid at its own threadgroup width.
+                        dispatch_fn = direct_ps
+                        threadgroup_size = (_twin[1], *threadgroup_size[1:])
 
             # Immediate mode: dispatch, wait, copy-back
             _assert_desc = kernel_metadata[11]

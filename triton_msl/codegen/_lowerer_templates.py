@@ -834,8 +834,12 @@ class _TemplateMixin:
     _I32_LIMIT_L = "0x80000000L"
     _I32_MAX_UL = "0x7fffffffUL"
 
-    def _simd_layout_guard_lines(self, a_ld, b_ld, c_ld, indent="    "):
+    def _simd_layout_guard_lines(self, a_ld, b_ld, c_ld, indent="    ", b_transposed=False):
         """Emit ``bool _simd_ok = <uniform proof>;``.
+
+        ``b_transposed`` states that B is stored with a unit K stride and ``b_ld``
+        as its COLUMN stride (``B[n * b_ld + k]``, the layout of ``w.t()``); its
+        maximal offset is then ``(_N-1)*b_ld + (_K-1)`` and (4) bounds that instead.
 
         SUFFICIENT CONDITIONS for the simdgroup leading-dimension path. With row
         extents from the traced output bounds, ``a_ld``/``b_ld``/``c_ld`` the traced
@@ -879,9 +883,69 @@ class _TemplateMixin:
             f"{indent}    && _M <= {i32} && _N <= {i32} && _K <= {i32}",
             f"{indent}    && _lda <= {u32} && _ldb <= {u32} && _ldc <= {u32}",
             f"{indent}    && (_M - 1L) * (long)_lda + (_K - 1L) < {lim}",
-            f"{indent}    && (_K - 1L) * (long)_ldb + (_N - 1L) < {lim}",
+            (
+                f"{indent}    && (_N - 1L) * (long)_ldb + (_K - 1L) < {lim}"
+                if b_transposed
+                else f"{indent}    && (_K - 1L) * (long)_ldb + (_N - 1L) < {lim}"
+            ),
             f"{indent}    && (_M - 1L) * (long)_ldc + (_N - 1L) < {lim};",
         ]
+
+    @staticmethod
+    def _direct_twin_width(block_m, block_n):
+        """Threadgroup width of the sub-tiled direct twin, or ``None`` when the
+        tile does not split into 32x32 sub-tiles. Up to four 32-lane simdgroups
+        share a tile; a larger tile's sub-tiles are dealt out among those four."""
+        if block_m <= 0 or block_n <= 0 or block_m % 32 or block_n % 32:
+            return None
+        return 32 * min((block_m // 32) * (block_n // 32), 4)
+
+    @staticmethod
+    def _subtiled_direct_lines(a_name, b_name, c_name, block_m, block_n, acc_frag, in_frag, b_transposed):
+        """Body of the sub-tiled direct twin, after the ``_simd_ok`` proof.
+
+        Each simdgroup computes whole 32x32 sub-tiles of the threadgroup's output
+        tile, keeping all sixteen 8x8 accumulators of the sub-tile it is on, so one
+        8-deep K step loads four A and four B fragments for sixteen
+        multiply-accumulates (the layout with one 8-column strip per simdgroup
+        spent an A load on every accumulate). Sub-tile ``_st`` belongs to simdgroup
+        ``_st % groups``, so the sub-tiles are disjoint and all are covered.
+        Fragments come straight from device memory through the proven leading
+        dimensions ``_lda``/``_ldb``/``_ldc``; a transposed B is read with the
+        transposing ``simdgroup_load``, whose ``elements_per_row`` is then B's
+        column stride. Every address is below 2**31 under the proof.
+        """
+        subtiles = (block_m // 32) * (block_n // 32)
+        groups = min(subtiles, 4)
+        lines = [
+            f"    for (uint _st = sgitg; _st < {subtiles}u; _st += {groups}u) {{",
+            f"        uint _sr = row_base + (_st / {block_n // 32}u) * 32u;",
+            f"        uint _sc = col_base + (_st % {block_n // 32}u) * 32u;",
+            f"        {acc_frag} {', '.join(f'acc_{r}_{c}(0)' for r in range(4) for c in range(4))};",
+            f"        {in_frag} a_frag, b_frag0, b_frag1, b_frag2, b_frag3;",
+            "        for (uint k = 0u; k < _K; k += 8u) {",
+        ]
+        for c in range(4):
+            if b_transposed:
+                lines.append(
+                    f"            simdgroup_load(b_frag{c}, {b_name} + (ulong)(_sc + {c * 8}u) * _ldb + k, _ldb, ulong2(0), true);"
+                )
+            else:
+                lines.append(
+                    f"            simdgroup_load(b_frag{c}, {b_name} + (ulong)k * _ldb + _sc + {c * 8}u, _ldb);"
+                )
+        for r in range(4):
+            lines.append(f"            simdgroup_load(a_frag, {a_name} + (ulong)(_sr + {r * 8}u) * _lda + k, _lda);")
+            for c in range(4):
+                lines.append(f"            simdgroup_multiply_accumulate(acc_{r}_{c}, a_frag, b_frag{c}, acc_{r}_{c});")
+        lines.append("        }")
+        for r in range(4):
+            for c in range(4):
+                lines.append(
+                    f"        simdgroup_store(acc_{r}_{c}, {c_name} + (ulong)(_sr + {r * 8}u) * _ldc + _sc + {c * 8}u, _ldc);"
+                )
+        lines.append("    }")
+        return lines
 
     def _scalar_tile_fallback_lines(
         self,
@@ -1244,7 +1308,162 @@ class _TemplateMixin:
         lines.append(f"        {c_name}[{_c_addr}] = ({c_msl})_sum;")
         lines.append("    }")
         lines.append("}")
+        lines.extend(
+            self._transposed_b_twin_lines(
+                info,
+                descriptors,
+                safe_name=safe_name,
+                arg_decls=arg_decls,
+                scalars=all_scalar_args,
+                source_bindings=source_bindings,
+                names=(a_name, b_name, c_name),
+                types=(a_msl, b_msl, c_msl),
+                blocks=(BLOCK_M, BLOCK_N, BLOCK_K),
+                has_extents=(has_M, has_N, has_K),
+                extent_args=(m_ext, n_ext),
+                widths=_widths,
+                has_pid=has_pid and has_k_loop,
+            )
+        )
         return "\n".join(lines)
+
+    def _transposed_b_twin_lines(
+        self,
+        info,
+        descriptors,
+        *,
+        safe_name,
+        arg_decls,
+        scalars,
+        source_bindings,
+        names,
+        types,
+        blocks,
+        has_extents,
+        extent_args,
+        widths,
+        has_pid,
+    ):
+        """Direct twin for ``A @ W.t()``: row-major A and C, B stored transposed.
+
+        A B whose K stride is the literal 1 is ``B[n * ldb + k]``: each output
+        column's K run is contiguous, so the transposing ``simdgroup_load`` reads
+        its 8x8 fragments straight from device memory and the per-K-block staging
+        of the ordinary entry (two barriers and a scalar copy of both tiles)
+        disappears. The twin replays the ordinary entry's extents, K rounding and
+        grid mapping, carries the same uniform layout proof as the K-loop twin
+        (with B's bound taken along its own layout) and the same width-faithful
+        scalar fallback, and is dispatched by the launcher only for tile-aligned
+        extents. Returns no lines, and leaves no descriptor, for any other layout.
+        """
+        a_row, a_col, b_row, b_col, c_row, c_col = descriptors
+        block_m, block_n, block_k = blocks
+        has_M, has_N, has_K = has_extents
+        scalar_names = {a.name for a in scalars}
+        width = self._direct_twin_width(block_m, block_n)
+
+        def _unit(desc):
+            try:
+                return desc not in scalar_names and int(str(desc)) == 1
+            except (TypeError, ValueError):
+                return False
+
+        def _ld(desc):
+            # Same rendering as the K-loop template: a runtime stride at its
+            # declared width, a literal as an unsigned constant, else decline.
+            if desc in scalar_names:
+                elem = self._declared_int_elem_type(desc)
+                if elem is None:
+                    return None
+                msl = triton_type_to_msl(elem)
+                return f"({'ulong' if msl in ('long', 'ulong') else 'uint'}){source_bindings[desc]}"
+            try:
+                return f"{int(str(desc))}u"
+            except (TypeError, ValueError):
+                return None
+
+        lds = (_ld(a_row), _ld(b_col), _ld(c_row))
+        argnames = [a.name for a in self.graph.args]
+        if (
+            not has_pid
+            or width is None
+            or block_k % 8
+            or types != ("float", "float", "float")
+            or not (_unit(a_col) and _unit(b_row) and _unit(c_col))
+            or None in lds
+            or not (has_M and has_N and has_K)
+            or any(name not in argnames for name in ("M", "N", "K"))
+        ):
+            return []
+        a_name, b_name, c_name = names
+        m_ext, n_ext = extent_args
+        direct_m = m_ext or "M"
+        direct_n = n_ext or "N"
+        direct_k = info.get("k_extent_arg") or "K"
+        dn = f"{safe_name}__mmdirect"
+        lines = [
+            "",
+            f"kernel void {dn}(",
+            ",\n".join(arg_decls) + ",",
+            "    uint3 pid3 [[threadgroup_position_in_grid]],",
+            "    uint tiitg [[thread_index_in_threadgroup]]",
+            "#if defined(__HAVE_SIMDGROUP_MATRIX__)",
+            "    , uint sgitg [[simdgroup_index_in_threadgroup]]",
+            "    , uint _sgw [[threads_per_simdgroup]]",
+            "#endif",
+            ") {",
+        ]
+        for arg in scalars:
+            lines.append(_scalar_unpack(arg, source_bindings))
+        lines.append(f"    long _M = (long){source_bindings[direct_m]}, _N = (long){source_bindings[direct_n]};")
+        lines.append(self._k_extent_line(info, block_k, has_K, block_m, block_n, source_bindings))
+        lines.extend(self._pid_map_lines(info, block_m))
+        lines.append(f"    uint row_base = pid_m * {block_m}u;")
+        lines.append(f"    uint col_base = pid_n * {block_n}u;")
+        lines.append("#if defined(__HAVE_SIMDGROUP_MATRIX__)")
+        lines.extend(self._simd_layout_guard_lines(*lds, b_transposed=True))
+        # Sub-tile ownership is by simdgroup index, so it needs the 32-lane
+        # simdgroup it was laid out for. Both verdicts are uniform.
+        lines.append("    _simd_ok = _simd_ok && _sgw == 32u;")
+        lines.append("#else")
+        lines.append("    bool _simd_ok = false;")
+        lines.append("#endif")
+        lines.append("    if (!_simd_ok) {")
+        lines.extend(
+            self._scalar_tile_fallback_lines(
+                widths=widths,
+                descriptors=descriptors,
+                a_name=a_name,
+                b_name=b_name,
+                c_name=c_name,
+                out_type=types[2],
+                block_m=block_m,
+                block_n=block_n,
+                threads=width,
+                scalar_names=scalar_names,
+                source_bindings=source_bindings,
+            )
+        )
+        lines.append("        return;")
+        lines.append("    }")
+        lines.append("#if defined(__HAVE_SIMDGROUP_MATRIX__)")
+        lines.extend(
+            self._subtiled_direct_lines(
+                a_name, b_name, c_name, block_m, block_n, "simdgroup_float8x8", "simdgroup_float8x8", True
+            )
+        )
+        lines.append("#endif")
+        lines.append("}")
+        self._mm_two_kernel = {
+            "direct_name": dn,
+            "direct_block": width,
+            "block_m": block_m,
+            "block_n": block_n,
+            "m_idx": argnames.index(direct_m),
+            "n_idx": argnames.index(direct_n),
+            "k_idx": argnames.index(direct_k),
+        }
+        return lines
 
     @staticmethod
     def _simdgroup_frag_for(elem_type):
@@ -1955,11 +2174,17 @@ class _TemplateMixin:
             and "K" in _argnames
         ):
             dn = f"{safe_name}__mmdirect"
+            # Whole 32x32 sub-tiles per simdgroup when the tile splits that way; the
+            # twin then has its OWN threadgroup width, carried in the descriptor.
+            # Other tiles keep the four-strip layout at the staged entry's width.
+            _twin_width = self._direct_twin_width(BLOCK_M, BLOCK_N)
             lines.append("")
             lines.append(f"kernel void {dn}(")
             lines.append(",\n".join(arg_decls) + ",")
             lines.append(f"    uint3 pid3 [[threadgroup_position_in_grid]],")
             lines.append(f"    uint sgitg [[simdgroup_index_in_threadgroup]],")
+            if _twin_width is not None:
+                lines.append(f"    uint _sgw [[threads_per_simdgroup]],")
             lines.append(f"    uint tiitg [[thread_index_in_threadgroup]]")
             lines.append(f") {{")
             for arg in all_scalar_args:
@@ -1986,6 +2211,10 @@ class _TemplateMixin:
             # footprint that is its whole reason to exist.
             if _emit_layout_guard:
                 lines.extend(self._simd_layout_guard_lines(a_ld, b_ld, c_ld))
+                if _twin_width is not None:
+                    # The sub-tile ownership below is by simdgroup index, so it also
+                    # needs the 32-lane simdgroup it was laid out for (uniform too).
+                    lines.append("    _simd_ok = _simd_ok && _sgw == 32u;")
                 lines.append(f"    if (!_simd_ok) {{")
                 lines.extend(
                     self._scalar_tile_fallback_lines(
@@ -1997,41 +2226,49 @@ class _TemplateMixin:
                         out_type=output_msl_type,
                         block_m=BLOCK_M,
                         block_n=BLOCK_N,
-                        threads=128,
+                        threads=_twin_width or 128,
                         scalar_names=scalar_names,
                         source_bindings=source_bindings,
                     )
                 )
                 lines.append(f"        return;")
                 lines.append(f"    }}")
-            lines.append(f"    {acc_frag} {', '.join(n + '(0)' for n in all_accs)};")
-            lines.append(f"    {in_frag} a_frag, {', '.join(b_names)};")
-            lines.append(f"    for (uint k = 0u; k < _K; k += 8u) {{")
-            for c in range(col_tiles):
-                g = _col_guard(c)
-                pfx = f"if ({g}) " if g else ""
-                lines.append(
-                    f"        {pfx}simdgroup_load(b_frag{c}, {b_name} + k * {b_ld} + col_base + sgitg * {cols_per_sg}u + {c * 8}u, {b_ld});"
+            if _twin_width is not None:
+                lines.extend(
+                    self._subtiled_direct_lines(a_name, b_name, c_name, BLOCK_M, BLOCK_N, acc_frag, in_frag, False)
                 )
-            for t in range(n_row_tiles):
-                lines.append(f"        simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * {a_ld} + k, {a_ld});")
+            else:
+                lines.append(f"    {acc_frag} {', '.join(n + '(0)' for n in all_accs)};")
+                lines.append(f"    {in_frag} a_frag, {', '.join(b_names)};")
+                lines.append(f"    for (uint k = 0u; k < _K; k += 8u) {{")
                 for c in range(col_tiles):
                     g = _col_guard(c)
                     pfx = f"if ({g}) " if g else ""
                     lines.append(
-                        f"        {pfx}simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});"
+                        f"        {pfx}simdgroup_load(b_frag{c}, {b_name} + k * {b_ld} + col_base + sgitg * {cols_per_sg}u + {c * 8}u, {b_ld});"
                     )
-            lines.append(f"    }}")
-            for t in range(n_row_tiles):
-                for c in range(col_tiles):
-                    g = _col_guard(c)
-                    pfx = f"if ({g}) " if g else ""
+                for t in range(n_row_tiles):
                     lines.append(
-                        f"    {pfx}simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * {c_ld} + col_base + sgitg * {cols_per_sg}u + {c * 8}u, {c_ld});"
+                        f"        simdgroup_load(a_frag, {a_name} + (row_base + {t * 8}u) * {a_ld} + k, {a_ld});"
                     )
+                    for c in range(col_tiles):
+                        g = _col_guard(c)
+                        pfx = f"if ({g}) " if g else ""
+                        lines.append(
+                            f"        {pfx}simdgroup_multiply_accumulate({acc_names[t][c]}, a_frag, b_frag{c}, {acc_names[t][c]});"
+                        )
+                lines.append(f"    }}")
+                for t in range(n_row_tiles):
+                    for c in range(col_tiles):
+                        g = _col_guard(c)
+                        pfx = f"if ({g}) " if g else ""
+                        lines.append(
+                            f"    {pfx}simdgroup_store({acc_names[t][c]}, {c_name} + (row_base + {t * 8}u) * {c_ld} + col_base + sgitg * {cols_per_sg}u + {c * 8}u, {c_ld});"
+                        )
             lines.append(f"}}")
             self._mm_two_kernel = {
                 "direct_name": dn,
+                "direct_block": _twin_width or 128,
                 "block_m": BLOCK_M,
                 "block_n": BLOCK_N,
                 "m_idx": _argnames.index(_direct_m),

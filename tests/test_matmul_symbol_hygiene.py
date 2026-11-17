@@ -95,7 +95,8 @@ def test_uppercase_direct_twin_uses_same_hygienic_names(tmp_path):
     assert "__mmdirect(" in source
     twin = source.split("__mmdirect(", 1)[1]
     assert "long _M = (long)_mmarg3, _N = (long)_mmarg4;" in twin
-    assert "* (uint)_mmarg5 + k" in twin
+    assert "ulong _lda = (ulong)((uint)_mmarg5);" in twin
+    assert "simdgroup_load(a_frag, _mmarg0 + (ulong)(_sr + 0u) * _lda + k, _lda);" in twin
     assert "(uint)K" not in source
 
 

@@ -143,7 +143,6 @@ def _observe_grouped_routes(monkeypatch):
 @pytest.mark.parametrize("route", ["host", "direct"])
 def test_grouped_route_observer_records_shadowed_singleton_cpu(monkeypatch, route):
     from types import SimpleNamespace
-    from tests.cache_helpers import patch_live_singleton_method
     from triton_msl.backend import driver
     from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
 
@@ -159,8 +158,10 @@ def test_grouped_route_observer_records_shadowed_singleton_cpu(monkeypatch, rout
     monkeypatch.setattr(driver, "_metal_utils", utils)
     monkeypatch.setattr(driver, "_COMPILE_SHADER_RUNTIME", runtime)
     with pytest.MonkeyPatch.context() as previous:
-        for getter, method in ((driver._get_utils, "launch"), (driver._get_compile_shader_runtime, "dispatch")):
-            patch_live_singleton_method(previous, getter, method, lambda owner, real: lambda *a, **kw: real(*a, **kw))
+        # A plain instance patch is what leaves a shadow: its undo restores
+        # the looked-up bound method as an instance attribute.
+        for owner, method in ((utils, "launch"), (runtime, "dispatch")):
+            previous.setattr(owner, method, getattr(owner, method))
     assert "launch" in vars(utils) and "dispatch" in vars(runtime)
     host, direct, launchers, observed_runtime = _observe_grouped_routes(monkeypatch)
     assert observed_runtime is runtime and not host and not direct and not launchers

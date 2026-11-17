@@ -119,6 +119,11 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   call plus sync on an M4 Max in both installed modes, against the November 3
   development wheels. This is a descriptive workflow result, not a release
   performance qualification, and it was not compared with 0.3.0.
+- Tile-aligned K-loop matmuls with an fp32 output, contiguous or with a transposed
+  fp32 B, launch a sub-tiled direct entry: each 32-lane SIMD group computes whole
+  32×32 sub-tiles with matrix fragments read in place, at 32 to 128 threads per
+  group. The transposed-B form no longer stages its operands for these launches.
+  Unaligned extents and other layouts keep the ordinary entry. See `docs/USAGE.md`.
 - New default-off options: `TRITON_MSL_HOST_EXTENT=1` (host storage extent
   borrowing), `TRITON_MSL_CPP_SCALAR_CFG=1` (LLVM scalar cleanup on the opt-in C++
   route), `MetalOptions(experimental_cooperative_attention=True)` and

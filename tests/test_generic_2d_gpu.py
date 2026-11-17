@@ -110,10 +110,27 @@ def _trace(monkeypatch):
     return dispatches, host, launchers
 
 
+def test_live_singleton_patch_leaves_no_instance_shadow_cpu(monkeypatch):
+    """Undoing the helper must not pin a class-level replacement on the singleton."""
+    from tests.cache_helpers import patch_live_singleton_method
+    from triton_msl.backend import driver
+
+    utils = object.__new__(driver.MetalUtils)
+    monkeypatch.setattr(driver, "_metal_utils", utils)
+    with pytest.MonkeyPatch.context() as outer:
+        outer.setattr(driver.MetalUtils, "launch", lambda self, *a, **kw: "refused")
+        with pytest.MonkeyPatch.context() as inner:
+            patch_live_singleton_method(
+                inner, driver._get_utils, "launch", lambda owner, real: lambda *a, **kw: real(*a, **kw)
+            )
+            assert "launch" in vars(utils) and utils.launch() == "refused"
+        assert "launch" not in vars(utils)
+    assert utils.launch.__func__ is driver.MetalUtils.launch
+
+
 @pytest.mark.parametrize("shadowed", [False, True])
 def test_trace_records_live_routes_across_fixture_undo_cpu(monkeypatch, shadowed):
     from types import SimpleNamespace
-    from tests.cache_helpers import patch_live_singleton_method
     from triton_msl.backend import driver
     from triton_msl.backend.compile_shader_runtime import CompileShaderRuntime
 
@@ -140,10 +157,10 @@ def test_trace_records_live_routes_across_fixture_undo_cpu(monkeypatch, shadowed
     monkeypatch.setattr(driver, "_metal_utils", utils)
     if shadowed:
         with pytest.MonkeyPatch.context() as previous:
-            for getter, name in ((driver._get_compile_shader_runtime, "dispatch"), (driver._get_utils, "launch")):
-                patch_live_singleton_method(
-                    previous, getter, name, lambda owner, method: lambda *a, **kw: method(*a, **kw)
-                )
+            # A plain instance patch is what leaves a shadow: its undo restores
+            # the looked-up bound method as an instance attribute.
+            for owner, name in ((runtime, "dispatch"), (utils, "launch")):
+                previous.setattr(owner, name, getattr(owner, name))
         assert "dispatch" in vars(runtime) and "launch" in vars(utils)
 
     recordings = []

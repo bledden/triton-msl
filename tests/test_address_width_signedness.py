@@ -893,12 +893,14 @@ def test_layout_guard_bound_cannot_overflow_its_own_64bit_check():
     assert (0x7FFFFFFF) ** 2 + 0x7FFFFFFF < (1 << 63)
 
 
-@pytest.mark.parametrize("kernel", ["_tutorial_mm", "_tutorial_mm__mmdirect"])
-def test_kloop_scalar_fallback_shape(kernel):
+# The fallback strides by the entry's own threadgroup width: 128 for the staged
+# entry, and one 32-lane simdgroup for the sub-tiled twin of a 32x32 tile.
+@pytest.mark.parametrize("kernel,width", [("_tutorial_mm", 128), ("_tutorial_mm__mmdirect", 32)])
+def test_kloop_scalar_fallback_shape(kernel, width):
     body = _kernels(_kloop_msl("i32"))[kernel]
     i = body.index("if (!_simd_ok) {")
     fb = body[i : body.index("return;", i)]
-    assert "for (uint _fe = tiitg; _fe < 1024u; _fe += 128u) {" in fb
+    assert f"for (uint _fe = tiitg; _fe < 1024u; _fe += {width}u) {{" in fb
     assert "uint m = row_base + _fe / 32u;" in fb
     assert "uint n = col_base + _fe % 32u;" in fb
     # signed, full-width tile masks (a negative extent masks everything)

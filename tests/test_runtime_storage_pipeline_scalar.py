@@ -50,9 +50,11 @@ class _Utils:
     def __init__(self):
         self.buffer_pool = _Pool()
         self.calls = []
+        self.groups = []
 
     def launch(self, pipeline, grid, group, buffers):
         self.calls.append((pipeline, tuple(buffers)))
+        self.groups.append(tuple(group))
 
 
 def _launcher(names, signatures, metadata=META, msl=None):
@@ -165,7 +167,9 @@ def pipeline_loader(monkeypatch):
 
 
 def _invoke_matrix(pipeline, dims=(32, 32, 8), split=True):
-    descriptor = dict(direct_name="kernel__mmdirect", block_m=32, block_n=32, m_idx=0, n_idx=1, k_idx=2)
+    descriptor = dict(
+        direct_name="kernel__mmdirect", direct_block=64, block_m=32, block_n=32, m_idx=0, n_idx=1, k_idx=2
+    )
     metadata = (*META[:6], descriptor if split else None, *META[7:])
     launcher = _launcher(["M", "N", "K"], dict(M="i32", N="i32", K="i32"), metadata)
     launcher(1, 1, 1, None, pipeline, metadata, None, None, None, *dims)
@@ -209,8 +213,40 @@ def test_matching_pipeline_keeps_alignment_and_metadata_checks(recording_host, p
     _invoke_matrix(primary, dims, split)
     selected = recording_host.calls[-1][0]
     assert selected.name == ("A direct" if direct else "A staged")
+    # The twin runs at the width its descriptor carries, the staged entry at its own.
+    assert recording_host.groups[-1] == ((64, 1, 1) if direct else (META[3], 1, 1))
     if not direct:
         assert selected is primary
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        dict(direct_block=0),
+        dict(direct_block=48),
+        dict(direct_block=256),
+        dict(direct_block=True),
+        dict(direct_name=""),
+        dict(block_m=0),
+        dict(m_idx=3),
+        dict(extra=1),
+        "missing-width",
+    ],
+)
+def test_unrecognised_twin_descriptor_keeps_staged_entry(recording_host, pipeline_loader, monkeypatch, change):
+    primary = pipeline_loader("A")
+    descriptor = dict(
+        direct_name="kernel__mmdirect", direct_block=64, block_m=32, block_n=32, m_idx=0, n_idx=1, k_idx=2
+    )
+    if change == "missing-width":
+        del descriptor["direct_block"]
+    else:
+        descriptor.update(change)
+    metadata = (*META[:6], descriptor, *META[7:])
+    launcher = _launcher(["M", "N", "K"], dict(M="i32", N="i32", K="i32"), metadata)
+    launcher(1, 1, 1, None, primary, metadata, None, None, None, 32, 32, 8)
+    assert recording_host.calls[-1][0] is primary
+    assert recording_host.groups[-1] == (META[3], 1, 1)
 
 
 @pytest.mark.parametrize("checked", [False, True])

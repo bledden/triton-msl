@@ -15,7 +15,10 @@ def _source(dtype="fp32", bm=32, bn=32, bk=32, width="i32"):
 
 
 def test_staging_retains_full_k_contract_and_scalar_fallback():
-    source = _source()
+    # The tile-aligned direct twin follows the staged entry and has its own
+    # tests; the staging contract below is the entry's alone.
+    source, twin = _source().split("kernel void full_k__mmdirect(")
+    assert "_stage_" not in twin and "threadgroup_barrier" not in twin
     assert "_stage_a[1056]" in source and "_stage_b[1056]" in source
     assert source.count("threadgroup_barrier(mem_flags::mem_threadgroup)") == 5
     assert "_K_source" in source and "_K <= 2147483647L" in source

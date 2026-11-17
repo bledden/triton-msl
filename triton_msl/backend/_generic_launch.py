@@ -25,6 +25,41 @@ def _msl_only_policy(execution_contract):
         return False
 
 
+_TWIN_KEYS = frozenset(("direct_name", "direct_block", "m_idx", "n_idx", "k_idx", "block_m", "block_n"))
+
+
+def direct_twin(descriptor, arguments):
+    """Entry and threadgroup width the matmul twin descriptor selects for this call.
+
+    Returns ``(name, width)`` when the live extents are tile-aligned, ``None``
+    when the ordinary entry must run, and ``False`` for a descriptor this
+    module does not understand (the caller then keeps the host route). The twin
+    shares the ordinary entry's grid and buffer ABI; only the dispatched
+    function of the same library and its threadgroup width change.
+    """
+    if type(descriptor) is not dict or descriptor.keys() != _TWIN_KEYS:
+        return False
+    name = descriptor["direct_name"]
+    width = descriptor["direct_block"]
+    if type(name) is not str or not name or type(width) is not int or width not in (32, 64, 96, 128):
+        return False
+    extents = []
+    for key in ("m_idx", "n_idx", "k_idx", "block_m", "block_n"):
+        value = descriptor[key]
+        if type(value) is not int or value < (1 if key.startswith("block") else 0):
+            return False
+        if key.endswith("_idx"):
+            if value >= len(arguments):
+                return False
+            extents.append(arguments[value])
+    if any(type(extent) is not int for extent in extents):
+        return None
+    m, n, k = extents
+    if m > 0 and n > 0 and k > 0 and m % descriptor["block_m"] == 0 and n % descriptor["block_n"] == 0 and k % 8 == 0:
+        return name, width
+    return None
+
+
 def generic_2d_geometry(launcher, arguments, signatures, metadata, grid, *, validated_tail_bounds=None):
     """Match existing sealed generic host geometry and direct buffer ABI.
 
@@ -47,7 +82,8 @@ def generic_2d_geometry(launcher, arguments, signatures, metadata, grid, *, vali
         or not _msl_only_policy(launcher._execution_contract)
         or len(metadata) != 12
         or metadata[5] is not True
-        or any(v is not None for v in metadata[6:10])
+        or (metadata[6] is not None and direct_twin(metadata[6], arguments) is False)
+        or any(v is not None for v in metadata[7:10])
         or (
             metadata[10] is not None
             and (

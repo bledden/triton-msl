@@ -95,6 +95,13 @@ def _run(monkeypatch, record_property, m, n, k, dtype, mask_mn, layout="plain"):
     options = dict(BM=32, BN=32, BK=32, MASK_MN=mask_mn)
     compiled = full_k.warmup(*args, grid=(count,), **options)
     block = compiled.metadata.block_size
+    expected_name = "full_k"
+    unit_inner = aa.stride(1) == 1 and bb.stride(0) == 1 and cc.stride(1) == 1
+    if dtype is torch.float32 and unit_inner and not (m % 32 or n % 32 or k % 8):
+        # Tile-aligned fp32 extents with unit inner strides take the direct twin:
+        # one 32-lane simdgroup per 32x32 tile instead of the staged entry.
+        assert compiled.metadata.mm_two_kernel["direct_block"] == 32
+        expected_name, block = "full_k__mmdirect", 32
     expected_geometry = (
         dict(threads=(count * block, 1, 1), group_size=(block, 1, 1))
         if compiled.metadata.needs_2d_grid
@@ -103,7 +110,7 @@ def _run(monkeypatch, record_property, m, n, k, dtype, mask_mn, layout="plain"):
 
     def direct(lib, name, args, **geometry):
         assert args[0] is aa and args[1] is bb and args[2] is cc
-        assert geometry == expected_geometry
+        assert name == expected_name and geometry == expected_geometry
         result = dispatch(lib, name, args, **geometry)
         routes.append("direct")
         return result

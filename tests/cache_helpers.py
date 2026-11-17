@@ -26,7 +26,13 @@ def patch_live_singleton_method(monkeypatch, getter, method_name, wrapper_factor
     replacement = wrapper_factory(instance, original)
     if not callable(original) or not callable(replacement):
         raise TypeError(f"{method_name} observer must wrap callable methods")
-    monkeypatch.setattr(instance, method_name, replacement)
+    if method_name in vars(instance):
+        monkeypatch.setattr(instance, method_name, replacement)
+    else:
+        # Undo must REMOVE the instance attribute. ``setattr`` would restore the
+        # looked-up value as an instance attribute, and when the class is patched
+        # too that value is the class-level replacement, which then outlives the test.
+        monkeypatch.setitem(vars(instance), method_name, replacement)
     if getter() is not instance or getattr(instance, method_name) is not replacement:
         raise AssertionError(f"{method_name} was not patched on the live singleton")
     return instance

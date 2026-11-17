@@ -57,7 +57,10 @@ def test_public_dense_transpose_direct_route(monkeypatch, dtype, m, n, k, transp
         torch.testing.assert_close(cc.cpu(), expected, rtol=0, atol=0)
         assert torch.equal(aa.cpu(), ac) and torch.equal(owner.cpu(), bc)
     assert len(calls) == 2
-    assert all(c[1] == "_flat" and c[2] == dict(threads=(count * 256, 1, 1), group_size=(256, 1, 1)) for c in calls)
+    # Tile-aligned fp32 extents with a row-major output take the direct twin.
+    twin = dtype is torch.float32 and not transpose_output and not (m % 32 or n % 32 or k % 8)
+    name, width = ("_flat__mmdirect", 32) if twin else ("_flat", 256)
+    assert all(c[1] == name and c[2] == dict(threads=(count * width, 1, 1), group_size=(width, 1, 1)) for c in calls)
     assert any("N-fastest source tile mapping" in text for text in compiled.asm.values() if isinstance(text, str))
 
 
