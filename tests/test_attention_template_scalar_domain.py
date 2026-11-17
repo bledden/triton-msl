@@ -247,6 +247,24 @@ def _dense(head_dim, dtype, block=32):
     return t, launch, {x: (2, n) for x in "qkvo"}
 
 
+def _decode():
+    """The inline small-query template: 17 query rows in 16-row tiles over 65 keys."""
+    from tests.test_q1_decode_boundary import _q1_attention
+
+    nq, nk, bm = 17, 65, 16
+    rows = triton.cdiv(nq, bm) * bm
+    t = {"q": torch.randn(1, 2, rows, 64), "k": torch.randn(1, 2, nk, 64), "v": torch.randn(1, 2, nk, 64)}
+    t["o"] = torch.full((1, 2, rows, 64), POISON)
+
+    def launch(p, s):
+        _q1_attention[(rows // bm, 2)](
+            p["q"], p["k"], p["v"], p["o"], *s["q"], *s["k"], *s["v"], *s["o"], 1, 2, nq, nk,
+            BLOCK_M=bm, BLOCK_N=32, HEAD_DIM=64, IS_CAUSAL=False,
+        )  # fmt: skip
+
+    return t, launch, {"q": (2, rows), "k": (2, nk), "v": (2, nk), "o": (2, rows)}
+
+
 def _varlen():
     from tests.test_varlen_fa_routing import _varlen_fwd
 
@@ -325,6 +343,7 @@ ROUTES = {
     "dense-simd-64": (lambda: _dense(64, torch.float32), ("o",)),
     "dense-simd-128": (lambda: _dense(128, torch.float16), ("o",)),
     "dense-tiled-64": (lambda: _dense(64, torch.float32, 64), ("o",)),
+    "decode": (_decode, ("o",)),
     "varlen": (_varlen, ("o",)),
     "biased": (_biased, ("o", "l")),
     "mla": (_mla, ("o",)),
@@ -336,6 +355,7 @@ _NEGATIVE = [
     ("dense-simd-64", "q"), ("dense-simd-64", "k"), ("dense-simd-64", "v"), ("dense-simd-64", "o"),
     ("dense-simd-128", "k"), ("dense-simd-128", "o"),
     ("dense-tiled-64", "q"), ("dense-tiled-64", "k"), ("dense-tiled-64", "v"), ("dense-tiled-64", "o"),
+    ("decode", "q"), ("decode", "k"), ("decode", "v"), ("decode", "o"),
     ("varlen", "q"), ("varlen", "k"), ("varlen", "v"), ("varlen", "o"),
     ("biased", "q"), ("biased", "k"), ("biased", "v"), ("biased", "b"), ("biased", "m"), ("biased", "o"),
     ("mla", "qn"), ("mla", "kr"), ("mla", "v"), ("mla", "o"),
@@ -372,8 +392,9 @@ def test_ordinary_strides_still_launch(route, dispatches):
     launch(dict(device), {key: list(x.stride()) for key, x in device.items()})
     torch.mps.synchronize()
     assert bool((device[outputs[0]].cpu() != POISON).any())
-    # The tiled dense template has no replacement dispatch: it takes the generic 2-D route.
-    assert bool(dispatches) == (route != "dense-tiled-64")
+    # The tiled dense and small-query templates have no replacement dispatch: they are
+    # inline shaders on the generic 2-D route.
+    assert bool(dispatches) == (route not in ("dense-tiled-64", "decode"))
 
 
 @requires_mps

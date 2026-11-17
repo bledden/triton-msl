@@ -190,7 +190,7 @@ B_LSE = "tl.store(lse_ptrs, lse, mask=mask_m)"
 B_V_UNMASKED = (B_V, "v_block = tl.load(v_ptrs)")
 
 
-def _lower_biased(*edits):
+def _lower_biased(*edits, types=None):
     fn = _variant(_biased_fa, *edits)
     const = dict(DIM=32, BLOCK_M=32, BLOCK_N=32, BAD_TEMP=False, I3D=False)
     sig = {}
@@ -201,6 +201,7 @@ def _lower_biased(*edits):
             sig[name] = "*i8" if name == "mask_ptr" else "*fp32"
         else:
             sig[name] = "fp32" if name in ("sm_scale", "neg_inf") else "i32"
+    sig.update(types or {})
     lowerer = _lower(fn, sig, const)
     lowerer.lower()
     tag, _unsigned, _signed, inner = lowerer._tail_access_bounds
@@ -223,6 +224,11 @@ def test_unmasked_biased_v_load_and_store_carry_both_descriptors():
     assert inner == (KEY_TAG, n, 32, (FA_TAG, n, 32))
 
 
+def test_biased_lse_of_another_float_type_refuses():
+    with pytest.raises(MetalNonRecoverableError, match="log-sum-exp tensor is not fp32, fp16 or bf16"):
+        _lower_biased(types={"lse_ptr": "*fp64"})
+
+
 # ---------------------------------------------------------------------------------------
 # GPU: varlen (lengths that are not tile multiples; query and key lengths differ)
 # ---------------------------------------------------------------------------------------
@@ -232,6 +238,7 @@ VL_K = "k = tl.load(k_ptrs, mask=kn[:, None] < seqlen_k, other=0.0)"
 VL_SEL = f"qk = tl.where(kn[None, :] < seqlen_k, qk, {NINF})"
 VL_V = "v = tl.load(v_ptrs, mask=kn[:, None] < seqlen_k, other=0.0)"
 VL_OUT = "tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=offs_m[:, None] < seqlen_q)"
+VL_ALPHA = "alpha = tl.exp(m_i - m_new)"
 VC_TRI = "causal = offs_m[:, None] >= kn[None, :]"
 VC_SEL = f"qk = tl.where((kn[None, :] < seqlen_k) & causal, qk, {NINF})"
 LENS_Q, LENS_K = [37, 50, 21], [45, 29, 60]
@@ -246,6 +253,10 @@ VARLEN_REFUSED = {
     "select_inverted_polarity": ((VL_SEL, f"qk = tl.where(kn[None, :] >= seqlen_k, qk, {NINF})"), 64, KEEPS),
     "select_fills_zero": ((VL_SEL, "qk = tl.where(kn[None, :] < seqlen_k, qk, 0.0)"), 64, KEEPS),
     "select_fills_finite": ((VL_SEL, "qk = tl.where(kn[None, :] < seqlen_k, qk, -1e9)"), 64, KEEPS),
+    # The finite floats that equal the fp16, bf16 and fp32 bit words of -inf.
+    "select_fills_fp16_inf_word": ((VL_SEL, "qk = tl.where(kn[None, :] < seqlen_k, qk, 64512.0)"), 64, KEEPS),
+    "select_fills_bf16_inf_word": ((VL_SEL, "qk = tl.where(kn[None, :] < seqlen_k, qk, 65408.0)"), 64, KEEPS),
+    "select_fills_fp32_inf_word": ((VL_SEL, "qk = tl.where(kn[None, :] < seqlen_k, qk, 4286578688.0)"), 64, KEEPS),
     "select_transposed": ((VL_SEL, f"qk = tl.where(kn[:, None] < seqlen_k, qk, {NINF})"), 64, AXIS),
     "select_on_the_row_bound": ((VL_SEL, f"qk = tl.where(offs_m[:, None] < seqlen_q, qk, {NINF})"), 64, "leaves ['Q']"),
     "select_key_boundary_twice": (
@@ -262,6 +273,25 @@ VARLEN_REFUSED = {
         AXIS,
     ),
     "v_unmasked": ((VL_V, "v = tl.load(v_ptrs)"), 64, "the V load is unmasked"),
+    "length_signed_in_one_mask_unsigned_in_another": (
+        (VL_V, "v = tl.load(v_ptrs, mask=kn[:, None] < seqlen_k.to(tl.uint32), other=0.0)"),
+        64,
+        "compares one sequence length as signed in one mask and unsigned in another",
+    ),
+    "select_off_the_score_path": (
+        (VL_ALPHA, VL_ALPHA + IND + f"alpha = tl.where(offs_m < seqlen_q, alpha, {NINF})"),
+        64,
+        "a sequence-boundary select is not on the path from the QK dot to the softmax",
+    ),
+    "store_of_rank_3": (
+        (
+            VL_OUT,
+            "tl.store(o_ptrs[:, :, None], acc.to(Out.dtype.element_ty)[:, :, None], "
+            "mask=(offs_m[:, None] < seqlen_q)[:, :, None])",
+        ),
+        64,
+        "Out value path is not exactly reproduced by the selected template (a masked tensor of rank 3",
+    ),
 }
 
 VARLEN_ADMITTED = {
@@ -311,6 +341,14 @@ CAUSAL_REFUSED = {
     ),
     "select_polarity": ((VC_SEL, f"qk = tl.where((kn[None, :] < seqlen_k) & causal, {NINF}, qk)"), KEEPS),
     "select_fills_zero": ((VC_SEL, "qk = tl.where((kn[None, :] < seqlen_k) & causal, qk, 0.0)"), KEEPS),
+    "select_fills_fp16_inf_word": (
+        (VC_SEL, "qk = tl.where((kn[None, :] < seqlen_k) & causal, qk, 64512.0)"),
+        KEEPS,
+    ),
+    "second_select_fills_fp16_inf_word": (
+        (VC_SEL, f"qk = tl.where(kn[None, :] < seqlen_k, qk, {NINF})" + IND + "qk = tl.where(causal, qk, 64512.0)"),
+        KEEPS,
+    ),
 }
 
 CAUSAL_ADMITTED = {
@@ -364,6 +402,112 @@ def test_varlen_mask_on_other_cells_refuses(name, fa_hits):
 @pytest.mark.parametrize("name", sorted(VARLEN_ADMITTED))
 def test_varlen_equivalent_mask_computes(name, dim, fa_hits):
     _varlen_computes(_varlen_fwd, VARLEN_ADMITTED[name], dim, False, fa_hits)
+
+
+@requires_mps
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("dim", [64, 128])
+@pytest.mark.parametrize(
+    "cu_q,cu_k",
+    [([0, 37, 58, 53], [0, 45, 74, 144]), ([0, 37, 87, 108], [0, 50, 124, 114]), ([0, 37, 37, 58], [0, 45, 45, 115])],
+    ids=["negative_query_length", "negative_key_length", "empty_sequence"],
+)
+def test_varlen_decreasing_cumulative_lengths_select_nothing(cu_q, cu_k, dim, causal, fa_hits):
+    """The source's signed ``index < length`` selects no row and no key of a negative length.
+
+    A sequence with rows and no keys has every score -inf: the source's own result is NaN.
+    """
+    heads, scale = 2, 1.0 / math.sqrt(dim)
+    gen = torch.Generator().manual_seed(1131)
+    q = torch.randn(max(cu_q), heads, dim, generator=gen)
+    k, v = [torch.randn(max(cu_k), heads, dim, generator=gen) for _ in range(2)]
+    o = torch.full((max(cu_q), heads, dim), POISON, device="mps")
+    cq, ck = [torch.tensor(c, dtype=torch.int32, device="mps") for c in (cu_q, cu_k)]
+    qd, kd, vd = [t.to("mps") for t in (q, k, v)]
+    st = lambda t: tuple(t.stride())  # noqa: E731
+    (_varlen_causal_fwd if causal else _varlen_fwd)[(4, 3 * heads)](
+        qd, kd, vd, o, cq, ck, *st(qd), *st(kd), *st(vd), *st(o), heads, 100, scale, 32, 32, dim
+    )
+    torch.mps.synchronize()
+    assert fa_hits == [True]
+    expected = torch.full(o.shape, POISON, dtype=torch.float64)
+    for b in range(3):
+        (q0, q1), (k0, k1) = cu_q[b : b + 2], cu_k[b : b + 2]
+        if q1 <= q0:
+            continue
+        if k1 <= k0:
+            expected[q0:q1] = float("nan")
+            continue
+        scores = scale * torch.einsum("qhd,khd->hqk", q[q0:q1].double(), k[k0:k1].double())
+        if causal:
+            scores = scores.masked_fill(torch.arange(q1 - q0)[:, None] < torch.arange(k1 - k0)[None, :], float("-inf"))
+        expected[q0:q1] = torch.einsum("hqk,khd->qhd", torch.softmax(scores, -1), v[k0:k1].double())
+    got = o.cpu().double()
+    assert torch.equal(got != POISON, expected != POISON)
+    assert torch.equal(got.isnan(), expected.isnan())
+    live = (expected != POISON) & ~expected.isnan()
+    torch.testing.assert_close(got[live], expected[live], atol=1e-3, rtol=1e-3)
+
+
+def _varlen_whole_span(cu_q, cu_k, dtype, dim, causal, fa_hits):
+    """Launch 64 rows per sequence over the 64 keys the loop visits; compare with the source.
+
+    A length that is above every launched index (wrapped, or beyond 32 bits) computes every
+    row of the launched tiles over every key the loop visits.
+    """
+    heads, span, scale = 2, 64, 1.0 / math.sqrt(dim)
+    gen = torch.Generator().manual_seed(1132)
+    q = torch.randn(max(cu_q[:-1]) + span + 8, heads, dim, generator=gen)
+    k, v = [torch.randn(max(cu_k[:-1]) + span + 8, heads, dim, generator=gen) for _ in range(2)]
+    o = torch.full(q.shape, POISON, device="mps")
+    cq, ck = [torch.tensor(c, dtype=dtype).to("mps") for c in (cu_q, cu_k)]
+    qd, kd, vd = [t.to("mps") for t in (q, k, v)]
+    st = lambda t: tuple(t.stride())  # noqa: E731
+    (_varlen_causal_fwd if causal else _varlen_fwd)[(span // 32, (len(cu_q) - 1) * heads)](
+        qd, kd, vd, o, cq, ck, *st(qd), *st(kd), *st(vd), *st(o), heads, span, scale, 32, 32, dim
+    )
+    torch.mps.synchronize()
+    assert fa_hits == [True]
+    expected = torch.full(o.shape, POISON, dtype=torch.float64)
+    for b in range(len(cu_q) - 1):
+        (q0, q1), (k0, k1) = cu_q[b : b + 2], cu_k[b : b + 2]
+        rows, keys = [min(hi - lo, span) if hi >= lo else span for lo, hi in ((q0, q1), (k0, k1))]
+        scores = scale * torch.einsum("qhd,khd->hqk", q[q0 : q0 + rows].double(), k[k0 : k0 + keys].double())
+        if causal:
+            scores = scores.masked_fill(torch.arange(rows)[:, None] < torch.arange(keys)[None, :], float("-inf"))
+        expected[q0 : q0 + rows] = torch.einsum("hqk,khd->qhd", torch.softmax(scores, -1), v[k0 : k0 + keys].double())
+    got = o.cpu().double()
+    assert torch.equal(got != POISON, expected != POISON)
+    live = expected != POISON
+    torch.testing.assert_close(got[live], expected[live], atol=1e-3, rtol=1e-3)
+
+
+@requires_mps
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("dim", [64, 128])
+@pytest.mark.parametrize("dtype", [torch.uint32, torch.uint64], ids=["uint32", "uint64"])
+@pytest.mark.parametrize(
+    "cu_q,cu_k",
+    [([0, 50, 20], [0, 45, 115]), ([0, 50, 90], [0, 70, 30])],
+    ids=["wrapped_query_length", "wrapped_key_length"],
+)
+def test_varlen_unsigned_decreasing_cumulative_lengths_wrap(cu_q, cu_k, dtype, dim, causal, fa_hits):
+    """Unsigned cumulative lengths compare ``index < length`` unsigned: a decrease wraps."""
+    _varlen_whole_span(cu_q, cu_k, dtype, dim, causal, fa_hits)
+
+
+@requires_mps
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("dim", [64, 128])
+@pytest.mark.parametrize("dtype", [torch.int64, torch.uint64], ids=["int64", "uint64"])
+@pytest.mark.parametrize(
+    "cu_q,cu_k",
+    [([0, 2**32 + 5], [0, 45]), ([0, 50], [0, 2**32 + 7]), ([0, 2**31 + 5], [0, 2**33])],
+    ids=["query_length", "key_length", "both_lengths"],
+)
+def test_varlen_length_beyond_32_bits_is_above_every_launched_index(cu_q, cu_k, dtype, dim, causal, fa_hits):
+    """A 64-bit length of 2**32 + 5 is not its low word, 5."""
+    _varlen_whole_span(cu_q, cu_k, dtype, dim, causal, fa_hits)
 
 
 @requires_mps
@@ -469,6 +613,62 @@ def test_biased_mask_on_other_cells_refuses(name, fa_hits):
 def test_biased_equivalent_mask_computes(name, fa_hits):
     edit = BIASED_ADMITTED[name]
     o, lse, o_exp, lse_exp = _launch_biased(_variant(_biased_fa, *([] if edit is None else [edit])), 48)
+    assert fa_hits == [True]
+    _assert_poisoned_match(o, o_exp, 2e-3)
+    _assert_poisoned_match(lse, lse_exp, 2e-3)
+
+
+def _launch_biased_sentinel(n_ctx, dim, sentinel, block_n=32, seed=1130):
+    """The 2-D biased kernel with every key of head 1 masked; returns outputs and the SOURCE result.
+
+    The source fills masked keys and the padding keys of its last ``block_n``-key iteration with
+    the finite runtime sentinel (in exp2 units), so each of them counts in the softmax: a fully
+    masked row averages V over the keys the loop visits, with zero for the padding ones.
+    """
+    gen = torch.Generator().manual_seed(seed)
+    z, h, tiles = 1, 2, triton.cdiv(n_ctx, 32)
+    rows, keys = tiles * 32, triton.cdiv(n_ctx, block_n) * block_n
+    q = torch.randn(z, h, rows, dim, generator=gen)
+    k, v = [torch.randn(z, h, keys, dim, generator=gen) for _ in range(2)]
+    b = torch.randn(z, h, rows, keys, generator=gen)
+    mask = (torch.rand(z, h, keys, generator=gen) < 0.25).to(torch.uint8)
+    mask[:, 1] = 1
+    o = torch.full((z, h, rows, dim), POISON, device="mps")
+    lse = torch.full((z, h, rows), POISON, device="mps")
+    dev = [x.to("mps") for x in (q, k, v, b, mask)]
+    st = lambda t: tuple(t.stride())  # noqa: E731
+    args = [o, *st(o), lse, *st(lse)]
+    for t in dev:
+        args += [t, *st(t)]
+    _biased_fa[(tiles, z * h)](*args, dim**-0.5, sentinel, z, h, n_ctx, dim, 32, block_n)
+    torch.mps.synchronize()
+    n, ln2 = n_ctx, math.log(2.0)
+    scores = (dim**-0.5 * (q.double() @ k.double().transpose(-1, -2)) + b.double()) / ln2
+    scores = scores.masked_fill(mask.bool()[:, :, None, :], sentinel)
+    scores[..., n:] = sentinel
+    scores = scores[:, :, :n]
+    top = scores.max(-1, keepdim=True).values
+    weights = torch.exp2(scores - top)
+    values = v.double().clone()
+    values[:, :, n:] = 0.0
+    o_exp = torch.full(o.shape, POISON, dtype=torch.float64)
+    lse_exp = torch.full(lse.shape, POISON, dtype=torch.float64)
+    o_exp[:, :, :n] = (weights @ values) / weights.sum(-1, keepdim=True)
+    lse_exp[:, :, :n] = top[..., 0] * ln2 + torch.log(weights.sum(-1))
+    return o, lse, o_exp, lse_exp
+
+
+@requires_mps
+@pytest.mark.parametrize("sentinel", [-1e9, 0.0])
+@pytest.mark.parametrize("dim", [32, 64])
+@pytest.mark.parametrize(
+    "n_ctx,block_n",
+    [(n, 32) for n in (32, 48, 64, 80, 96, 160)] + [(n, 16) for n in (16, 40, 48, 100)] + [(n, 64) for n in (32, 96)],
+)
+def test_biased_finite_sentinel_counts_the_keys_the_source_visits(n_ctx, block_n, dim, sentinel, fa_hits):
+    """A 64-wide template tile over an odd number of 32-key source iterations visits 32 keys
+    the source never does; counted as sentinels they halved a fully masked row's output."""
+    o, lse, o_exp, lse_exp = _launch_biased_sentinel(n_ctx, dim, sentinel, block_n)
     assert fa_hits == [True]
     _assert_poisoned_match(o, o_exp, 2e-3)
     _assert_poisoned_match(lse, lse_exp, 2e-3)
@@ -588,7 +788,9 @@ def _mla_causal_run(fn, n_ctx=64, seed=1126):
 @requires_mps
 def test_mla_transposed_causal_select_refuses(mla_hits):
     fn = _variant(_mla_value_path, _mla_select("m[None, :] >= (s + n0)[:, None]"))
-    with pytest.raises(MetalNonRecoverableError):
+    with pytest.raises(
+        MetalNonRecoverableError, match="query index runs along the rows and key index along the columns"
+    ):
         _mla_causal_run(fn)
     assert mla_hits == []
 
@@ -620,6 +822,12 @@ KV_D = "delta = tl.load(d_ptrs, mask_j)"
 Q_K = "k_block = tl.load(k_ptrs, mask_k[:, None])"
 Q_VT = "vt_block = tl.load(vt_ptrs, mask_k[None, :])"
 NAN = "other=float('nan'))"
+BIAS = "the Bias load masked by the query-row boundary along its rows and the key boundary along its columns"
+MASK_KEYS = "the Mask load masked by exactly the key boundary"
+BW_B = "b_block = tl.load(b_ptrs, mask_j[:, None] & mask_k[None, :]"
+BW_M = "m_block = tl.load(mask_ptrs, mask_k, "
+BW_B_T = "b_block = tl.load(b_ptrs, mask_j[None, :] & mask_k[:, None], other=0.0"
+BW_M_ROWS = "m_block = tl.load(mask_ptrs, mask_j, other=0, "
 
 BACKWARD_REFUSED = {
     "kv_q_other_nan": ("kv", (KV_Q, KV_Q[:-1] + ", " + NAN), OTHER),
@@ -632,6 +840,19 @@ BACKWARD_REFUSED = {
         "the lse load masked by exactly the query-row boundary",
     ),
     "q_k_other_nan": ("q", (Q_K, Q_K[:-1] + ", " + NAN), OTHER),
+    # No dot orients the Bias and Mask loads: a boundary on the other axis zeroes live cells.
+    "kv_bias_mask_transposed": ("kv", (BW_B, BW_B_T), BIAS),
+    "q_bias_mask_transposed": ("q", (BW_B, BW_B_T), BIAS),
+    "b_bias_mask_transposed": ("b", (BW_B, BW_B_T), BIAS),
+    "kv_bias_mask_rows_only_on_keys": ("kv", (BW_B, "b_block = tl.load(b_ptrs, mask_k[:, None]"), BIAS),
+    "q_bias_mask_one_key_short": (
+        "q",
+        (BW_B, "b_block = tl.load(b_ptrs, mask_j[:, None] & ((k_idxs + start_k) < N - 1)[None, :]"),
+        BIAS,
+    ),
+    "q_mask_load_on_the_row_boundary": ("q", (BW_M, BW_M_ROWS), MASK_KEYS),
+    "b_mask_load_on_the_row_boundary": ("b", (BW_M, BW_M_ROWS), MASK_KEYS),
+    "kv_mask_load_one_key_short": ("kv", (BW_M, "m_block = tl.load(mask_ptrs, k_idxs < N - 1, "), MASK_KEYS),
     "q_vt_other_nan": ("q", (Q_VT, Q_VT[:-1] + ", " + NAN), OTHER),
 }
 
@@ -639,6 +860,18 @@ BACKWARD_ADMITTED = {
     "kv_q_other_zero": ("kv", (KV_Q, KV_Q[:-1] + ", other=0.0)")),
     "kv_lse_mask_bound_first": ("kv", (KV_L, "row_max = tl.load(l_ptrs, mask=N > (j_idxs + start_j))")),
     "q_k_other_zero": ("q", (Q_K, Q_K[:-1] + ", other=0.0)")),
+    "kv_bias_mask_keys_first": ("kv", (BW_B, "b_block = tl.load(b_ptrs, mask_k[None, :] & mask_j[:, None]")),
+    "q_bias_mask_bound_first": (
+        "q",
+        (BW_B, "b_block = tl.load(b_ptrs, (N > j_idxs)[:, None] & (N > (k_idxs + start_k))[None, :]"),
+    ),
+    "b_bias_mask_keys_first": ("b", (BW_B, "b_block = tl.load(b_ptrs, mask_k[None, :] & mask_j[:, None]")),
+    "q_mask_load_bound_first": ("q", (BW_M, "m_block = tl.load(mask_ptrs, N > (k_idxs + start_k), ")),
+    "b_mask_load_other_zero": ("b", (BW_M, "m_block = tl.load(mask_ptrs, mask_k, other=0, ")),
+    # Padding read as masked: the bounds select supplies the sentinel there either way.
+    "kv_mask_load_other_one": ("kv", (BW_M, "m_block = tl.load(mask_ptrs, mask_k, other=1, ")),
+    "q_mask_load_other_one": ("q", (BW_M, "m_block = tl.load(mask_ptrs, mask_k, other=1, ")),
+    "b_mask_load_other_one": ("b", (BW_M, "m_block = tl.load(mask_ptrs, mask_k, other=1, ")),
 }
 
 

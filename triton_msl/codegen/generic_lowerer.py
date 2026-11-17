@@ -7558,6 +7558,16 @@ class GenericLowerer(
             extra_stores=[(roles["o"], "Out", ("Q",), True)],
         )
         info = self._witness_varlen_flash_attention(info)
+        # ``index < length`` with a length that came out negative: no index when the source
+        # compares signed, every launched index when it compares unsigned (uint32 or uint64
+        # cumulative lengths). The template computes each length the way its masks read it.
+        _signs = [self._fa_boundary_signs.get(r, set()) for r in ("Q", "K")]
+        if any(s not in ({"s"}, {"u"}) for s in _signs):
+            raise MetalNonRecoverableError(
+                "varlen FlashAttention compares one sequence length as signed in one mask and "
+                "unsigned in another; the template holds one length per sequence. Refusing."
+            )
+        _unsigned_q, _unsigned_k = (s == {"u"} for s in _signs)
         role_of_idx = {
             roles["q"]: "Q",
             roles["k"]: "K",
@@ -7576,7 +7586,9 @@ class GenericLowerer(
                     )
                 if role in ("CUQ", "CUK"):
                     # The template indexes the cumulative lengths as stored: an int64 tensor
-                    # read through ``int*`` gives every second entry a zero high word.
+                    # read through ``int*`` gives every second entry a zero high word. The mask
+                    # proof refuses a narrower length before this point; the check stays so the
+                    # template never declares a width it does not index.
                     if a.elem_type not in ("i32", "i64"):
                         raise MetalNonRecoverableError(
                             "varlen FlashAttention cumulative sequence lengths are neither int32 nor int64; refusing."
@@ -7626,6 +7638,10 @@ class GenericLowerer(
             "o_st": _uint_expr(o[0]),
             "o_sh": _uint_expr(o[1]),
             "o_sk": _uint_expr(o[2]),
+            "unsigned_q": _unsigned_q,
+            "unsigned_k": _unsigned_k,
+            "wide_q": any(a.index == roles["cuq"] and a.elem_type == "i64" for a in args),
+            "wide_k": any(a.index == roles["cuk"] and a.elem_type == "i64" for a in args),
         }
         # FAST PATH: the register-O simdgroup-MMA varlen kernel (~7.6x the scalar one-thread-
         # per-row template at D=64, ~4x pad+SDPA; ~1.4x pad+SDPA at D=128) when eligible —
@@ -7737,7 +7753,7 @@ class GenericLowerer(
             if unresolved_subject is not None:
                 raise MetalNonRecoverableError(
                     f"{unresolved_subject}: required pointer/stride roles could not be "
-                    "resolved; refusing rather than guess"
+                    f"resolved; refusing rather than guess (unproved: {field})"
                 )
             raise MetalNonRecoverableError(
                 f"FlashAttention recognized but {field} could not be resolved; refusing rather than guess"
@@ -10496,9 +10512,15 @@ class GenericLowerer(
             # The templates supply ZERO for every element a load's mask drops, and skip the
             # rows past N_CTX. A source ``other`` is what the source computes with there
             # (NaN or -inf reach the sums through 0 * x and exp), and an unmasked lse load
-            # reads the tensor there.
+            # reads the tensor there. The Mask load is the exception: a key its key-boundary
+            # mask drops gets the sentinel from the bounds select whatever the Mask says there
+            # (both selects supply the one sentinel), so any constant, such as other=1, is the
+            # same source.
             for _ld in allops:
-                if _ld.op == "tt.load" and len(_ld.operand_ids or []) >= 3 and not _is_zero_const(_ld.operand_ids[2]):
+                if _ld.op != "tt.load" or len(_ld.operand_ids or []) < 3 or _is_zero_const(_ld.operand_ids[2]):
+                    continue
+                _oc = op_by_id.get(_peel_ids(_ld.operand_ids[2], _bcast))
+                if _ld.id != mask_loads[0].id or _oc is None or _oc.op != "arith.constant":
                     _refuse("every masked load's `other` being absent or zero (the templates supply zero)")
             _lse_ld = op_by_id.get(_peel_ids(lse_sub_op.operand_ids[1], _bcast))
             if (
@@ -10508,6 +10530,25 @@ class GenericLowerer(
                 or _leaf_coord(_lse_ld.operand_ids[1], mirrored_ok=True) != "j"
             ):
                 _refuse("the lse load masked by exactly the query-row boundary")
+
+            # The Bias and Mask loads are operands of no dot, so no contraction orients them:
+            # their masks are compared with the coordinates their ADDRESSES run along (Bias
+            # rows are query rows and its columns keys; Mask holds one value per key). A
+            # boundary on the other axis zeroes cells inside the tile the templates read.
+            def _mask_along(mask_vid, want):
+                m = op_by_id.get(_peel_ids(mask_vid, _bcast))
+                both = m is not None and m.op == "arith.andi" and len(m.operand_ids or []) == 2
+                seen = set()
+                for x in m.operand_ids if both else (mask_vid,):
+                    ax, co = _axis_of(x), _leaf_coord(x, mirrored_ok=True)
+                    if ax in seen or want.get(ax) is None or co != want[ax]:
+                        return False
+                    seen.add(ax)
+                return True
+
+            _mask_ld = mask_loads[0]
+            if len(_mask_ld.operand_ids or []) >= 2 and _leaf_coord(_mask_ld.operand_ids[1], mirrored_ok=True) != "k":
+                _refuse("the Mask load masked by exactly the key boundary (one Mask value per key)")
 
             # ---- shared: scores, dP, dS ----
             _need(scores_dot.id, ("j", "k"), "the score dot Q(j,d) @ K(d,k)")
@@ -10526,6 +10567,10 @@ class GenericLowerer(
                 if bo is None or bo.op != "tt.load" or load_addr(bo.id) != load_addr(scores_dot.operand_ids[2]):
                     _refuse(
                         "the score dot's accumulator being the Bias load VALUE itself (a widening is replayed; arithmetic is not)"
+                    )
+                if len(bo.operand_ids or []) >= 2 and not _mask_along(bo.operand_ids[1], {"row": "j", "col": "k"}):
+                    _refuse(
+                        "the Bias load masked by the query-row boundary along its rows and the key boundary along its columns"
                     )
             k_orient = _orient(k_load.id)
             dp = next(
@@ -12048,6 +12093,8 @@ class GenericLowerer(
         from triton_msl.errors import MetalNonRecoverableError
 
         if isinstance(key_bound, bool) or not isinstance(key_bound, int):
+            # A specialized length is refused earlier, at the loop bound; this guards the
+            # launch contract below, which needs the argument's index.
             raise MetalNonRecoverableError(
                 "FlashAttention with an unmasked V load and no runtime sequence-length argument: the "
                 "template supplies zero past the sequence length and cannot prove the launch attends "
@@ -12683,6 +12730,9 @@ class GenericLowerer(
             # blocks: exact only when the source's kv block is 64. Otherwise the tiled maker
             # (which takes block_n from the source) replays it exactly — slower, correct.
             and (not _rp or block_n == 64)
+            # A 64-wide tile covers whole source iterations only when the source's key block
+            # divides it; the keys of a partial last tile are then told apart in the template.
+            and 64 % block_n == 0
         )
         if simd_eligible:
             from triton_msl.codegen._msl_templates import make_flash_attention_kernel_simdgroup
@@ -12708,6 +12758,7 @@ class GenericLowerer(
                 round_q=_rq,
                 round_p=_rp,
                 scale_chain=_scale_chain,
+                sentinel_kv_block=block_n,
             )
             self.effective_block_size = 256
         else:
@@ -13465,6 +13516,25 @@ class GenericLowerer(
                 cur = op.operand_ids[0]
             return None
 
+        def _is_neg_inf_constant(op):
+            """A floating -inf literal: a Python float, or the raw bit word of ITS element type.
+
+            The walker exposes an infinity as its bit word. Python numeric equality makes the
+            finite float 64512.0 equal the f16 word 0xFC00, so a float is compared as a float and
+            an integer word only against the pattern of the constant's own type.
+            """
+            if op is None or op.op != "arith.constant":
+                return False
+            value = (op.attrs or {}).get("value")
+            if isinstance(value, bool):
+                return False
+            if isinstance(value, float):
+                return value == float("-inf")
+            if isinstance(value, int):
+                words = {"f16": 0xFC00, "bf16": 0xFF80, "f32": 0xFF800000, "f64": 0xFFF0000000000000}
+                return value == words.get(op.elem_type)
+            return False
+
         # ---- load masks (packet 110): plain, or exactly the template's sequence-boundary mask ----
         _mask_wrappers = {"tt.splat", "tt.broadcast", "tt.expand_dims", "ttg.convert_layout"}
         _fors = [s for s in _all if s.op == "scf.for"]
@@ -13609,6 +13679,11 @@ class GenericLowerer(
                 return None
             return 1 - axis
 
+        # A boundary against a scalar argument is the same signed or unsigned (the launch
+        # refuses a negative one). A varlen length is read from a tensor on the GPU, so the
+        # varlen lowering needs the signedness each length is compared in.
+        _boundary_signs = self._fa_boundary_signs = {}
+
         def _boundary_leaf(cid, role, allowed_roles, axes=None, above=(), negated=False):
             """One comparison leaf; returns the leaf role it is EXACTLY the boundary of.
 
@@ -13619,6 +13694,8 @@ class GenericLowerer(
             lhs, rhs, own = _leaf_compare(cid, role, negated)
             for r in allowed_roles:
                 if _bound_ok(rhs, r) and _coord_ok(lhs, r):
+                    _pred = (_peel_expands(cid)[0].attrs or {}).get("predicate_name") or ""
+                    _boundary_signs.setdefault("Q" if r in _ROW_ROLES else "K", set()).add(_pred[:1])
                     if axes is not None:
                         below = _range_expands(lhs)
                         got = _expand_axis(None if below is None else list(above) + own + below)
@@ -13642,13 +13719,13 @@ class GenericLowerer(
                 return [_boundary_leaf(x, role, allowed_roles, axes, above) for x in core.operand_ids]
             return [_boundary_leaf(mid, role, allowed_roles, axes, negated=negated)]
 
-        def _mask_axes(tensor_id, matrix_axes):
+        def _mask_axes(tensor_id, matrix_axes, role):
             """Leaf role -> required axis for a mask on ``tensor_id`` (a vector masks along -1)."""
             rank = len(_shape_of(tensor_id))
             if rank == 1:
                 return dict.fromkeys(matrix_axes, -1)
             if rank != 2:
-                _refuse("Q/K/V", f"a masked tensor of rank {rank} is not a tile the template replays")
+                _refuse(role, f"a masked tensor of rank {rank} is not a tile the template replays")
             return matrix_axes
 
         # Rows of the score are queries and its columns are keys. The dot's left operand
@@ -13673,7 +13750,7 @@ class GenericLowerer(
                     _refuse(role, "the store is unmasked but the template stores only inside the sequence boundary")
                 return
             # Out is [rows, head_dim] and Lse is [rows]: a row boundary varies along axis 0.
-            axes = _mask_axes(store.operand_ids[1], {"Q": 0, "K": 1})
+            axes = _mask_axes(store.operand_ids[1], {"Q": 0, "K": 1}, "Out")
             leaves = _mask_leaf_roles(store.operand_ids[2], role, tuple(leaf_roles), axes)
             if sorted(leaves) != sorted(leaf_roles):
                 _refuse(
@@ -13707,7 +13784,9 @@ class GenericLowerer(
                             role,
                             f"the load resolves to arg {ptr_index}, not detector arg {expected_index}",
                         )
-                    _check_load_mask(op, role, axes=_mask_axes(op.id, {role: _LOAD_AXIS[role] ^ (n_transpose & 1)}))
+                    _check_load_mask(
+                        op, role, axes=_mask_axes(op.id, {role: _LOAD_AXIS[role] ^ (n_transpose & 1)}, role)
+                    )
                     _verified_loads[role] = op
                     return scale_value
                 if op.op in _representation and len(op.operand_ids or []) == 1:
@@ -13907,7 +13986,7 @@ class GenericLowerer(
                         _role,
                         tuple(_leaf_roles),
                         exact_leaves=tuple(_leaf_roles),
-                        axes=_mask_axes(_ld.id, {"Q": 0, "K": 1}),
+                        axes=_mask_axes(_ld.id, {"Q": 0, "K": 1}, _role),
                     )
             for _idx, _role, _leaf_roles, _req in extra_stores:
                 _sts = [
@@ -13983,7 +14062,9 @@ class GenericLowerer(
             _S2 = _by_id.get(_peel_id(_p_core.operand_ids[0], _b_wr))
             if _S2 is None or _S2.op != "arith.select" or len(_S2.operand_ids or []) != 3:
                 _refuse("Score", "the softmax input is not the tile-boundary select the template replays")
-            _leaves = _mask_leaf_roles(_S2.operand_ids[0], "Score", ("Q", "K"), _mask_axes(_S2.id, {"Q": 0, "K": 1}))
+            _leaves = _mask_leaf_roles(
+                _S2.operand_ids[0], "Score", ("Q", "K"), _mask_axes(_S2.id, {"Q": 0, "K": 1}, "Score")
+            )
             if sorted(_leaves) != ["K", "Q"]:
                 _refuse(
                     "Score",
@@ -14151,20 +14232,13 @@ class GenericLowerer(
                     and not all(_range_expands(x) is not None for x in _cond_core.operand_ids or [])
                 )
                 _kept, _fill = (_no, _yes) if _inverted else (_yes, _no)
-                _axes = _mask_axes(_sel.id, {"Q": 0, "K": 1})
+                _axes = _mask_axes(_sel.id, {"Q": 0, "K": 1}, "Score")
                 if _inverted:
                     _leaves += _mask_leaf_roles(_cond, "Score", ("Q", "K"), _axes, negated=True)
                 else:
                     _score_leaf(_cond, [], 0, _axes)
                 _fill_core = _peel_to_core(_fill, _mask_wrappers)
-                if (
-                    not _depends_on_dot0(_kept)
-                    or _depends_on_dot0(_fill)
-                    or _fill_core is None
-                    or _fill_core.op != "arith.constant"
-                    or (_fill_core.attrs or {}).get("value")
-                    not in (float("-inf"), 0xFC00, 0xFF80, 0xFF800000, 0xFFF0000000000000)
-                ):
+                if not _depends_on_dot0(_kept) or _depends_on_dot0(_fill) or not _is_neg_inf_constant(_fill_core):
                     _refuse("Score", "the score select does not keep the score inside the key boundary and supply -inf")
             if (
                 _leaves.count("K") != 1
@@ -14192,7 +14266,7 @@ class GenericLowerer(
             if _varlen_select is not None and sorted(_score_scale.get("select_ids") or ()) != sorted(
                 _certified_selects
             ):
-                _refuse("Score", "a key-boundary select is not on the path from the QK dot to the softmax")
+                _refuse("Score", "a sequence-boundary select is not on the path from the QK dot to the softmax")
             if expected_score_scale is None:
                 _refuse("P", "the detector supplied no score-scale proof")
             _factor_tol = 1e-7 * max(
@@ -14416,14 +14490,7 @@ class GenericLowerer(
                 elif _op.op == "arith.select" and len(_op.operand_ids or []) == 3:
                     cond, yes, no = _op.operand_ids
                     _sentinel = _peel_to_core(no, _mask_wrappers)
-                    if (
-                        not _depends_on_dot0(yes)
-                        or _depends_on_dot0(no)
-                        or _sentinel is None
-                        or _sentinel.op != "arith.constant"
-                        or (_sentinel.attrs or {}).get("value")
-                        not in (float("-inf"), 0xFC00, 0xFF80, 0xFF800000, 0xFFF0000000000000)
-                    ):
+                    if not _depends_on_dot0(yes) or _depends_on_dot0(no) or not _is_neg_inf_constant(_sentinel):
                         _refuse("Tail", "live score select must keep the score or supply negative infinity")
                     cmp = _peel_to_core(cond, _mask_wrappers)
                     if cmp is None or cmp.op != "arith.cmpi" or len(cmp.operand_ids or []) != 2:
@@ -14455,7 +14522,7 @@ class GenericLowerer(
                     # fill for this role, even if its sibling has a masked load.
                     _plain.append(role)
                 else:
-                    _check_load_mask(load, role, exact_leaves=(role,), axes=_mask_axes(load.id, {role: 0}))
+                    _check_load_mask(load, role, exact_leaves=(role,), axes=_mask_axes(load.id, {role: 0}, role))
                     if _mask_axis(load.operand_ids[1]) != 0:
                         _refuse("Tail", f"{role} boundary is not broadcast along its load rows")
 

@@ -195,7 +195,8 @@ def test_runtime_stride_reference_keeps_its_real_emitter_route(contiguous, tiled
     current_metadata = copy.deepcopy(md)
     current = msl_emitter.emit_msl(mod, current_metadata, opts)
     assert current == baseline and current_metadata == parent_metadata
-    assert current_metadata["batched_dot_bounds"] is None
+    # The template's own launch contract, never a source-program descriptor.
+    assert current_metadata["batched_dot_bounds"][0] == "attention_unsigned_scalars_v1"
 
 
 @pytest.mark.parametrize("compile_shader", ["0", "1"])

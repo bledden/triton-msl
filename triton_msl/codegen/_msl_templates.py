@@ -1928,6 +1928,7 @@ def make_flash_attention_kernel_simdgroup(
     source_causal_stop=None,
     initial_values=None,
     fragment_lowering="off",
+    sentinel_kv_block=None,
 ):
     """simdgroup_matrix FlashAttention-2 (fp32/fp16, causal/non-causal, head_dim=128).
 
@@ -2322,6 +2323,25 @@ def make_flash_attention_kernel_simdgroup(
         _v_tail = f"({_v_tail} && {_visited})" if "V" not in unmasked_kv else _v_tail
     _k_tail, _v_tail = _k_tail.replace("%", "%%"), _v_tail.replace("%", "%%")
 
+    # A source that fills its padding keys with a FINITE runtime sentinel counts every
+    # key its own loop visits, and no other. This tile may span several source
+    # iterations: a key past the source's last iteration is no key at all (-inf), not
+    # a sentinel. Equal widths visit the same keys and keep the original spelling.
+    _unvisited_ni = _NI
+    if sentinel_kv_block is not None:
+        if not runtime_neg_inf or not (bias or mask):
+            raise ValueError("a sentinel KV block requires the biased runtime-sentinel route")
+        if sentinel_kv_block != BLOCK_N:
+            _unvisited_ni = (
+                "("
+                + _fa_source_tail_guard(sentinel_kv_block, BLOCK_N)
+                .replace("kv_row", "kvrow_b")
+                .replace("source KV tail:", "source sentinel keys:")
+                + " ? "
+                + _NI
+                + " : -INFINITY)"
+            )
+
     # ---- per-block body emitter (mode in {'full','tail'}) ----
     def guard_decls(mode):
         if mode == "full" and not causal:
@@ -2343,7 +2363,7 @@ def make_flash_attention_kernel_simdgroup(
                 "                float s;\n"
                 "                if (" + g + ") {\n"
                 "                    s = tg_S[pr*BN+cj]*" + _s_scale + ";" + _bias_add + _mask_apply + "\n"
-                "                } else { s = " + _NI + "; }"
+                "                } else { s = " + (_unvisited_ni if mode == "tail" else _NI) + "; }"
             )
         else:
             score_cell = "float s = " + g + " ? (tg_S[pr*BN+cj]*" + _s_scale + ") : " + _NI + ";"
@@ -5753,6 +5773,23 @@ def _varlen_kmax_expr(maxs):
     return f"((int({maxs}) <= 0) ? 0u : min(seqlen_k, ((uint({maxs}) - 1u) / 32u + 1u) * 32u))"
 
 
+def _varlen_length(cu, unsigned=False, wide=False):
+    """One sequence's length from its cumulative lengths, in the signedness the source compares it.
+
+    The source subtracts two entries and masks ``index < length``. Compared signed, cumulative
+    lengths that decrease give a negative length, which selects no row and no key. Compared
+    unsigned (uint32 or uint64 tensors) the difference wraps to a length above every launched
+    index. A 64-bit length (``wide``) that does not fit the template's 32 bits is likewise above
+    every launched index, so it saturates rather than keeping its low word.
+    """
+    length = f"({cu}[bb + 1u] - {cu}[bb])"
+    if unsigned:
+        return f"uint(min(ulong{length}, ulong(0xFFFFFFFFu)))" if wide else f"uint{length}"
+    if wide:
+        length = f"(min({length}, long(0x7FFFFFFF)))"
+    return f"(({cu}[bb + 1u] > {cu}[bb]) ? uint{length} : 0u)"
+
+
 def make_varlen_flash_attention(
     head_dim=64,
     causal=False,
@@ -5847,10 +5884,10 @@ kernel void {kernel_name}(
     uint bb = bh / nheads, h = bh % nheads;
 
     uint q_start = uint({b["CUQ"]}[bb]);
-    uint seqlen_q = uint({b["CUQ"]}[bb + 1u]) - q_start;
+    uint seqlen_q = {_varlen_length(b["CUQ"], b.get("unsigned_q", False), b.get("wide_q", False))};
     if (m_block * BM >= seqlen_q) return;
     uint k_start = uint({b["CUK"]}[bb]);
-    uint seqlen_k = uint({b["CUK"]}[bb + 1u]) - k_start;
+    uint seqlen_k = {_varlen_length(b["CUK"], b.get("unsigned_k", False), b.get("wide_k", False))};
 
     uint row = lid;
     uint qrow = m_block * BM + row;
@@ -6009,8 +6046,8 @@ kernel void {kernel_name}(
 
     uint m_block = tgpos.x, bh = tgpos.y;
     uint bb = bh / nheads, h = bh % nheads;
-    uint q_start = uint({b["CUQ"]}[bb]);   uint seqlen_q = uint({b["CUQ"]}[bb+1u]) - q_start;
-    uint k_start = uint({b["CUK"]}[bb]);   uint seqlen_k = uint({b["CUK"]}[bb+1u]) - k_start;
+    uint q_start = uint({b["CUQ"]}[bb]);   uint seqlen_q = {_varlen_length(b["CUQ"], b.get("unsigned_q", False), b.get("wide_q", False))};
+    uint k_start = uint({b["CUK"]}[bb]);   uint seqlen_k = {_varlen_length(b["CUK"], b.get("unsigned_k", False), b.get("wide_k", False))};
     if (m_block * BM >= seqlen_q) return;
     uint kmax = {kmax_expr};
 

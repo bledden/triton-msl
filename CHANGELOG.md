@@ -80,16 +80,25 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   or lengths the template would read differently from the source. The
   templates bind every integer argument as a 32-bit unsigned value and add
   addresses in 32-bit arithmetic. A negative stride (a view walked from its
-  last row) was read as a large positive one: on the dense, varlen, biased
-  and backward routes the result was wrong and the stores landed outside the
-  view. A stride, head count or length that is negative or does not fit 31
-  bits now refuses, as does a tensor whose storage exceeds 2**32 elements.
-  Head dimension 32 with 32-row blocks takes the general path and computes
-  negative strides as before.
+  last row) was read as a large positive one: on the dense, small-query,
+  varlen, biased and backward routes the result was wrong and the stores
+  landed outside the view. A stride, head count or length argument that is
+  negative or does not fit 31 bits now refuses when a template receives it,
+  as does a tensor whose storage exceeds 2**32 elements. Head dimension 32
+  with 32-row blocks takes the general path and computes negative strides as
+  before, and so does a dense kernel specialized for a 64-bit argument.
 - Read the varlen cumulative sequence lengths at the width the tensor holds.
   The templates indexed them as 32-bit integers, so an int64 tensor, which is
-  what `cumsum` returns, gave every second entry a zero. Int32 and int64 now
-  compute; other widths refuse.
+  what `cumsum` returns, gave every second entry a zero. Signed and unsigned
+  32-bit and 64-bit tensors now compute; other widths refuse.
+- Compute each varlen sequence length as the source compares it. The source
+  subtracts two cumulative lengths and masks `index < length`. Cumulative
+  lengths that decrease give a negative length, which selects no row and no
+  key; the template read it as a large unsigned length, attended every key
+  and stored every row. A length from an unsigned tensor wraps, as it does in
+  the source, and a 64-bit length above 32 bits selects every launched index
+  rather than keeping its low word. A kernel that compares one length signed
+  in one mask and unsigned in another refuses.
 - Store the biased log-sum-exp at its tensor's element type. The templates
   wrote it through a 32-bit float pointer, so a half or bfloat16 tensor
   received four bytes for every two it holds: wrong values, and writes past
@@ -124,9 +133,11 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   route, with another triangle ran as the canonical kernel. The select, or a
   chain of selects, must now keep the score inside the key boundary exactly
   once, with the row boundary and the causal triangle where the route has
-  them, and supply negative infinity. A finite fill such as `-1e9` refuses:
-  the template supplies negative infinity, and the two differ when a row has
-  no key left.
+  them, and supply negative infinity. A finite fill such as `-1e9` refuses,
+  including one whose value equals the bit word of negative infinity at
+  another float type (`64512.0`): the template supplies negative infinity,
+  and the two differ when a row has no key left. A boundary select anywhere
+  else in the kernel refuses.
 - Apply the biased route's loaded key mask per key. A source that broadcast
   the loaded mask along the rows (`m_block[:, None]`) masked query rows, and
   the template masked keys.
@@ -138,10 +149,28 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   number of key tiles, and compute whole-tile launches as before.
 - On the biased backward routes, refuse a masked load that supplies a value
   other than zero and an unmasked log-sum-exp load. The templates supply zero
-  for every operand row past the sequence length.
+  for every operand row past the sequence length. The loaded key mask may
+  supply any constant: a key past the sequence gets the sentinel score
+  whatever the mask holds there.
+- On the biased backward routes, prove the axis of the loaded bias and key
+  mask. A bias tile loaded transposed (`Bias[key, row]`) and a key mask
+  broadcast along the rows ran as the canonical kernel; on a whole tile the
+  two have the same shape. Both now refuse.
+- Count only the keys the source loop visits on the biased fp32 route with a
+  finite runtime sentinel. The template walks 64 keys at a time. Over a
+  source loop of 32 keys and an odd number of key tiles it gave the 32 keys
+  past the last source iteration the sentinel score, where the source never
+  visits them: a row with every key masked, or a sentinel that is not very
+  negative, returned other values. Those keys now score negative infinity.
+  A source block that does not divide 64 runs on the tiled template, which
+  walks the source's own block.
 - Accept a boundary written bound first (`N > m_idxs`, `seqlen_k > kn`) on the
-  load, store and select masks of the biased, varlen and MLA routes. These
-  spellings refused before.
+  load, store and select masks of the biased and varlen routes and on the
+  load masks of the MLA route. These spellings refused before. The MLA causal
+  select written bound first still refuses.
+- Name the proof that failed when a softmax kernel with several dots refuses
+  for unresolved roles. The message ended at "refusing rather than guess"; it
+  now adds the unproved field.
 - Refuse by name a dense attention kernel whose K, V and Out tensors do not
   share one float element type, or whose Q is bfloat beside half tiles. These
   reached the Metal compiler and failed there. A Q of another float type that

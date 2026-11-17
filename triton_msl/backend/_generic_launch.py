@@ -135,6 +135,7 @@ def generic_2d_geometry(launcher, arguments, signatures, metadata, grid, *, vali
             and (
                 metadata[10] is not validated_tail_bounds
                 or type(validated_tail_bounds) not in (tuple, list)
+                or len(validated_tail_bounds) not in (4, 6, 7)
                 or (len(validated_tail_bounds), validated_tail_bounds[0])
                 not in (
                     (6, "matmul_full_k_storage_v1"),
