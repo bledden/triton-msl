@@ -2405,6 +2405,28 @@ class GenericLowerer(
                     op_name=_widest_op or "tt.load",
                 )
 
+        # A source barrier orders lanes; the shader's barrier orders threads. The two agree
+        # only while each lane has a thread of its own, which a lane loop (the wrapping
+        # loop, a multipass phase loop) does not give. Whether that matters depends on the
+        # launch: only where two lanes meet at an element one of them stores. The launcher
+        # decides it per launch (triton_msl.backend._lane_order), reading a barrier inside a
+        # lane loop as no proof, so nothing is refused here.
+        _lane_barrier = next((ssa.op for ssa in all_ops_iter if ssa.op in ("tt.debug_barrier", "ttg.barrier")), None)
+        # Metal runs at most 1024 threads in a threadgroup and the driver clamps the
+        # launch to that.  Every branch above that keeps one lane per thread therefore
+        # has to end at or below the cap.  A kernel that arrives here wider has nothing
+        # covering lanes 1024 and up: a barrier over a 2048-lane tile took none of the
+        # wrapping branches, kept its block and passed the backstop above, which
+        # compares against the same uncapped width.  GPU bite: lanes 1024..2047 never
+        # ran and the output kept its old contents, with no exception.
+        if actual_dispatch_threads > 1024 and not getattr(self, "_flash_too_large", False):
+            raise MetalNonRecoverableError(
+                f"kernel needs one thread per lane for {actual_dispatch_threads} lanes, exceeding "
+                "Metal's 1024-thread threadgroup cap: lanes 1024 and up would never run. "
+                "Refusing (correct-or-refuse). Use a block of at most 1024.",
+                op_name=_lane_barrier or "tt.load",
+            )
+
         # If the kernel is too large for the generic lowerer (cooperative ops
         # with > 1024 total elements), emit a minimal kernel with UNSUPPORTED
         # so the legacy parser can handle it via prebuilt templates.
