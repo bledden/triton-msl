@@ -176,13 +176,16 @@ class _DeviceFuncLowerer:
 
         if ptr_id in self.env_is_ptr:
             base, offs = self.env_is_ptr[ptr_id]
-            if offs:
-                self._emit(f"{msl_ty} {var} = static_cast<{msl_ty}>({base}[{offs}]);")
-            else:
-                self._emit(f"{msl_ty} {var} = static_cast<{msl_ty}>({base}[0]);")
+            read = f"static_cast<{msl_ty}>({base}[{offs or 0}])"
         else:
-            ptr = self._lookup(ptr_id)
-            self._emit(f"{msl_ty} {var} = static_cast<{msl_ty}>({ptr}[0]);")
+            read = f"static_cast<{msl_ty}>({self._lookup(ptr_id)}[0])"
+        # tt.load(ptr, mask?, other?): where the mask is off nothing is read and the
+        # value is ``other`` (zero when the source gave none).
+        if len(ssa.operand_ids) >= 2:
+            mask = self._lookup(ssa.operand_ids[1])
+            other = self._lookup(ssa.operand_ids[2]) if len(ssa.operand_ids) >= 3 else "0"
+            read = f"({mask}) ? {read} : static_cast<{msl_ty}>({other})"
+        self._emit(f"{msl_ty} {var} = {read};")
 
         self.env[ssa.id] = var
         self.env_types[ssa.id] = triton_dtype
@@ -194,16 +197,15 @@ class _DeviceFuncLowerer:
         ptr_id = ssa.operand_ids[0]
         val_id = ssa.operand_ids[1]
         val = self._lookup(val_id)
+        # tt.store(ptr, value, mask?): nothing is stored where the mask is off.
+        guard = f"if ({self._lookup(ssa.operand_ids[2])}) " if len(ssa.operand_ids) >= 3 else ""
 
         if ptr_id in self.env_is_ptr:
             base, offs = self.env_is_ptr[ptr_id]
-            if offs:
-                self._emit(f"{base}[{offs}] = {val};")
-            else:
-                self._emit(f"{base}[0] = {val};")
+            self._emit(f"{guard}{base}[{offs or 0}] = {val};")
         else:
             ptr = self._lookup(ptr_id)
-            self._emit(f"{ptr}[0] = {val};")
+            self._emit(f"{guard}{ptr}[0] = {val};")
 
     def _lower_addptr(self, ssa: SSAValue):
         """tt.addptr — pointer arithmetic."""
