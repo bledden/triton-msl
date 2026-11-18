@@ -5024,15 +5024,20 @@ class GenericLowerer(
             cast_val = self._fp8_cast_val(val_var, store_dtype)
             idx = self._lid_expr
             # In 2D kernels, lid maps to row index via lid/N where N is the
-            # inner dimension.  The guard must cover all threads whose
-            # lid/N < result_size, i.e. lid < result_size * N.  Using just
-            # result_size (the number of rows) cuts off the upper threads
-            # and leaves half the rows unwritten when N > 1.
-            guard_size = result_size
-            if self._effective_2d_shape and len(self._effective_2d_shape) == 2:
+            # inner dimension, so the rows of the store are the lanes with
+            # lid/N < result_size.  Every lane of a row holds the row's
+            # address, value and mask; the row's first lane stores it.  Left to
+            # every lane of the row, a lane that loads the cell late reads
+            # another lane's store.
+            guard = f"{idx} < {result_size}u"
+            if self._effective_2d_shape and len(self._effective_2d_shape) == 2 and self._effective_2d_shape[1] > 0:
                 inner_N = self._effective_2d_shape[1]
-                guard_size = result_size * inner_N
-            self.kb.raw_line(f"    if ({idx} < {guard_size}u) {base_ptr}[{offsets}] = {cast_val};")
+                guard = f"{idx} % {inner_N}u == 0u && {idx} / {inner_N}u < {result_size}u"
+                self._row_lane_stores.add(id(ssa))
+            # The mask excludes rows past the range the program was given.
+            if native_mask_id is not None:
+                guard += f" && {self._lookup(native_mask_id)}"
+            self.kb.raw_line(f"    if ({guard}) {{ {base_ptr}[{offsets}] = {cast_val}; }}")
             return
 
         # Refuse a BLOCK-wide tensor store the base path can only emit as one
