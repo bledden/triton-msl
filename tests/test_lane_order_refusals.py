@@ -138,6 +138,18 @@ def _shifted_by_float(X, Y, S, BLOCK: tl.constexpr):
     tl.store(Y + i + d, tl.load(X + i) + 1.0)
 
 
+@triton.jit
+def _folded_trips(P, O, X, Q, BLOCK: tl.constexpr, FIRST: tl.constexpr, SMALL: tl.constexpr, FOLD: tl.constexpr):
+    t = tl.arange(0, FIRST)
+    j = tl.arange(0, SMALL)
+    w = tl.arange(0, BLOCK)
+    tl.store(P + t, tl.load(X + t))
+    for k in range(2):
+        keep = ((j < FOLD) & (k == 1)) | ((j >= FOLD) & (k == 0))
+        tl.store(O + j % FOLD, tl.load(X + j), mask=keep)
+    tl.store(Q + w, tl.load(X + w))
+
+
 @triton.jit(noinline=True)
 def _d9(X, Y, k):
     tl.store(Y + k, tl.load(X + k) + 1.0)
@@ -431,6 +443,31 @@ def _one_cell():
     return out
 
 
+def _folded():
+    """One store in a loop, narrower than the block: a cell's two trips are two lanes' stores.
+
+    The source's second trip stores last. The shader's threads each run both trips, and
+    nothing makes the thread of the first trip's store finish before the other's second.
+    """
+    out = []
+    for block, small in ((256, 64), (2048, 64), (4096, 1024)):
+        # The narrow store before the loop has the looped store's width, half of it, or twice it.
+        for first in (small, small // 2, 2 * small):
+            x = distinct(block)
+            args = [blank(first), blank(small), x, blank(block)]
+            sizes = dict(BLOCK=block, FIRST=first, SMALL=small)
+            name = f"{small} of {block} after {first}"
+            out.append(
+                Refusal(
+                    case(f"folded trips, {name}", _folded_trips, args, FOLD=small // 2, **sizes),
+                    NARROW,
+                    "O",
+                    case(f"unfolded trips, {name}", _folded_trips, args, FOLD=small, **sizes),
+                )
+            )
+    return out
+
+
 def _other_reasons():
     out = []
     # The reduction makes each thread walk several lanes, so the lane's loaded value is loaded again after the store.
@@ -613,7 +650,7 @@ def _other_reasons():
     return out
 
 
-REFUSED = _meeting() + _above_the_threads() + _one_cell() + _other_reasons()
+REFUSED = _meeting() + _above_the_threads() + _one_cell() + _folded() + _other_reasons()
 PARTNERS = list({row.partner.name: row.partner for row in REFUSED if row.partner is not None}.values())
 PARTNERS += [
     case("one call, separate", _one_call, [whole(8), blank(8)], 4),

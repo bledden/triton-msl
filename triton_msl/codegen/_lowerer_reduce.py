@@ -1996,6 +1996,8 @@ class _ReduceScanMixin:
         self._register_1d_layout(ssa.id, "direct")
         for _rid in ssa.result_ids or []:
             self._register_1d_layout(_rid, "direct")
+        for _rid in [ssa.id, *(ssa.result_ids or [])]:
+            self._range_held[_rid] = ("one",)
 
     def _lower_reduce_1d_i64(self, ssa, input_var, combine_op, msl_type, shared_dtype):
         """1-D full reduce for 64-bit ints via a shared-memory tree (Metal has
@@ -2040,6 +2042,8 @@ class _ReduceScanMixin:
         self._register_1d_layout(ssa.id, "direct")
         for _rid in ssa.result_ids or []:
             self._register_1d_layout(_rid, "direct")
+        for _rid in [ssa.id, *(ssa.result_ids or [])]:
+            self._range_held[_rid] = ("one",)
 
     def _lower_reduce_multi_value(self, ssa: SSAValue):
         """Multi-value reduce: argmax/argmin (2-value) or Welford (3-value).
@@ -2366,6 +2370,8 @@ class _ReduceScanMixin:
         self._register_1d_layout(ssa.id, "direct")
         for _rid in ssa.result_ids or []:
             self._register_1d_layout(_rid, "direct")
+        for _rid in [ssa.id, *(ssa.result_ids or [])]:
+            self._range_held[_rid] = ("one",)
 
     def _argminmax_lane_contract(self, ssa, native, idx_var):
         """Which lanes take part in a full argmin/argmax, and the index each one carries.
@@ -2581,6 +2587,10 @@ class _ReduceScanMixin:
         self._register_1d_layout(ssa.id, _layout, N)
         for _rid in ssa.result_ids or []:
             self._register_1d_layout(_rid, _layout, N)
+        if axis == 0 and N > 1:
+            # Read back as element lane % N on every lane.
+            for _rid in [ssa.id, *(ssa.result_ids or [])]:
+                self._range_held[_rid] = ("col", N)
         # Barrier AFTER the broadcast read of the pooled result arrays — without it a SECOND
         # argminmax in the same kernel re-stages those (declare_threadgroup_array-pooled)
         # arrays and races this read, so a tail of rows return their own index. Twin of the
@@ -2901,6 +2911,10 @@ class _ReduceScanMixin:
         self._register_1d_layout(ssa.id, _layout, N)
         for _rid in ssa.result_ids or []:
             self._register_1d_layout(_rid, _layout, N)
+        if axis == 0 and N > 1:
+            # Read back as element lane % N on the tile's own lanes.
+            for _rid in [ssa.id, *(ssa.result_ids or [])]:
+                self._range_held[_rid] = ("col", N, total)
 
     def _lower_reduce_3d(
         self,
@@ -3485,6 +3499,10 @@ class _ReduceScanMixin:
                 rv = self._next_var("scan_result")
                 self.kb.raw_line(f"    {slot_msl[i]} {rv} = ({slot_msl[i]}){shared_names[i]}[lid % {total}u];")
                 acc_vars_out.append(rv)
+            if not getattr(self, "_needs_wrapping", False):
+                # Lane ``lid`` holds element ``lid % total`` (see _lane_sources).
+                for _rid in ssa.result_ids or [ssa.id]:
+                    self._scan_held_modulo[_rid] = total
         else:
             acc_vars_out = acc_vars
 

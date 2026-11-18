@@ -18,7 +18,8 @@ import numpy as np
 from triton_msl.autotuning._operand_overlap import _base, _share, _storage
 
 PID, LANE, LOOP, OPAQUE = 1, 2, 4, 8
-BUDGET = 1 << 22
+BUDGET = 1 << 22  # addresses compared at a time
+SLICES = 16  # and how many times that for one launch, a run of programs at a time
 
 _COMMUTING = ("add", "fadd", "and", "or", "xor", "max", "min", "umax", "umin")
 SAFE = ("no-write", "one-store", "atomic-only", "one-lane", "text", "text+lanes", "lanes")
@@ -336,7 +337,9 @@ class LaunchCheck:
             return "no-write"
         if len(ordinals) == 1 and not accesses[0][4] and not accesses[0][5]:
             return "one-store"
-        if len(ordinals) == 1 and accesses[0][0] == "A":
+        # The lanes of one atomic operation are not ordered by the source. Its trips are:
+        # inside a loop only an update that commutes with itself is free of that order.
+        if len(ordinals) == 1 and accesses[0][0] == "A" and not accesses[0][4]:
             return "atomic-only"
         if self._commuting(ordinals):
             return "atomic-only"
@@ -381,11 +384,36 @@ class LaunchCheck:
             if answer is None:
                 answer = self._lanes(ordinals, origins, arguments, grid, None, swapped, spaces)
                 if answer == "per-program":
-                    answer = self._lanes(ordinals, origins, arguments, grid, tuple(grid), swapped, spaces)
+                    answer = self._per_program(ordinals, origins, arguments, grid, swapped, spaces)
                 self.cache[key] = answer
         except Unproved as unproved:
             return unproved.reason
         return proved if answer == "apart" else answer
+
+    def _per_program(self, ordinals, origins, arguments, grid, swapped, spaces):
+        """The lanes of every program compared, a run of programs at a time.
+
+        A cell is compared within its own program only, so the grid can be cut anywhere.
+        """
+        count = int(grid[0]) * int(grid[1]) * int(grid[2])
+        first, step, done = 0, count, 0
+        while first < count:
+            try:
+                answer = self._lanes(
+                    ordinals, origins, arguments, grid, (first, min(count, first + step)), swapped, spaces
+                )
+            except Unproved as unproved:
+                if unproved.reason != "budget" or step == 1:
+                    raise
+                step = (step + 1) // 2
+                continue
+            if answer != "apart":
+                return answer
+            first += step
+            done += 1
+            if done + -(-(count - first) // step) > SLICES:
+                raise Unproved("budget")
+        return "apart"
 
     def _swapped(self, ordinals):
         """The accesses among these that the shader writes in another order than the source, a store among them."""
@@ -578,7 +606,7 @@ class LaunchCheck:
                 return "per-program"
             count = 1
         else:
-            count = int(grid[0]) * int(grid[1]) * int(grid[2])
+            count = programs[1] - programs[0]
         loops = sorted({loop for ordinal in ordinals for loop in self.accesses[ordinal][4]})
         trips, axis = {}, {}
         for loop in loops:
@@ -591,7 +619,7 @@ class LaunchCheck:
         if separable:
             pid = [np.zeros((1,) * lead, dtype=np.int64)] * 3
         else:
-            index = np.arange(count, dtype=np.int64).reshape((count,) + (1,) * (lead - 1))
+            index = np.arange(programs[0], programs[1], dtype=np.int64).reshape((count,) + (1,) * (lead - 1))
             pid = [index % grid[0], (index // grid[0]) % grid[1], index // (grid[0] * grid[1])]
         env = _Env(lead, count, pid, trips, axis, origins, arguments, grid)
         # Which allocation each address is in, when the group has several: the same
@@ -644,20 +672,24 @@ class LaunchCheck:
                         where = where.reshape(where.shape + (1,) * len(shape))
                 where = np.broadcast_to(where, full)
                 if ordinal in swapped:
-                    lane = np.full(shape, -(1 << 30) - ordinal, dtype=np.int64)
+                    # No claim about which lane performs an element, only that two
+                    # elements are two lanes.
+                    lane = -(1 << 60) - (ordinal << 24) - np.arange(size, dtype=np.int64).reshape(shape)
                 elif self.one_lane or ordinal in self.single:
                     # No claim about which lane of a wider access that one lane is.
-                    lane = np.full(shape, -(1 << 29), dtype=np.int64)
+                    lane = np.full(shape, -(1 << 59), dtype=np.int64)
                 elif ordinal in self.rows:
                     # Row by row the same lane, and no claim about which lane of a
                     # wider access it is.
-                    lane = -(1 << 28) + np.arange(size, dtype=np.int64).reshape(shape)
+                    lane = -(1 << 58) + np.arange(size, dtype=np.int64).reshape(shape)
                 elif size == self.block:
                     lane = np.arange(size, dtype=np.int64).reshape(shape) + (
                         shapes.setdefault(shape, len(shapes)) << 40
                     )
                 else:
-                    lane = np.full(shape, -1 - ordinal, dtype=np.int64)
+                    # One lane for each element, and no claim about which: two elements
+                    # that meet in a cell, in one trip or in two, are two lanes.
+                    lane = -1 - (ordinal << 24) - np.arange(size, dtype=np.int64).reshape(shape)
                 lane = np.broadcast_to(lane, full)
                 program = np.broadcast_to(
                     np.arange(full[0], dtype=np.int64).reshape((full[0],) + (1,) * (len(full) - 1)), full
@@ -702,7 +734,7 @@ class LaunchCheck:
         if unmasked:
             # The lanes a mask switches off may be the ones that met.
             return "per-program"
-        if (lowest[meeting] <= -(1 << 30)).any():
+        if (lowest[meeting] <= -(1 << 60)).any():
             return "order-meet"
         return "lanes-meet-narrow" if (lowest[meeting] < 0).any() else "lanes-meet"
 

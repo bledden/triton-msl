@@ -1084,6 +1084,64 @@ class _ControlFlowMixin:
             self.env[ssa.id] = iter_vars[0]
             self.env_types[ssa.id] = iter_dtypes[0] if iter_dtypes else "i32"
 
+    def _atomic_lanes(self, ssa, shape):
+        """The condition under which a lane performs this atomic, so each element is updated once.
+
+        ``shape`` is the atomic's own (empty for a scalar). A kernel runs one lane per
+        element of its widest value, so an atomic over fewer elements is reached by
+        several lanes for each of them. Returns ``(guard, one)``: the guard, or None
+        when every lane has an element of its own, and whether the atomic is over one
+        element and so performed by the first lane alone.
+        """
+        from triton_msl.errors import MetalNonRecoverableError
+
+        lane, lanes = self._lane_here()
+        used, looped = self._graph_facts()
+        count = 1
+        for extent in shape:
+            count *= extent
+        if count == 1:
+            if lane != "lid" and ssa.id in used and id(ssa) in looped:
+                # The first lane's trips all finish before the thread's next lane starts,
+                # so one slot cannot hand each trip's old value to the other lanes.
+                raise MetalNonRecoverableError(
+                    "an atomic on one element, inside a loop, whose returned value is read, in a "
+                    "kernel with more lanes than threads: the value each trip returns is not kept "
+                    "for the lanes that run later. Use a block no wider than the thread count, or "
+                    "do not read the returned value.",
+                    op_name=ssa.op,
+                )
+            self._single_lane_stores.add(id(ssa))
+            return f"{lane} == 0u", True
+        if len(shape) == 1:
+            if count >= lanes:
+                return None, False
+            # Lanes 0..count-1 take one element each. An address, value or mask held one
+            # row per W lanes (computed from a row-wise reduce) would give every one of
+            # them the first row's element.
+            self._refuse_row_blocked_effect(ssa.op, count, tuple(ssa.operand_ids or ()), op_name=ssa.op)
+            return f"{lane} < {count}u", False
+        if self._is_2d and len(shape) == 2:
+            if count >= lanes:
+                return None, False
+            if ssa.id in used:
+                raise MetalNonRecoverableError(
+                    f"an atomic over {list(shape)} in a kernel that runs {lanes} lanes, whose returned "
+                    "value is read: one lane performs it for each element, and the value is not handed "
+                    "to the other lanes that hold the element. Do not read the returned value, or give "
+                    "the atomic the shape of the kernel's widest block.",
+                    op_name=ssa.op,
+                )
+            # One lane per element, and a lane that holds the element's address and operands.
+            guard = self._tile_lanes(tuple(shape), tuple(ssa.operand_ids or ()), lane, lanes, "an atomic", each=True)
+            return guard, False
+        raise MetalNonRecoverableError(
+            f"an atomic over {list(shape)} in a kernel that runs {lanes} lanes: several lanes reach "
+            "each element and the update would be applied once for each of them. Give the atomic "
+            "the shape of the kernel's widest block, or one dimension.",
+            op_name=ssa.op,
+        )
+
     def _atomic_ordering_fences(self, ssa):
         """190/201: fence-bracket ONE logical atomic, with closed source metadata.
 
@@ -1321,7 +1379,7 @@ class _ControlFlowMixin:
         is_scalar = not native_result.is_tensor
         atom_shape = native_result.shape
         atomic_result_shared = None
-        if is_scalar or atom_shape == (1,):
+        if is_scalar or all(extent == 1 for extent in atom_shape):
             # The scalar result is logically available to every thread after a later
             # tt.splat, but only lid 0 executes the device atomic below.  A plain local
             # therefore leaves every other thread holding result_zero; labelling that
@@ -1333,25 +1391,6 @@ class _ControlFlowMixin:
             atomic_result_shared = f"atomic_single_result_{self._shared_counter}"
             self._shared_counter += 1
             self.kb.declare_threadgroup_array(atomic_result_shared, dtype=result_dtype, size=1)
-
-        # A 1-D atomic tensor smaller than the thread count must only execute on
-        # the first shape[0] threads, NOT all of them. For a constant-offset
-        # (size-1) non-idempotent atomic (atomic_add/fadd) every thread would RMW
-        # the SAME address -> over-count by num_threads (size-1 add returned 256,
-        # expect 1); for size-N>1 the un-guarded lanes lid>=N also write OOB. This
-        # held only for self._is_2d, leaving the 1-D kernel path unguarded (the
-        # missed twin of the 2-D case) — apply it whenever the atomic tensor is 1-D
-        # and under-fills the threadgroup. Re-audit 2026-06-27.
-        atomic_1d_guard = None
-        if not is_scalar:
-            if len(atom_shape) == 1 and atom_shape[0] < self.effective_block_size:
-                atomic_1d_guard = atom_shape[0]
-        # The guard below runs lanes 0..n-1, one element each: an address, value or mask
-        # held one row per W lanes (computed from a row-wise reduce) would give every
-        # one of those lanes the first row's element.
-        self._refuse_row_blocked_effect(
-            "tt.atomic_rmw", atomic_1d_guard, (ptr_id, val_id, mask_id), op_name="tt.atomic_rmw"
-        )
 
         # n>1 under-cover guard (mirrors _lower_store): a BLOCK-wide atomic the
         # base path emits as one element per thread (PTR[k+lid]) would silently
@@ -1462,20 +1501,9 @@ class _ControlFlowMixin:
 
         # Build the guard condition
         guard_parts = []
-        if is_scalar:
-            guard_parts.append("lid == 0")
-        elif atomic_1d_guard is not None:
-            guard_parts.append(f"lid < {atomic_1d_guard}u")
-        elif len(atom_shape) == 2 and not self._mept_single_pass:
-            # A tile smaller than the kernel's dominant one: no update past its last row.
-            _row_bound = self._row_range_lane_bound(ptr_id, atom_shape)
-            _span = (
-                getattr(self, "_total_elements", 0)
-                if getattr(self, "_needs_wrapping", False)
-                else self.effective_block_size
-            )
-            if _row_bound is not None and 0 < _row_bound < _span:
-                guard_parts.append(f"{self._lid_expr} < {_row_bound}u")
+        lane_guard, _ = self._atomic_lanes(ssa, () if is_scalar else atom_shape)
+        if lane_guard is not None:
+            guard_parts.append(lane_guard)
         if mask_var:
             guard_parts.append(mask_var)
 
@@ -1534,7 +1562,9 @@ class _ControlFlowMixin:
             self.kb.raw_line(f"    }}")
 
         if atomic_result_shared is not None:
-            self.kb.raw_line(f"    if (lid == 0) {atomic_result_shared}[0] = {result_var};")
+            # Written by the one lane that performed the atomic: in a wrap loop the
+            # thread's later lanes did not, and must not put their zero in the slot.
+            self.kb.raw_line(f"    if ({lane_guard}) {atomic_result_shared}[0] = {result_var};")
             self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
             self.kb.raw_line(f"    {result_var} = ({result_msl_type}){atomic_result_shared}[0];")
 
@@ -1628,20 +1658,10 @@ class _ControlFlowMixin:
         # initialized to zero on the other lanes previously produced [old,0,...]
         # for scalar CAS and [old,new,new,...] for an unguarded tensor<1> CAS.
         atomic_result_shared = None
-        if is_scalar or atom_shape == (1,):
+        if is_scalar or all(extent == 1 for extent in atom_shape):
             atomic_result_shared = f"atomic_cas_single_result_{self._shared_counter}"
             self._shared_counter += 1
             self.kb.declare_threadgroup_array(atomic_result_shared, dtype=result_dtype, size=1)
-
-        # As for atomic_rmw, a 1-D CAS tensor smaller than the threadgroup must
-        # execute only on its logical lanes. Otherwise tensor<1> races every lane
-        # on one address and tensor<N> writes OOB for lid >= N.
-        atomic_1d_guard = None
-        if not is_scalar and len(atom_shape) == 1 and atom_shape[0] < self.effective_block_size:
-            atomic_1d_guard = atom_shape[0]
-        self._refuse_row_blocked_effect(
-            "tt.atomic_cas", atomic_1d_guard, (ptr_id, cmp_id, val_id), op_name="tt.atomic_cas"
-        )
 
         # n>1 under-cover guard (mirrors _lower_store): a BLOCK-wide atomic the
         # base path emits as one element per thread (PTR[k+lid]) would silently
@@ -1672,20 +1692,7 @@ class _ControlFlowMixin:
         self.kb.raw_line(f"    {result_msl_type} {result_var} = {result_zero};")
 
         # Scalar / 1-D underfill guard.
-        guard = None
-        if is_scalar:
-            guard = "lid == 0"
-        elif atomic_1d_guard is not None:
-            guard = f"lid < {atomic_1d_guard}u"
-        elif len(atom_shape) == 2 and not self._mept_single_pass:
-            _row_bound = self._row_range_lane_bound(ptr_id, atom_shape)
-            _span = (
-                getattr(self, "_total_elements", 0)
-                if getattr(self, "_needs_wrapping", False)
-                else self.effective_block_size
-            )
-            if _row_bound is not None and 0 < _row_bound < _span:
-                guard = f"{self._lid_expr} < {_row_bound}u"
+        guard, _ = self._atomic_lanes(ssa, () if is_scalar else atom_shape)
         indent = "    "
         if guard is not None:
             self.kb.raw_line(f"    if ({guard}) {{")
@@ -1732,7 +1739,7 @@ class _ControlFlowMixin:
             self.kb.raw_line(f"    }}")
 
         if atomic_result_shared is not None:
-            self.kb.raw_line(f"    if (lid == 0) {atomic_result_shared}[0] = {result_var};")
+            self.kb.raw_line(f"    if ({guard}) {atomic_result_shared}[0] = {result_var};")
             self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
             self.kb.raw_line(f"    {result_var} = ({result_msl_type}){atomic_result_shared}[0];")
 

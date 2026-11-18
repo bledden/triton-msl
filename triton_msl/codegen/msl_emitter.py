@@ -143,6 +143,8 @@ class KernelBuilder:
         self.block_size = block_size
         self.args = []
         self._body_lines = []
+        self._brace_depth = 0
+        self._wrap_loops = []  # brace depth at which each open per-lane wrap loop began
         self._locals = {}
         self._indent = 1
         self._needs_simd_qualifiers = False
@@ -173,6 +175,20 @@ class KernelBuilder:
     def _emit(self, line):
         prefix = "    " * self._indent
         self._body_lines.append(f"{prefix}{line}")
+        code = line.split("//", 1)[0]
+        if "for (uint _loop_e = " in code:
+            self._wrap_loops.append(self._brace_depth)
+        self._brace_depth += code.count("{") - code.count("}")
+        while self._wrap_loops and self._brace_depth <= self._wrap_loops[-1]:
+            self._wrap_loops.pop()
+
+    @property
+    def in_wrap_loop(self):
+        """True while the lines being written are inside a loop over the lanes of one thread.
+
+        Every body line is appended here in order, so the loop's own braces say where it ends.
+        """
+        return bool(self._wrap_loops)
 
     def _var(self, name, expr, ty="auto"):
         """Declare and assign a local variable."""

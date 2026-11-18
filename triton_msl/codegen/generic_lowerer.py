@@ -356,6 +356,9 @@ class GenericLowerer(
         self._memory_emitted = []
         self._single_lane_stores = set()
         self._row_lane_stores = set()
+        self._row_lane_guard = None
+        self._range_held = {}
+        self._scan_held_modulo = {}
         self._var_counter = 0
 
         # Track stores for output detection
@@ -754,6 +757,246 @@ class GenericLowerer(
         returns '_loop_e' (the loop variable). Otherwise returns 'lid'.
         """
         return "_loop_e" if getattr(self, "_needs_wrapping", False) else "lid"
+
+    def _lane_here(self):
+        """The lane index and the number of lanes where the next line is written.
+
+        Inside a wrap loop a thread runs several lanes and ``_loop_e`` names the one in
+        hand. Outside one (a kernel with a thread per lane, or an operation written
+        before or after the loop) the lane is the thread.
+        """
+        if self.kb.in_wrap_loop:
+            return "_loop_e", getattr(self, "_total_elements", 0) or self.effective_block_size
+        return "lid", self.effective_block_size
+
+    def _lane_sources(self, ids):
+        """How the indices behind ``ids`` are held on the lanes.
+
+        Returns ``(strides, moduli, flat, unknown, bounds)``: the N of every row index
+        written ``lane / N`` and of every value held as element ``lane / N`` (None when
+        the width is not known), the M of every column index written ``lane % M`` and of
+        every value held as element ``lane % M``, the values held as element ``lane``,
+        what was met that is held in no known way, and the lane counts past which one of
+        those values holds nothing.
+        """
+        declared = getattr(self, "_value_1d_layout", None) or {}
+        widths = getattr(self, "_value_1d_block", None) or {}
+        strides, moduli, flat, unknown, bounds = set(), set(), [], [], []
+        computed = self._LAYOUT_PASSTHROUGH_OPS + self._LAYOUT_ELEMENTWISE_OPS
+
+        def visit(cur, op):
+            held = self._range_held.get(cur)
+            if held is not None or (op is not None and op.op == "tt.make_range"):
+                if held is None or held[0] == "nd":
+                    unknown.append("a range of a block with three or more dimensions")
+                elif held[0] == "one":
+                    pass  # the same value on every lane
+                elif held[0] == "row":
+                    strides.add(held[1])
+                elif held[0] == "col":
+                    moduli.add(held[1])
+                else:
+                    flat.append(cur)
+                if held is not None and len(held) > 2:
+                    bounds.append(held[2])
+                return True
+            if self.env_shapes.get(cur) == ():
+                return True  # one value for the whole program
+            if op is not None and op.op == "tt.expand_dims" and op.attrs.get("axis", 0) == 0 and op.operand_ids:
+                # A value from a short one-dimensional scan laid along the columns: lane
+                # ``lane`` holds its element ``lane % M``, the lane's column when M is the width.
+                modulo = self._scan_row_vector_modulo(op.operand_ids[0])
+                if modulo is not None:
+                    moduli.add(modulo)
+                    return True
+            if op is not None and op.op == "tt.scan":
+                # Element (i, j) of an (M, N) scan is computed on lane i * N + j.
+                shape = self.env_shapes.get(op.operand_ids[0]) if op.operand_ids else None
+                if self._mept_single_pass or not shape or len(shape) > 2:
+                    unknown.append("tt.scan")
+                elif len(shape) == 1:
+                    flat.append(cur)
+                else:
+                    strides.add(shape[1])
+                    moduli.add(shape[1])
+                    bounds.append(shape[0] * shape[1])
+                return True
+            if cur in declared:
+                if declared[cur] == "blocked":
+                    strides.add(widths.get(cur))
+                else:
+                    flat.append(cur)
+                return True
+            if op is None or op.op == "scf.for":
+                return False  # an argument, or a carried value: followed to what it carries
+            if op.op == "arith.constant":
+                if not isinstance(op.attrs.get("value"), (bool, int, float)):
+                    unknown.append("a tensor constant")
+                return True
+            if op.op == "tt.reshape" or not (op.op in computed or op.op.startswith(("arith.", "math."))):
+                unknown.append(op.op)
+                return True
+            return False
+
+        for value_id in ids:
+            if value_id is not None:
+                self._walk_producers(value_id, visit)
+        return strides, moduli, flat, unknown, bounds
+
+    def _scan_row_vector_modulo(self, value_id):
+        """M when lane ``lane`` holds element ``lane % M`` of the one-dimensional ``value_id``, else None.
+
+        That is how a scan shorter than the kernel is read back, and how a range of M
+        that no later axis claims is written. A value computed lane by lane from such
+        values and from scalars is held the same way. At least one scan has to be met:
+        without one the ranges alone say how the value is held.
+        """
+        scans = self._scan_held_modulo
+        found, other, met = set(), [], []
+
+        def visit(cur, op):
+            if cur in scans:
+                found.add(scans[cur])
+                met.append(cur)
+                return True
+            held = self._range_held.get(cur)
+            if held is not None or (op is not None and op.op == "tt.make_range"):
+                if held is not None and len(held) == 2 and held[0] == "col":
+                    found.add(held[1])
+                else:
+                    other.append(cur)
+                return True
+            if self.env_shapes.get(cur) == ():
+                return True
+            if op is None or op.op == "scf.for":
+                return False  # an argument, or a carried value: followed to what it carries
+            if op.op == "arith.constant":
+                if not isinstance(op.attrs.get("value"), (bool, int, float)):
+                    other.append(cur)
+                return True
+            if op.op in ("tt.expand_dims", "tt.broadcast", "tt.reshape") or not (
+                op.op in self._LAYOUT_PASSTHROUGH_OPS + self._LAYOUT_ELEMENTWISE_OPS
+                or op.op in ("tt.load", "tt.addptr")
+                or op.op.startswith(("arith.", "math."))
+            ):
+                other.append(cur)
+                return True
+            return False
+
+        self._walk_producers(value_id, visit)
+        return next(iter(found)) if met and len(found) == 1 and not other else None
+
+    def _one_lane_per_element(self, ssa, guard):
+        """Note a store that ``guard`` gives to one lane for each of its elements.
+
+        The launch check treats such stores, and the loads of the same shape that feed
+        nothing else, as made element by element by one lane. That holds across several
+        stores only when they are given to the same lanes, so the first guard names the
+        set and a store under another guard stays outside it.
+        """
+        if self._row_lane_guard in (None, guard):
+            self._row_lane_guard = guard
+            self._row_lane_stores.add(id(ssa))
+
+    def _tile_lanes(self, shape, ids, lane, lanes, op_name, each=False):
+        """The lanes that perform a store or an atomic over a block narrower than the kernel.
+
+        ``shape`` is two-dimensional and has fewer elements than the kernel has lanes, so
+        several lanes compute each of its elements and some lanes compute none of them.
+        The operation belongs to one lane per element, and that lane has to be one that
+        holds the element's own address, value and mask. Which lanes those are follows
+        from how each index behind ``ids`` is written: a row index as ``lane / N``, a
+        column index as ``lane % M``, a declared value as element ``lane / N`` or element
+        ``lane``. Returns the condition. Refuses when the indices do not agree on one
+        lane per element or one of them is not written in a known way.
+
+        Elements of a row, or whole rows, can share an address, a value and a mask when
+        no index tells them apart. A store of them is one store, so one lane makes it.
+        ``each`` says the operation has to happen once for every element all the same,
+        as an atomic update does.
+        """
+        from triton_msl.errors import MetalNonRecoverableError
+
+        rows, cols = shape
+        strides, moduli, flat, unknown, bounds = self._lane_sources(ids)
+
+        def refuse(why):
+            raise MetalNonRecoverableError(
+                f"{op_name} over a {rows}x{cols} block in a kernel that runs {lanes} lanes: {why}. "
+                "Which lane holds each element is not proved, so the operation is refused. Give it "
+                "the shape of the kernel's widest block.",
+                op_name=op_name,
+            )
+
+        if unknown:
+            refuse(f"its address, value or mask depends on {unknown[0]}, whose place on the lanes is not known")
+        if None in strides:
+            refuse("its address, value or mask depends on a row-blocked value of unknown width")
+        if flat:
+            # Element i on lane i: a row index with one lane per row, or a column index
+            # over the first lanes.
+            if cols == 1:
+                strides.add(1)
+            elif rows == 1:
+                moduli.add(cols)
+            else:
+                refuse("its address, value or mask depends on a one-dimensional value held element by lane")
+        if len(strides) > 1:
+            refuse(f"its row indices are held at different lane strides {sorted(strides)}")
+        if moduli - {cols}:
+            refuse(f"its column indices repeat every {sorted(moduli)} lanes, not every {cols}")
+        if cols == 1 and moduli or rows == 1 and strides:
+            refuse("an index of the other axis reaches it")
+        stride = next(iter(strides), None)
+        if stride is None:
+            # No row index: every row has the same address, value and mask.
+            if each:
+                guard, reach = f"{lane} < {rows * cols}u", rows * cols
+            elif moduli:
+                guard, reach = f"{lane} < {cols}u", cols
+            else:
+                guard, reach = f"{lane} == 0u", 1
+        else:
+            if moduli and stride % cols:
+                refuse(f"its rows are {stride} lanes apart, which is not a multiple of its {cols} columns")
+            if (rows - 1) * stride + cols > lanes or cols > stride:
+                refuse(f"its rows are {stride} lanes apart and do not fit")
+            reach = (rows - 1) * stride + cols
+            if not moduli and (cols == 1 or not each):
+                # No column index: every lane of a row holds the row, and its first lane acts.
+                reach = (rows - 1) * stride + 1
+                if stride == 1:
+                    guard = f"{lane} < {rows}u"
+                else:
+                    guard = f"{lane} % {stride}u == 0u && {lane} / {stride}u < {rows}u"
+            elif stride == cols:
+                guard = f"{lane} < {rows * cols}u"
+            else:
+                guard = f"{lane} / {stride}u < {rows}u && {lane} % {stride}u < {cols}u"
+        if bounds and reach > min(bounds):
+            refuse(f"a value it depends on is held on the first {min(bounds)} lanes and it needs {reach}")
+        return guard
+
+    def _graph_facts(self):
+        """(ids some operation reads, ids of operations inside a source loop), built once per graph."""
+        cached = getattr(self, "_graph_facts_cache", None)
+        if cached is not None and cached[0] is self.graph:
+            return cached[1], cached[2]
+        used, looped = set(), set()
+
+        def walk(ops, inside):
+            for op in ops:
+                used.update(op.operand_ids or ())
+                if inside:
+                    looped.add(id(op))
+                nested = inside or op.op in ("scf.for", "scf.while")
+                for region in (op.region_ops, op.else_ops):
+                    if region:
+                        walk(region, nested)
+
+        walk(self.graph.ops, False)
+        self._graph_facts_cache = (self.graph, used, looped)
+        return used, looped
 
     # -- Multi-pass reduction helpers ------------------------------------------
 
@@ -2441,6 +2684,9 @@ class GenericLowerer(
         self._memory_emitted = []
         self._single_lane_stores = set()
         self._row_lane_stores = set()
+        self._row_lane_guard = None
+        self._range_held = {}
+        self._scan_held_modulo = {}
 
         # Generate device functions for noinline callees (must appear before kernel)
         if self.graph.called_funcs:
@@ -4314,6 +4560,7 @@ class GenericLowerer(
                     expr = f"({lid} % {range_size}u)"
                 else:
                     expr = f"(({lid} / {stride_below}u) % {range_size}u)"
+                self._range_held[ssa.id] = ("nd", stride_below, range_size)
             else:
                 # 2D path: preserved for backward compatibility and the
                 # dim-0 inner_N pairing (transpose tiles, FlashAttention, etc).
@@ -4325,9 +4572,11 @@ class GenericLowerer(
                     self._make_range_row_div[ssa.id] = (N, range_size)
                     expr = f"{lid} / {N}u"
                     held = ("blocked", N)
+                    self._range_held[ssa.id] = ("row", N)
                 else:
                     expr = f"{lid} % {range_size}u"
                     held = ("direct", None)
+                    self._range_held[ssa.id] = ("col", range_size)
 
             if start != 0:
                 expr = f"({expr} + {start}u)"
@@ -4386,6 +4635,7 @@ class GenericLowerer(
             self.kb.raw_line(f"    uint {var_name} = {expr};")
             if lid == "lid":
                 self._register_1d_layout(ssa.id, "direct")
+            self._range_held[ssa.id] = ("col", range_size)
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = "i32"
             self.env_shapes[ssa.id] = (range_size,)
@@ -4460,6 +4710,7 @@ class GenericLowerer(
             self.env[ssa.id] = lid
         if lid == "lid":
             self._register_1d_layout(ssa.id, "direct")
+        self._range_held[ssa.id] = ("flat",)
         self.env_types[ssa.id] = "i32"
         self.env_shapes[ssa.id] = (end - start,)
 
@@ -4730,8 +4981,10 @@ class GenericLowerer(
         self.env_shapes[ssa.id] = tuple(dst)
         if along_rows:
             self._register_1d_layout(ssa.id, "blocked", D)
+            self._range_held[ssa.id] = ("row", D, lanes)
         else:
             self._register_1d_layout(ssa.id, "direct")
+            self._range_held[ssa.id] = ("col", N, lanes)
         return True
 
     def _lower_reshape(self, ssa: SSAValue):
@@ -5401,17 +5654,21 @@ class GenericLowerer(
             store_dtype = self._trace_ptr_dtype(ptr_id)
             cast_val = self._fp8_cast_val(val_var, store_dtype)
             idx = self._lid_expr
-            # In 2D kernels, lid maps to row index via lid/N where N is the
-            # inner dimension, so the rows of the store are the lanes with
-            # lid/N < result_size.  Every lane of a row holds the row's
-            # address, value and mask; the row's first lane stores it.  Left to
-            # every lane of the row, a lane that loads the cell late reads
-            # another lane's store.
-            guard = f"{idx} < {result_size}u"
-            if self._effective_2d_shape and len(self._effective_2d_shape) == 2 and self._effective_2d_shape[1] > 0:
-                inner_N = self._effective_2d_shape[1]
-                guard = f"{idx} % {inner_N}u == 0u && {idx} / {inner_N}u < {result_size}u"
-                self._row_lane_stores.add(id(ssa))
+            # Every lane of a row holds the row's address, value and mask; the row's
+            # first lane stores it.  Left to every lane of the row, a lane that loads the
+            # cell late reads another lane's store.
+            span = getattr(self, "_total_elements", 0) if self._needs_wrapping else self.effective_block_size
+            if result_size < span:
+                # Fewer rows than lanes: which lane is a row's first follows from how the
+                # row index is written, not from the kernel's widest block.
+                guard = self._tile_lanes(tuple(ptr_shape), (ptr_id, val_id, native_mask_id), idx, span, "a store")
+                self._one_lane_per_element(ssa, guard)
+            else:
+                guard = f"{idx} < {result_size}u"
+                if self._effective_2d_shape and len(self._effective_2d_shape) == 2 and self._effective_2d_shape[1] > 0:
+                    inner_N = self._effective_2d_shape[1]
+                    guard = f"{idx} % {inner_N}u == 0u && {idx} / {inner_N}u < {result_size}u"
+                    self._one_lane_per_element(ssa, guard)
             # The mask excludes rows past the range the program was given.
             if native_mask_id is not None:
                 guard += f" && {self._lookup(native_mask_id)}"
@@ -5488,7 +5745,10 @@ class GenericLowerer(
         # that bounding that variable actually bounds the write.
         _idx_var = self._lid_expr
         _idx_driven = _idx_var == str(offsets) or _idx_var in re.findall(r"[A-Za-z_]\w*", str(offsets))
-        if _idx_driven and not self._is_scalar_ptr(ptr_id):
+        # In a kernel with no two-dimensional value, lane i holds element i of every tensor,
+        # so the bound holds whatever the address is computed from (j % H, 2 * j, a loaded
+        # index): without it the lanes past the store's own range run it too.
+        if (_idx_driven or not self._is_2d) and not self._is_scalar_ptr(ptr_id):
             wrap_shape = native_ptr_shape
             if wrap_shape:
                 wrap_total = 1
@@ -5676,12 +5936,29 @@ class GenericLowerer(
                     clauses.append(f"{lid} % {N}u == 0u && {lid} / {N}u < {store_1d_guard}u")
                 else:
                     clauses.append(f"{lid} < {store_1d_guard}u")
-        if store_wrap_guard is not None:
-            clauses.append(f"{self._lid_expr} < {store_wrap_guard}u")
+        tile_guard = None
+        if self._is_2d and native_ptr_shape and len(native_ptr_shape) == 2:
+            span = getattr(self, "_total_elements", 0) if self._needs_wrapping else self.effective_block_size
+            if 1 < native_ptr_shape[0] * native_ptr_shape[1] < span:
+                # A block narrower than the kernel: one lane per element, and a lane
+                # that holds the element.
+                tile_guard = self._tile_lanes(
+                    tuple(native_ptr_shape), (ptr_id, val_id, native_mask_id), self._lid_expr, span, "a store"
+                )
+                clauses.append(tile_guard)
+                self._one_lane_per_element(ssa, tile_guard)
         # A store of one element is the same store on every lane. Left to every lane, a
         # lane that reads the cell late sees another lane's store and writes a second
         # update. One lane does it; the others compute the same value and drop it.
         one_element = not native_ptr_shape or all(extent == 1 for extent in native_ptr_shape)
+        if store_wrap_guard is not None and tile_guard is None and not (one_element and store_wrap_guard == 1):
+            clauses.append(f"{self._lid_expr} < {store_wrap_guard}u")
+            if not self._is_2d and len(native_ptr_shape) == 1:
+                # Lane i stores element i. It is also the lane that holds element i of
+                # what the store is computed from when every index behind it is lane i.
+                strides, moduli, _, unknown, bounds = self._lane_sources((ptr_id, val_id, native_mask_id))
+                if not (strides or moduli or unknown) and all(b >= store_wrap_guard for b in bounds):
+                    self._one_lane_per_element(ssa, clauses[-1])
         if one_element and (self.kb.block_size > 1 or getattr(self, "_needs_wrapping", False)):
             clauses.insert(0, f"{self._lid_expr} == 0u")
             self._single_lane_stores.add(id(ssa))

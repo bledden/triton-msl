@@ -688,7 +688,8 @@ def _single_lane(graph, sites, accesses, single, whole=True):
     every lane of its row, and is the first lane's alone under the same condition.
     """
     single = set(single or ())
-    stores = [ordinal for ordinal, site in enumerate(sites) if accesses[ordinal][0] == "S" and site in single]
+    # ``single`` also names the atomics over one element: the first lane alone performs them.
+    stores = [ordinal for ordinal, site in enumerate(sites) if accesses[ordinal][0] in "SA" and site in single]
     if not stores:
         return [], []
     shapes = {tuple(accesses[ordinal][3]) for ordinal in stores}
