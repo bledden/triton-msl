@@ -823,6 +823,35 @@ def emit_msl(mod, metadata, options):
             # Outputs of an attention-shaped kernel, for the launcher's overlap refusal.
             # Outside the packed descriptor: it grants no route, it only refuses.
             metadata["attention_outputs"] = getattr(lowerer, "_attention_outputs", None)
+            # Where the kernel loads and stores, for the launcher's lane-order refusal.
+            # It grants no route either. A plan that cannot be built is recorded as one
+            # that proves nothing, never left out.
+            from triton_msl.codegen._access_plan import build_access_plan
+
+            try:
+                _plan = build_access_plan(
+                    lowerer.graph,
+                    msl_src,
+                    lowerer._memory_emitted,
+                    None if lowerer.kb is None else lowerer.kb._body_lines,
+                    single=lowerer._single_lane_stores,
+                    rows=lowerer._row_lane_stores,
+                    threads=(
+                        None
+                        if lowerer.kb is None
+                        else [int(lowerer.kb.block_size), bool(getattr(lowerer, "_needs_wrapping", False))]
+                    ),
+                )
+            except Exception as _error:
+                _plan = {"version": 0, "why": "not built: " + type(_error).__name__}
+            # A replacement shader is written from a recognised whole kernel, not operation
+            # by operation, and its own launch checks decide about shared memory.
+            _plan["replaced"] = lowerer.kb is None and [
+                name
+                for name in ("mm_two_kernel", "fast_matmul", "quant_matmul", "flash_attention", "attention_outputs")
+                if metadata[name]
+            ]
+            metadata["access_plan"] = _plan
             # Batched-dot host-roundtrip address-bounds descriptor; None for
             # other kernels. Runtime strides must stay inside each view mirror.
             # Mutually exclusive address-plan union, sealed by the packed

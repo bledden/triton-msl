@@ -1058,6 +1058,12 @@ class MetalLauncher:
 
         # Kernel name for the compile_shader fast-path MSL lookup (Phase 4).
         self.kernel_name = getattr(metadata, "name", None)
+        # Where the kernel loads and stores (see __call__). Every kernel the emitter lowers
+        # carries a plan; a launcher built around a shader of its own has none.
+        from triton_msl.backend._lane_order import launch_plan
+
+        self._access_plan = launch_plan(metadata)
+        self._lane_check = None
         # Stored arguments of an attention-shaped kernel (see __call__); None otherwise.
         _stored = getattr(metadata, "attention_outputs", None)
         self._attention_outputs = (
@@ -1168,6 +1174,33 @@ class MetalLauncher:
                     "lowering does not keep the source's load-then-store order, and the kernel addresses each "
                     "tensor through its own stride and length arguments, so the result could be computed from "
                     "overwritten inputs. Write the output to a tensor that has its own storage."
+                )
+        _plan = getattr(self, "_access_plan", None)
+        if _plan is not None and not (isinstance(_plan, dict) and _plan.get("replaced")):
+            # A source program finishes each operation over every lane before the next
+            # one starts. The ordinary lowering keeps each lane's own order only, so a
+            # launch where two lanes of a program meet at an element one of them stores
+            # can differ from the source (an in-place reversal kept half its elements).
+            # Which lanes meet depends on the arguments, so it is decided here, before
+            # any hook: a launch with no proof is refused.
+            from triton_msl.backend._lane_order import LaunchCheck, unproved
+
+            try:
+                if self._lane_check is None:
+                    self._lane_check = LaunchCheck(_plan)
+                _open = unproved(self._lane_check, flat_args, (gridX, gridY, gridZ))
+            except Exception as _error:
+                _open = (f"the kernel's access plan could not be read ({type(_error).__name__})", ())
+            if _open is not None:
+                from triton_msl.errors import MetalNonRecoverableError
+
+                _names = ", ".join(self.arg_names[flat_origin[i]] for i in _open[1] if i < len(flat_origin))
+                raise MetalNonRecoverableError(
+                    "lane order: this launch is not proved to keep the source's order for the memory of "
+                    f"{'argument(s) ' + _names if _names else 'its arguments'}: {_open[0]}. The source "
+                    "finishes each operation over every lane before the next one starts; the shader keeps "
+                    "only each lane's own order, so the result could differ from the source's. Refusing "
+                    "(correct-or-refuse). Store to a tensor whose storage the kernel does not also load."
                 )
         import ctypes
 

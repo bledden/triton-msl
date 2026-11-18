@@ -353,6 +353,9 @@ class GenericLowerer(
         # per-thread distinct operand does absorb).
         self._is_splat = set()
         self.kb = None
+        self._memory_emitted = []
+        self._single_lane_stores = set()
+        self._row_lane_stores = set()
         self._var_counter = 0
 
         # Track stores for output detection
@@ -2412,6 +2415,9 @@ class GenericLowerer(
             return self.kb.build()
 
         self.kb = KernelBuilder(self.graph.func_name, block_size=actual_dispatch_threads)
+        self._memory_emitted = []
+        self._single_lane_stores = set()
+        self._row_lane_stores = set()
 
         # Generate device functions for noinline callees (must appear before kernel)
         if self.graph.called_funcs:
@@ -3825,9 +3831,19 @@ class GenericLowerer(
         # Skip ops that were handled as part of a fused pattern
         if ssa.id in self._skip_ids:
             return
+        traced = (
+            ssa.op in ("tt.load", "tt.store", "tt.atomic_rmw", "tt.atomic_cas", "tt.call")
+            and getattr(self, "kb", None) is not None
+        )
+        if traced:
+            # Which body lines each memory operation wrote, for the access plan.
+            written = self.kb._body_lines
+            start = len(written)
 
         try:
             self._lower_op_dispatch(ssa)
+            if traced and written is self.kb._body_lines and len(written) > start:
+                self._memory_emitted.append((id(ssa), start, len(written)))
         except (MetalCodegenError, MetalNotImplementedError):
             raise  # Already has context
         except Exception as e:
@@ -5223,6 +5239,13 @@ class GenericLowerer(
                     clauses.append(f"{lid} < {store_1d_guard}u")
         if store_wrap_guard is not None:
             clauses.append(f"{self._lid_expr} < {store_wrap_guard}u")
+        # A store of one element is the same store on every lane. Left to every lane, a
+        # lane that reads the cell late sees another lane's store and writes a second
+        # update. One lane does it; the others compute the same value and drop it.
+        one_element = not native_ptr_shape or all(extent == 1 for extent in native_ptr_shape)
+        if one_element and (self.kb.block_size > 1 or getattr(self, "_needs_wrapping", False)):
+            clauses.insert(0, f"{self._lid_expr} == 0u")
+            self._single_lane_stores.add(id(ssa))
         if mask_var:
             clauses.append(str(mask_var))
 
