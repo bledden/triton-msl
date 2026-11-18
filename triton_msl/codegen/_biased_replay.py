@@ -277,6 +277,11 @@ def emit_small_store(lowerer, op):
     offset = lowerer._rebuild_staged_fill_offset(op.operand_ids[0], by, base, m, n)
     mask = lowerer._rebuild_staged_fill_mask(op.operand_ids[2], by, m, n) if len(op.operand_ids) > 2 else "true"
     dtype = triton_type_to_msl(lowerer._trace_ptr_dtype(op.operand_ids[0]))
+    # Every load is emitted above this line and the program is one threadgroup, so behind
+    # this barrier the store cannot reach a cell another thread still reads. The loop's
+    # own barriers do not cover a loop that runs no iteration. store_follows_every_load
+    # checks the emitted order before the launcher's overlap refusal is lifted.
+    lowerer.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
     lowerer.kb.raw_line(f"    if (lid < {m * n}u) {{")
     lowerer.kb.raw_line(f"        uint _fill_row = lid / {n}u;")
     lowerer.kb.raw_line(f"        uint _fill_col = lid % {n}u;")
@@ -285,6 +290,25 @@ def emit_small_store(lowerer, op):
     )
     lowerer.kb.raw_line("    }")
     return True
+
+
+def store_follows_every_load(lowerer, msl):
+    """Does one barrier separate every load of an argument buffer from the one store?
+
+    Reads the emitted shader: its last barrier must stand in the kernel body, outside
+    every loop and branch, so that each thread of the program's one threadgroup passes
+    it once, with the store the only use of an argument buffer below it. An output that
+    shares memory with an input then keeps the source's result. False when the text does
+    not show that, for example a load rendered inside the stored value.
+    """
+    import re
+
+    names = "|".join(re.escape(arg.name) for arg in lowerer.graph.args if arg.is_ptr)
+    head, barrier, tail = msl.rpartition("threadgroup_barrier(")
+    if not names or not barrier or head.count("{") - head.count("}") != 1:
+        return False
+    uses = re.findall(rf"\b(?:{names})\s*\[", tail)
+    return len(uses) == 1 and re.search(rf"\b(?:{names})\s*\[[^;]*\]\s*=(?!=)[^;]*;", tail) is not None
 
 
 _WIDE_ROW_CASES = {(32, 64, 64, False), (64, 32, 64, True)}

@@ -188,6 +188,33 @@ def test_biased_fa_routes_and_computes(Z, H, N, DIM):
 
 
 @requires_mps
+@pytest.mark.parametrize("dtype, tol", [(torch.float32, 1e-3), (torch.float16, 3e-2)])
+@pytest.mark.parametrize("DIM, BLOCK_N", [(32, 128), (64, 128), (64, 64), (128, 64)])
+def test_biased_fa_head_dim_stride_two_computes(DIM, BLOCK_N, dtype, tol):
+    """Every other head-dim element of wider tensors: the 64-key template needs stride 1,
+    so these take the tiled template and its narrowed head-dim slice."""
+    Z, H, N = 1, 2, 96
+    gen = torch.Generator().manual_seed(7)
+    wide = {name: torch.randn(Z, H, N, 2 * DIM, generator=gen).to(dtype).to("mps") for name in "qkv"}
+    q, k, v = (wide[name][..., ::2] for name in "qkv")
+    b = torch.randn(Z, H, N, N, generator=gen).to(dtype).to("mps")
+    mask = (torch.rand(Z, H, N, generator=gen) < 0.25).to(torch.uint8).to("mps")
+    held = torch.full((Z, H, N, 2 * DIM), -8192.0, dtype=dtype, device="mps")
+    o, lse = held[..., ::2], torch.zeros(Z, H, N, dtype=dtype, device="mps")
+    args = []
+    for t in (o, lse, q, k, v, b, mask):
+        args += [t, *t.stride()]
+    _biased_fa[(triton.cdiv(N, 32), Z * H)](*args, DIM**-0.5, -1e9, Z, H, N, DIM, 32, BLOCK_N)
+    torch.mps.synchronize()
+    raw = DIM**-0.5 * (q.cpu().double() @ k.cpu().double().transpose(-2, -1)) + b.cpu().double()
+    raw = raw.masked_fill(mask.cpu()[:, :, None, :].bool(), float("-inf"))
+    want = torch.softmax(raw, dim=-1) @ v.cpu().double()
+    assert (o.cpu().double() - want).abs().max().item() < tol
+    assert (lse.cpu().double() - torch.logsumexp(raw, dim=-1)).abs().max().item() < tol
+    assert bool((held[..., 1::2] == -8192.0).all())  # the elements between stay untouched
+
+
+@requires_mps
 def test_biased_fa_bad_temperature_refuses():
     """exp2 WITHOUT the inv_ln2 result-scale => softmax temperature = ln2 != 1 =>
     the detector must refuse (routing it to the natural-exp template would be wrong).

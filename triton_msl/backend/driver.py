@@ -1149,9 +1149,9 @@ class MetalLauncher:
         _attention_outputs = getattr(self, "_attention_outputs", None)
         if _attention_outputs is not None:
             # A source program loads before it stores, so an output that shares memory
-            # with an input is defined there. Only the wide-row replay keeps that order
-            # (two other shapes computed from overwritten inputs) and it publishes no
-            # outputs, so refuse the rest before any hook.
+            # with an input is defined there. Only the two biased source replays keep
+            # that order (two other shapes computed from overwritten inputs) and they
+            # publish no outputs, so refuse the rest before any hook.
             from triton_msl.autotuning._operand_overlap import overlapping_output
 
             _pair = overlapping_output(flat_args, _attention_outputs)

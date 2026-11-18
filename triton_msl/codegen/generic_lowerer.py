@@ -1027,7 +1027,15 @@ class GenericLowerer(
 
             if _biased_replay_eligible(self):
                 self._source_biased_replay = True
-                return "// Source-replayed biased attention\n" + self._lower_generic()
+                replayed = "// Source-replayed biased attention\n" + self._lower_generic()
+                from ._biased_replay import store_follows_every_load as _store_follows_every_load
+
+                if _store_follows_every_load(self, replayed):
+                    # One threadgroup per program and a barrier between its last load
+                    # and its one store: an output over an input keeps the source's
+                    # result, so there is nothing to refuse.
+                    self._attention_outputs = None
+                return replayed
             _biased_info = self._detect_biased_flash_attention()
             if _biased_info is not None:
                 return self._lower_biased_flash_attention_template(_biased_info)
@@ -3122,12 +3130,14 @@ class GenericLowerer(
         OUTPUT ALIAS: a source program loads its rows, keys and values before it stores,
         so one whose output shares memory with an input is defined. The attention
         lowerings do not keep that order (a 64-row program runs as two 32-row passes;
-        the dQ backward template stores delta before it loads lse) and only the
-        wide-row replay proves it. Every other forward attention kernel (two or more
-        dots, an exponential and a max) and every backward template route publishes
-        these positions, and the launcher refuses one that overlaps another tensor
-        argument. A two-dot kernel that is neither stays on the generic lowering, which
-        stages every dot operand behind a barrier, and publishes nothing.
+        the dQ backward template stores delta before it loads lse) and only the two
+        biased source replays show it: the wide-row replay by construction, the narrow
+        one by _biased_replay.store_follows_every_load on its emitted text. Every other
+        forward attention kernel (two or more dots, an exponential and a max) and every
+        backward template route publishes these positions, and the launcher refuses one
+        that overlaps another tensor argument. A two-dot kernel that is neither stays on
+        the generic lowering, which stages every dot operand behind a barrier, and
+        publishes nothing.
 
         ``forward_only`` is for the caller that has not tested the shape. None when a
         store's pointer does not trace to an argument: with no output to compare, the
@@ -16716,6 +16726,17 @@ class GenericLowerer(
 
         return _resolve(val_id, frozenset(), depth)
 
+    # The operations _staged_fill_terms walks through.
+    _STAGED_TERM_OPS = (
+        "tt.expand_dims",
+        "tt.broadcast",
+        "arith.index_cast",
+        "arith.extsi",
+        "arith.addi",
+        "arith.subi",
+        "arith.muli",
+    )
+
     def _rebuild_staged_fill_mask(self, mask_id, op_by_id, M, N, kind="store"):
         """Structurally rebuild a cooperative over-threadgroup store's or load's
         per-element mask as a boolean MSL expression in terms of
@@ -16765,6 +16786,17 @@ class GenericLowerer(
             expr = " + ".join(out) if out else "0"
             return f"{cast}({expr})" if cast else expr
 
+        def _zero_extends(nid, depth=0):
+            """Does the term walk below cross a zero extension?"""
+            node = op_by_id.get(nid)
+            if node is None or depth > 64:
+                return False
+            if node.op in ("arith.extui", "arith.index_castui"):
+                return True
+            if node.op in self._STAGED_TERM_OPS:
+                return any(_zero_extends(oid, depth + 1) for oid in node.operand_ids or [])
+            return False
+
         # Unwrap pass-through wrappers (broadcast/splat/extension) to the cmpi.
         cur = mask_id
         for _ in range(16):
@@ -16788,7 +16820,15 @@ class GenericLowerer(
                 # comparison can't be flipped by C++ unsigned promotion.
                 is_unsigned = pred_name in ("ult", "ule", "ugt", "uge") if pred_name else pred_int in (6, 7, 8, 9)
                 is_signed = pred_name in ("slt", "sle", "sgt", "sge") if pred_name else pred_int in (2, 3, 4, 5)
-                cast = "(uint)" if is_unsigned else "(int)" if is_signed else ""
+                # The cast takes the operands' width, as in _lower_cmpi: a 64-bit
+                # bound cast to int compares its low half.
+                wide = any(self.env_types.get(oid) in ("i64", "u64", "ui64") for oid in op.operand_ids[:2])
+                if wide and any(_zero_extends(oid) for oid in op.operand_ids[:2]):
+                    # The terms below are rendered at their own width and then
+                    # sign-extended by the cast, which is not a zero extension.
+                    _refuse()
+                cast = ("(ulong)" if wide else "(uint)") if is_unsigned else ("(long)" if wide else "(int)")
+                cast = cast if is_unsigned or is_signed else ""
                 lhs = _render(self._staged_fill_terms(op.operand_ids[0], None, None, op_by_id), cast)
                 rhs = _render(self._staged_fill_terms(op.operand_ids[1], None, None, op_by_id), cast)
                 if lhs is None or rhs is None:

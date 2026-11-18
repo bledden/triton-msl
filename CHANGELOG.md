@@ -24,12 +24,14 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   store finished tiles while others still load: a 256 by 256 in-place product
   was wrong in 4 or 5 of 300 launches on an M4 Max. A launch whose output
   bytes intersect an operand's now stays on the compiled entry or the host
-  path. The quantized replacements (int8 and int4 GEMM and GEMV) had the same
-  race, 7 to 11 of 200 launches for an in-place GEMV; they have no compiled
-  entry to fall back to, so an output that overlaps any operand now refuses
-  by name. This is a change for an in-place quantized launch that ran
-  before. Views of one storage that do not intersect keep the replacement on
-  every route.
+  path, and that includes the split-K replacement for a deep product. The
+  quantized replacements (int8 and int4 GEMM and GEMV) had the same race,
+  between 1 and 11 of 200 launches for an in-place GEMV depending on the run;
+  they have no compiled entry to fall back to, so an output that overlaps any
+  operand now refuses, in one message that also lists the route's other
+  conditions. This is a change for an in-place quantized launch that ran
+  before. Views of one storage whose byte ranges do not intersect keep the
+  replacement on every route.
 - Offer the fast matmul replacement only where it is that source domain. It
   computes exactly `args[3]` by `args[4]`, so a store clip, load clip, load
   modulus or flat-grid divisor that is a separate argument now stays on the
@@ -116,6 +118,16 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   length above 32 bits selects every launched index rather than keeping its
   low word. A kernel that compares one length signed in one mask and unsigned
   in another refuses.
+- Compare a 64-bit length at 64 bits in the generic lowering's staged masks.
+  A packed-sequence kernel that widens its int32 cumulative entries before it
+  subtracts them (`tl.load(cu + b).to(tl.int64)`) takes the generic lowering.
+  Its per-lane masks compared the length at 64 bits, but the masks rebuilt
+  for the staged operand fill and the staged store cast both sides to 32
+  bits, so a length of 2**31 or more read as negative and the launch stored
+  nothing where the source stores every launched row. The rebuilt masks now
+  take their width from the compared values. A 64-bit comparison whose row
+  index passes through a zero extension refuses, since the rebuild renders
+  the index at its own width and sign-extends it.
 - Address a varlen sequence from a signed start. The source adds the
   cumulative entry to the row index in signed arithmetic, so a negative entry
   addresses rows before the tensor's first row, which is defined on a view
@@ -199,9 +211,10 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   strides the 64-key template cannot take, runs on the tiled template, which
   walks the source's own block. Its scores and accumulator are fixed by the
   source; the staged head-dim slice now narrows until the working set fits.
-  bfloat16 at head dim 64 or 128 with a 64-key block, and half types at head
-  dim 32 or 64 with a 128-key block, failed at pipeline creation and now
-  compute.
+  bfloat16 at head dim 64 or 128 with a 64-key block, half types at head
+  dim 32 or 64 with a 128-key block, and float32 or half tensors with a
+  head-dim stride other than 1 at a 64- or 128-key block failed at pipeline
+  creation and now compute.
   Where no slice fits (head dim 128 with a 128-key block, a 256-key block)
   the kernel refuses by name with the size it would need.
 - Accept a boundary written bound first (`N > m_idxs`, `seqlen_k > kn`) on the
@@ -224,31 +237,51 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   stores, so such a launch is defined in the source. The attention lowerings
   do not keep that order, and two shapes returned other values in 40 of 40
   launches on an M4 Max. A dense
-  head dim 64 float32 launch with a 64-row block and the output over the keys
-  or the values runs as two 32-row passes, and rows 32 and up were computed
-  from rows the first pass had stored. The dQ backward template stores delta
-  before it loads the log-sum-exp, so with delta over that tensor every dQ
-  cell was wrong. Only the wide biased row route proves the order: it runs one
-  threadgroup per program with a barrier between its last load and its
-  stores, and it keeps computing in place. Every other forward attention
-  kernel (two or more dots, an exponential and a max) and every backward
-  attention template now refuses, by argument name and before anything runs,
-  when a tensor it stores through overlaps another tensor argument. This is a
-  change for in-place launches that computed before, such as the output over
-  the queries: of 230 in-place probe cases that ran on those routes, 208
-  returned the source's result and now refuse with the 22 that did not.
-  Inputs that share memory with each other, such as one tensor as query, key
-  and value, are not compared and still compute. Views of one storage that do
-  not intersect still compute. A two-dot kernel that is not attention stays
-  on the generic lowering and is not refused.
+  head dim 64 launch, float32 or half, with a 64-row block and the output
+  over the keys or the values runs as two 32-row passes, and rows 32 and up
+  were computed from rows the first pass had stored. The dQ backward template
+  stores delta before it loads the log-sum-exp, so with delta over that
+  tensor every dQ cell was wrong. A biased launch with the log-sum-exp over
+  the output's first column was wrong as well. The two biased source replays
+  keep the order and keep computing in place: each runs one threadgroup per
+  program with a barrier between its last load and its stores. The wide row
+  replay does so by construction; for the narrow one the lowering checks the
+  emitted shader and publishes the output if the text does not show it. Every
+  other forward attention kernel (two or more dots, an exponential and a max)
+  and every backward attention template now refuses, by argument name and
+  before anything runs, when a tensor it stores through overlaps another
+  tensor argument. This is a change for in-place launches that computed
+  before, such as the output over the queries. Of 277 in-place probe
+  launches paired with the code before this work, 187 forward and 90
+  backward, 244 returned the source's result then: 169 of them now refuse and
+  75 keep computing. Of the 27 that returned other values, 23 now refuse, 1
+  computes and 3 are the short views of the next item. A two-dot kernel with
+  an exponential and a row max that is not softmax attention is refused in
+  place too. Inputs that share memory with each other, such as one tensor as
+  query, key and value, are not compared and still compute. A two-dot kernel
+  without a max stays on the generic lowering and is not refused.
+- The refusal compares the tensor views as passed. Views of one storage
+  whose byte ranges do not intersect compute. So do views that interleave
+  without sharing a cell, such as query, key, value and output as the slots
+  of one packed buffer, or a log-sum-exp column beside its output: the
+  launcher tells them apart by the residues they address along a stride.
+  A view shorter than the rows the kernel's stride and length arguments
+  address is compared by its own extent. An output placed inside those rows
+  is therefore not refused and can be computed from overwritten inputs, as
+  it was before this release; pass each tensor as a view of everything the
+  kernel addresses through it.
 - Known limitation, not changed here: a generic kernel that permutes a tensor
   in place within one program. Each lane loads and stores its own elements
   with no barrier between the program's loads and its stores, so a lane can
-  load a cell another lane has already stored. On an M4 Max a one-program
-  in-place reverse was wrong in 100 of 100 launches at 256 elements and
-  above, an in-place transpose at 16 by 16 and above, and an in-place shift
-  in some launches. An in-place kernel in which each lane loads and stores
-  the same cell is unaffected. Write a permuted result to a separate tensor.
+  load a cell another lane has already stored. The size at which that shows
+  depends on how the kernel is written. On an M4 Max a one-program in-place
+  reverse that stores through the reversed index was wrong in 100 of 100
+  launches at 256 elements and above; one that loads through the reversed
+  index and stores in order was correct at 64 and 256 elements and wrong in
+  20 of 20 launches at 1024. An in-place transpose was wrong at 16 by 16 and
+  above, and an in-place shift in some launches. An in-place kernel in which
+  each lane loads and stores the same cell is unaffected. Write a permuted
+  result to a separate tensor.
 
 ### Compatibility
 

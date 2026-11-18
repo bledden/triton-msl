@@ -4,9 +4,9 @@ One source program loads every operand before it stores, so a single-program lau
 output shares memory with an operand is defined. The matmul replacement templates spread
 that program over several threadgroups that store finished tiles while others still load.
 Measured on the device before the gate: a 256x256 in-place matmul was wrong in 4 to 5 of 300
-launches, an in-place quantized GEMV in 7 to 11 of 200. The fast matmul route now keeps the
-compiled entry for such a launch and the quantized routes refuse it; views of one storage
-that do not intersect keep the replacement.
+launches, an in-place quantized GEMV in 1 to 11 of 200 depending on the run. The fast matmul
+route, split-K included, now keeps the compiled entry for such a launch and the quantized
+routes refuse it; views of one storage whose byte ranges do not intersect keep the replacement.
 """
 
 import platform
@@ -273,6 +273,40 @@ def test_in_place_matmul_keeps_the_source_order(fast_matmul_routes, which):
         kernel[(1, 1)](A, Bm, C, n, n, n, BM=n, BN=n, BK=32)
         torch.mps.synchronize()
         assert fast_matmul_routes == [False], "the replacement must decline an in-place output"
+        assert torch.equal(C.cpu(), want)
+
+
+@requires_mps
+@pytest.mark.parametrize("which", ["A", "B", "apart"])
+def test_in_place_deep_matmul_declines_the_split_k_replacement_too(fast_matmul_routes, monkeypatch, which):
+    # Few output tiles and a deep K: with a separate output this is the split-K launch.
+    import triton_msl.autotuning._fast_matmul_dispatch as fast
+
+    split, real = [], fast._maybe_splitk_dispatch
+
+    def spy(*args, **kwargs):
+        result = real(*args, **kwargs)
+        split.append(bool(result))
+        return result
+
+    monkeypatch.setattr(fast, "_maybe_splitk_dispatch", spy)
+    kernel, n, depth = _matmul_kernel(), 64, 2048
+    for seed in range(6):
+        g = torch.Generator().manual_seed(seed)
+        a = torch.randint(-3, 4, (n, depth), generator=g).float()
+        b = torch.randint(-3, 4, (depth, n), generator=g).float()
+        want = (a.double() @ b.double()).float()
+        A, Bm = a.to("mps"), b.to("mps")
+        C = (
+            {"A": A, "B": Bm}[which].reshape(-1)[: n * n].view(n, n)
+            if which != "apart"
+            else torch.empty(n, n, device="mps")
+        )
+        fast_matmul_routes.clear()
+        split.clear()
+        kernel[(1, 1)](A, Bm, C, n, n, depth, BM=n, BN=n, BK=32)
+        torch.mps.synchronize()
+        assert (fast_matmul_routes, split) == (([True], [True]) if which == "apart" else ([False], []))
         assert torch.equal(C.cpu(), want)
 
 
