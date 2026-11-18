@@ -1346,6 +1346,12 @@ class _ControlFlowMixin:
         if not is_scalar:
             if len(atom_shape) == 1 and atom_shape[0] < self.effective_block_size:
                 atomic_1d_guard = atom_shape[0]
+        # The guard below runs lanes 0..n-1, one element each: an address, value or mask
+        # held one row per W lanes (computed from a row-wise reduce) would give every
+        # one of those lanes the first row's element.
+        self._refuse_row_blocked_effect(
+            "tt.atomic_rmw", atomic_1d_guard, (ptr_id, val_id, mask_id), op_name="tt.atomic_rmw"
+        )
 
         # n>1 under-cover guard (mirrors _lower_store): a BLOCK-wide atomic the
         # base path emits as one element per thread (PTR[k+lid]) would silently
@@ -1460,6 +1466,16 @@ class _ControlFlowMixin:
             guard_parts.append("lid == 0")
         elif atomic_1d_guard is not None:
             guard_parts.append(f"lid < {atomic_1d_guard}u")
+        elif len(atom_shape) == 2 and not self._mept_single_pass:
+            # A tile smaller than the kernel's dominant one: no update past its last row.
+            _row_bound = self._row_range_lane_bound(ptr_id, atom_shape)
+            _span = (
+                getattr(self, "_total_elements", 0)
+                if getattr(self, "_needs_wrapping", False)
+                else self.effective_block_size
+            )
+            if _row_bound is not None and 0 < _row_bound < _span:
+                guard_parts.append(f"{self._lid_expr} < {_row_bound}u")
         if mask_var:
             guard_parts.append(mask_var)
 
@@ -1623,6 +1639,9 @@ class _ControlFlowMixin:
         atomic_1d_guard = None
         if not is_scalar and len(atom_shape) == 1 and atom_shape[0] < self.effective_block_size:
             atomic_1d_guard = atom_shape[0]
+        self._refuse_row_blocked_effect(
+            "tt.atomic_cas", atomic_1d_guard, (ptr_id, cmp_id, val_id), op_name="tt.atomic_cas"
+        )
 
         # n>1 under-cover guard (mirrors _lower_store): a BLOCK-wide atomic the
         # base path emits as one element per thread (PTR[k+lid]) would silently
@@ -1658,6 +1677,15 @@ class _ControlFlowMixin:
             guard = "lid == 0"
         elif atomic_1d_guard is not None:
             guard = f"lid < {atomic_1d_guard}u"
+        elif len(atom_shape) == 2 and not self._mept_single_pass:
+            _row_bound = self._row_range_lane_bound(ptr_id, atom_shape)
+            _span = (
+                getattr(self, "_total_elements", 0)
+                if getattr(self, "_needs_wrapping", False)
+                else self.effective_block_size
+            )
+            if _row_bound is not None and 0 < _row_bound < _span:
+                guard = f"{self._lid_expr} < {_row_bound}u"
         indent = "    "
         if guard is not None:
             self.kb.raw_line(f"    if ({guard}) {{")

@@ -17,6 +17,16 @@ The oracle for each mode is a torch SIMULATION of the kernel's own semantics (fl
 into the same contiguous slack buffers, per program and per loop iteration), so a witness
 asserts "refuse, or match what the kernel means" — never the template's raw result. The
 compile-time pins go through ``emit_msl`` with launch-specialized signatures.
+
+2026-11-18 (reduce of a row reduction, the held-layout record): the int8 GEMV violations no
+longer refuse at the lowering boundary. Their descriptor still declines every one of them (no
+``quant_matmul``), and the generic path now lowers the kernel op by op: ``acc * scale`` is a
+loop-carried row reduction times a load through the row index, and a load through an index is
+now known to be held the way the index is, so the 1-D store is proved instead of refused. The
+fourteen ``gemv-int8`` refusal pins became ``test_lowering_boundary_int8_gemv_declines`` plus
+``test_int8_gemv_address_contract_computes_exactly``, which compares the device result with
+the kernel's own semantics EXACTLY (integer data), at sizes that are and are not multiples
+of the tile. The GEMM routes still refuse.
 """
 
 import pytest
@@ -452,15 +462,18 @@ def _sim_gemm(mode, a, w, c_shape, M, N, K, BM, BN, BK, G, s=None, z=None, sc=No
     return c
 
 
-def _sim_gemv8(mode, x, w, s, z, N, K, BN, BK):
+def _sim_gemv8(mode, x, w, s, z, N, K, BN, BK, progs=None):
+    """``progs`` is the launched grid when N is not a multiple of BN (the kernel has no masks,
+    so its last program stores a whole tile); the default is the N // BN of the witnesses."""
     dev = x.device
     wf = w.reshape(-1).float()
     swn, swk = w.stride(0), w.stride(1)
-    o = torch.full((N + 8,), float("nan"), device=dev)
+    progs = N // BN if progs is None else progs
+    o = torch.full((max(N, progs * BN) + 8,), float("nan"), device=dev)
     rn, rk = torch.arange(BN, device=dev), torch.arange(BK, device=dev)
     step = 2 * BK if mode == 39 else BK
     kb = K // 2 if mode == 40 else K
-    for pid in range(N // BN):
+    for pid in range(progs):
         on_out = pid * BN + rn
         if mode == 30:
             on = rn
@@ -635,6 +648,27 @@ def _g8_case(mode):
     return launch, o, _sim_gemv8(0, x, w, s, z, N, K, BN, BK), _sim_gemv8(mode, x, w, s, z, N, K, BN, BK)
 
 
+def _g8_exact_case(mode, N, K, BN, BK):
+    """Integer data for an EXACT comparison: x and zero are small integers, w is int8 and the
+    scale a power of two, so every partial sum is an integer far below 2**24 and fp32 holds it
+    exactly in any summation order. N and K need not be tile multiples: the kernel then reads
+    and stores whole tiles inside the same contiguous buffers (flat addressing, as simulated).
+    Built on the CPU; only the launch sees the device."""
+    g = torch.Generator().manual_seed(10501)
+    progs, iters = -(-N // BN), -(-K // BK)
+    rows = 4 * progs * BN + 2 * BN + 8  # the doubled / shifted tile indices, and a ragged K spilling a row
+    x = torch.randint(-4, 5, (2 * iters * BK + 3 * BK + 8,), generator=g).float()
+    w = torch.randint(-32, 32, (rows, K), generator=g, dtype=torch.int8)
+    s = (2.0 ** torch.randint(-1, 3, (2 * rows + 8,), generator=g).float()).contiguous()
+    z = torch.randint(-4, 5, (rows + 8,), generator=g).float()
+    raw = _sim_gemv8(0, x, w, s, z, N, K, BN, BK, progs=progs)
+    intended = _sim_gemv8(mode, x, w, s, z, N, K, BN, BK, progs=progs)
+    gx, gw, gs, gz = (t.to(D) for t in (x, w, s, z))
+    o = torch.full((progs * BN + 8,), float("nan"), device=D)
+    launch = lambda: _g8[(progs,)](gx, gw, o, gs, gz, N, K, gw.stride(0), gw.stride(1), BN=BN, BK=BK, MODE=mode)
+    return launch, o, raw, intended
+
+
 def _g4_case(mode):
     N, K, G, BN, BK = 64, 256, 128, 32, 32
     torch.manual_seed(10301)
@@ -696,6 +730,33 @@ def test_symmetric_address_contract_never_raw(cold_gpu_caches, quant_dispatch_sp
 def test_int8_gemv_address_contract_never_raw(cold_gpu_caches, quant_dispatch_spy, mode):
     launch, o, raw, intended = _g8_case(mode)
     _witness(launch, o, raw, intended, quant_dispatch_spy)
+
+
+# (N, K, BN, BK): the witness launch; N and K off the tile; a wider K tile; a taller row tile.
+_G8_EXACT_DIMS = [(64, 128, 32, 32), (40, 100, 32, 32), (24, 96, 16, 64), (70, 50, 64, 16)]
+
+
+@requires_gpu
+@pytest.mark.parametrize("dims", _G8_EXACT_DIMS, ids=lambda d: "N{}-K{}-BN{}-BK{}".format(*d))
+@pytest.mark.parametrize("mode", _GEMV_MODES)
+def test_int8_gemv_address_contract_computes_exactly(cold_gpu_caches, quant_dispatch_spy, mode, dims):
+    """Every int8 GEMV contract violation now COMPUTES on the generic path, and what it stores
+    is the kernel's own semantics exactly: every stored cell equal, every other cell untouched,
+    and not through the specialized template. (Before the held-layout record these refused at
+    the 1-D store of ``acc * scale``; the collapse to row 0 that refusal guarded against would
+    show here as every row of a tile holding the first row's value.)"""
+    launch, o, raw, intended = _g8_exact_case(mode, *dims)
+    same = lambda a, b: torch.equal(torch.nan_to_num(a, nan=SENTINEL), torch.nan_to_num(b, nan=SENTINEL))
+    assert not same(raw, intended), "mode does not change the kernel's semantics on this data"
+    launch()
+    torch.mps.synchronize()
+    got = o.cpu()
+    assert True not in quant_dispatch_spy, "a contract violation reached the specialized template"
+    wrong = (torch.nan_to_num(got, nan=SENTINEL) != torch.nan_to_num(intended, nan=SENTINEL)).nonzero().flatten()
+    assert same(got, intended), (
+        f"{wrong.numel()} cells differ from the kernel's semantics, first {wrong[:4].tolist()}: "
+        f"got {got[wrong[:4]].tolist()}, want {intended[wrong[:4]].tolist()}, template {raw[wrong[:4]].tolist()}"
+    )
 
 
 @requires_gpu
@@ -782,20 +843,31 @@ _SIG_G4 = {
 }
 _CEX_G4 = {"BN": 32, "BK": 32, "G": 128}
 
-_REFUSING = (
-    [pytest.param(_pg, _SIG_PG, _CEX_PG, m, id=f"pergroup-m{m}") for m in _GEMM_MODES]
-    + [pytest.param(_sym, _SIG_SYM, _CEX_SYM, m, id=f"symmetric-m{m}") for m in _SYM_MODES]
-    + [pytest.param(_g8, _SIG_G8, _CEX_G8, m, id=f"gemv-int8-m{m}") for m in _GEMV_MODES]
-)
+_REFUSING = [pytest.param(_pg, _SIG_PG, _CEX_PG, m, id=f"pergroup-m{m}") for m in _GEMM_MODES] + [
+    pytest.param(_sym, _SIG_SYM, _CEX_SYM, m, id=f"symmetric-m{m}") for m in _SYM_MODES
+]
 
 
 @requires
 @pytest.mark.parametrize("fn,sig,cex,mode", _REFUSING)
 def test_lowering_boundary_address_contract_refuses(fn, sig, cex, mode):
     """Rule 9: through emit_msl, every contract violation refuses (no descriptor, and the
-    generic path refuses these forms) on the GEMM routes and the int8 GEMV."""
+    generic path refuses these forms) on the GEMM routes."""
     with pytest.raises(MetalNonRecoverableError):
         _emit_for(fn, sig, {**cex, "MODE": mode})
+
+
+@requires
+@pytest.mark.parametrize("mode", _GEMV_MODES)
+def test_lowering_boundary_int8_gemv_declines(mode):
+    """The int8 descriptor declines every contract violation (no quant descriptor is built);
+    the generic path lowers the kernel op by op, with no stub
+    (``test_int8_gemv_address_contract_computes_exactly`` proves on the GPU that it computes
+    the kernel's semantics). These fourteen were refusal pins until the generic path could
+    prove the layout of ``acc * scale``."""
+    msl, md = _emit_for(_g8, _SIG_G8, {**_CEX_G8, "MODE": mode})
+    assert "UNSUPPORTED" not in msl
+    assert md.get("quant_matmul") is None
 
 
 @requires

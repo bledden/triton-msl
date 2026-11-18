@@ -3606,6 +3606,21 @@ class _TemplateMixin:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _reduce3_origin(origin):
+        """The MSL prefix of a proved tile origin: ``[constant + ]pid * step + ``."""
+        first, step = origin
+        return (f"{first}u + " if first else "") + f"pid * {step}u + "
+
+    @staticmethod
+    def _reduce3_cast_chain(expr, held, element_types):
+        """``expr`` (an MSL value of type ``held``) taken through the source's own element types."""
+        for element in element_types:
+            msl = triton_type_to_msl(element)
+            if msl != held:
+                expr, held = f"({msl}){expr}", msl
+        return expr
+
     def _lower_3d_reduce_template(self, info) -> str:
         """Generate a complete MSL kernel for 3D axis reduction.
 
@@ -3632,13 +3647,12 @@ class _TemplateMixin:
             result_total = M * N
             axis_size = K
 
-        # Determine data type from pointer args
-        ptr_args = [a for a in self.graph.args if a.is_ptr]
-        msl_type = "float"
-        if ptr_args:
-            elem = ptr_args[0].elem_type
-            if elem in ("i32", "si32"):
-                msl_type = "int"
+        # Pointer roles, the element type and both tile origins come from the proof in
+        # _prove_3d_reduce_template (dataflow), never from the order of the arguments. Every
+        # integer of at most 32 bits accumulates in int: a narrow sum then wraps in its own
+        # width at the store cast, as the source's does (a float accumulator saturates).
+        input_arg, output_arg = info["input_arg"], info["output_arg"]
+        msl_type = "int" if input_arg.elem_type in ("i8", "i16", "i32", "si32") else "float"
 
         # Identity and combine expression
         if combine_op == "sum":
@@ -3670,8 +3684,10 @@ class _TemplateMixin:
             else:
                 arg_decls.append(_scalar_buffer_decl(arg, i, source_bindings))
 
-        x_name = source_bindings[ptr_args[0].name] if ptr_args else "X"
-        z_name = source_bindings[ptr_args[1].name] if len(ptr_args) > 1 else "Z"
+        x_name = source_bindings[input_arg.name]
+        z_name = source_bindings[output_arg.name]
+        x_origin = self._reduce3_origin(info["load_origin"])
+        z_origin = self._reduce3_origin(info["store_origin"])
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -3694,7 +3710,7 @@ class _TemplateMixin:
         # dispatch silently computed only program 0's slice and left the others untouched
         # (reduce-probe finding). pid*total is a no-op for a single-program (grid=1) launch.
         lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u)")
-        lines.append(f"        _input[_e] = ({msl_type}){x_name}[pid * {total}u + _e];")
+        lines.append(f"        _input[_e] = ({msl_type}){x_name}[{x_origin}_e];")
         lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         # Reduce along axis
@@ -3728,11 +3744,13 @@ class _TemplateMixin:
         # implicit float->half but NOT float->bfloat, so a bf16 output otherwise fails to
         # compile ("assigning to 'bfloat' from 'float'") — reduce-fuzzer finding. No-op
         # for float/half.
-        _out_msl3d = triton_type_to_msl(ptr_args[1].elem_type) if len(ptr_args) > 1 else "float"
-        _scast3d = "" if _out_msl3d in ("float", "half") else f"({_out_msl3d})"
-        R0, R1 = result_dims
+        # The result passes through the source's own types: the reduction's element type, then
+        # each cast between the reduction and the store, then the stored element type.
+        _stored3d = self._reduce3_cast_chain(
+            "_result[_r]", msl_type, [input_arg.elem_type, *info["result_casts"], output_arg.elem_type]
+        )
         lines.append(f"    for (uint _r = lid; _r < {result_total}u; _r += {block_size}u)")
-        lines.append(f"        {z_name}[pid * {result_total}u + _r] = {_scast3d}_result[_r];")
+        lines.append(f"        {z_name}[{z_origin}_r] = {_stored3d};")
 
         lines.append("}")
         lines.append("")
@@ -3766,13 +3784,9 @@ class _TemplateMixin:
             result_total = M * N
             axis_size = K
 
-        # Determine data type from pointer args
-        ptr_args = [a for a in self.graph.args if a.is_ptr]
-        msl_type = "float"
-        if ptr_args:
-            elem = ptr_args[0].elem_type
-            if elem in ("i32", "si32"):
-                msl_type = "int"
+        # Roles, element type and tile origins from the proof (see _lower_3d_reduce_template).
+        input_arg, output_arg = info["input_arg"], info["output_arg"]
+        msl_type = "int" if input_arg.elem_type in ("i8", "i16", "i32", "si32") else "float"
 
         identity = "(-INFINITY)" if is_max and msl_type == "float" else "INFINITY"
         if msl_type == "int":
@@ -3791,8 +3805,10 @@ class _TemplateMixin:
             else:
                 arg_decls.append(_scalar_buffer_decl(arg, i, source_bindings))
 
-        x_name = source_bindings[ptr_args[0].name] if ptr_args else "X"
-        z_name = source_bindings[ptr_args[1].name] if len(ptr_args) > 1 else "Z"
+        x_name = source_bindings[input_arg.name]
+        z_name = source_bindings[output_arg.name]
+        x_origin = self._reduce3_origin(info["load_origin"])
+        z_origin = self._reduce3_origin(info["store_origin"])
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -3815,7 +3831,7 @@ class _TemplateMixin:
         # dispatch silently computed only program 0's slice and left the others untouched
         # (reduce-probe finding). pid*total is a no-op for a single-program (grid=1) launch.
         lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u)")
-        lines.append(f"        _input[_e] = ({msl_type}){x_name}[pid * {total}u + _e];")
+        lines.append(f"        _input[_e] = ({msl_type}){x_name}[{x_origin}_e];")
         lines.append(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         # Reduce along axis, tracking best value and index
@@ -3849,7 +3865,8 @@ class _TemplateMixin:
 
         # Store index results to output (program_id-offset for multi-program dispatch).
         lines.append(f"    for (uint _r = lid; _r < {result_total}u; _r += {block_size}u)")
-        lines.append(f"        {z_name}[pid * {result_total}u + _r] = _result_idx[_r];")
+        _stored3d = self._reduce3_cast_chain("_result_idx[_r]", "int", [*info["result_casts"], output_arg.elem_type])
+        lines.append(f"        {z_name}[{z_origin}_r] = {_stored3d};")
 
         lines.append("}")
         lines.append("")

@@ -4218,6 +4218,166 @@ class _DetectionMixin:
             return False
         return False
 
+    _REDUCE3_VALUE_CASTS = frozenset(
+        {"arith.truncf", "arith.extf", "arith.sitofp", "arith.fptosi", "arith.extsi", "arith.trunci"}
+    )
+    _REDUCE3_INDEX_CASTS = frozenset({"arith.uitofp", "arith.extui"})
+
+    def _prove_3d_reduce_template(self, reduce_ssa, shape, axis, is_argminmax):
+        """Prove that the 3-D reduce template replays this kernel, and bind what it replays.
+
+        The template replaces the whole kernel by one contiguous row-major read of the tile,
+        the reduction, and one contiguous row-major store of the result. Nothing in it follows
+        the source: it took its input and output from the ORDER of the pointer arguments (an
+        output-first signature reduced the output's old contents and overwrote the input),
+        addressed both buffers from element zero whatever the source address said (a shifted,
+        reversed or strided address was read or written canonically), and stored the raw
+        reduction whatever stood between the reduction and the store (``tl.sum(x, 2) * 2.0``
+        stored the unscaled sum). There is no other lowering for a 3-D reduction, so each of
+        these is proved here or refused.
+
+        Returns the pointer roles, the constant and per-program origin of each address, and the
+        element types the result passes through on its way to the store.
+        """
+        import random
+
+        from triton_msl.codegen._address_witness import AddressWitness, WitnessRefusal, _Tensor
+        from triton_msl.errors import MetalNonRecoverableError
+
+        def _refuse(why):
+            raise MetalNonRecoverableError(
+                f"3-D reduce template: {why}. The template replaces the whole kernel by one "
+                "contiguous row-major read of the tile, the reduction and one contiguous row-major "
+                "store of the result, and a 3-D reduction has no other lowering. Refusing rather "
+                "than emit silently-wrong output; reduce in a kernel that does only that.",
+                op_name="tt.reduce",
+            )
+
+        witness = AddressWitness(self.graph)
+        for op in witness.ops.values():
+            if op.op.startswith("tt.atomic") or op.op in ("scf.if", "scf.while"):
+                _refuse(f"the kernel also contains {op.op}, which the template does not replay")
+        loads = [a for a in witness.accesses if a[1] == "load"]
+        stores = [a for a in witness.accesses if a[1] == "store"]
+        if len(loads) != 1 or len(stores) != 1:
+            _refuse(
+                f"the kernel has {len(loads)} loads and {len(stores)} stores where the template "
+                "performs exactly one of each"
+            )
+        load_ssa, store_ssa = loads[0][0], stores[0][0]
+        if len(load_ssa.operand_ids or []) != 1 or len(store_ssa.operand_ids or []) != 2:
+            _refuse("a masked load or store, whose mask the template does not replay")
+
+        # The stored value is the reduction result, through layout ops and plain casts only.
+        value_id = reduce_ssa.id
+        target = value_id
+        if is_argminmax:
+            results = list(getattr(reduce_ssa, "result_ids", None) or [])
+            if len(results) != 2:
+                _refuse("an index-returning reduction whose index result could not be identified")
+            value_id, target = results
+        allowed = self._REDUCE3_VALUE_CASTS | (self._REDUCE3_INDEX_CASTS if is_argminmax else frozenset())
+        cur, casts = store_ssa.operand_ids[1], []
+        for _ in range(32):
+            if cur == target:
+                break
+            if is_argminmax and cur == value_id:
+                _refuse(
+                    "the stored value is the reduced VALUE of an index-returning reduction; only the index is replayed"
+                )
+            op = witness.ops.get(cur)
+            ids = list(op.operand_ids or []) if op is not None else []
+            if op is not None and op.op in ("ttg.convert_layout", "tt.reshape", "tt.expand_dims") and len(ids) == 1:
+                cur = ids[0]
+                continue
+            if op is not None and op.op in allowed and len(ids) == 1:
+                if str(op.elem_type) in ("i1", "f64", "fp64"):
+                    _refuse(f"a cast of the result to {op.elem_type}, which the template cannot reproduce")
+                casts.append(str(op.elem_type))
+                cur = ids[0]
+                continue
+            _refuse(
+                "the stored value is not the reduction result itself "
+                f"({op.op if op is not None else 'an untracked value'} between the reduction and the store "
+                "would be dropped)"
+            )
+        else:
+            _refuse("the stored value could not be traced to the reduction")
+        casts.reverse()
+
+        M, N, K = shape
+        total = M * N * K
+        result_total = total // shape[axis]
+        rng = random.Random(0x3D5EED)
+
+        def _accesses(env):
+            return {kind: (base, off) for kind, base, off in witness.offsets(env)}
+
+        try:
+            scalars = {}
+            zero_env = witness.env(rng, scalars, zero=True)
+            zero = _accesses(zero_env)
+            one = _accesses(witness.env(rng, scalars, zero=True, ones=(("pid", 0),)))
+            free_env = witness.env(rng, {})
+            free = _accesses(free_env)
+            pid = free_env.atom(("pid", 0))
+            index = witness.value(reduce_ssa.operand_ids[1], zero_env) if is_argminmax else None
+        except WitnessRefusal as exc:
+            _refuse(f"a load or store address could not be evaluated ({exc})")
+
+        if is_argminmax:
+            stride = (N * K, K, 1)[axis]
+            want = [(t // stride) % shape[axis] for t in range(total)]
+            if not isinstance(index, _Tensor) or index.shape != tuple(shape) or index.data != want:
+                _refuse("the index operand of the argmin/argmax is not the position along the reduced axis")
+
+        origins = {}
+        for kind, count in (("load", total), ("store", result_total)):
+            cells = []
+            for sample in (zero, one, free):
+                off = sample[kind][1]
+                cell = list(off.data) if isinstance(off, _Tensor) else [off]
+                if kind == "load" and not is_argminmax and len(cell) == total:
+                    # A sum, max or min does not depend on the order ALONG the reduced axis, so
+                    # a tile whose index is permuted along that axis only (reversed, say) is the
+                    # same reduction of the same cells.
+                    stride = (N * K, K, 1)[axis]
+                    for t in range(total):
+                        if (t // stride) % shape[axis] == 0:
+                            line = range(t, t + shape[axis] * stride, stride)
+                            for slot, address in zip(line, sorted(cell[s] for s in line)):
+                                cell[slot] = address
+                cells.append(cell)
+            first = cells[0][0]
+            step = cells[1][0] - first if type(cells[1][0]) is int and type(first) is int else None
+            if (
+                step is None
+                or any(len(c) != count for c in cells)
+                or not 0 <= first <= 2**30
+                or not 0 <= step <= 2**30
+                or cells[0] != [first + t for t in range(count)]
+                or cells[1] != [first + step + t for t in range(count)]
+                or cells[2] != [first + pid * step + t for t in range(count)]
+            ):
+                _refuse(
+                    f"the {kind} address is not one contiguous row-major tile of {count} elements at a "
+                    "constant origin plus a constant multiple of tl.program_id(0) (a reversed, strided "
+                    "or transposed index, a runtime stride or offset, or another grid axis)"
+                )
+            origins[kind] = (first, step)
+
+        by_index = {a.index: a for a in self.graph.args if a.is_ptr}
+        input_arg, output_arg = by_index.get(zero["load"][0]), by_index.get(zero["store"][0])
+        if input_arg is None or output_arg is None:
+            _refuse("the load or store pointer does not trace to a pointer argument")
+        return {
+            "input_arg": input_arg,
+            "output_arg": output_arg,
+            "load_origin": origins["load"],
+            "store_origin": origins["store"],
+            "result_casts": casts,
+        }
+
     def _detect_3d_reduce(self):
         """Detect if this kernel is a simple 3D reduce that needs a template.
 
@@ -4290,8 +4450,7 @@ class _DetectionMixin:
                                 "reduces the RAW loaded values and would silently drop "
                                 "the op, and the generic 3D-reduce path mis-computes "
                                 "this shape. Refusing to emit silently-wrong output. "
-                                "Apply the op after the reduce where valid (e.g. "
-                                "s * tl.sum(a, axis=2)) or in a separate kernel."
+                                "Apply the op in a separate kernel."
                             )
                         axis = ssa.attrs.get("axis", 0)
                         # Detect argmin/argmax: 2 operands (values, indices)
@@ -4344,12 +4503,14 @@ class _DetectionMixin:
                         block_size = max(total, self.graph.num_warps * 32)
                         # Cap at 1024 (Metal max threads per threadgroup)
                         block_size = min(block_size, 1024)
-                        return {
+                        info = {
                             "shape": (M, N, K),
                             "axis": axis,
                             "combine_op": combine_op,
                             "block_size": block_size,
                         }
+                        info.update(self._prove_3d_reduce_template(ssa, (M, N, K), axis, is_argminmax))
+                        return info
         return None
 
     def _detect_flip(self):

@@ -371,6 +371,7 @@ class GenericLowerer(
         self._is_2d = False
         self._effective_2d_shape = None  # e.g., (32, 64)
         self._make_range_dim = {}  # ssa_id -> dimension index (0=row, 1=col)
+        self._make_range_row_div = {}  # lowered row range id -> (lanes per row, rows)
 
         # Track which program_id axes are used (for kernel signature)
         self._used_pid_axes = set()  # {0, 1, 2}
@@ -3732,7 +3733,10 @@ class GenericLowerer(
                     # make that store a store-target user. But here we care
                     # about offset_operand: make_range flows through expand,
                     # muli, broadcast, addi into addptr, then into store.
-                    if u_op.op == "tt.load":
+                    if u_op.op in ("tt.load", "tt.reduce"):
+                        # A reduce reads its operand on the compact lanes of its tile,
+                        # as a load addresses them: a range whose value reaches one is
+                        # not spread over the dominant tile.
                         reaches_load = True
                     elif u_op.op in ("tt.store", "tt.atomic_rmw"):
                         reaches_store = True
@@ -4057,6 +4061,193 @@ class GenericLowerer(
         # Shape: num_programs is always scalar
         self.env_shapes[ssa.id] = ()
 
+    def _row_divisor_of_range(self, mr_id, range_size):
+        """Lanes per row of a 2-D row range: lane ``lid`` holds row ``lid / divisor``."""
+        total = getattr(self, "_total_elements", self.effective_block_size)
+        inner_N_map = getattr(self, "_make_range_inner_N", {})
+        if mr_id in inner_N_map:
+            N = inner_N_map[mr_id]
+        else:
+            N = total // range_size if range_size > 0 else 1
+        # Store-only make_ranges whose tile is smaller than the
+        # kernel's element count: scale inner_N so lid/N still
+        # yields the correct M-index (see tl.topk M>1 case).
+        store_only = getattr(self, "_make_range_store_only", set())
+        if mr_id in store_only and range_size > 0 and total > range_size * N:
+            N = total // range_size
+        return N
+
+    def _compact_spread_tile_operand(self, value_id, op_name, gather=False):
+        """Bring a reduce or scan operand that is a spread 2-D tile onto its compact lanes.
+
+        Both read element (i, j) of an (M, N) operand on lane ``i * N + j``. A row range
+        holds row ``lid / D``; D is N unless the same range also addresses a wider tile
+        of the same layout, and then the operand's rows sit D lanes apart. With
+        ``gather`` the operand is rebound to a copy gathered through threadgroup memory
+        and the previous binding is returned for the caller to restore; a form this
+        cannot serve is refused. Returns None when the operand is already compact.
+        """
+        shape = _extract_shape(self._find_op_type_str(value_id) or "")
+        if not shape or len(shape) != 2:
+            return None
+        M, N = shape
+        held = self._row_divisors_of_address(value_id, M, through_loads=True)
+        if not held - {N}:
+            return None
+
+        def _refuse(why):
+            raise MetalNonRecoverableError(
+                f"{op_name} over a {tuple(shape)} tile whose row range also addresses a wider tile: its "
+                f"rows are held {', '.join(str(d) for d in sorted(held))} lanes apart, not {N}, so the "
+                f"lanes this operation reads do not hold the tile's elements ({why}). Refusing.",
+                op_name=op_name,
+            )
+
+        if not gather:
+            _refuse("only a single-value reduction gathers such a tile")
+        if len(held) != 1:
+            _refuse("its rows are not all held alike")
+        D = next(iter(held))
+        dtype = self.env_types.get(value_id, "fp32")
+        if dtype.startswith(("fp", "bf")):
+            msl_type, shared_dtype = "float", "fp32"
+        elif dtype in ("i64", "u64", "ui64"):
+            msl_type = "long" if dtype == "i64" else "ulong"
+            shared_dtype = "i64" if dtype == "i64" else "u64"
+        elif dtype in ("i32", "u32", "ui32"):
+            msl_type, shared_dtype = "int", "i32"
+        else:
+            _refuse(f"a {dtype} tile is not gathered")
+        if (
+            getattr(self, "_needs_wrapping", False)
+            or self._mept_single_pass
+            or self._control_flow_depth > 0
+            or value_id in self.env_array
+            or value_id in self.env_is_ptr
+            or value_id not in self.env
+        ):
+            _refuse("the tile is not one value per lane of one thread group")
+        if D < N or D % N or D * M > self.kb.block_size:
+            _refuse(f"the tile's lanes do not fit the {self.kb.block_size}-thread group")
+
+        previous = self.env[value_id]
+        shared_name = f"shared_{self._shared_counter}"
+        self._shared_counter += 1
+        self.kb.declare_threadgroup_array(shared_name, dtype=shared_dtype, size=M * N)
+        # Lane D * i + j (j < N) holds element (i, j): the column range is lid % N and
+        # N divides D.
+        self.kb.raw_line(f"    if (lid / {D}u < {M}u && lid % {D}u < {N}u)")
+        self.kb.raw_line(f"        {shared_name}[(lid / {D}u) * {N}u + lid % {D}u] = {previous};")
+        self.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        gathered = self._next_var("tile")
+        self.kb.raw_line(f"    {msl_type} {gathered} = (lid < {M * N}u) ? {shared_name}[lid] : ({msl_type})0;")
+        self.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        self.env[value_id] = gathered
+        return previous
+
+    def _row_divisors_of_address(self, ptr_id, rows, through_loads=False):
+        """Lanes per row of the ``rows``-row ranges a 2-D address is built on."""
+        by_id = self._layout_op_index()
+        found = set()
+
+        def _visit(_cur, _op):
+            if _op is None:
+                return False
+            if _op.op == "tt.make_range":
+                size = _op.attrs.get("end", 0) - _op.attrs.get("start", 0)
+                full_shape = getattr(self, "_make_range_full_shape", {}).get(_cur)
+                n_d = _cur in getattr(self, "_make_range_stride_below", {}) and full_shape and len(full_shape) >= 3
+                if self._make_range_dim.get(_cur) == 0 and size == rows and not n_d:
+                    found.add(self._row_divisor_of_range(_cur, size))
+                return True
+            if _op.op == "tt.load":
+                return not through_loads
+            # A matrix product is laid out by its own lowering (element (i, j) of an
+            # (M, N) product on lane i * N + j), whatever lanes its operands' rows hold.
+            return _op.op in ("tt.reduce", "tt.scan", "arith.constant", "ttg.convert_layout", "tt.dot")
+
+        if ptr_id in by_id:
+            self._walk_producers(ptr_id, _visit)
+        return found
+
+    def _row_lane_requirements(self, value_id, rows, cols):
+        """Lanes per row with which the consumers of a (rows, cols) tile value read it.
+
+        A store reads it on the lanes of its address: row ``lid / D`` for the row range
+        the address is built on, where D is ``cols`` unless that range is spread wider
+        (``_row_divisor_of_range``). Everything else (a reduce, a 1-D view) reads the
+        compact lanes, ``cols`` per row. Elementwise results and 2-D layout conversions
+        of the value are held as the value is, so their consumers count too.
+        """
+        users = {}
+        for _o in self._layout_op_index().values():
+            for _operand in _o.operand_ids or ():
+                users.setdefault(_operand, []).append(_o)
+        needs = set()
+        seen = {value_id}
+        stack = [value_id]
+        while stack:
+            cur = stack.pop()
+            for _o in users.get(cur, ()):
+                operands = _o.operand_ids or []
+                same_tile = _o.op.startswith(("arith.", "math.")) or _o.op == "tt.clampf"
+                if _o.op == "ttg.convert_layout":
+                    same_tile = tuple(_extract_shape(_o.type_str or "") or ()) == (rows, cols)
+                if _o.op in ("tt.store", "tt.atomic_rmw", "tt.atomic_cas") and operands[0] != cur:
+                    needs |= self._row_divisors_of_address(operands[0], rows)
+                elif same_tile:
+                    if _o.id not in seen:
+                        seen.add(_o.id)
+                        stack.append(_o.id)
+                else:
+                    needs.add(cols)
+        return needs or {cols}
+
+    def _row_range_lane_bound(self, ptr_id, shape):
+        """Lanes on which a 2-D address built on a row range stays inside its rows, or None.
+
+        Lane ``lid`` addresses row ``lid / divisor`` of a row range of ``shape[0]`` rows,
+        so a lane at or past ``divisor * shape[0]`` names a row the range does not have.
+        The kernel runs every lane of its dominant tile; a smaller tile that is loaded
+        and stored was written past its last row on those lanes.
+        """
+        bounds = []
+
+        def _visit(_cur, _op):
+            if _op is None:
+                return False
+            if _op.op == "tt.make_range":
+                rec = self._make_range_row_div.get(_cur)
+                if rec is not None and rec[1] == shape[0]:
+                    bounds.append(rec[0] * rec[1])
+                return True
+            return _op.op in ("tt.load", "tt.reduce", "arith.constant", "ttg.convert_layout")
+
+        self._walk_producers(ptr_id, _visit)
+        return min(bounds) if bounds else None
+
+    def _refuse_row_blocked_effect(self, what, n, operand_ids, op_name):
+        """Refuse a 1-D store or atomic run on lanes 0..n-1 whose operand is held one row per W lanes.
+
+        ``tl.store(O + tl.argmin(v, axis=1), x)``: the address of row i is held on the W
+        lanes of row i, the stored value one element per lane. Lanes 0..n-1 then all
+        write through the address of row 0.
+        """
+        if n is None or n <= 1:
+            return
+        for operand in operand_ids:
+            if operand is None:
+                continue
+            widths = self._blocked_widths(operand) - {1}
+            if widths:
+                held = ", ".join("an unknown number of" if w is None else str(w) for w in sorted(widths, key=str))
+                raise MetalNonRecoverableError(
+                    f"{what} of {n} elements whose address, mask or value is computed from a row-wise "
+                    f"reduction (held one row per {held} lanes) while another operand is held one element "
+                    f"per lane: lanes 0..{n - 1} would all use the first row's element. Refusing.",
+                    op_name=op_name,
+                )
+
     def _lower_make_range(self, ssa: SSAValue):
         """tt.make_range → lid or 2D index expression.
 
@@ -4112,6 +4303,9 @@ class GenericLowerer(
             #   3D (M, N, K), dim 0:      stride_below = N*K
             #   3D (M, N, K), dim 1:      stride_below = K
             #   3D (M, N, K), dim 2:      stride_below = 1
+            # How the range is held (see _register_1d_layout); None for the forms no
+            # consumer of a 1-D value is proved against.
+            held = None
             stride_below_map = getattr(self, "_make_range_stride_below", {})
             full_shape = getattr(self, "_make_range_full_shape", {}).get(ssa.id)
             if ssa.id in stride_below_map and full_shape and len(full_shape) >= 3:
@@ -4127,25 +4321,20 @@ class GenericLowerer(
                 # For row (dim 0): range covers rows, N = total / range = inner dim
                 # For col (dim 1): range IS the inner dim, N = range_size
                 if dim == 0:
-                    inner_N_map = getattr(self, "_make_range_inner_N", {})
-                    if ssa.id in inner_N_map:
-                        N = inner_N_map[ssa.id]
-                    else:
-                        N = total // range_size if range_size > 0 else 1
-                    # Store-only make_ranges whose tile is smaller than the
-                    # kernel's element count: scale inner_N so lid/N still
-                    # yields the correct M-index (see tl.topk M>1 case).
-                    store_only = getattr(self, "_make_range_store_only", set())
-                    if ssa.id in store_only and range_size > 0 and total > range_size * N:
-                        N = total // range_size
+                    N = self._row_divisor_of_range(ssa.id, range_size)
+                    self._make_range_row_div[ssa.id] = (N, range_size)
                     expr = f"{lid} / {N}u"
+                    held = ("blocked", N)
                 else:
                     expr = f"{lid} % {range_size}u"
+                    held = ("direct", None)
 
             if start != 0:
                 expr = f"({expr} + {start}u)"
 
             self.kb.raw_line(f"    uint {var_name} = {expr};")
+            if held is not None and lid == "lid":
+                self._register_1d_layout(ssa.id, *held)
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = "i32"
             self.env_shapes[ssa.id] = (range_size,)
@@ -4195,6 +4384,8 @@ class GenericLowerer(
             else:
                 expr = f"{lid} % {range_size}u"
             self.kb.raw_line(f"    uint {var_name} = {expr};")
+            if lid == "lid":
+                self._register_1d_layout(ssa.id, "direct")
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = "i32"
             self.env_shapes[ssa.id] = (range_size,)
@@ -4267,6 +4458,8 @@ class GenericLowerer(
             self.env[ssa.id] = var_name
         else:
             self.env[ssa.id] = lid
+        if lid == "lid":
+            self._register_1d_layout(ssa.id, "direct")
         self.env_types[ssa.id] = "i32"
         self.env_shapes[ssa.id] = (end - start,)
 
@@ -4372,11 +4565,174 @@ class GenericLowerer(
 
             if emit_row_broadcast(self, ssa):
                 return
+        if self._broadcast_reduction_result(ssa):
+            return
         self._emit_passthrough(ssa)
         # Track shape from the result type (overrides passthrough shape)
         shape = _extract_shape(ssa.type_str)
         if shape:
             self.env_shapes[ssa.id] = shape
+
+    def _broadcast_reduction_result(self, ssa: SSAValue):
+        """Broadcast a reduction result along an axis its lanes are not laid out for.
+
+        The pass-through above is right when the lanes already hold the broadcast: the
+        row totals of an (M, N) tile are held one row per N lanes, which IS their
+        broadcast over the columns. Laid along the OTHER axis (``v + rowtotals[None, :]``,
+        or the outer product ``r[:, None] * r[None, :]``) the lanes hold the wrong
+        element, and the pass-through stored row i's total in every cell of row i where
+        column j's was asked for. Such a source is re-read through threadgroup memory in
+        the lane order the target needs. Returns True when it emitted the value.
+        """
+        if not self._is_2d or not ssa.operand_ids:
+            return False
+        src_id = ssa.operand_ids[0]
+        dst = _extract_shape(ssa.type_str)
+        src = self.env_shapes.get(src_id)
+        if not src or len(src) != 2:
+            _src_type = self._find_op_type_str(src_id)
+            src = _extract_shape(_src_type) if _src_type else None
+        if not dst or not src or len(dst) != 2 or len(src) != 2:
+            return False
+        M, N = dst
+        if tuple(src) == (M, 1) and M > 1 and N > 1:
+            along_rows = True
+        elif tuple(src) == (1, N) and M > 1 and N > 1:
+            along_rows = False
+        else:
+            return False  # nothing broadcast, or a one-element source (held on every lane)
+        n = M if along_rows else N
+        # Lanes of the target tile: row i on the D lanes [i * D, (i + 1) * D), column
+        # lid % N. D is N unless the tile is stored through a store-only row range, which
+        # _row_divisor_of_range spreads over the kernel's dominant tile.
+        needs = self._row_lane_requirements(ssa.id, M, N)
+        D = next(iter(needs)) if len(needs) == 1 else None
+        lanes = (D or N) * M
+
+        # Only a value computed from a reduction can be laid out against the target's
+        # axes; everything else (addresses, loads) is placed by its own make_range.
+        converted = getattr(self, "_converted_layout_ids", None) or set()
+        seen = {"reduce": False, "converted": False, "periodic": True}
+
+        def _visit(_cur, _op):
+            if _cur in converted:
+                seen["converted"] = True
+                seen["periodic"] = False
+                return True
+            if _op is None:
+                return False
+            if _op.op == "tt.reduce" and _op.operand_ids:
+                _ish = self.env_shapes.get(_op.operand_ids[0])
+                if not _ish:
+                    _it = self._find_op_type_str(_op.operand_ids[0])
+                    _ish = _extract_shape(_it) if _it else None
+                if _ish and len(_ish) >= 2:
+                    seen["reduce"] = True
+                    # A column-wise reduce of an (M', N) tile is read back as
+                    # shared[lid % N] on its M' * N lanes: the broadcast along the rows.
+                    if not (
+                        len(_ish) == 2
+                        and _op.attrs.get("axis", 0) == 0
+                        and _ish[1] == N
+                        and _ish[0] > 1
+                        and _ish[0] * _ish[1] >= lanes
+                    ):
+                        seen["periodic"] = False
+                return True
+            return _op.op in ("arith.constant", "tt.splat", "tt.make_range")
+
+        self._walk_producers(src_id, _visit)
+        if not (seen["reduce"] or seen["converted"]):
+            return False
+        if src_id in self._bcast_layout:
+            return False  # an N-D reduce result: its recorded index propagates instead
+
+        layout = self._value_1d_layout_of(src_id)
+        if layout == "any":
+            return False
+
+        def _refuse(why):
+            raise MetalNonRecoverableError(
+                f"tt.broadcast of a reduction result of shape {tuple(src)} over a {tuple(dst)} tile: {why}. "
+                f"Each lane would take the element of its own row or column of the reduced tile, "
+                f"not the one the broadcast names. Refusing.",
+                op_name="tt.broadcast",
+            )
+
+        if along_rows and M * N > self.effective_block_size:
+            # A tile larger than the thread group is staged in threadgroup memory, and its
+            # arithmetic (_lower_binary) reads the value of row i on the block_size // M
+            # lanes [i * (block_size // M), ...). A source held that way is passed through
+            # when that arithmetic is every reader of the broadcast.
+            per_row = self.effective_block_size // M
+            staged = getattr(self, "_shared_mem_descs", {})
+            readers = [_o for _o in self._layout_op_index().values() if ssa.id in (_o.operand_ids or ())]
+
+            def _staged_tile_arithmetic(_o):
+                if not _o.op.startswith("arith.") or len(_o.operand_ids or ()) != 2:
+                    return False
+                other = _o.operand_ids[1] if _o.operand_ids[0] == ssa.id else _o.operand_ids[0]
+                return other in staged and tuple(staged[other][1]) == (M, N)
+
+            if (
+                per_row * M == self.effective_block_size
+                and layout == "blocked"
+                and self._blocked_widths(src_id) == {per_row}
+                and readers
+                and all(_staged_tile_arithmetic(_o) for _o in readers)
+            ):
+                return False
+        if D is None:
+            _refuse(
+                f"its consumers read the rows of the target tile on different lanes "
+                f"({', '.join(str(d) for d in sorted(needs))} lanes per row)"
+            )
+        if along_rows:
+            if layout == "blocked" and self._blocked_widths(src_id) == {D}:
+                return False
+        elif layout == "direct" and seen["periodic"]:
+            return False
+        if src_id in self.env_is_ptr or src_id in self.env_array:
+            _refuse("the source is a pointer or a per-thread array")
+        if lanes > self.kb.block_size:
+            _refuse(f"the tile does not fit the {self.kb.block_size}-thread group")
+        try:
+            kind, width = self._lanes_of_1d_value(src_id, n, "tt.broadcast")
+        except MetalNonRecoverableError as exc:
+            _refuse(f"the lanes that hold the source are not proved ({exc})")
+
+        src_var = self._lookup(src_id)
+        src_dtype = self.env_types.get(src_id, "fp32")
+        if src_dtype.startswith(("fp", "bf")):
+            msl_type, shared_dtype = "float", "fp32"
+        elif src_dtype in ("i64", "u64", "ui64"):
+            msl_type = "long" if src_dtype == "i64" else "ulong"
+            shared_dtype = "i64" if src_dtype == "i64" else "u64"
+        else:
+            msl_type, shared_dtype = "int", "i32"
+        shared_name = f"shared_{self._shared_counter}"
+        self._shared_counter += 1
+        self.kb.declare_threadgroup_array(shared_name, dtype=shared_dtype, size=n)
+        if kind == "blocked":
+            self.kb.raw_line(f"    if (lid % {width}u == 0u && lid / {width}u < {n}u)")
+            self.kb.raw_line(f"        {shared_name}[lid / {width}u] = {src_var};")
+        else:
+            self.kb.raw_line(f"    if (lid < {n}u)")
+            self.kb.raw_line(f"        {shared_name}[lid] = {src_var};")
+        self.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        result_var = self._next_var("bcst")
+        element = f"lid / {D}u" if along_rows else f"lid % {N}u"
+        self.kb.raw_line(f"    {msl_type} {result_var} = (lid < {lanes}u) ? {shared_name}[{element}] : ({msl_type})0;")
+        # A later op may re-stage the pooled scratch array this read came from.
+        self.kb.raw_line("    threadgroup_barrier(mem_flags::mem_threadgroup);")
+        self.env[ssa.id] = result_var
+        self.env_types[ssa.id] = src_dtype
+        self.env_shapes[ssa.id] = tuple(dst)
+        if along_rows:
+            self._register_1d_layout(ssa.id, "blocked", D)
+        else:
+            self._register_1d_layout(ssa.id, "direct")
+        return True
 
     def _lower_reshape(self, ssa: SSAValue):
         """tt.reshape → passthrough with optional bcast-layout rewrite.
@@ -5147,6 +5503,21 @@ class GenericLowerer(
                 )
                 if 0 < wrap_total < span:
                     store_wrap_guard = wrap_total
+        if (
+            store_wrap_guard is None
+            and native_ptr_shape
+            and len(native_ptr_shape) == 2
+            and not self._is_scalar_ptr(ptr_id)
+            and not self._mept_single_pass
+        ):
+            _row_bound = self._row_range_lane_bound(ptr_id, native_ptr_shape)
+            _span = (
+                getattr(self, "_total_elements", 0)
+                if getattr(self, "_needs_wrapping", False)
+                else self.effective_block_size
+            )
+            if _row_bound is not None and 0 < _row_bound < _span:
+                store_wrap_guard = _row_bound
 
         def remap_blocked_address(inner):
             # The result is broadcast at row=lid/inner, whereas the pointer
@@ -5227,7 +5598,31 @@ class GenericLowerer(
             # That is authoritative; the size-matching below cannot tell an axis=0 result
             # from an axis=1 one on a square tile.
             _rec_layout = self._value_1d_layout_of(val_id)
-            if self._traces_to_converted_layout(val_id):
+            _eff = self._effective_2d_shape
+            _converted = self._traces_to_converted_layout(val_id)
+            # One value for every element, through an address held one row per N lanes
+            # (`tl.store(O + tl.argmin(v, axis=1), 1.0)`): stored as the row-blocked
+            # value it may equally be read as.
+            _uniform_by_row = bool(
+                _rec_layout == "any"
+                and store_1d_guard > 1
+                and not _converted
+                and self._value_1d_layout_of(ptr_id) == "blocked"
+                and _eff
+                and len(_eff) >= 2
+                and self._blocked_widths(ptr_id) == {_eff[1]}
+                and (native_mask_id is None or self._value_1d_layout_of(native_mask_id) in ("blocked", "any"))
+                and (native_mask_id is None or self._blocked_widths(native_mask_id) <= {_eff[1]})
+            )
+            if not _uniform_by_row and (_converted or _rec_layout in ("direct", "any")):
+                self._refuse_row_blocked_effect(
+                    "tt.store", store_1d_guard, (ptr_id, native_mask_id), op_name="tt.store"
+                )
+            if _uniform_by_row:
+                N = _eff[1]
+                base_ptr, offsets, mask_var = remap_blocked_address(N)
+                clauses.append(f"{lid} % {N}u == 0u && {lid} / {N}u < {store_1d_guard}u")
+            elif _converted:
                 # THIS value was redistributed: thread i has element i. Simple guard.
                 clauses.append(f"{lid} < {store_1d_guard}u")
             elif _rec_layout in ("direct", "any"):
@@ -5241,6 +5636,23 @@ class GenericLowerer(
                 shape = self._effective_2d_shape
                 if shape and len(shape) >= 2 and shape[1] > 0:
                     N = shape[1]
+                    # The row reduction of a tile narrower than the kernel's widest is
+                    # held one row per ITS width: lane i * shape[1] does not hold row i.
+                    _own = self._blocked_widths(val_id)
+                    _own_width = next(iter(_own)) if len(_own) == 1 else None
+                    if isinstance(_own_width, int) and _own_width > 1:
+                        N = _own_width
+                    _beside = set(self._blocked_widths(ptr_id))
+                    if native_mask_id is not None:
+                        _beside |= self._blocked_widths(native_mask_id)
+                    _beside = {w for w in _beside if isinstance(w, int) and w not in (1, N)}
+                    if _beside:
+                        raise MetalNonRecoverableError(
+                            f"tt.store of {store_1d_guard} elements whose value is held one row per {N} lanes "
+                            f"through an address or mask held one row per {min(_beside)} lanes: no one lane "
+                            f"of each row holds both. Refusing.",
+                            op_name="tt.store",
+                        )
                     base_ptr, offsets, mask_var = remap_blocked_address(N)
                     clauses.append(f"{lid} % {N}u == 0u && {lid} / {N}u < {store_1d_guard}u")
                 else:
@@ -16846,11 +17258,13 @@ class GenericLowerer(
             return
         raise MetalNonRecoverableError(msg, op_name="tt.store")
 
-    def _register_1d_layout(self, value_id, layout):
+    def _register_1d_layout(self, value_id, layout, block=None):
         """Record the thread-to-element mapping a 1-D value is produced in.
 
         ``"direct"``  -- thread i holds element i (store: ``if (lid < size) out[lid]``)
-        ``"blocked"`` -- thread i holds element i / N (store: one thread per row block)
+        ``"blocked"`` -- thread i holds element i / N (store: one thread per row block);
+                         ``block`` is that N, for a consumer that must pick one thread
+                         of each block (see ``_blocked_width``)
 
         Producers must declare this because the STORE cannot infer it from the value's
         SIZE. A 2-D axis=0 reduce yields size N and an axis=1 reduce size M, so on a
@@ -16861,7 +17275,10 @@ class GenericLowerer(
         """
         if not hasattr(self, "_value_1d_layout"):
             self._value_1d_layout = {}
+            self._value_1d_block = {}
         self._value_1d_layout[value_id] = layout
+        if layout == "blocked" and block:
+            self._value_1d_block[value_id] = int(block)
 
     # Elementwise ops that PRESERVE per-element layout: the result's element i is a
     # function of each operand's element i, so if every tensor operand shares a layout,
@@ -16886,6 +17303,48 @@ class GenericLowerer(
         "math.absf",
         "arith.negf",
         "arith.select",
+        # Every one of these is computed by each thread from its own operands, so the
+        # result is held the way the operands are. Without them a reduce of `sin(r)`
+        # or of `where(r > t, r, 0)` had no known layout.
+        "arith.remf",
+        "arith.divsi",
+        "arith.divui",
+        "arith.remsi",
+        "arith.remui",
+        "arith.andi",
+        "arith.ori",
+        "arith.xori",
+        "arith.shli",
+        "arith.shrsi",
+        "arith.shrui",
+        "arith.maxsi",
+        "arith.maxui",
+        "arith.minsi",
+        "arith.minui",
+        "arith.cmpf",
+        "arith.cmpi",
+        "math.sin",
+        "math.cos",
+        "math.tanh",
+        "math.erf",
+        "math.expm1",
+        "math.log1p",
+        "math.rsqrt",
+        "math.floor",
+        "math.ceil",
+        "math.trunc",
+        "math.round",
+        "math.roundeven",
+        "math.absi",
+        "math.atan2",
+        "math.copysign",
+        "math.powf",
+        "math.fma",
+        "tt.clampf",
+        # An address is held the way its offsets are, and a thread loads through its own
+        # address (with its own mask and fallback), so the loaded value is held that way.
+        "tt.addptr",
+        "tt.load",
     )
 
     def _value_1d_layout_of(self, val_id, depth=24):
@@ -18186,6 +18645,147 @@ class GenericLowerer(
         self._propagate_shape_from_type(ssa)
         return True
 
+    def _walk_producers(self, src_id, visit):
+        """Carry-aware BFS from ``src_id`` over (operands + scf.for carry edges).
+
+        ``visit(value_id, op)`` is called once per value (``op`` is None for a block
+        argument or a kernel argument) and returns True to stop below that value.
+        """
+        by_id = self._layout_op_index()
+        _ba_edges = {}
+        for _o in by_id.values():
+            if _o.op != "scf.for":
+                continue
+            _bas = (_o.attrs.get("block_arg_ids", []) if _o.attrs else [])[1:]
+            _inits = (_o.operand_ids or [])[3:]
+            _yield = next((b for b in _o.region_ops or [] if b.op == "scf.yield"), None)
+            for _i, _ba in enumerate(_bas):
+                _dsts = []
+                if _i < len(_inits):
+                    _dsts.append(_inits[_i])
+                if _yield is not None and _i < len(_yield.operand_ids or []):
+                    _dsts.append(_yield.operand_ids[_i])
+                _ba_edges[_ba] = _dsts
+            # Single-result scf.for: result_ids is None and the result id IS _o.id
+            # (see the resolver's res_of for the same trap).
+            _rids = _o.result_ids or ([_o.id] if len(_inits) > 0 else [])
+            for _i, _rid in enumerate(_rids):
+                if _yield is not None and _i < len(_yield.operand_ids or []):
+                    _ba_edges[_rid] = [_yield.operand_ids[_i]]
+
+        _seen = set()
+        _queue = [src_id]
+        while _queue and len(_seen) < 256:
+            _cur = _queue.pop()
+            if _cur in _seen:
+                continue
+            _seen.add(_cur)
+            _op = by_id.get(_cur)
+            if visit(_cur, _op):
+                continue
+            if _cur in _ba_edges:
+                _queue.extend(_ba_edges[_cur])
+                continue
+            if _op is not None:
+                _queue.extend(_op.operand_ids or [])
+
+    def _reduce_provenance(self, src_id, many_only=False):
+        """The 2-D reductions ``src_id`` is computed from, as {(axis, inner dimension)}.
+
+        Conflicting (axis, inner-dim) pairs mean the value mixes reduces of different
+        layouts -> unprovable. ``many_only`` leaves out a reduction of a two-dimensional
+        tile down to ONE element (`tl.sum(v, axis=0)` of an (M, 1) tile): every lane holds
+        that one result, so it says nothing about which lane holds which element.
+        """
+        _found = set()
+
+        def _visit(_cur, _op):
+            if _op is None:
+                return False
+            if _op.op == "tt.reduce" and _op.operand_ids:
+                _ish = self.env_shapes.get(_op.operand_ids[0])
+                if not _ish:
+                    _it = self._find_op_type_str(_op.operand_ids[0])
+                    _ish = _extract_shape(_it) if _it else None
+                if _ish and len(_ish) >= 2:
+                    _ax = _op.attrs.get("axis", 0)
+                    _one = len(_ish) == 2 and _ax in (0, 1) and _ish[1 - _ax] == 1
+                    if not (many_only and _one):
+                        _found.add((_ax, _ish[1] if _ax == 1 else _ish[0]))
+                return True  # do not walk past the reduce
+            return _op.op in ("arith.constant", "tt.splat", "tt.make_range")
+
+        self._walk_producers(src_id, _visit)
+        return _found
+
+    def _blocked_widths(self, src_id):
+        """Block widths of the declared row-blocked values ``src_id`` is computed from.
+
+        A value declared blocked without its width contributes None. The walk stops at
+        every declared value, as the layout resolver does.
+        """
+        declared = getattr(self, "_value_1d_layout", None) or {}
+        widths = set()
+
+        def _visit(_cur, _op):
+            if _cur not in declared:
+                return False
+            if declared[_cur] == "blocked":
+                widths.add(self._value_1d_block.get(_cur))
+            return True
+
+        self._walk_producers(src_id, _visit)
+        return widths
+
+    def _blocked_width(self, src_id):
+        """The one block width behind ``src_id``, or None (none, unknown, or two that meet)."""
+        widths = self._blocked_widths(src_id)
+        return next(iter(widths)) if len(widths) == 1 else None
+
+    def _lanes_of_1d_value(self, value_id, n, what, with_own_total=False):
+        """Which lanes hold the ``n`` elements of a 1-D value (or a tile with one unit axis).
+
+        Returns ``("direct", 1)`` when lane i holds element i for i < n, or
+        ``("blocked", W)`` when lanes [i * W, (i + 1) * W) all hold element i (the result of
+        a row-wise reduce of a tile W wide). Refuses when neither is proved: taking lanes
+        0..n-1 of a row-blocked value takes n copies of its first element.
+
+        ``with_own_total``: an (M, 1) tile combined with a reduction down to ONE element
+        (`v - tl.sum(v, axis=0, keep_dims=True)`) resolves to no layout, because the tile's
+        rows are declared blocked with width 1 and the total is declared direct. Both say
+        that lane i holds element i (every lane holds the total), so it is taken as direct.
+        """
+        layout = self._value_1d_layout_of(value_id)
+        widths = self._blocked_widths(value_id)
+        if layout == "blocked":
+            width = next(iter(widths)) if len(widths) == 1 else None
+            if not width:
+                raise MetalNonRecoverableError(
+                    f"{what} of a row-blocked value whose block width is not one known number. Refusing.",
+                    op_name="tt.reduce",
+                )
+            if width == 1:
+                return "direct", 1
+            if n * width > self.kb.block_size:
+                raise MetalNonRecoverableError(
+                    f"{what} of a {n}-element row-blocked value (block width {width}) that does not fit "
+                    f"the {self.kb.block_size}-thread group. Refusing.",
+                    op_name="tt.reduce",
+                )
+            return "blocked", width
+        if with_own_total:
+            unproved = (widths - {1}) or self._reduce_provenance(value_id, many_only=True)
+        else:
+            unproved = widths or self._reduce_provenance(value_id)
+        if layout is None and unproved:
+            raise MetalNonRecoverableError(
+                f"{what} of a {n}-element value computed from a row-wise reduce or a row index, whose "
+                f"thread-to-element mapping is not proved; taking lanes 0..{n - 1} could take copies of "
+                f"the first row. Refusing.",
+                op_name="tt.reduce",
+            )
+        return "direct", 1
+
     def _lower_convert_layout(self, ssa: SSAValue):
         """ttg.convert_layout → shared memory redistribution.
 
@@ -18324,6 +18924,35 @@ class GenericLowerer(
         else:
             msl_type, shared_dtype = "int", "i32"
 
+        # A tensor of POINTERS (`P + tl.argmax(v, axis=1)`, loaded per row) is redistributed
+        # as its offsets. Staging the pointer's dereferenced value instead left the result
+        # a plain float that the load then subscripted: a Metal compile error. Lanes past
+        # the N elements get offset 0, which a load may read and a store must not write,
+        # so only a pointer that is loaded from is admitted.
+        _ptr_info = self.env_is_ptr.get(ssa.operand_ids[0])
+        if _ptr_info is None and "tt.ptr" in (ssa.type_str or ""):
+            raise MetalNonRecoverableError(
+                "ttg.convert_layout of a pointer tensor whose base and offsets are not tracked "
+                "cannot be redistributed. Refusing.",
+                op_name="ttg.convert_layout",
+            )
+        if _ptr_info is not None:
+            _users = [
+                _o for _o in self._layout_op_index().values() if ssa.id in (_o.operand_ids or []) and _o is not ssa
+            ]
+            if not _users or any(
+                _o.op != "tt.load" or ssa.id in (_o.operand_ids or [])[1:] or _o.operand_ids[0] != ssa.id
+                for _o in _users
+            ):
+                raise MetalNonRecoverableError(
+                    "ttg.convert_layout of a pointer tensor (addresses computed from a reduction "
+                    "result) that is used by something other than a plain tl.load: the lanes "
+                    "outside its elements would hold a stray address. Refusing.",
+                    op_name="ttg.convert_layout",
+                )
+            src_var = f"(int)({_ptr_info[1]})"
+            msl_type, shared_dtype = "int", "i32"
+
         # Allocate shared memory for the redistribution
         shared_name = f"shared_{self._shared_counter}"
         self._shared_counter += 1
@@ -18351,58 +18980,7 @@ class GenericLowerer(
         src_id = ssa.operand_ids[0]
         _layout = self._value_1d_layout_of(src_id)
 
-        # Carry-aware BFS over (operands + scf.for carry edges) for the producing
-        # 2-D reduce(s). Consistency required: conflicting (axis, inner-dim) pairs
-        # mean the value mixes reduces of different layouts -> unprovable.
-        by_id = self._layout_op_index()
-        _ba_edges = {}
-        for _o in by_id.values():
-            if _o.op != "scf.for":
-                continue
-            _bas = (_o.attrs.get("block_arg_ids", []) if _o.attrs else [])[1:]
-            _inits = (_o.operand_ids or [])[3:]
-            _yield = next((b for b in _o.region_ops or [] if b.op == "scf.yield"), None)
-            for _i, _ba in enumerate(_bas):
-                _dsts = []
-                if _i < len(_inits):
-                    _dsts.append(_inits[_i])
-                if _yield is not None and _i < len(_yield.operand_ids or []):
-                    _dsts.append(_yield.operand_ids[_i])
-                _ba_edges[_ba] = _dsts
-            # Single-result scf.for: result_ids is None and the result id IS _o.id
-            # (see the resolver's res_of for the same trap).
-            _rids = _o.result_ids or ([_o.id] if len(_inits) > 0 else [])
-            for _i, _rid in enumerate(_rids):
-                if _yield is not None and _i < len(_yield.operand_ids or []):
-                    _ba_edges[_rid] = [_yield.operand_ids[_i]]
-
-        _found = set()  # {(axis, inner_dim)}
-        _seen = set()
-        _queue = [src_id]
-        while _queue and len(_seen) < 256:
-            _cur = _queue.pop()
-            if _cur in _seen:
-                continue
-            _seen.add(_cur)
-            if _cur in _ba_edges:
-                _queue.extend(_ba_edges[_cur])
-                continue
-            _op = by_id.get(_cur)
-            if _op is None:
-                continue
-            if _op.op == "tt.reduce" and _op.operand_ids:
-                _ish = self.env_shapes.get(_op.operand_ids[0])
-                if not _ish:
-                    _it = self._find_op_type_str(_op.operand_ids[0])
-                    _ish = _extract_shape(_it) if _it else None
-                if _ish and len(_ish) >= 2:
-                    _ax = _op.attrs.get("axis", 0)
-                    _found.add((_ax, _ish[1] if _ax == 1 else _ish[0]))
-                continue  # do not walk past the reduce
-            if _op.op in ("arith.constant", "tt.splat", "tt.make_range"):
-                continue
-            _queue.extend(_op.operand_ids or [])
-
+        _found = self._reduce_provenance(src_id)
         reduce_axis, N_reduced = next(iter(_found)) if len(_found) == 1 else (None, None)
 
         def _stage_modular():
@@ -18430,10 +19008,11 @@ class GenericLowerer(
         elif _layout == "blocked":
             # Resolver proves blocked rows; the reduce search must supply ONE
             # consistent axis=1 divisor or there is no valid mapping.
-            if reduce_axis == 1 and N_reduced and N_reduced > 1:
-                _stage_blocked(N_reduced)
+            _width = self._blocked_width(src_id)
+            if _width and _width > 1 and _found <= {(1, _width)}:
+                _stage_blocked(_width)
             else:
-                _refuse(f"declared blocked, but reduce provenance is {sorted(_found)}")
+                _refuse(f"declared blocked (width {_width}), but reduce provenance is {sorted(_found)}")
         elif _found:
             # The provenance search can identify reduce DIVISORS, but it cannot prove
             # that every other elementwise operand shares that reduce's layout.  In
@@ -18457,6 +19036,9 @@ class GenericLowerer(
 
         self.env[ssa.id] = result_var
         self.env_types[ssa.id] = src_dtype
+        if _ptr_info is not None:
+            self.env_is_ptr[ssa.id] = (_ptr_info[0], result_var)
+            self.env[ssa.id] = f"{_ptr_info[0]}[{result_var}]"
         if src_shape:
             self.env_shapes[ssa.id] = src_shape
         # Mark this value as having been through convert_layout — the

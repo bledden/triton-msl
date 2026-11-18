@@ -1635,6 +1635,18 @@ class _ReduceScanMixin:
         """
         if not ssa.operand_ids:
             return
+        if not getattr(self, "_reduce_operand_gathered", False):
+            # A tile whose rows are spread wider than its columns is gathered onto the
+            # lanes every path below reads (single-value reductions; others refuse).
+            _tile = ssa.operand_ids[0]
+            _previous = self._compact_spread_tile_operand(_tile, "tt.reduce", gather=len(ssa.operand_ids) == 1)
+            if _previous is not None:
+                self._reduce_operand_gathered = True
+                try:
+                    return self._lower_reduce(ssa)
+                finally:
+                    self._reduce_operand_gathered = False
+                    self.env[_tile] = _previous
 
         # Detect multi-value reduce (argmax/argmin): 2+ inputs, 2+ results
         if len(ssa.operand_ids) >= 2 and ssa.result_ids and len(ssa.result_ids) >= 2:
@@ -1760,7 +1772,11 @@ class _ReduceScanMixin:
             # where dim_0 == 1 and axis == 1, this is really a 1D reduction
             # along the reduction dimension.  Use the efficient SIMD path,
             # not the slow sequential shared memory path.
-            if input_shape[0] == 1 and axis == 1:
+            # ... unless the operand carries a recorded broadcast index (a tile reshaped
+            # and reduced along a third axis holds each element on several lanes): the SIMD
+            # path would take every lane, so the staged path, which writes each element to
+            # its own slot, is used instead.
+            if input_shape[0] == 1 and axis == 1 and ssa.operand_ids[0] not in self._bcast_layout:
                 pass  # Fall through to 1D SIMD reduction below
             else:
                 # A 2-D axis reduce whose tile exceeds the threadgroup under-covers the
@@ -1859,17 +1875,19 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"    int {cast_var} = (int){input_var};")
             input_var = cast_var
 
-        if is_i64:
-            self._lower_reduce_1d_i64(ssa, input_var, combine_op, msl_type, shared_dtype)
-            return
-
         # The dispatch may run more threads (block_size = num_threads) than the
         # logical reduce length N when the input has no make_range to pin block_size
         # to N — e.g. a reduce over a tt.splat/full. Lanes >= N then hold a value that
         # must NOT contribute (re-audit #6: sum over a splat of N summed num_threads
         # copies — 768 vs 24). Mask the tail to the combine identity. No-op when
         # N == block_size (the common make_range case, where N lanes == all lanes).
+        # A one-row (1, N) tile reduced along its row reaches here too, and is the same
+        # N-element full reduce: an operand that is itself a reduction result is held on
+        # more lanes than its N elements (a kept axis-0 reduction repeats every N lanes).
         _rn = input_shape[0] if (input_shape and len(input_shape) == 1) else None
+        if _rn is None and self._is_2d and input_shape and len(input_shape) == 2:
+            if input_shape[0] == 1 and axis == 1:
+                _rn = input_shape[1]
         if _rn is not None and _rn < self.kb.block_size:
             from triton_msl.errors import MetalNonRecoverableError
 
@@ -1886,6 +1904,8 @@ class _ReduceScanMixin:
                 # NaN-prop max/min are float-only; -INF/INF tail-pad never spuriously
                 # introduces a NaN (so masked lanes don't poison the result).
                 _ident = "-INFINITY" if combine_op == "nanmax" else "INFINITY"
+            elif combine_op in ("max", "min") and is_i64:
+                _ident = self._reduce_identity_combine(combine_op, msl_type)[0]
             elif combine_op == "max":
                 # integer max identity (reduce-probe over-refusal fix: int max/min over a
                 # splat was wrongly refused).
@@ -1902,11 +1922,43 @@ class _ReduceScanMixin:
                     f"the cross-lane reduce would over-count. Refusing.",
                     op_name="tt.reduce",
                 )
+            # Which lanes hold the _rn elements. A value of a row-wise (axis=1) reduce is
+            # held one row per block of lanes: lanes 0.._rn-1 are all row 0, and taking
+            # them reduced _rn copies of the first row. One lane of each block is taken.
+            _holds = f"lid < {_rn}u"
+            _layout = self._value_1d_layout_of(ssa.operand_ids[0])
+            _widths = self._blocked_widths(ssa.operand_ids[0])
+            _width = next(iter(_widths)) if len(_widths) == 1 else None
+            if getattr(self, "_reduce_operand_gathered", False):
+                # A spread tile was just gathered onto lanes 0.._rn-1 (see _lower_reduce):
+                # the layout declared for its source no longer describes the operand.
+                pass
+            elif _layout == "blocked":
+                if not _width:
+                    raise MetalNonRecoverableError(
+                        f"reduce ('{combine_op}') over a row-blocked value whose block width "
+                        f"is not one known number. Refusing.",
+                        op_name="tt.reduce",
+                    )
+                if _width > 1:
+                    _holds = f"lid % {_width}u == 0u && lid / {_width}u < {_rn}u"
+            elif _layout is None and (_widths or self._reduce_provenance(ssa.operand_ids[0])):
+                raise MetalNonRecoverableError(
+                    f"reduce ('{combine_op}') over a {_rn}-element value computed from a row-wise "
+                    f"reduce or a row index, whose thread-to-element mapping is not proved; "
+                    f"taking lanes 0..{_rn - 1} could reduce copies of the first row. Refusing.",
+                    op_name="tt.reduce",
+                )
             _masked = self._next_var("rmask")
-            self.kb.raw_line(
-                f"    {msl_type} {_masked} = (lid < {_rn}u) ? ({msl_type}){input_var} : ({msl_type}){_ident};"
-            )
+            self.kb.raw_line(f"    {msl_type} {_masked} = ({_holds}) ? ({msl_type}){input_var} : ({msl_type}){_ident};")
             input_var = _masked
+
+        # 64-bit integers reduce through a shared-memory tree. It runs AFTER the lane mask:
+        # the tree combines every lane of the group, so an operand held on more lanes than
+        # it has elements (a row-wise reduce result) was counted once per lane.
+        if is_i64:
+            self._lower_reduce_1d_i64(ssa, input_var, combine_op, msl_type, shared_dtype)
+            return
 
         # 1D full reduction (original behavior)
         shared_name = f"shared_{self._shared_counter}"
@@ -2231,8 +2283,22 @@ class _ReduceScanMixin:
 
         tag = "max" if is_max else "min"
         self.kb.raw_line(f"    // Multi-value reduce: arg{tag}")
-        self.kb.raw_line(f"    {msl_val_type} {mv} = {val_var};")
-        self.kb.raw_line(f"    int {mi} = {idx_var};")
+        _holds, _idx_expr = self._argminmax_lane_contract(ssa, native, idx_var)
+        if _holds is None:
+            self.kb.raw_line(f"    {msl_val_type} {mv} = {val_var};")
+            self.kb.raw_line(f"    int {mi} = {idx_var};")
+        else:
+            # Lanes that hold no element of the operand lose every comparison: a lane
+            # outside the tile holds a zero, which won an all-negative argmax or an
+            # all-positive argmin and returned its (zero) index.
+            if msl_val_type == "float":
+                _lose = "(-INFINITY)" if is_max else "INFINITY"
+            elif msl_val_type == "uint":
+                _lose = "0u" if is_max else "0xFFFFFFFFu"
+            else:
+                _lose = "INT_MIN" if is_max else "INT_MAX"
+            self.kb.raw_line(f"    {msl_val_type} {mv} = ({_holds}) ? ({msl_val_type}){val_var} : {_lose};")
+            self.kb.raw_line(f"    int {mi} = ({_holds}) ? (int)({_idx_expr}) : INT_MAX;")
 
         # SIMD-level tree reduction using simd_shuffle_down. The source lane is
         # group-relative (tiisg + _d); its GLOBAL thread index is lid + _d. When the
@@ -2300,6 +2366,69 @@ class _ReduceScanMixin:
         self._register_1d_layout(ssa.id, "direct")
         for _rid in ssa.result_ids or []:
             self._register_1d_layout(_rid, "direct")
+
+    def _argminmax_lane_contract(self, ssa, native, idx_var):
+        """Which lanes take part in a full argmin/argmax, and the index each one carries.
+
+        Returns ``(None, None)`` when every lane of the group holds its own element (the
+        operand fills the threadgroup one element per lane), else ``(predicate, index)``.
+        An operand with fewer elements than the group has lanes, or one held a block of
+        lanes per element (a row-wise reduce result), needs both: the unmasked tree took
+        the zeros of the lanes outside the tile, and the lane number as the index.
+        """
+        from triton_msl.errors import MetalNonRecoverableError
+
+        shape = native["shape"]
+        if len(shape) == 1:
+            n = shape[0]
+        elif len(shape) == 2 and shape[0] == 1 and native["axis"] == 1:
+            n = shape[1]
+        else:
+            return None, None
+        value_id, index_id = ssa.operand_ids[0], ssa.operand_ids[1]
+        if value_id in self._bcast_layout:
+            raise MetalNonRecoverableError(
+                "argmax/argmin of a value held under a recorded broadcast index (a tile reduced "
+                "along a third axis): the lanes that hold each element are not one per element, "
+                "so the index of the winner cannot be proved. Refusing.",
+                op_name="tt.reduce",
+            )
+        kind, width = self._lanes_of_1d_value(value_id, n, "argmax/argmin")
+        if kind == "direct" and n >= self.kb.block_size:
+            return None, None
+        element = f"lid / {width}u" if kind == "blocked" else "lid"
+        holds = f"{element} < {n}u"
+        # The index operand of tl.argmax / tl.argmin is tl.arange(0, n) laid out for the
+        # operand's declared layout, not for the lanes the value is held on. When it is
+        # that range, the element number is the index.
+        by_id = self._layout_op_index()
+        cur = index_id
+        start = None
+        for _ in range(8):
+            op = by_id.get(cur)
+            if op is None:
+                break
+            if op.op == "tt.make_range":
+                _start = op.attrs.get("start", 0)
+                _end = op.attrs.get("end", self.graph.block_size)
+                if _end - _start == n:
+                    start = _start
+                break
+            if op.op in self._LAYOUT_PASSTHROUGH_OPS and op.operand_ids:
+                cur = op.operand_ids[0]
+                continue
+            break
+        if start is not None:
+            return holds, f"(int)({element}) + {start}"
+        if self._value_1d_layout_of(index_id) == "any":
+            return holds, idx_var  # one index on every lane (a one-element operand)
+        if kind == "blocked" or self._lanes_of_1d_value(index_id, n, "argmax/argmin index")[0] != "direct":
+            raise MetalNonRecoverableError(
+                "argmax/argmin of a row-blocked value whose index operand is not the plain "
+                "tl.arange of its length: the index each lane carries cannot be proved. Refusing.",
+                op_name="tt.reduce",
+            )
+        return holds, idx_var
 
     def _lower_reduce_2d_argminmax(self, ssa, axis, input_shape, native, argminmax):
         """Lower 2D argmin/argmax: find min/max value and index along axis.
@@ -2449,9 +2578,9 @@ class _ReduceScanMixin:
         # thread that stored read column 0, so column 0's index was broadcast to the whole
         # output (reduce-probe #6, previously refused for square tiles).
         _layout = "direct" if axis == 0 else "blocked"
-        self._register_1d_layout(ssa.id, _layout)
+        self._register_1d_layout(ssa.id, _layout, N)
         for _rid in ssa.result_ids or []:
-            self._register_1d_layout(_rid, _layout)
+            self._register_1d_layout(_rid, _layout, N)
         # Barrier AFTER the broadcast read of the pooled result arrays — without it a SECOND
         # argminmax in the same kernel re-stages those (declare_threadgroup_array-pooled)
         # arrays and races this read, so a tail of rows return their own index. Twin of the
@@ -2663,7 +2792,27 @@ class _ReduceScanMixin:
                 bs = self.effective_block_size
                 self.kb.raw_line(f"    if (lid < {bs}u) {shared_name}[{input_bcast_idx}] = {input_var};")
             else:
-                self.kb.raw_line(f"    if (lid < {total}u) {shared_name}[lid] = {input_var};")
+                # A tile with a unit axis is a 1-D value, and a 1-D value that is itself a
+                # row-wise reduction (`tl.sum(v, axis=1, keep_dims=True)`) is held one
+                # element per block of lanes: lanes 0..total-1 are then all its first
+                # element. One lane of each block is staged.
+                # (Not after a spread tile was gathered onto lanes 0..total-1 in
+                # _lower_reduce: the layout declared for its source no longer holds.)
+                _stage_w = 1
+                if 1 in (M, N) and total > 1 and not getattr(self, "_reduce_operand_gathered", False):
+                    _stage_w = self._lanes_of_1d_value(
+                        ssa.operand_ids[0],
+                        total,
+                        f"reduce ('{combine_op}') of a {tuple(input_shape)} tile",
+                        with_own_total=True,
+                    )[1]
+                if _stage_w > 1:
+                    self.kb.raw_line(
+                        f"    if (lid % {_stage_w}u == 0u && lid / {_stage_w}u < {total}u) "
+                        f"{shared_name}[lid / {_stage_w}u] = {input_var};"
+                    )
+                else:
+                    self.kb.raw_line(f"    if (lid < {total}u) {shared_name}[lid] = {input_var};")
             self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 
         # Use a second shared array to broadcast results to all threads
@@ -2695,7 +2844,11 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
             # All threads read their row's result.
             # Row-major: threads [0..N-1] in row 0, [N..2N-1] in row 1.
-            self.kb.raw_line(f"    {result_var} = (lid < {total}u) ? {result_shared}[lid / {N}u] : {identity};")
+            if M == 1:
+                # One result: every lane holds it (it may be broadcast over a wider tile).
+                self.kb.raw_line(f"    {result_var} = {result_shared}[0];")
+            else:
+                self.kb.raw_line(f"    {result_var} = (lid < {total}u) ? {result_shared}[lid / {N}u] : {identity};")
             # Barrier AFTER the broadcast read: result_shared may alias the input shared
             # array (existing_shared reuse), and a following op that re-stages it (e.g. a
             # fused tt.scan's `shared[lid] = ...`) would otherwise race this read and a tail
@@ -2723,7 +2876,12 @@ class _ReduceScanMixin:
             self.kb.raw_line(f"    if (lid < {N}u) {result_shared}[lid] = {result_var};")
             self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
             # All threads read their column's result
-            self.kb.raw_line(f"    {result_var} = (lid < {total}u) ? {result_shared}[lid % {N}u] : {identity};")
+            if N == 1:
+                # One result: every lane holds it. Lanes 0..M-1 alone would leave the rest
+                # of a wider tile it is broadcast over (`v * total`) with the identity.
+                self.kb.raw_line(f"    {result_var} = {result_shared}[0];")
+            else:
+                self.kb.raw_line(f"    {result_var} = (lid < {total}u) ? {result_shared}[lid % {N}u] : {identity};")
             # Barrier after the broadcast read — see the axis==1 branch (guards the
             # result_shared/input-shared alias against a following re-stage, e.g. a scan).
             self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
@@ -2740,9 +2898,9 @@ class _ReduceScanMixin:
         # result_shared[lid % N] (DIRECT, per column). Without this the store falls back
         # to inferring the layout from the result's size, which is ambiguous.
         _layout = "blocked" if axis == 1 else "direct"
-        self._register_1d_layout(ssa.id, _layout)
+        self._register_1d_layout(ssa.id, _layout, N)
         for _rid in ssa.result_ids or []:
-            self._register_1d_layout(_rid, _layout)
+            self._register_1d_layout(_rid, _layout, N)
 
     def _lower_reduce_3d(
         self,
@@ -3119,6 +3277,7 @@ class _ReduceScanMixin:
 
         if not ssa.operand_ids:
             return
+        self._compact_spread_tile_operand(ssa.operand_ids[0], "tt.scan")
 
         # The wide register-array route is authorized by native per-result
         # metadata, never by a first-result type string or mutable env_types.

@@ -23,6 +23,14 @@ MODES (per route, where applicable): 0 native · 1 masked input · 2 square-tile
 
 Compile-time pins go through ``emit_msl`` with the LAUNCH-SPECIALIZED signature (unit strides
 as ``constexpr`` 1 — the GEMV descriptors check that exact arg layout).
+
+2026-11-18 (reduce of a row reduction, the held-layout record): the int8 wrong-axis expand
+(mode 8 at BN == BK == 32) no longer refuses at the lowering boundary. Its descriptor still
+declines it, and the generic path now proves the layout of ``acc * scale`` (a loop-carried row
+reduction times a load through the row index) and lowers the kernel, as it already did for
+the int4 route. The ``gemv-int8-m8`` refusal pin became
+``test_lowering_boundary_int8_wrong_axis_declines_no_stub`` and the exact device tests
+``test_int8_gemv_wrong_axis_expand_declines_and_computes`` / ``..._computes_exactly``.
 """
 
 import pytest
@@ -602,6 +610,68 @@ def test_int8_gemv_wrong_axis_expand_never_raw(cold_gpu_caches):
 
 
 @requires_gpu
+def test_int8_gemv_wrong_axis_expand_declines_and_computes(cold_gpu_caches):
+    """The int8 descriptor declines ``x[:, None]``; the generic path now replays it (it
+    refused until the layout of ``acc * scale`` could be proved)."""
+    launch, o, raw, intended = _g8_case(8, BK=32)
+    assert _witness(launch, o, raw, intended) == "computed"
+
+
+def _g8_wrong_axis_exact_case(N, K, B):
+    """Integer data for an EXACT comparison of the wrong-axis expand at BN == BK == B: x and
+    zero are small integers, w is int8 and the scale a power of two, so every partial sum is an
+    integer far below 2**24 and fp32 holds it exactly in any summation order. N and K need not
+    be multiples of B: the kernel has no masks, so it reads and stores whole tiles inside the
+    same contiguous buffers (flat addressing, mirrored here). Returns the launch, the output,
+    the kernel's own semantics and the template's (``x[None, :]``) result."""
+    g = torch.Generator().manual_seed(10502)
+    progs, iters = -(-N // B), -(-K // B)
+    rows = progs * B + 2  # a ragged K spills the last tile into the next row
+    x = torch.randint(-4, 5, (iters * B + 8,), generator=g).float()
+    w = torch.randint(-32, 32, (rows, K), generator=g, dtype=torch.int8)
+    s = 2.0 ** torch.randint(-1, 3, (progs * B + 8,), generator=g).float()
+    z = torch.randint(-4, 5, (progs * B + 8,), generator=g).float()
+    wf, r = w.reshape(-1).float(), torch.arange(B)
+    intended = torch.full((progs * B + 8,), float("nan"))
+    raw = intended.clone()
+    for pid in range(progs):
+        rn = pid * B + r
+        acc, acc_raw = torch.zeros(B), torch.zeros(B)
+        for k in range(0, K, B):
+            wz = wf[rn[:, None] * K + (r[None, :] + k)] - z[rn][:, None]
+            acc += (x[r + k][:, None] * wz).sum(1)  # x[:, None]: row i scaled by x[k + i]
+            acc_raw += (x[r + k][None, :] * wz).sum(1)
+        intended[rn], raw[rn] = acc * s[rn], acc_raw * s[rn]
+    gx, gw, gs, gz = (t.to(D) for t in (x, w, s, z))
+    o = torch.full((progs * B + 8,), float("nan"), device=D)
+    launch = lambda: _g8[(progs,)](gx, gw, o, gs, gz, N, K, gw.stride(0), gw.stride(1), BN=B, BK=B, MODE=8)
+    return launch, o, intended, raw
+
+
+@requires_gpu
+@pytest.mark.parametrize(
+    "N,K,B",
+    [(256, 512, 32), (64, 128, 32), (40, 100, 32), (32, 32, 32), (64, 128, 16), (24, 40, 16)],
+    ids=lambda v: str(v),
+)
+def test_int8_gemv_wrong_axis_expand_computes_exactly(cold_gpu_caches, N, K, B):
+    """The wrong-axis expand on the generic path equals the kernel's own semantics EXACTLY,
+    at sizes that are and are not multiples of the tile: every stored cell equal, every other
+    cell untouched, and different from the template's contraction."""
+    launch, o, intended, raw = _g8_wrong_axis_exact_case(N, K, B)
+    same = lambda a, b: torch.equal(torch.nan_to_num(a, nan=98765.0), torch.nan_to_num(b, nan=98765.0))
+    assert not same(raw, intended), "the expand axis does not change the result on this data"
+    launch()
+    torch.mps.synchronize()
+    got = o.cpu()
+    wrong = (torch.nan_to_num(got, nan=98765.0) != torch.nan_to_num(intended, nan=98765.0)).nonzero().flatten()
+    assert same(got, intended), (
+        f"{wrong.numel()} cells differ from the kernel's semantics, first {wrong[:4].tolist()}: "
+        f"got {got[wrong[:4]].tolist()}, want {intended[wrong[:4]].tolist()}, template {raw[wrong[:4]].tolist()}"
+    )
+
+
+@requires_gpu
 def test_int8_gemv_native_computes(cold_gpu_caches):
     launch, o, raw, _ = _g8_case(0)
     launch()
@@ -758,9 +828,6 @@ _BOUNDARY = (
     [pytest.param(_pg, _SIG_PG, _CEX_PG, m, id=f"pergroup-m{m}") for m in _PG_BITES]
     + [pytest.param(_sym, _SIG_SYM, _CEX_SYM, m, id=f"symmetric-m{m}") for m in _SYM_BITES]
     + [pytest.param(_g8, _SIG_G8, _CEX_G8, m, id=f"gemv-int8-m{m}") for m in _G8_BITES]
-    + [
-        pytest.param(_g8, _SIG_G8, {**_CEX_G8, "BK": 32}, 8, id="gemv-int8-m8"),
-    ]
     + [pytest.param(_g4, _SIG_G4, _CEX_G4, m, id=f"gemv-int4-m{m}") for m in _G4_BITES]
 )
 
@@ -768,7 +835,9 @@ _BOUNDARY = (
 @requires
 @pytest.mark.parametrize("fn,sig,cex,mode", _BOUNDARY)
 def test_lowering_boundary_quant_transform_refuses(fn, sig, cex, mode):
-    """Rule 9: fresh TTGIR through emit_msl, every transform refuses on every route."""
+    """Rule 9: fresh TTGIR through emit_msl, every transform refuses on every route (the
+    wrong-axis expand, mode 8, is the exception on both GEMV routes: declined, then lowered
+    by the generic path — see the two ``..._wrong_axis_declines_no_stub`` tests below)."""
     with pytest.raises(MetalNonRecoverableError):
         _emit_for(fn, sig, {**cex, "MODE": mode})
 
@@ -790,6 +859,15 @@ def test_lowering_boundary_quant_native_routes(fn, sig, cex, mode):
     msl, md = _emit_for(fn, sig, {**cex, "MODE": mode})
     assert "UNSUPPORTED" not in msl
     assert md.get("quant_matmul") is not None, "native quantized form no longer routes to its template"
+
+
+@requires
+def test_lowering_boundary_int8_wrong_axis_declines_no_stub():
+    """The int8 descriptor declines ``x[:, None]`` and the generic path lowers it (no stub).
+    This was a refusal pin until the generic path could prove the layout of ``acc * scale``."""
+    msl, md = _emit_for(_g8, _SIG_G8, {**_CEX_G8, "BK": 32, "MODE": 8})
+    assert "UNSUPPORTED" not in msl
+    assert md.get("quant_matmul") is None
 
 
 @requires
