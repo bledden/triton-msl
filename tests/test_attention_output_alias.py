@@ -13,18 +13,22 @@ the launcher refuses one that overlaps another tensor argument. Inputs that shar
 each other, such as one tensor as query, key and value, still compute, and so does a two-dot
 kernel that is not attention.
 
-The comparison is of the byte ranges of the views as passed. Views that interleave without
-sharing a cell (the slots of one packed buffer, a column beside its matrix) are refused too:
-a kernel addresses its tensors through its own stride arguments, and slot views given
-contiguous strides put the output's rows over the rows read as inputs. That launch returned
-1117 to 1364 wrong cells of 4096 while a comparison of the views' cells accepted it. A view
-shorter than the rows its stride and length arguments address is compared by its own extent,
-so such a launch is not refused.
+The comparison is of whole storages. A kernel addresses its tensors through its own stride
+and length arguments, so the views a caller passes do not bound the cells it reads and
+writes: slot views of one buffer given contiguous strides put the output's rows over the
+rows read as inputs (1117 to 1364 wrong cells of 4096 while a comparison of the views'
+cells accepted the launch), and so does a one-element view of the keys beside an output
+32 rows further along the same storage (wrong on every tree while the views' byte ranges
+were compared). An output that is a view of the storage of another tensor argument is
+therefore refused wherever the two views lie, and so is an output beside an argument whose
+storage cannot be read. Disjoint slices of one arena, which computed before, are refused
+with them; an output with a storage of its own computes.
 """
 
 import math
 import platform
 
+import numpy
 import pytest
 import torch
 import triton
@@ -44,7 +48,7 @@ requires_mps = pytest.mark.skipif(
     not (platform.system() == "Darwin" and torch.backends.mps.is_available() and hasattr(torch.mps, "compile_shader")),
     reason="needs MPS + compile_shader",
 )
-REFUSAL = "attention kernel: output argument {} shares memory with argument {}"
+REFUSAL = "attention kernel: output argument {} is not known to be apart from argument {}:"
 
 
 # ---------------------------------------------------------------------------- the lookup
@@ -67,17 +71,49 @@ def test_two_outputs_over_each_other_are_found():
     assert overlapping_output([x, out, out], [1, 2]) == (1, 2)
 
 
-def test_views_of_one_storage_are_compared_by_byte_range():
+def test_views_of_one_storage_are_reported_wherever_they_lie():
     arena = torch.zeros(4 * 64)
     q, k, v, out = (arena[i * 64 : (i + 1) * 64].view(8, 8) for i in range(4))
-    assert overlapping_output([q, k, v, out], [3]) is None
-    assert overlapping_output([q, k, v, arena[191:255].view(8, 8)], [3]) == (3, 2)
+    assert overlapping_output([q, k, v, out], [3]) == (3, 0)
+    assert overlapping_output([q.clone(), k, v, out], [3]) == (3, 1)
+    assert overlapping_output([q, k, v, out.clone()], [3]) is None
+    assert overlapping_output([q, k, v, arena[191:255].view(8, 8)], [3]) == (3, 0)
+    # A zero-size view still names the storage the kernel addresses through it.
+    assert overlapping_output([arena[:0], arena], [0]) == (0, 1)
     assert overlapping_output([torch.zeros(0), arena], [0]) is None
+    assert overlapping_output([torch.zeros(0), torch.zeros(0)], [0]) is None
+
+
+def test_a_view_shorter_than_the_cells_addressed_through_it_is_reported():
+    # An input passed as a view of four elements, read for sixteen through the kernel's
+    # length argument, with the output at elements eight to eleven of the same storage:
+    # the views' cells are apart, the cells the kernel addresses are not.
+    arena = torch.zeros(16)
+    assert overlapping_output([arena[:4], arena[8:12], 16], [1]) == (1, 0)
+    assert overlapping_output([arena[:1], arena[15:]], [1]) == (1, 0)
+    assert overlapping_output([arena[:4], torch.zeros(4), 16], [1]) is None
+
+
+def test_host_storages_over_the_same_memory_are_reported():
+    # Two host tensors can cover the same memory without being views of one storage.
+    memory = numpy.zeros(32, dtype=numpy.float32)
+    assert overlapping_output([torch.from_numpy(memory[:16]), torch.from_numpy(memory[8:])], [1]) == (1, 0)
+    assert overlapping_output([torch.from_numpy(memory), torch.from_numpy(memory[30:])], [1]) == (1, 0)
+    assert overlapping_output([torch.from_numpy(memory[:8]), torch.from_numpy(memory[8:])], [1]) is None
+
+
+@requires_mps
+def test_storages_on_different_devices_are_apart():
+    on_host, on_device = torch.zeros(64), torch.zeros(64, device="mps")
+    assert overlapping_output([on_host, on_device], [1]) is None
+    assert overlapping_output([on_device, on_device[32:]], [1]) == (1, 0)
+    assert overlapping_output([on_device[:8], on_device[32:]], [0]) == (0, 1)
+    assert overlapping_output([on_device, torch.zeros(64, device="mps")], [1]) is None
 
 
 def test_views_that_interleave_without_sharing_a_cell_are_reported():
     # The views' cells say nothing about the cells a kernel addresses through its own
-    # stride arguments, so intersecting ranges are reported whatever the views' strides.
+    # stride arguments, so views of one storage are reported whatever their strides.
     pair = torch.zeros(8, 2)
     assert overlapping_output([pair[:, 0], pair[:, 1]], [1]) == (1, 0)
     # Query, key, value and output as the slots of one packed buffer.
@@ -95,10 +131,9 @@ def test_views_that_interleave_without_sharing_a_cell_are_reported():
     assert overlapping_output([wide[:, 0], halves[:, 3]], [0]) == (0, 1)
 
 
-def test_the_range_comparison_never_misses_a_shared_cell():
-    # Every pair of strided views of a small arena, against the cells they address.
-    cells = torch.arange(4 * 6 * 5).view(4, 6, 5)
+def test_every_pair_of_views_of_one_storage_is_reported():
     arena = torch.zeros(4 * 6 * 5).view(4, 6, 5)
+    other = torch.zeros(4 * 6 * 5).view(4, 6, 5)
     cuts = [
         (slice(None), slice(None), slice(None)),
         (slice(1, None, 2), slice(None), slice(None)),
@@ -106,25 +141,17 @@ def test_the_range_comparison_never_misses_a_shared_cell():
         (slice(None), slice(1, None, 2), slice(None)),
         (slice(None), slice(None), slice(0, 4)),
         (slice(None), slice(None), 4),
-        (slice(None), slice(None), 3),
         (slice(None), 2, slice(1, None, 3)),
-        (slice(None), slice(None, None, 3), slice(2, None, 2)),
         (slice(2, 3), slice(1, 5), slice(None, None, 2)),
         (0, slice(None), slice(None)),
         (3, slice(4, None), slice(None, 2)),
-        (slice(None), slice(None, None, 4), slice(None, None, 4)),
-        (slice(None), slice(2, None, 4), slice(1, None, 4)),
     ]
-    apart = 0
     for a in cuts:
         for b in cuts:
-            shared = bool(set(cells[a].flatten().tolist()) & set(cells[b].flatten().tolist()))
-            found = overlapping_output([arena[a], arena[b]], [0])
-            assert not shared or found == (0, 1), (a, b)
-            apart += found is None
-            moved = overlapping_output([arena[a].transpose(0, -1), arena[b]], [0])
-            assert not shared or moved == (0, 1), (a, b)
-    assert apart > 10  # views whose ranges do not intersect stay eligible
+            assert overlapping_output([arena[a], arena[b]], [0]) == (0, 1), (a, b)
+            assert overlapping_output([arena[a].transpose(0, -1), arena[b]], [0]) == (0, 1), (a, b)
+            assert overlapping_output([arena[a], other[b]], [0]) is None, (a, b)
+            assert overlapping_output([arena[a], other[b], arena[b]], [1]) is None, (a, b)
 
 
 def test_a_reinterpreted_tensor_addresses_its_base():
@@ -134,15 +161,26 @@ def test_a_reinterpreted_tensor_addresses_its_base():
     assert overlapping_output([triton.reinterpret(x, tl.float32), x[4:]], [1]) == (1, 0)
 
 
-def test_arguments_without_readable_storage_are_skipped():
+def test_an_argument_whose_storage_cannot_be_read_is_not_known_to_be_apart():
     class Opaque:
         def data_ptr(self):
             return 4096
 
+    class Raising:
+        def data_ptr(self):
+            return 4096
+
+        def untyped_storage(self):
+            raise RuntimeError("no storage")
+
     x = torch.zeros(8)
-    assert overlapping_output([Opaque(), x, 3, 2.5, None], [1]) is None
-    assert overlapping_output([x, Opaque()], [1]) is None
-    assert overlapping_output([x, x, 3], [2]) is None
+    for unreadable in (Opaque(), Raising()):
+        assert overlapping_output([unreadable, x, 3, 2.5, None], [1]) == (1, 0)
+        assert overlapping_output([x, unreadable], [1]) == (1, 0)
+        assert overlapping_output([x, unreadable], [0]) == (0, 1)
+        assert overlapping_output([x, unreadable], []) is None  # inputs are not compared
+        assert overlapping_output([unreadable], [0]) is None  # nothing to be apart from
+    assert overlapping_output([x, x, 3], [2]) is None  # a scalar is not a tensor argument
 
 
 # ---------------------------------------------------------------------------- on the device
@@ -193,24 +231,73 @@ def test_one_tensor_as_query_key_and_value_computes(device):
 
 
 @requires_mps
-def test_views_of_one_storage_compute_when_the_output_is_apart():
-    t = _dense_inputs(2, 32, 64, "mps")
+@pytest.mark.parametrize("device", ["mps", "cpu"])
+def test_disjoint_slices_of_one_storage_refuse_with_the_output_among_them(device):
+    # A capability given up: these four slices share no cell and computed while the views'
+    # byte ranges were compared. The launcher cannot see that the kernel stays inside them.
+    t = _dense_inputs(2, 32, 64, device)
     cells = t["q"].numel()
-    arena = torch.zeros(4 * cells, device="mps")
+    arena = torch.full((4 * cells,), -8192.0, device=device)
     views = {name: arena[i * cells : (i + 1) * cells].view(1, 2, 32, 64) for i, name in enumerate("qkvo")}
     for name in "qkv":
         views[name].copy_(t[name])
+    before = arena.clone()
+    with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("Out", "Q")):
+        _dense(views, 2, 32, 64, 32)
+    assert torch.equal(arena, before)
+    # The inputs as slices of one storage and the output in a storage of its own compute.
+    apart = dict(views, o=torch.zeros_like(t["o"]))
     _dense(t, 2, 32, 64, 32)
-    _dense(views, 2, 32, 64, 32)
-    assert torch.equal(views["o"], t["o"])
+    _dense(apart, 2, 32, 64, 32)
+    assert torch.equal(apart["o"], t["o"]) and float(t["o"].abs().max()) > 0
+
+
+def _dense_explicit(q, k, v, out, n, dim, strides):
+    _flash_attn_fwd[(1, 1)](
+        q, k, v, out, *q.stride(), *strides["k"], *v.stride(), *strides["o"], 1, 1, n,
+        BLOCK_M=64, BLOCK_N=32, HEAD_DIM=dim, IS_CAUSAL=False,
+    )  # fmt: skip
+    torch.mps.synchronize()
+
+
+@requires_mps
+@pytest.mark.parametrize("short", ["keys", "output", "both"])
+def test_a_short_view_beside_the_output_in_one_storage_refuses(short):
+    # The keys' 64 rows start at element 0 of a storage and the output's 64 rows start 32
+    # rows further along, both addressed through explicit stride arguments. Passed as views
+    # of one element the two share no byte, and the launch stored its first rows over keys
+    # it had still to read: wrong against the separate output on every tree before this.
+    n, dim = 64, 64
+    gen = torch.Generator().manual_seed(7)
+    q, v = (torch.randn(1, 1, n, dim, generator=gen).to("mps") for _ in range(2))
+    keys = torch.randn(n * dim, generator=gen).to("mps")
+    contiguous = (n * dim, n * dim, dim, 1)
+    strides = {"k": contiguous, "o": contiguous}
+
+    arena = torch.zeros(4 * n * dim, device="mps")
+    arena[: n * dim] = keys
+    before = arena.clone()
+    k_rows, out_rows = arena[: n * dim].view(1, 1, n, dim), arena[32 * dim : (32 + n) * dim].view(1, 1, n, dim)
+    k_view = arena[:1] if short in ("keys", "both") else k_rows
+    out_view = arena[32 * dim : 32 * dim + 1] if short in ("output", "both") else out_rows
+    with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("Out", "K")):
+        _dense_explicit(q, k_view, v, out_view, n, dim, strides)
+    assert torch.equal(arena, before)
+
+    # The same one-element view of the keys with the output in its own storage computes
+    # what the full view computes.
+    full, through_short = (torch.zeros(1, 1, n, dim, device="mps") for _ in range(2))
+    _dense_explicit(q, k_rows, v, full, n, dim, strides)
+    _dense_explicit(q, arena[:1], v, through_short, n, dim, strides)
+    assert torch.equal(through_short, full) and float(full.abs().max()) > 0
 
 
 @requires_mps
 @pytest.mark.parametrize("device", ["mps", "cpu"])
 @pytest.mark.parametrize("rows, n", [(32, 32), (32, 80), (64, 64)])
 def test_the_slots_of_one_packed_buffer_refuse(device, rows, n):
-    # The four views interleave, so every byte range covers the others. No cell is shared
-    # with these stride arguments, but the launcher does not see the kernel's addresses.
+    # The four views are slots of one storage. No cell is shared with these stride
+    # arguments, but the launcher does not see the kernel's addresses.
     t = _dense_inputs(2, n, 64, device)
     packed = torch.full((1, 2, n, 4, 64), -8192.0, device=device)
     views = {name: packed[:, :, :, i] for i, name in enumerate("qkvo")}
@@ -273,7 +360,7 @@ def test_a_log_sum_exp_column_beside_the_output_refuses(dim, dtype, keys):
     _biased(apart, heads, rows, dim, keys)
     assert float(apart["o"].abs().max()) > 0 and bool(apart["l"].isfinite().all())
     # Two outputs of one buffer: the column after the output's last one shares no cell
-    # with it, the output's own last column does. Their byte ranges intersect either way.
+    # with it, the output's own last column does. They are views of one storage either way.
     both = torch.full((1, heads, rows, dim + 1), -8192.0, dtype=dtype, device="mps")
     for column in (dim, dim - 1):
         with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("o_ptr", "lse_ptr")):
@@ -515,8 +602,8 @@ def test_backward_output_over_an_input_refuses(kind, output, over):
     [("kv", "dk", "dv"), ("kv", "dk", "k"), ("q", "dq", "q"), ("q", "delta", "lse")],
 )
 def test_backward_tensors_interleaved_in_one_buffer_refuse(kind, first, second):
-    # An output and another tensor as the two slots of one buffer: no cell shared, ranges
-    # intersecting.
+    # An output and another tensor as the two slots of one buffer: no cell shared, one
+    # storage.
     t = {name: x.to("mps") for name, x in bwd._inputs(kind, 5).items()}
     shape = tuple(max(a, b) for a, b in zip(t[first].shape, t[second].shape))
     packed = torch.full((*shape, 2), -8192.0, device="mps")

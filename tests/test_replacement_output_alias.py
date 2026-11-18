@@ -6,11 +6,15 @@ that program over several threadgroups that store finished tiles while others st
 Measured on the device before the gate: a 256x256 in-place matmul was wrong in 4 to 5 of 300
 launches, an in-place quantized GEMV in 1 to 11 of 200 depending on the run. The fast matmul
 route, split-K included, now keeps the compiled entry for such a launch and the quantized
-routes refuse it; views of one storage whose byte ranges do not intersect keep the replacement.
+routes refuse it. A kernel addresses a tensor through its own stride and length arguments,
+not through the view passed, so views of one storage keep the replacement only where the
+route knows the element count addressed from each pointer and those byte ranges do not
+intersect. A tensor argument without such a count is compared by whole storage.
 """
 
 import platform
 
+import numpy
 import pytest
 import torch
 
@@ -76,7 +80,10 @@ def test_exact_counts_are_the_whole_contract():
     after_row = arena[32:64].view(4, 8)
     assert output_overlaps_operand([row, torch.zeros(16, 8), after_row], 2, 32, {0: 64, 1: 128}, exact=True)
     assert output_overlaps_operand([row, torch.zeros(16, 8), after_row], 2, 32, {0: 64})
-    assert not output_overlaps_operand([row, torch.zeros(16, 8), after_row], 2, 32, {})
+    # ... and with no count for it, a view of the output's storage counts wherever it lies.
+    assert output_overlaps_operand([row, torch.zeros(16, 8), after_row], 2, 32, {})
+    assert not output_overlaps_operand([row, torch.zeros(16, 8), after_row], 2, 32, {0: 16})
+    assert not output_overlaps_operand([row, torch.zeros(16, 8), after_row.clone()], 2, 32, {})
 
 
 def test_strided_view_range_covers_its_last_element():
@@ -84,16 +91,59 @@ def test_strided_view_range_covers_its_last_element():
     every_other = arena[::2]  # elements 0, 2, ..., 62
     tail = arena[62:64]
     gap = arena[63:64]
-    assert output_overlaps_operand([every_other, tail], 1, 2, {})
-    assert not output_overlaps_operand([every_other, gap], 1, 1, {})
+    assert output_overlaps_operand([every_other, tail], 1, 2, {0: 1})
+    assert not output_overlaps_operand([every_other, gap], 1, 1, {0: 1})
+    assert output_overlaps_operand([every_other, gap], 1, 1, {})  # no count: one storage
 
 
 def test_element_sizes_are_compared_in_bytes():
     arena = torch.zeros(64, dtype=torch.float32)
     as_bytes = arena.view(torch.int8)  # 256 bytes over the same storage
     out = arena[32:]
-    assert output_overlaps_operand([as_bytes[100:200], out], 1, 32, {})
-    assert not output_overlaps_operand([as_bytes[0:128], out], 1, 32, {})
+    assert output_overlaps_operand([as_bytes[100:200], out], 1, 32, {0: 1})
+    assert not output_overlaps_operand([as_bytes[0:128], out], 1, 32, {0: 1})
+    assert output_overlaps_operand([as_bytes[0:128], out], 1, 32, {0: 129})
+    assert output_overlaps_operand([as_bytes[0:128], out], 1, 32, {})  # no count: one storage
+
+
+def test_a_view_shorter_than_the_cells_addressed_through_it():
+    # An operand passed as a view of four elements and read for sixteen, with the output at
+    # elements eight to eleven of the same storage: the views are apart, the cells are not.
+    arena = torch.zeros(16)
+    short, out, other = arena[:4], arena[8:12], torch.zeros(16)
+    assert output_overlaps_operand([short, other, out], 2, 4, {0: 16, 1: 16}, exact=True)
+    assert output_overlaps_operand([short, other, out], 2, 4, {0: 16})
+    assert output_overlaps_operand([short, other, out], 2, 4, {1: 16})  # no count for the short view
+    assert output_overlaps_operand([short, other, out], 2, 0, {})
+    assert not output_overlaps_operand([short, other, out], 2, 4, {0: 8, 1: 16}, exact=True)
+    assert not output_overlaps_operand([short, other, out.clone()], 2, 0, {})
+
+
+def test_host_storages_over_the_same_memory_are_compared_by_address():
+    # Two host tensors can cover the same memory without being views of one storage.
+    memory = numpy.zeros(256, dtype=numpy.float32)
+    a, b = torch.from_numpy(memory[:64]), torch.zeros(64)
+    inside, after = torch.from_numpy(memory[32:96]), torch.from_numpy(memory[64:128])
+    assert output_overlaps_operand([a, b, inside], 2, 64, {0: 64, 1: 64}, exact=True)
+    assert not output_overlaps_operand([a, b, after], 2, 64, {0: 64, 1: 64}, exact=True)
+    assert output_overlaps_operand([a, b, inside], 2, 64, {})
+    assert not output_overlaps_operand([a, b, after], 2, 64, {})
+    # A count that runs past the end of a tensor's own storage reaches no byte of that
+    # tensor, so it does not make a neighbouring host allocation an overlap: the answer
+    # would otherwise depend on where the allocator placed two unrelated tensors.
+    short, beside = torch.from_numpy(memory[:16]), torch.from_numpy(memory[16:80])
+    assert not output_overlaps_operand([short, b, beside], 2, 64, {0: 64, 1: 64}, exact=True)
+    assert not output_overlaps_operand([short, b, beside], 2, 64, {0: 64})
+
+
+@requires_mps
+def test_storages_on_different_devices_do_not_overlap():
+    on_host, on_device = torch.zeros(64), torch.zeros(64, device="mps")
+    assert not output_overlaps_operand([on_host, on_device], 1, 64, {})
+    assert not output_overlaps_operand([on_host, on_device], 1, 64, {0: 64}, exact=True)
+    assert output_overlaps_operand([on_device[:4], on_device[32:]], 1, 32, {})
+    assert not output_overlaps_operand([on_device[:4], on_device[32:]], 1, 32, {0: 32}, exact=True)
+    assert output_overlaps_operand([on_device[:4], on_device[32:]], 1, 32, {0: 33}, exact=True)
 
 
 def test_arguments_without_storage():

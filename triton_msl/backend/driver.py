@@ -1152,7 +1152,9 @@ class MetalLauncher:
             # with an input is defined there. Only the two biased source replays keep
             # that order (two other shapes computed from overwritten inputs). The wide
             # one publishes no outputs, the narrow one none once its emitted text shows
-            # the order, so refuse the rest before any hook.
+            # the order, so refuse the rest before any hook. The kernel addresses each
+            # tensor through its own stride and length arguments, not the view's shape,
+            # so the comparison is of whole storages.
             from triton_msl.autotuning._operand_overlap import overlapping_output
 
             _pair = overlapping_output(flat_args, _attention_outputs)
@@ -1161,10 +1163,11 @@ class MetalLauncher:
 
                 _output, _other = (self.arg_names[flat_origin[i]] for i in _pair)
                 raise MetalNonRecoverableError(
-                    f"attention kernel: output argument {_output} shares memory with argument {_other}. "
-                    "The attention lowering does not keep the source's load-then-store order for an output "
-                    "that overlaps another tensor argument, so the result could be computed from overwritten "
-                    "inputs. Write the output to a separate tensor."
+                    f"attention kernel: output argument {_output} is not known to be apart from argument "
+                    f"{_other}: they are views of one storage, or a storage could not be read. The attention "
+                    "lowering does not keep the source's load-then-store order, and the kernel addresses each "
+                    "tensor through its own stride and length arguments, so the result could be computed from "
+                    "overwritten inputs. Write the output to a tensor that has its own storage."
                 )
         import ctypes
 

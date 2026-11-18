@@ -283,9 +283,6 @@ def _dispatch_sym_int8(
             return False
         if not _gemm_grid_ok(grid, descriptor[6] if len(descriptor) > 6 else None, M, N):  # packet 105 B
             return False
-        # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles load.
-        if output_overlaps_operand(kargs, 2, 0, {}):
-            return False
         _s = lambda i: (int(kargs[i]) if i >= 0 else 1)
         scale = kargs[3]
         strides = tuple(_s(i) for i in (isr, isc, wsk, wsn, osr, osc, ssn_idx))
@@ -305,6 +302,15 @@ def _dispatch_sym_int8(
             for max_index, tensor in bounds:
                 if hasattr(tensor, "numel") and max_index >= tensor.numel():
                     return False
+            # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles
+            # load. The furthest cell each pointer is addressed at is known here.
+            last_in, last_w, last_out, last_scale = (max_index for max_index, _ in bounds)
+            if output_overlaps_operand(
+                kargs[:4], 2, last_out + 1, {0: last_in + 1, 1: last_w + 1, 3: last_scale + 1}, exact=True
+            ):
+                return False
+        elif output_overlaps_operand(kargs, 2, 0, {}):
+            return False
 
         zeros = _torch.zeros(1, dtype=getattr(scale, "dtype", None), device=getattr(scale, "device", None))
         # input(0), weight(1), output(2), scale(3), zeros(synth,4), M,N,K, strides...
@@ -351,9 +357,6 @@ def _dispatch_pergroup_int8(
         # LAUNCH CONTRACT (packet 105 B) — checked BEFORE the fast sub-path selection below.
         if not _gemm_grid_ok(grid, descriptor[11] if len(descriptor) > 11 else None, M, N):
             return False
-        # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles load.
-        if output_overlaps_operand(kargs, 2, 0, {}):
-            return False
         # a stride index of -1 means the stride was folded to a compile-time 1.
         strides = [(int(kargs[i]) if i >= 0 else 1) for i in sidx]
         isr, isc, wsk, wsn, osr, osc, ssg, ssn = strides[0:8]
@@ -382,6 +385,13 @@ def _dispatch_pergroup_int8(
             for _mx, _t in _bounds:
                 if hasattr(_t, "numel") and _mx >= _t.numel():
                     return False
+            # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles
+            # load. The furthest cell each pointer is addressed at is known here.
+            _reads = {_i: _mx + 1 for _i, (_mx, _t) in enumerate(_bounds) if _i != 2}
+            if output_overlaps_operand(kargs[:5], 2, _bounds[2][0] + 1, _reads, exact=True):
+                return False
+        elif output_overlaps_operand(kargs, 2, 0, {}):
+            return False
 
         # FAST simdgroup-MMA per-group path (descriptor[6..10] = fast_msl, rr, rc, bk,
         # group_size), selected ONLY when the runtime shape meets its contract: contiguous
