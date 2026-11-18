@@ -106,6 +106,30 @@ def test_element_sizes_are_compared_in_bytes():
     assert output_overlaps_operand([as_bytes[0:128], out], 1, 32, {})  # no count: one storage
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=requires_mps)])
+def test_exact_counts_never_miss_a_shared_byte(device):
+    # With exact counts the answer is the intersection of the bytes addressed from each
+    # pointer, whatever the views passed cover: every pair of ranges in one storage, as
+    # float32 cells and as bytes of the same storage, in both argument orders.
+    import random
+
+    arena = torch.zeros(48, dtype=torch.float32, device=device)
+    as_bytes = arena.view(torch.int8)
+    rng, apart = random.Random(7), 0
+    for _ in range(3000):
+        start, count = rng.randrange(0, 40), rng.randrange(1, 9)
+        first, length = rng.randrange(0, 180), rng.randrange(1, 13)
+        cells, octets = arena[start : start + rng.randrange(1, 9)], as_bytes[first : first + rng.randrange(1, 13)]
+        shared = 4 * start < first + length and first < 4 * (start + count)
+        apart += not shared
+        assert output_overlaps_operand([octets, cells], 1, count, {0: length}, exact=True) == shared
+        assert output_overlaps_operand([cells, octets], 1, length, {0: count}, exact=True) == shared
+        if shared:
+            # Without exact the views passed count as well, so a shared byte is never missed.
+            assert output_overlaps_operand([octets, cells], 1, count, {0: length})
+    assert apart > 300
+
+
 def test_a_view_shorter_than_the_cells_addressed_through_it():
     # An operand passed as a view of four elements and read for sixteen, with the output at
     # elements eight to eleven of the same storage: the views are apart, the cells are not.

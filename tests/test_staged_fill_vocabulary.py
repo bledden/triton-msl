@@ -451,6 +451,8 @@ def _attn(
         carried = offs_n + start
     else:
         carried = offs_n
+    if KEYS == "carried2d":  # the carried index already has its row axis
+        carried_rows = offs_n[:, None]
     for start_n in range(0, max_n, BLOCK_N):
         if KEYS == "induction":
             kn = start_n + offs_n
@@ -464,7 +466,10 @@ def _attn(
         else:
             kmask = kn[:, None] < N
             cmask = kn[None, :] < N
-        k = tl.load(K + kn[:, None] * sk + offs_d[None, :], mask=kmask, other=0.0)
+        if KEYS == "carried2d":
+            k = tl.load(K + carried_rows * sk + offs_d[None, :], mask=carried_rows < N, other=0.0)
+        else:
+            k = tl.load(K + kn[:, None] * sk + offs_d[None, :], mask=kmask, other=0.0)
         qk = tl.dot(q, tl.trans(k))
         qk = tl.where(cmask, qk, float("-inf"))
         m_new = tl.maximum(m_i, tl.max(qk, 1))
@@ -472,7 +477,11 @@ def _attn(
         p = tl.exp(qk - m_new[:, None])
         l_i = l_i * alpha + tl.sum(p, 1)
         acc = acc * alpha[:, None]
-        v = tl.load(V + kn[:, None] * sv + offs_d[None, :], mask=kmask, other=0.0)
+        if KEYS == "carried2d":
+            v = tl.load(V + carried_rows * sv + offs_d[None, :], mask=carried_rows < N, other=0.0)
+            carried_rows += BLOCK_N
+        else:
+            v = tl.load(V + kn[:, None] * sv + offs_d[None, :], mask=kmask, other=0.0)
         acc += tl.dot(p, v)
         m_i = m_new
         if KEYS == "swapped":
@@ -634,11 +643,12 @@ def _key_index(keys, lane, trip, start, max_n):
 
 @requires_mps
 @pytest.mark.parametrize("n_keys", [45, 64, 97])
-@pytest.mark.parametrize("keys", ["carried32", "carried", "carried64", "swapped", "negative-step"])
+@pytest.mark.parametrize("keys", ["carried32", "carried", "carried64", "swapped", "negative-step", "carried2d"])
 def test_carried_key_index_computes_on_the_staged_route(keys, n_keys):
     """``kn = offs_n`` ... ``kn += BLOCK_N``, as 32-bit, 32-bit under a 64-bit mask and 64-bit.
 
     ``negative-step`` walks the key tiles from the last to the first (``kn += -BLOCK_N``).
+    ``carried2d`` carries the index with its row axis (``offs_n[:, None]``).
 
     45 and 97 keys are not tile multiples; 97 needs four trips. The unfixed lowering
     read one lane's key row for the whole K and V tile.
@@ -650,7 +660,7 @@ def test_carried_key_index_computes_on_the_staged_route(keys, n_keys):
 
 
 @pytest.mark.parametrize(
-    "keys", ["induction", "carried32", "carried", "carried64", "swapped", "offset-init", "negative-step"]
+    "keys", ["induction", "carried32", "carried", "carried64", "swapped", "offset-init", "negative-step", "carried2d"]
 )
 def test_carried_key_index_fill_is_the_source_row_on_every_trip(keys):
     """CPU-only: the emitted K and V fills, evaluated for every trip, row and column.
@@ -691,6 +701,18 @@ def test_carried_tensor_outside_the_vocabulary_is_refused(keys):
     """
     with pytest.raises(MetalNonRecoverableError, match=_OFFSET_REFUSAL):
         _emit_attn(KEYS=keys)
+
+
+@requires_mps
+@pytest.mark.parametrize("keys", ["down", "doubled"])
+def test_carried_tensor_outside_the_vocabulary_is_refused_at_the_launch(keys):
+    """The same refusal on the launch route: nothing runs and the output is not written."""
+    out = torch.full((2 * BM, HEAD_DIM), _POISON, device="mps")
+    q = torch.randn(2 * BM, HEAD_DIM, device="mps")
+    k = torch.randn(3 * BN, HEAD_DIM, device="mps")
+    with pytest.raises(MetalNonRecoverableError, match=_OFFSET_REFUSAL):
+        _attn[(2,)](q, k, k.clone(), out, *_attn_scalars(64, 40), **_attn_constants(KEYS=keys), num_warps=4)
+    assert bool((out == _POISON).all())
 
 
 # --------------------------------------------------------------------------
