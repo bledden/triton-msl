@@ -3206,9 +3206,28 @@ class GenericLowerer(
                 self._output_arg_ids.add(_arg.id)
             else:
                 _unresolved = True
+        # A function that is not inlined stores through pointers it was handed, and the
+        # entry function's own stores say nothing about which arguments those are. A
+        # list built from the entry function alone left such an argument out, and a
+        # host tensor came back unchanged.
+        if not _unresolved and self._called_function_writes(self.graph.ops):
+            _unresolved = True
         if _unresolved:
             # Copy-everything fallback: correctness over the copy-back optimization.
             self._output_arg_ids = set()
+
+    _WRITES = ("tt.store", "tt.atomic_rmw", "tt.atomic_cas")
+
+    def _called_function_writes(self, ops) -> bool:
+        """Whether a call in ``ops`` reaches a function that stores to memory."""
+
+        def writes(body):
+            return any(op.op in self._WRITES or writes(op.region_ops or ()) or writes(op.else_ops or ()) for op in body)
+
+        def calls(body):
+            return any(op.op == "tt.call" or calls(op.region_ops or ()) or calls(op.else_ops or ()) for op in body)
+
+        return calls(ops) and any(writes(called.ops) for called in self.graph.called_funcs or ())
 
     def _prescan_stores_recursive(self, ops):
         """Recursively find all tt.store and tt.atomic_rmw ops including in nested regions."""
@@ -3217,7 +3236,7 @@ class GenericLowerer(
                 if ssa.operand_ids:
                     self._store_ptr_ids.add(ssa.operand_ids[0])
             # tt.atomic_rmw modifies memory in-place — treat target as output
-            if ssa.op == "tt.atomic_rmw":
+            if ssa.op in ("tt.atomic_rmw", "tt.atomic_cas"):
                 if ssa.operand_ids:
                     self._store_ptr_ids.add(ssa.operand_ids[0])
             # Recurse into nested regions
