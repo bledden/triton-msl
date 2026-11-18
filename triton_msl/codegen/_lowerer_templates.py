@@ -5012,13 +5012,33 @@ class _TemplateMixin:
                 ng_idx = i
                 break
 
-        from triton_msl.codegen._msl_templates import make_int4_gemv
+        from triton_msl.codegen._msl_templates import make_int4_gemv, make_int4_matmul_pergroup
 
         int4_msl = make_int4_gemv(group_size)
         # [13] = the SOURCE program mapping (BN; one program per BN outputs on program_id(0)):
         # the dispatcher runs the template only for a launch of exactly cdiv(N, BN) programs
         # (packet 105 B: a partial launch used to run the full output).
-        return ("gemv_int4", int4_msl, 0, 1, 2, 3, 4, 5, 6, swn_idx, ssn_idx, ng_idx, group_size, _bn4)
+        # [14] = the SOURCE K block and [15] = the stride-generic scalar template: the kernel
+        # is unmasked, so it computes whole BN x BK blocks; the dispatcher runs those extents
+        # when the launch sizes are not whole blocks (its SOURCE DOMAIN note).
+        return (
+            "gemv_int4",
+            int4_msl,
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            swn_idx,
+            ssn_idx,
+            ng_idx,
+            group_size,
+            _bn4,
+            _bk4,
+            make_int4_matmul_pergroup(group_size),
+        )
 
     def _maybe_quant_gemv_descriptor(self):
         """Build the runtime QUANTIZED-GEMV (decode / M=1) dispatch descriptor, or None.
@@ -5268,11 +5288,14 @@ class _TemplateMixin:
         #     weight row stride (args[7]) must equal K (args[6]) at dispatch. ---
         stride_checks = ((7, 6),)
 
-        from triton_msl.codegen._msl_templates import make_int8_gemv
+        from triton_msl.codegen._msl_templates import make_int8_gemv, make_int8_matmul_pergroup
 
         gemv_msl = make_int8_gemv()
         # [10] = the SOURCE program mapping (BN on program_id(0)) — packet 105 B.
-        return ("gemv", gemv_msl, 0, 1, 2, 3, 4, 5, 6, stride_checks, _bn)
+        # [11] = the SOURCE K block and [12] = the stride-generic scalar template: the kernel
+        # is unmasked, so it computes whole BN x BK blocks; the dispatcher runs those extents
+        # when the launch sizes are not whole blocks (its SOURCE DOMAIN note).
+        return ("gemv", gemv_msl, 0, 1, 2, 3, 4, 5, 6, stride_checks, _bn, _bk, make_int8_matmul_pergroup(32))
 
     def _maybe_quant_matmul_descriptor(self):
         """Build the runtime QUANTIZED-matmul dispatch descriptor, or None.
@@ -5727,7 +5750,8 @@ class _TemplateMixin:
                     _bk,
                     g_s,
                     (_gc["bm"], _gc["bn"]),
-                )  # [11] source (BM, BN), packet 105 B
+                    _gc["bk"],
+                )  # [11] source (BM, BN), packet 105 B; [12] source BK (dispatcher SOURCE DOMAIN)
             from triton_msl.codegen._msl_templates import (
                 make_int8_matmul_pergroup,
                 make_int8_matmul_pergroup_fast,
@@ -5747,7 +5771,8 @@ class _TemplateMixin:
                 _bk,
                 g_s,
                 (_gc["bm"], _gc["bn"]),
-            )  # [11] source (BM, BN), packet 105 B
+                _gc["bk"],
+            )  # [11] source (BM, BN), packet 105 B; [12] source BK (dispatcher SOURCE DOMAIN)
 
         # --- Weight [K,N] contiguous-inner (+ input [M,K], output [M,N]) via strides. ---
         try:
@@ -5826,13 +5851,29 @@ class _TemplateMixin:
             else:
                 return None  # non-1 literal row stride: can't prove it equals the dim
 
-        from triton_msl.codegen._msl_templates import make_int8_matmul_fast
+        from triton_msl.codegen._msl_templates import make_int8_matmul_fast, make_int8_matmul_pergroup
 
         rr, rc = 4, 2
         layout = "nk" if _is_nk[0] else "kn"
         fast_msl = make_int8_matmul_fast(rr=rr, rc=rc, bk=32, layout=layout)
         # [7] = the SOURCE program mapping (BM on program_id(0), BN on program_id(1)) — packet 105 B.
-        return (fast_msl, 5, 6, 7, 8 * rr, 8 * rc, tuple(stride_checks), (_gc["bm"], _gc["bn"]))
+        # [8] = the SOURCE K block, [9] = the weight layout, [10] = the stride-generic scalar
+        # template: the kernel is unmasked, so it computes whole BM x BN x BK blocks; the
+        # dispatcher runs those extents when the launch sizes are not whole blocks (its
+        # SOURCE DOMAIN note).
+        return (
+            fast_msl,
+            5,
+            6,
+            7,
+            8 * rr,
+            8 * rc,
+            tuple(stride_checks),
+            (_gc["bm"], _gc["bn"]),
+            _gc["bk"],
+            layout,
+            make_int8_matmul_pergroup(32),
+        )
 
     def _maybe_quant_matmul_symmetric_descriptor(self):
         """SYMMETRIC weight-only int8 GEMM: out = a @ (w_i8.to(float) * scale), NO
@@ -6020,7 +6061,8 @@ class _TemplateMixin:
         from triton_msl.codegen._msl_templates import make_int8_matmul_pergroup
 
         # [6] = the SOURCE program mapping (BM on program_id(0), BN on program_id(1)) — packet 105 B.
-        return ("sym_int8", make_int8_matmul_pergroup(32), 4, 5, 6, tuple(idxs), (_gc["bm"], _gc["bn"]))
+        # [7] = the SOURCE K block (the dispatcher's SOURCE DOMAIN note).
+        return ("sym_int8", make_int8_matmul_pergroup(32), 4, 5, 6, tuple(idxs), (_gc["bm"], _gc["bn"]), _gc["bk"])
 
     def _maybe_fast_matmul_descriptor(self):
         """Build the runtime fast-matmul dispatch descriptor, or None.

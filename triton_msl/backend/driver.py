@@ -1349,6 +1349,8 @@ class MetalLauncher:
         # launch must be handled by dispatch_quant_matmul (compile_shader) or REFUSED —
         # start "unhandled" and clear it only on a successful dispatch (the `return`).
         _quant_unhandled = quant_matmul is not None
+        # A reason the dispatcher recorded for declining this launch (named in the refusal).
+        _quant_declined = []
         # FAIL-CLOSED for MLA too: the 'mla' descriptor's kernel (concatenated qk=192)
         # has a DIFFERENT ABI than the @jit kernel, so the host path can't run it. A
         # symmetric ('flash_attention') descriptor is fail-OPEN (host path is correct).
@@ -1399,6 +1401,7 @@ class MetalLauncher:
                             launch_exit_hook=launch_exit_hook,
                             launch_metadata=launch_metadata,
                             submission_state=_submission,
+                            decline=_quant_declined,
                         ):
                             return
 
@@ -1569,6 +1572,13 @@ class MetalLauncher:
         if _quant_unhandled:
             from triton_msl.errors import MetalNonRecoverableError
 
+            if _quant_declined:
+                raise MetalNonRecoverableError(
+                    "quantized weight-only matmul launch refused: "
+                    + "; ".join(_quant_declined)
+                    + ". The quantized route has no other executable form of this kernel, so "
+                    "the launch is refused rather than computed differently from the source."
+                )
             raise MetalNonRecoverableError(
                 "quantized weight-only matmul runs only on MPS tensors via "
                 "compile_shader, with dims M % 32 == 0, N % 16 == 0, K % 32 == 0 (the "
