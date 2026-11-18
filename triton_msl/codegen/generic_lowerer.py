@@ -16399,6 +16399,8 @@ class GenericLowerer(
             op = op_by_id.get(tid)
             ev = self.env.get(tid)
             if op is None:
+                if not self._staged_block_scalar(tid):
+                    return None
                 if isinstance(ev, str) and ev and not ev.startswith("idx_") and not ev.startswith("r_"):
                     return ev
                 return None
@@ -16419,10 +16421,17 @@ class GenericLowerer(
             return None
         op = op_by_id.get(nid)
         if op is None:
-            ev = self.env.get(nid)
-            if isinstance(ev, str) and ev:
-                return [("const", _apply_coeff(ev, coeff))]
-            return None
+            if self._staged_block_scalar(nid):
+                ev = self.env.get(nid)
+                return [("const", _apply_coeff(ev, coeff))] if isinstance(ev, str) and ev else None
+            # A tensor a loop carries: its value at this trip, for every element.
+            carried = self._staged_carried(nid)
+            if carried is None or self._INDEX_BITS.get(self.env_types.get(nid)) != 32:
+                return None
+            init, step, trip = carried
+            first = self._staged_fill_terms(init, coeff, axis_dim, op_by_id, depth + 1)
+            rest = self._staged_fill_terms(step, _mul_coeff(coeff, f"(int)({trip})"), axis_dim, op_by_id, depth + 1)
+            return None if first is None or rest is None else first + rest
         name = op.op
         if name == "tt.make_range":
             if axis_dim is None:
@@ -16446,6 +16455,11 @@ class GenericLowerer(
         if name == "tt.broadcast" or name in _PASS:
             if not op.operand_ids:
                 return None
+            if name in ("arith.extsi", "arith.extui") and self._staged_source_bits(op.operand_ids[0], op_by_id) != 32:
+                # The flattened sum is taken modulo 2**32. A value extended from fewer
+                # bits wrapped at its own width first, so it is one term of its own.
+                narrow = self._staged_narrow_extension(op, axis_dim, op_by_id, depth)
+                return None if narrow is None else [("const", _apply_coeff(narrow, coeff))]
             return self._staged_fill_terms(op.operand_ids[0], coeff, axis_dim, op_by_id, depth + 1)
         if name in ("tt.splat", "arith.constant"):
             ev = self.env.get(nid)
@@ -16478,6 +16492,116 @@ class GenericLowerer(
 
     _INDEX_BITS = {"i32": 32, "u32": 32, "i64": 64, "u64": 64, "ui64": 64}
 
+    def _staged_block_scalar(self, nid):
+        """Is a value with no defining operation one scalar for the whole program?
+
+        Such a value is an argument or a block argument (a loop's induction variable or
+        a value it carries). Its lowered name is the same for every element of a staged
+        tile only when it is a scalar. A carried TENSOR (``kn += BLOCK_N``) is lowered
+        as the current lane's register, and a cooperative fill that names it reads one
+        lane's value for the whole tile.
+        """
+        return self.env_shapes.get(nid) == ()
+
+    def _staged_source_bits(self, nid, op_by_id):
+        op = op_by_id.get(nid)
+        return self._INDEX_BITS.get(self.env_types.get(nid) if op is None else op.elem_type)
+
+    _NARROW_TYPES = {
+        "i8": ("char", "uchar"),
+        "u8": ("char", "uchar"),
+        "i16": ("short", "ushort"),
+        "u16": ("short", "ushort"),
+    }
+
+    def _staged_narrow_extension(self, op, axis_dim, op_by_id, depth):
+        """An extension from 8 or 16 bits as one ``int`` expression, or None.
+
+        Only a value with no row or column index in it is rendered: its sum is cast to
+        the source's narrow type, which wraps it where the source's wraps, and the
+        extension is that type's own conversion to ``int``.
+        """
+        source = op.operand_ids[0]
+        inner = op_by_id.get(source)
+        names = self._NARROW_TYPES.get(self.env_types.get(source) if inner is None else inner.elem_type)
+        terms = self._staged_fill_terms(source, None, axis_dim, op_by_id, depth + 1) if names else None
+        if not terms or any(term[0] != "const" for term in terms):
+            return None
+        total = " + ".join(term[1] for term in terms)
+        return f"(int)(({names[op.op == 'arith.extui']})({total}))"
+
+    _CARRIED_STEP_OPS = (
+        "arith.constant",
+        "tt.splat",
+        "tt.broadcast",
+        "tt.expand_dims",
+        "tt.make_range",
+        "arith.addi",
+        "arith.subi",
+        "arith.muli",
+        "arith.extsi",
+        "arith.extui",
+    )
+
+    def _staged_carried(self, nid):
+        """A tensor a loop carries as ``init + trip * step``: ``(init, step, trip)`` or None.
+
+        ``nid`` has to be a carried block argument of a ``scf.for`` whose yielded value
+        is ``nid + step`` with ``step`` the same on every trip: built outside the loop,
+        or inside it from constants and outside values by the listed operations only.
+        ``trip`` is the number of completed trips as an unsigned MSL expression of the
+        loop's induction variable (the step of a ``scf.for`` is positive).
+        """
+        by_id = self._layout_op_index()
+        loop = bids = None
+        for one in by_id.values():
+            if one.op == "scf.for" and nid in list((one.attrs or {}).get("block_arg_ids") or [])[1:]:
+                loop, bids = one, list(one.attrs["block_arg_ids"])
+                break
+        if loop is None:
+            return None
+        slot = bids.index(nid) - 1
+        ids = list(loop.operand_ids or [])
+        yields = [o for o in (loop.region_ops or []) if o.op == "scf.yield"]
+        if len(ids) != len(bids) + 2 or len(yields) != 1 or len(yields[0].operand_ids or []) != len(bids) - 1:
+            return None
+        nxt = by_id.get(yields[0].operand_ids[slot])
+        if nxt is None or nxt.op != "arith.addi" or list(nxt.operand_ids or []).count(nid) != 1:
+            return None
+        if len(nxt.operand_ids) != 2:
+            return None
+        step = nxt.operand_ids[1 - nxt.operand_ids.index(nid)]
+
+        inside = set(bids)
+
+        def _mark(ops):
+            for o in ops or []:
+                inside.add(o.id)
+                inside.update(o.result_ids or [])
+                inside.update((o.attrs or {}).get("block_arg_ids") or [])
+                inside.update((o.attrs or {}).get("else_block_arg_ids") or [])
+                _mark(o.region_ops)
+                _mark(o.else_ops)
+
+        _mark(loop.region_ops)
+
+        def _fixed(vid, depth=0):
+            if vid not in inside:
+                return True
+            o = by_id.get(vid)
+            if o is None or depth > 64 or o.op not in self._CARRIED_STEP_OPS:
+                return False
+            return all(_fixed(x, depth + 1) for x in (o.operand_ids or []))
+
+        if not _fixed(step):
+            return None
+        bits = self._INDEX_BITS.get(self.env_types.get(bids[0]))
+        names = [self.env.get(v) for v in (bids[0], ids[0], ids[2])]
+        if bits is None or any(not (isinstance(n, str) and n) for n in names):
+            return None
+        u = "uint" if bits == 32 else "ulong"
+        return ids[3 + slot], step, f"((({u})({names[0]}) - ({u})({names[1]})) / ({u})({names[2]}))"
+
     def _staged_fill_typed(self, nid, axis_dim, op_by_id, M, N, depth=0):
         """Render one index value at ``(_fill_row, _fill_col)`` with every operation at
         the width the source gives it: ``(expr, bits)``, ``expr`` an ``int`` (32) or a
@@ -16498,6 +16622,18 @@ class GenericLowerer(
         if bits is None:
             return None
         signed, unsigned = ("int", "uint") if bits == 32 else ("long", "ulong")
+        if op is None and not self._staged_block_scalar(nid):
+            # A tensor a loop carries: its value at this trip, at its own width.
+            carried = self._staged_carried(nid)
+            if carried is None:
+                return None
+            sides = [self._staged_fill_typed(v, axis_dim, op_by_id, M, N, depth + 1) for v in carried[:2]]
+            if any(side is None or side[1] != bits for side in sides):
+                return None
+            return (
+                f"({signed})(({unsigned})({sides[0][0]}) + ({unsigned})({carried[2]}) * ({unsigned})({sides[1][0]}))",
+                bits,
+            )
         if op is None or op.op in ("tt.splat", "arith.constant"):
             # A lowered value is recovered by a cast to its declared type, as at its
             # other uses; the declared type has to be the source's width for that.
@@ -16522,6 +16658,11 @@ class GenericLowerer(
         if op.op == "tt.broadcast":
             return self._staged_fill_typed(op.operand_ids[0], axis_dim, op_by_id, M, N, depth + 1)
         if op.op in ("arith.extsi", "arith.extui"):
+            if self._staged_source_bits(op.operand_ids[0], op_by_id) is None:
+                narrow = self._staged_narrow_extension(op, axis_dim, op_by_id, depth)
+                if narrow is None:
+                    return None
+                return (narrow if bits == 32 else f"(long)({narrow})"), bits
             inner = self._staged_fill_typed(op.operand_ids[0], axis_dim, op_by_id, M, N, depth + 1)
             if inner is None or inner[1] != 32 or bits != 64:
                 return None
@@ -16857,12 +16998,8 @@ class GenericLowerer(
                 is_unsigned = pred_name in ("ult", "ule", "ugt", "uge") if pred_name else pred_int in (6, 7, 8, 9)
                 is_signed = pred_name in ("slt", "sle", "sgt", "sge") if pred_name else pred_int in (2, 3, 4, 5)
                 cast = "(uint)" if is_unsigned else "(int)" if is_signed else ""
-                lhs = _render(self._staged_fill_terms(op.operand_ids[0], None, None, op_by_id), cast)
-                rhs = _render(self._staged_fill_terms(op.operand_ids[1], None, None, op_by_id), cast)
-                if lhs is None or rhs is None:
-                    _refuse()
                 if any(self.env_types.get(oid) in ("i64", "u64", "ui64") for oid in op.operand_ids[:2]):
-                    # A 64-bit comparison: the flattened sums above are exact at 32
+                    # A 64-bit comparison: the flattened sums below are exact at 32
                     # bits only (a 64-bit bound cast to int compares its low half, and
                     # a 32-bit partial sum is extended by its C type, not the
                     # source's). Render each side at the source's widths.
@@ -16870,6 +17007,11 @@ class GenericLowerer(
                     if any(side is None or side[1] != 64 for side in sides):
                         _refuse()
                     lhs, rhs = (f"(ulong)({side[0]})" if is_unsigned else side[0] for side in sides)
+                    return f"({lhs} {sym} {rhs})"
+                lhs = _render(self._staged_fill_terms(op.operand_ids[0], None, None, op_by_id), cast)
+                rhs = _render(self._staged_fill_terms(op.operand_ids[1], None, None, op_by_id), cast)
+                if lhs is None or rhs is None:
+                    _refuse()
                 return f"({lhs} {sym} {rhs})"
             if op.op in ("tt.broadcast", "tt.splat", "arith.extsi", "arith.extui", "arith.trunci") and op.operand_ids:
                 cur = op.operand_ids[0]
@@ -16916,8 +17058,9 @@ class GenericLowerer(
         # Walk the addptr chain, collecting every additive offset term plus any
         # block-constant offset folded onto the base pointer (a scalar
         # program-id / batch-stride addptr applied before the splat).
-        parts = []  # row/col index contributions
-        const_terms = []  # block-constant contributions (same for all _sa)
+        parts = []  # row/col index contributions of the addptr being walked
+        const_terms = []  # its block-constant contributions (same for all _sa)
+        sums = []  # one flattened 32-bit sum per tensor addptr
         offsets = []  # each tensor addptr's offset operand
         base_offset = None  # the scalar offset folded onto the splatted base pointer
         wide = ("i64", "u64", "ui64")
@@ -16962,7 +17105,6 @@ class GenericLowerer(
             if op.op == "tt.addptr":
                 if len(op.operand_ids) < 2:
                     _refuse()
-                _add(self._staged_fill_terms(op.operand_ids[1], None, axis_dim_hint, op_by_id))
                 offsets.append(op.operand_ids[1])
                 cur = op.operand_ids[0]
                 continue
@@ -16983,7 +17125,6 @@ class GenericLowerer(
                 if sp is None or sp[0] != base_ptr:
                     _refuse()
                 if isinstance(sp[1], str) and sp[1] not in ("", "0"):
-                    const_terms.append(sp[1])
                     base_offset = sp[1]
                 reached_base = True
                 break
@@ -17022,8 +17163,16 @@ class GenericLowerer(
             terms = [f"(long)({term[0]})" for term in reversed(typed)]
             return " + ".join(terms + ([base_offset] if base_offset else []))
 
-        all_parts = parts + const_terms
-        return " + ".join(all_parts) if all_parts else "0"
+        # Every term here is 32 bits wide, so each addptr's flattened sum is the source's
+        # offset modulo 2**32 whatever C type the sum gets. The pointer adds that offset
+        # sign-extended: a sum that holds ``pid`` (a ``uint``) and comes out negative
+        # would otherwise index 2**32 elements past its cell.
+        for oid in offsets:
+            _add(self._staged_fill_terms(oid, None, axis_dim_hint, op_by_id))
+            sums.append(" + ".join(parts + const_terms) or "0")
+            del parts[:], const_terms[:]
+        terms = [f"(long)((int)({one}))" for one in reversed(sums)]
+        return " + ".join(terms + ([base_offset] if base_offset else [])) or "0"
 
     def _rebuild_staged_fill_load(self, ptr_id, op_by_id, M, N, axis_dim_hint=None, depth=4):
         """Rebuild one cooperative fill's source load at ``(_fill_row, _fill_col)``.
