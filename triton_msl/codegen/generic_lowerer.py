@@ -843,6 +843,50 @@ class GenericLowerer(
                 self._walk_producers(value_id, visit)
         return strides, moduli, flat, unknown, bounds
 
+    # Computed by each lane from its own operands, so a lane whose range index lies past
+    # the range holds no element of the result either.
+    _LANEWISE_ADDRESS_OPS = ("tt.addptr", "tt.load", "tt.expand_dims", "tt.broadcast", "tt.int_to_ptr", "tt.ptr_to_int")
+
+    def _load_extent_guard(self, ptr_id):
+        """The condition under which this lane holds an element of the load through ``ptr_id``, or None.
+
+        A range of n is written from the lane number, and a kernel runs as many lanes as
+        its widest block. On a lane past n, or past the last row of a tile, the index is
+        one the source never forms, and the address built from it lies beyond the
+        elements the source loads, possibly beyond the tensor. Such a lane loads nothing.
+        The comparison is made on the index as the lane holds it, so it stands however
+        the lane number is written here. Only indices that reach the address through
+        operations computed lane by lane are compared; a range of one element is left
+        alone, since it may stand for every element of a wider block.
+        """
+        lanes = max(self.effective_block_size, getattr(self, "_total_elements", 0) or 0, self.kb.block_size)
+        lanewise = self._LAYOUT_ELEMENTWISE_OPS + self._LANEWISE_ADDRESS_OPS
+        clauses = []
+
+        def visit(cur, op):
+            if op is None or op.op == "scf.for":
+                return False  # an argument, or a carried value: followed to what it carries
+            held = self._range_held.get(cur)
+            if op.op == "tt.make_range":
+                size = op.attrs.get("end", 0) - op.attrs.get("start", 0)
+                reach = None
+                if held is not None and len(held) == 1 and held[0] == "flat":
+                    reach = size
+                elif held is not None and len(held) == 2 and held[0] == "row" and isinstance(held[1], int):
+                    reach = size * held[1]
+                index = self.env.get(cur)
+                if reach is not None and 1 < size and reach < lanes and index and cur not in self.env_array:
+                    clauses.append(f"{index} < {op.attrs.get('end', 0)}u")
+                return True
+            if held is not None or cur in self._scan_held_modulo:
+                return True  # laid on the lanes anew: the lanes of what it was made from say nothing
+            if op.op in self._LAYOUT_PASSTHROUGH_OPS and op.op not in ("ttg.convert_layout", "tt.reshape", "tt.splat"):
+                return False
+            return not (op.op in lanewise or op.op.startswith("arith.") and op.op != "arith.constant")
+
+        self._walk_producers(ptr_id, visit)
+        return " && ".join(f"({clause})" for clause in sorted(set(clauses))) or None
+
     def _scan_row_vector_modulo(self, value_id):
         """M when lane ``lane`` holds element ``lane % M`` of the one-dimensional ``value_id``, else None.
 
@@ -5327,6 +5371,11 @@ class GenericLowerer(
                 other_val = self._lookup(op_id)
 
         var_name = self._next_var("val")
+
+        # A lane that holds no element of this load reads nothing (see _load_extent_guard).
+        held_here = self._load_extent_guard(ptr_id)
+        if held_here:
+            mask_var = f"({held_here} && ({mask_var}))" if mask_var else f"({held_here})"
 
         # Source replay can use the widest operand's threadgroup.
         # Lanes beyond this load's own flat tensor extent have NO source load.
