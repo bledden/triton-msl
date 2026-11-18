@@ -124,10 +124,15 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   Its per-lane masks compared the length at 64 bits, but the masks rebuilt
   for the staged operand fill and the staged store cast both sides to 32
   bits, so a length of 2**31 or more read as negative and the launch stored
-  nothing where the source stores every launched row. The rebuilt masks now
-  take their width from the compared values. A 64-bit comparison whose row
-  index passes through a zero extension refuses, since the rebuild renders
-  the index at its own width and sign-extends it.
+  nothing where the source stores every launched row. The same kernel with
+  its rows spelled `arange - program_id` or `program_id + arange - 1` stored
+  row -1 of a later program 2**32 elements from its place: the rebuilt
+  address added a 32-bit row offset, in which the unsigned program id had
+  wrapped, to a pointer that already carried the 64-bit start. A 64-bit
+  comparison or address is now rebuilt operation by operation at the widths
+  the source gives it, sign and zero extensions included, and refuses when a
+  part of it is not one of the operations the rebuild renders. 32-bit masks
+  and addresses are emitted as before.
 - Address a varlen sequence from a signed start. The source adds the
   cumulative entry to the row index in signed arithmetic, so a negative entry
   addresses rows before the tensor's first row, which is defined on a view
@@ -251,25 +256,27 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   and every backward attention template now refuses, by argument name and
   before anything runs, when a tensor it stores through overlaps another
   tensor argument. This is a change for in-place launches that computed
-  before, such as the output over the queries. Of 277 in-place probe
-  launches paired with the code before this work, 187 forward and 90
-  backward, 244 returned the source's result then: 169 of them now refuse and
-  75 keep computing. Of the 27 that returned other values, 23 now refuse, 1
-  computes and 3 are the short views of the next item. A two-dot kernel with
+  before, such as the output over the queries: on those routes most in-place
+  probe launches returned the source's result before this work, and they now
+  refuse together with the ones that did not. A two-dot kernel with
   an exponential and a row max that is not softmax attention is refused in
   place too. Inputs that share memory with each other, such as one tensor as
   query, key and value, are not compared and still compute. A two-dot kernel
   without a max stays on the generic lowering and is not refused.
-- The refusal compares the tensor views as passed. Views of one storage
-  whose byte ranges do not intersect compute. So do views that interleave
-  without sharing a cell, such as query, key, value and output as the slots
-  of one packed buffer, or a log-sum-exp column beside its output: the
-  launcher tells them apart by the residues they address along a stride.
-  A view shorter than the rows the kernel's stride and length arguments
+- The refusal compares the byte ranges of the tensor views as passed. Views
+  of one storage whose byte ranges do not intersect compute. Views that
+  interleave without sharing a cell are refused: query, key, value and
+  output as the slots of one packed buffer, or a log-sum-exp column beside
+  its output. A kernel addresses its tensors through its own stride
+  arguments, which need not be the views' strides, so cells the views keep
+  apart are not cells the kernel keeps apart: slot views `buf[:, i, :]`
+  passed with contiguous stride arguments returned 1117 to 1364 wrong cells
+  of 4096. Write the output to a tensor of its own. For the same reason a
+  view shorter than the rows the kernel's stride and length arguments
   address is compared by its own extent. An output placed inside those rows
-  is therefore not refused and can be computed from overwritten inputs, as
-  it was before this release; pass each tensor as a view of everything the
-  kernel addresses through it.
+  is not refused and can be computed from overwritten inputs, as it was
+  before this release; pass each tensor as a view of everything the kernel
+  addresses through it.
 - Known limitation, not changed here: a generic kernel that permutes a tensor
   in place within one program. Each lane loads and stores its own elements
   with no barrier between the program's loads and its stores, so a lane can

@@ -300,12 +300,25 @@ def store_follows_every_load(lowerer, msl):
     it once, with the store the only use of an argument buffer below it. An output that
     shares memory with an input then keeps the source's result. False when the text does
     not show that, for example a load rendered inside the stored value.
+
+    The text is matched, not parsed, so it has to be of the plain kind the replay emits:
+    no thread returns early, and an argument buffer is only ever declared or indexed by
+    its own name. A buffer passed to a call, copied to another pointer or dereferenced
+    could be read below the barrier under a name this does not look for. Each buffer
+    must be declared volatile: every thread waits at the barrier whatever its memory
+    flags, and a volatile load above it is not moved below it.
     """
     import re
 
-    names = "|".join(re.escape(arg.name) for arg in lowerer.graph.args if arg.is_ptr)
+    pointers = [re.escape(arg.name) for arg in lowerer.graph.args if arg.is_ptr]
+    names = "|".join(pointers)
+    msl = re.sub(r"//[^\n]*|/\*.*?\*/", "", msl, flags=re.S)
     head, barrier, tail = msl.rpartition("threadgroup_barrier(")
     if not names or not barrier or head.count("{") - head.count("}") != 1:
+        return False
+    if re.search(r"\breturn\b", msl) or re.search(rf"\b(?:{names})\b(?!\s*\[)", msl):
+        return False
+    if any(len(re.findall(rf"\bvolatile device \w+\* {name} \[\[buffer\(", msl)) != 1 for name in pointers):
         return False
     uses = re.findall(rf"\b(?:{names})\s*\[", tail)
     return len(uses) == 1 and re.search(rf"\b(?:{names})\s*\[[^;]*\]\s*=(?!=)[^;]*;", tail) is not None

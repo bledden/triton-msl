@@ -435,16 +435,23 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   load-then-store order by leaving the replacement template; the quantized routes and the
   attention kernels refuse such a launch by name, except the two biased source replays, which
   keep the order behind a barrier and compute in place. The attention refusal compares the
-  tensor views as passed. Views that interleave without sharing a cell, such as the slots of one
-  packed buffer, are told apart and compute. A view shorter than the rows the kernel's stride and
-  length arguments address is compared by its own extent, so an output inside those rows is not
-  refused and can be computed from overwritten inputs. A generic kernel that permutes a tensor
+  byte ranges of the tensor views as passed. Views that interleave without sharing a cell, such
+  as the slots of one packed buffer, are refused with the rest: the kernel addresses its tensors
+  through its own stride arguments, not the views' strides. Write the output to a tensor of its
+  own. A view shorter than the rows the kernel's stride and length arguments address is compared
+  by its own extent, so an output inside those rows is not refused and can be computed from
+  overwritten inputs. A generic kernel that permutes a tensor
   in place within one program (reverse, transpose, shift) is neither detected nor refused: lanes
   load and store their own elements with no barrier between the program's loads and stores. The
   size at which that shows depends on how the kernel is written: on an M4 Max one in-place
   reverse was wrong in 100 of 100 launches at 256 elements and above, another spelling of it
   only at 1024, and a transpose at 16 by 16 and above. A kernel in which each lane loads and
   stores the same cell is unaffected. Write a permuted result to a separate tensor.
+- **Half accumulators in matmul:** a matmul kernel that keeps a float16 accumulator across its
+  K blocks (`acc += tl.dot(a, b, out_dtype=tl.float16)`) is accumulated in float32 and rounded
+  to float16 once, at the store, where the source rounds after every block. In a 64 by 64 probe
+  with two K blocks 555 of 4096 cells differed from the source's per-block rounding and none
+  from the product rounded once, on the replacement template and the ordinary entry alike.
 - **Scratch aliasing:** the conservative 529 allocator and 527 store fixes have bounded focused
   evidence and passing combined 589 gates. Cross-vendor/artifact evidence remains separate.
 

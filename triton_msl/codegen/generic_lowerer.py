@@ -16476,6 +16476,64 @@ class GenericLowerer(
         # Any other op breaks structural resolution.
         return None
 
+    _INDEX_BITS = {"i32": 32, "u32": 32, "i64": 64, "u64": 64, "ui64": 64}
+
+    def _staged_fill_typed(self, nid, axis_dim, op_by_id, M, N, depth=0):
+        """Render one index value at ``(_fill_row, _fill_col)`` with every operation at
+        the width the source gives it: ``(expr, bits)``, ``expr`` an ``int`` (32) or a
+        ``long`` (64), or None when a part is not covered.
+
+        ``_staged_fill_terms`` flattens a value into one sum. While every term is 32
+        bits wide that is exact, because the sum is taken modulo 2**32 whatever C type
+        it gets. Beside a 64-bit term it is not: a 32-bit partial sum that holds ``pid``
+        (a ``uint``) is zero-extended where the source sign-extends it, and a zero
+        extension in the source is dropped. Callers use this rendering whenever a 64-bit
+        value takes part. Sums, differences and products are computed unsigned and cast
+        back, so they wrap where the source's do.
+        """
+        if depth > 64:
+            return None
+        op = op_by_id.get(nid)
+        bits = self._INDEX_BITS.get(self.env_types.get(nid) if op is None else op.elem_type)
+        if bits is None:
+            return None
+        signed, unsigned = ("int", "uint") if bits == 32 else ("long", "ulong")
+        if op is None or op.op in ("tt.splat", "arith.constant"):
+            # A lowered value is recovered by a cast to its declared type, as at its
+            # other uses; the declared type has to be the source's width for that.
+            ev = self.env.get(nid)
+            if not (isinstance(ev, str) and ev) or self._INDEX_BITS.get(self.env_types.get(nid)) != bits:
+                return None
+            return f"({signed})({ev})", bits
+        if op.op == "tt.make_range":
+            start, end = int(op.attrs.get("start", 0)), int(op.attrs.get("end", 0))
+            if axis_dim is None or bits != 32 or end - start != (M if axis_dim == 0 else N):
+                return None
+            idx = "(int)_fill_row" if axis_dim == 0 else "(int)_fill_col"
+            return (idx if start == 0 else f"({start} + {idx})"), 32
+        if not op.operand_ids:
+            return None
+        if op.op == "tt.expand_dims":
+            # axis=1 puts the range at dim 0 (row); axis=0 at dim 1 (column).
+            d = 1 - int(op.attrs.get("axis", 0))
+            if d not in (0, 1) or (axis_dim is not None and axis_dim != d):
+                return None
+            return self._staged_fill_typed(op.operand_ids[0], d, op_by_id, M, N, depth + 1)
+        if op.op == "tt.broadcast":
+            return self._staged_fill_typed(op.operand_ids[0], axis_dim, op_by_id, M, N, depth + 1)
+        if op.op in ("arith.extsi", "arith.extui"):
+            inner = self._staged_fill_typed(op.operand_ids[0], axis_dim, op_by_id, M, N, depth + 1)
+            if inner is None or inner[1] != 32 or bits != 64:
+                return None
+            return (f"(long)({inner[0]})" if op.op == "arith.extsi" else f"(long)((uint)({inner[0]}))"), 64
+        symbol = {"arith.addi": "+", "arith.subi": "-", "arith.muli": "*"}.get(op.op)
+        if symbol is None or len(op.operand_ids) < 2:
+            return None
+        sides = [self._staged_fill_typed(oid, axis_dim, op_by_id, M, N, depth + 1) for oid in op.operand_ids[:2]]
+        if any(side is None or side[1] != bits for side in sides):
+            return None
+        return f"({signed})(({unsigned})({sides[0][0]}) {symbol} ({unsigned})({sides[1][0]}))", bits
+
     # Producers that pass a value through unchanged as far as the thread-to-element
     # mapping is concerned (dtype/shape wrappers, layout conversions).
     _LAYOUT_PASSTHROUGH_OPS = (
@@ -16726,17 +16784,6 @@ class GenericLowerer(
 
         return _resolve(val_id, frozenset(), depth)
 
-    # The operations _staged_fill_terms walks through.
-    _STAGED_TERM_OPS = (
-        "tt.expand_dims",
-        "tt.broadcast",
-        "arith.index_cast",
-        "arith.extsi",
-        "arith.addi",
-        "arith.subi",
-        "arith.muli",
-    )
-
     def _rebuild_staged_fill_mask(self, mask_id, op_by_id, M, N, kind="store"):
         """Structurally rebuild a cooperative over-threadgroup store's or load's
         per-element mask as a boolean MSL expression in terms of
@@ -16786,17 +16833,6 @@ class GenericLowerer(
             expr = " + ".join(out) if out else "0"
             return f"{cast}({expr})" if cast else expr
 
-        def _zero_extends(nid, depth=0):
-            """Does the term walk below cross a zero extension?"""
-            node = op_by_id.get(nid)
-            if node is None or depth > 64:
-                return False
-            if node.op in ("arith.extui", "arith.index_castui"):
-                return True
-            if node.op in self._STAGED_TERM_OPS:
-                return any(_zero_extends(oid, depth + 1) for oid in node.operand_ids or [])
-            return False
-
         # Unwrap pass-through wrappers (broadcast/splat/extension) to the cmpi.
         cur = mask_id
         for _ in range(16):
@@ -16820,19 +16856,20 @@ class GenericLowerer(
                 # comparison can't be flipped by C++ unsigned promotion.
                 is_unsigned = pred_name in ("ult", "ule", "ugt", "uge") if pred_name else pred_int in (6, 7, 8, 9)
                 is_signed = pred_name in ("slt", "sle", "sgt", "sge") if pred_name else pred_int in (2, 3, 4, 5)
-                # The cast takes the operands' width, as in _lower_cmpi: a 64-bit
-                # bound cast to int compares its low half.
-                wide = any(self.env_types.get(oid) in ("i64", "u64", "ui64") for oid in op.operand_ids[:2])
-                if wide and any(_zero_extends(oid) for oid in op.operand_ids[:2]):
-                    # The terms below are rendered at their own width and then
-                    # sign-extended by the cast, which is not a zero extension.
-                    _refuse()
-                cast = ("(ulong)" if wide else "(uint)") if is_unsigned else ("(long)" if wide else "(int)")
-                cast = cast if is_unsigned or is_signed else ""
+                cast = "(uint)" if is_unsigned else "(int)" if is_signed else ""
                 lhs = _render(self._staged_fill_terms(op.operand_ids[0], None, None, op_by_id), cast)
                 rhs = _render(self._staged_fill_terms(op.operand_ids[1], None, None, op_by_id), cast)
                 if lhs is None or rhs is None:
                     _refuse()
+                if any(self.env_types.get(oid) in ("i64", "u64", "ui64") for oid in op.operand_ids[:2]):
+                    # A 64-bit comparison: the flattened sums above are exact at 32
+                    # bits only (a 64-bit bound cast to int compares its low half, and
+                    # a 32-bit partial sum is extended by its C type, not the
+                    # source's). Render each side at the source's widths.
+                    sides = [self._staged_fill_typed(oid, None, op_by_id, M, N) for oid in op.operand_ids[:2]]
+                    if any(side is None or side[1] != 64 for side in sides):
+                        _refuse()
+                    lhs, rhs = (f"(ulong)({side[0]})" if is_unsigned else side[0] for side in sides)
                 return f"({lhs} {sym} {rhs})"
             if op.op in ("tt.broadcast", "tt.splat", "arith.extsi", "arith.extui", "arith.trunci") and op.operand_ids:
                 cur = op.operand_ids[0]
@@ -16881,6 +16918,9 @@ class GenericLowerer(
         # program-id / batch-stride addptr applied before the splat).
         parts = []  # row/col index contributions
         const_terms = []  # block-constant contributions (same for all _sa)
+        offsets = []  # each tensor addptr's offset operand
+        base_offset = None  # the scalar offset folded onto the splatted base pointer
+        wide = ("i64", "u64", "ui64")
 
         def _refuse():
             raise MetalNonRecoverableError(
@@ -16923,6 +16963,7 @@ class GenericLowerer(
                 if len(op.operand_ids) < 2:
                     _refuse()
                 _add(self._staged_fill_terms(op.operand_ids[1], None, axis_dim_hint, op_by_id))
+                offsets.append(op.operand_ids[1])
                 cur = op.operand_ids[0]
                 continue
             if op.op == "tt.broadcast" and op.operand_ids:
@@ -16943,6 +16984,7 @@ class GenericLowerer(
                     _refuse()
                 if isinstance(sp[1], str) and sp[1] not in ("", "0"):
                     const_terms.append(sp[1])
+                    base_offset = sp[1]
                 reached_base = True
                 break
             # A value such as a pointer-valued select can have a valid
@@ -16956,6 +16998,29 @@ class GenericLowerer(
 
         if not reached_base:
             _refuse()
+
+        def _base_is_wide(pointer):
+            """Does a scalar addptr below the splat add a 64-bit offset?"""
+            for _ in range(64):
+                node = op_by_id.get(pointer)
+                if node is None or node.op != "tt.addptr" or len(node.operand_ids) < 2:
+                    return False
+                if self.env_types.get(node.operand_ids[1]) in wide:
+                    return True
+                pointer = node.operand_ids[0]
+            return False
+
+        if any(self.env_types.get(oid) in wide for oid in offsets) or _base_is_wide(op.operand_ids[0]):
+            # The flattened sum is exact while every term is 32 bits wide. With a
+            # 64-bit term in it, a 32-bit partial sum is extended by its C type: one
+            # holding ``pid`` (a ``uint``) and a negative term lands 2**32 elements
+            # away. Render each addptr's offset at the source's widths and add them as
+            # the pointer does, sign-extended.
+            typed = [self._staged_fill_typed(oid, axis_dim_hint, op_by_id, M, N) for oid in offsets]
+            if any(term is None for term in typed):
+                _refuse()
+            terms = [f"(long)({term[0]})" for term in reversed(typed)]
+            return " + ".join(terms + ([base_offset] if base_offset else []))
 
         all_parts = parts + const_terms
         return " + ".join(all_parts) if all_parts else "0"

@@ -13,10 +13,13 @@ the launcher refuses one that overlaps another tensor argument. Inputs that shar
 each other, such as one tensor as query, key and value, still compute, and so does a two-dot
 kernel that is not attention.
 
-The comparison is of the views as passed. Views that interleave without sharing a cell (the
-slots of one packed buffer, a column beside its matrix) are told apart by the residues they
-address along a stride and compute. A view shorter than the rows its stride and length
-arguments address is compared by its own extent, so such a launch is not refused.
+The comparison is of the byte ranges of the views as passed. Views that interleave without
+sharing a cell (the slots of one packed buffer, a column beside its matrix) are refused too:
+a kernel addresses its tensors through its own stride arguments, and slot views given
+contiguous strides put the output's rows over the rows read as inputs. That launch returned
+1117 to 1364 wrong cells of 4096 while a comparison of the views' cells accepted it. A view
+shorter than the rows its stride and length arguments address is compared by its own extent,
+so such a launch is not refused.
 """
 
 import math
@@ -31,7 +34,7 @@ import tests.test_fa_bwd_address_witness as bwd
 from tests.test_attention_capability import CASES as NARROW_REPLAY
 from tests.test_attention_capability import OPEN_CASES as WIDE_ROWS
 from tests.test_attention_capability import _attention as _biased_source
-from tests.test_attention_capability import compile_case
+from tests.test_attention_capability import compile_case, reference
 from tests.test_fa_biased_routing import _biased_fa
 from tests.test_flash_attention import _flash_attn_fwd
 from triton_msl.autotuning._operand_overlap import overlapping_output
@@ -72,26 +75,27 @@ def test_views_of_one_storage_are_compared_by_byte_range():
     assert overlapping_output([torch.zeros(0), arena], [0]) is None
 
 
-def test_views_that_interleave_without_sharing_a_cell_are_apart():
+def test_views_that_interleave_without_sharing_a_cell_are_reported():
+    # The views' cells say nothing about the cells a kernel addresses through its own
+    # stride arguments, so intersecting ranges are reported whatever the views' strides.
     pair = torch.zeros(8, 2)
-    assert overlapping_output([pair[:, 0], pair[:, 1]], [1]) is None
-    assert overlapping_output([pair[:, 0], pair[3:, 0]], [1]) == (1, 0)
+    assert overlapping_output([pair[:, 0], pair[:, 1]], [1]) == (1, 0)
     # Query, key, value and output as the slots of one packed buffer.
     slots = torch.zeros(1, 2, 8, 4, 16)
     q, k, v, out = (slots[:, :, :, i] for i in range(4))
-    assert overlapping_output([q, k, v, out], [3]) is None
-    assert overlapping_output([q, k, v, slots[:, :, :, 2, 8:]], [3]) == (3, 2)
+    assert overlapping_output([q, k, v, out], [3]) == (3, 0)
     # A per-row column beside the matrix it belongs to.
     both = torch.zeros(1, 2, 8, 17)
-    assert overlapping_output([both[..., :16], both[..., 16]], [0, 1]) is None
-    assert overlapping_output([both[..., :16], both[..., 15]], [0, 1]) == (0, 1)
-    # Different element widths over one storage are not compared cell by cell.
+    assert overlapping_output([both[..., :16], both[..., 16]], [0, 1]) == (0, 1)
+    # The last slot of a packed buffer ends after every other slot and still intersects.
+    assert overlapping_output([slots[0, 0, :, 0], slots[0, 0, :, 3]], [1]) == (1, 0)
+    # Different element widths over one storage.
     wide = torch.zeros(8, 2, dtype=torch.float32)
     halves = wide.view(torch.float16)
     assert overlapping_output([wide[:, 0], halves[:, 3]], [0]) == (0, 1)
 
 
-def test_the_cell_comparison_never_misses_a_shared_cell():
+def test_the_range_comparison_never_misses_a_shared_cell():
     # Every pair of strided views of a small arena, against the cells they address.
     cells = torch.arange(4 * 6 * 5).view(4, 6, 5)
     arena = torch.zeros(4 * 6 * 5).view(4, 6, 5)
@@ -120,7 +124,7 @@ def test_the_cell_comparison_never_misses_a_shared_cell():
             apart += found is None
             moved = overlapping_output([arena[a].transpose(0, -1), arena[b]], [0])
             assert not shared or moved == (0, 1), (a, b)
-    assert apart > 40  # the proof is used, not only the refusal
+    assert apart > 10  # views whose ranges do not intersect stay eligible
 
 
 def test_a_reinterpreted_tensor_addresses_its_base():
@@ -204,17 +208,46 @@ def test_views_of_one_storage_compute_when_the_output_is_apart():
 @requires_mps
 @pytest.mark.parametrize("device", ["mps", "cpu"])
 @pytest.mark.parametrize("rows, n", [(32, 32), (32, 80), (64, 64)])
-def test_the_slots_of_one_packed_buffer_compute(device, rows, n):
-    # The four views interleave, so every byte range covers the others; no cell is shared.
+def test_the_slots_of_one_packed_buffer_refuse(device, rows, n):
+    # The four views interleave, so every byte range covers the others. No cell is shared
+    # with these stride arguments, but the launcher does not see the kernel's addresses.
     t = _dense_inputs(2, n, 64, device)
-    packed = torch.zeros(1, 2, n, 4, 64, device=device)
+    packed = torch.full((1, 2, n, 4, 64), -8192.0, device=device)
     views = {name: packed[:, :, :, i] for i, name in enumerate("qkvo")}
     for name in "qkv":
         views[name].copy_(t[name])
-    _dense(t, 2, n, 64, rows)
-    _dense(views, 2, n, 64, rows)
-    assert torch.equal(views["o"], t["o"]) and float(t["o"].abs().max()) > 0
+    with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("Out", "Q")):
+        _dense(views, 2, n, 64, rows)
     assert all(torch.equal(views[name], t[name]) for name in "qkv")
+    assert bool((views["o"] == -8192.0).all())
+    # The same slots with the output in a tensor of its own compute.
+    apart = dict(views, o=torch.zeros_like(t["o"]))
+    _dense(t, 2, n, 64, rows)
+    _dense(apart, 2, n, 64, rows)
+    assert torch.equal(apart["o"], t["o"]) and float(t["o"].abs().max()) > 0
+
+
+@requires_mps
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("keys_block", [32, 64])
+def test_slot_views_addressed_with_contiguous_strides_refuse(keys_block, dtype):
+    # Slots [n, 4, d] of one buffer share no cell, but the stride arguments are the
+    # contiguous ones, so the kernel addresses n * d cells from each slot's first: the
+    # output's rows lie over the rows it reads as query, key and value. With the views'
+    # cells compared this launch computed, 1117 to 1364 of 4096 cells wrong in 10 of 10.
+    n, dim = 64, 64
+    gen = torch.Generator().manual_seed(7)
+    buf = torch.randn(n, 4, dim, generator=gen).to(dtype).to("mps")
+    before = buf.clone()
+    q, k, v, out = (buf[:, i, :] for i in range(4))
+    strides = (n * dim, n * dim, dim, 1)
+    with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("Out", "Q")):
+        _flash_attn_fwd[(1, 1)](
+            q, k, v, out, *strides, *strides, *strides, *strides, 1, 1, n,
+            BLOCK_M=64, BLOCK_N=keys_block, HEAD_DIM=dim, IS_CAUSAL=False,
+        )  # fmt: skip
+    torch.mps.synchronize()
+    assert torch.equal(buf, before)
 
 
 def _biased(t, heads, rows, dim, keys):
@@ -229,7 +262,7 @@ def _biased(t, heads, rows, dim, keys):
 @pytest.mark.parametrize(
     "dim, dtype, keys", [(32, torch.float32, 32), (64, torch.float32, 64), (64, torch.float16, 32)]
 )
-def test_a_log_sum_exp_column_beside_the_output_computes(dim, dtype, keys):
+def test_a_log_sum_exp_column_beside_the_output_refuses(dim, dtype, keys):
     heads, rows = 2, 64
     gen = torch.Generator().manual_seed(13)
     t = {name: torch.randn(1, heads, rows, dim, generator=gen).to(dtype).to("mps") for name in "qkv"}
@@ -238,14 +271,14 @@ def test_a_log_sum_exp_column_beside_the_output_computes(dim, dtype, keys):
     apart = dict(t, o=torch.zeros(1, heads, rows, dim, dtype=dtype, device="mps"))
     apart["l"] = torch.zeros(1, heads, rows, dtype=dtype, device="mps")
     _biased(apart, heads, rows, dim, keys)
-    both = torch.full((1, heads, rows, dim + 1), -8192.0, dtype=dtype, device="mps")
-    beside = dict(t, o=both[..., :dim], l=both[..., dim])
-    _biased(beside, heads, rows, dim, keys)
-    assert torch.equal(beside["o"], apart["o"]) and torch.equal(beside["l"], apart["l"])
     assert float(apart["o"].abs().max()) > 0 and bool(apart["l"].isfinite().all())
-    # The column over the output's own last column is two outputs over one cell.
-    with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("o_ptr", "lse_ptr")):
-        _biased(dict(t, o=both[..., :dim], l=both[..., dim - 1]), heads, rows, dim, keys)
+    # Two outputs of one buffer: the column after the output's last one shares no cell
+    # with it, the output's own last column does. Their byte ranges intersect either way.
+    both = torch.full((1, heads, rows, dim + 1), -8192.0, dtype=dtype, device="mps")
+    for column in (dim, dim - 1):
+        with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("o_ptr", "lse_ptr")):
+            _biased(dict(t, o=both[..., :dim], l=both[..., column]), heads, rows, dim, keys)
+    assert bool((both == -8192.0).all())
 
 
 def _replay_inputs(case):
@@ -301,6 +334,17 @@ def test_the_narrow_replay_shows_its_store_behind_every_load(case):
     assert not store_follows_every_load(lowerer, head + barrier + "    Out[0] = 0.0f;\n" + tail)
     assert not store_follows_every_load(lowerer, head + "    if (lid < 4u) {\n" + barrier + tail + "}\n")
     assert not store_follows_every_load(lowerer, msl.replace("threadgroup_barrier(", "barrier("))
+    # The text is matched by name: a thread that leaves before the barrier, and a buffer
+    # reached under another name, through a call or by a dereference, are not approved.
+    assert not store_follows_every_load(lowerer, head + "    if (lid > 900u) return;\n" + barrier + tail)
+    assert not store_follows_every_load(lowerer, head + "    volatile device half* alias = K;\n" + barrier + tail)
+    assert not store_follows_every_load(lowerer, head + barrier + "    float late = load_first(Bias);\n" + tail)
+    assert not store_follows_every_load(lowerer, head + barrier + "    float late = *(Bias + 1);\n" + tail)
+    # A buffer the compiler may read whenever it likes.
+    plain = head.replace("volatile device float* Bias", "device const float* Bias")
+    assert plain != head and not store_follows_every_load(lowerer, plain + barrier + tail)
+    # A brace or a buffer name in a comment changes nothing.
+    assert store_follows_every_load(lowerer, head + "    // } K[0] return\n" + barrier + "    /* Bias[0] { */\n" + tail)
 
 
 def test_a_store_that_traces_to_no_argument_publishes_nothing(monkeypatch):
@@ -344,6 +388,71 @@ def test_the_narrow_biased_replay_computes_in_place(case, where, shader, monkeyp
         _replay(case, t, out)
         assert torch.equal(out, apart)
     assert bool(apart.isfinite().all()) and float(apart.abs().max()) > 0
+
+
+def _replay_launch(case, t, out, nq, keys):
+    _dtype, rows, keys_block, dim, _nq, _keys, narrow, causal = case
+    _biased_source[(triton.cdiv(nq, rows),)](
+        t["q"], t["k"], t["v"], t["b"], out, nq, keys,
+        D=dim, BM=rows, BN=keys_block, NARROW=narrow, CAUSAL=causal,
+    )  # fmt: skip
+    torch.mps.synchronize()
+
+
+def _replay_tensors(case, nq, keys, seed):
+    kind = torch.float16 if case[0] == "fp16" else torch.bfloat16
+    gen = torch.Generator().manual_seed(seed)
+    t = {name: torch.randn((n, case[3]), generator=gen).to(kind) for name, n in (("q", nq), ("k", keys), ("v", keys))}
+    t["b"] = torch.randn((nq, keys), generator=gen) * 0.2
+    return t
+
+
+@requires_mps
+@pytest.mark.parametrize("keys", [33, 64, 70, 95, 97])
+@pytest.mark.parametrize("case", NARROW_REPLAY)
+def test_the_narrow_replay_computes_in_place_at_other_key_counts(case, keys):
+    # Two to four trips of the key loop, with and without a partial last block.
+    rows, dim, narrow, causal = case[1], case[3], case[6], case[7]
+    host = _replay_tensors(case, rows, keys, 77)
+    apart = torch.full((rows, dim), -8192.0, device="mps")
+    _replay_launch(case, {name: value.to("mps") for name, value in host.items()}, apart, rows, keys)
+    want = reference(host["q"], host["k"], host["v"], host["b"], case[2], narrow, causal)
+    # A probability narrowed to half rounds either way on a last-bit difference in exp.
+    tol = 1e-3 if narrow else 3e-5
+    assert torch.allclose(apart.cpu(), want, atol=tol, rtol=tol)
+    tried = 0
+    for where in ("bias-start", "bias-end", "key-bytes", "value-bytes"):
+        t = {name: value.to("mps") for name, value in host.items()}
+        cells = t["b"].numel() if where.startswith("bias") else t[where[0]].numel() // 2
+        if cells < rows * dim:
+            continue
+        tried += 1
+        out = _over(t, where, rows, dim)
+        _replay_launch(case, t, out, rows, keys)
+        assert torch.equal(out, apart)
+    # 32 rows of 64 with 33 keys: no input is large enough to hold the output.
+    assert tried or (rows * dim, keys) == (2048, 33)
+
+
+@requires_mps
+@pytest.mark.parametrize("programs, spare", [(3, 0), (3, 3), (2, 1)])
+@pytest.mark.parametrize("case", NARROW_REPLAY)
+def test_the_narrow_replay_computes_in_place_over_several_programs(case, programs, spare):
+    # With as many keys as the head dim, the bias row a program loads is the output row
+    # it stores, so the output over the bias is defined for any number of programs:
+    # no program stores a cell another one loads. ``spare`` rows short of a full last
+    # program leaves that program's other rows masked.
+    rows, dim, narrow, causal = case[1], case[3], case[6], case[7]
+    nq = programs * rows - spare
+    for seed in range(5):
+        host = _replay_tensors(case, nq, dim, 90 + seed)
+        want = reference(host["q"], host["k"], host["v"], host["b"], case[2], narrow, causal)
+        t = {name: value.to("mps") for name, value in host.items()}
+        apart = torch.full((nq, dim), -8192.0, device="mps")
+        _replay_launch(case, t, apart, nq, dim)
+        _replay_launch(case, t, t["b"], nq, dim)
+        tol = 1e-3 if narrow else 3e-5
+        assert torch.equal(t["b"], apart) and torch.allclose(apart.cpu(), want, atol=tol, rtol=tol)
 
 
 @requires_mps
@@ -398,6 +507,29 @@ def test_backward_output_over_an_input_refuses(kind, output, over):
     ):
         _backward(kind, t)
     assert torch.equal(t[over], before)
+
+
+@requires_mps
+@pytest.mark.parametrize(
+    "kind, first, second",
+    [("kv", "dk", "dv"), ("kv", "dk", "k"), ("q", "dq", "q"), ("q", "delta", "lse")],
+)
+def test_backward_tensors_interleaved_in_one_buffer_refuse(kind, first, second):
+    # An output and another tensor as the two slots of one buffer: no cell shared, ranges
+    # intersecting.
+    t = {name: x.to("mps") for name, x in bwd._inputs(kind, 5).items()}
+    shape = tuple(max(a, b) for a, b in zip(t[first].shape, t[second].shape))
+    packed = torch.full((*shape, 2), -8192.0, device="mps")
+    slots = [packed[..., i][tuple(slice(0, n) for n in t[name].shape)] for i, name in enumerate((first, second))]
+    slots[1].copy_(t[second])
+    before = packed.clone()
+    t[first], t[second] = slots
+    with pytest.raises(
+        MetalNonRecoverableError,
+        match=REFUSAL.format(NAMES.get(first, first + "_ptr"), NAMES.get(second, second + "_ptr")),
+    ):
+        _backward(kind, t)
+    assert torch.equal(packed, before)
 
 
 @requires_mps

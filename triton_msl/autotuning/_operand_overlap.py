@@ -11,8 +11,6 @@ eligible.
 No Triton import: the dispatchers that use this stay importable without backend discovery.
 """
 
-import math
-
 
 def _span(value):
     """Elements from the first to the last one a view addresses."""
@@ -61,75 +59,41 @@ def output_overlaps_operand(arguments, output, written, reads, *, exact=False):
     return False
 
 
-def _view(value):
-    """(storage, first byte, one past the last byte, tensor) of the view an argument passes."""
+def _view_bytes(value):
+    """(storage, first byte, one past the last byte) of the view an argument passes."""
     if not hasattr(value, "untyped_storage"):
         # triton.reinterpret wraps a tensor and addresses the same bytes.
         value = value.base
     start, stop = _byte_range(value, _span(value))
-    return value.untyped_storage().data_ptr(), start, stop, value
-
-
-_RESIDUE_CAP = 1 << 12
-
-
-def _residues(value, modulus):
-    """The elements a view addresses, modulo ``modulus``; None above the cap."""
-    found = {value.storage_offset() % modulus}
-    for size, stride in zip(value.shape, value.stride()):
-        step = stride % modulus
-        if size < 2 or step == 0:
-            continue
-        size = min(size, modulus // math.gcd(step, modulus))  # the residues repeat after that
-        if len(found) * size > _RESIDUE_CAP:
-            return None
-        found = {(base + index * step) % modulus for base in found for index in range(size)}
-    return found
-
-
-def _never_share_a_cell(a, b):
-    """True when two views of one storage whose ranges intersect are proved apart.
-
-    The slots of a packed buffer (query, key, value and output as ``buf[..., i, :]``)
-    and a column next to its matrix (``buf[..., :d]`` and ``buf[..., d]``) interleave
-    without sharing a cell. Along a stride of either view the two then address
-    different residues. Any modulus that separates them is a proof; False when none
-    does or when the views are not the same element width.
-    """
-    if a.element_size() != b.element_size():
-        return False
-    for modulus in sorted({abs(s) for value in (a, b) for s in value.stride() if abs(s) > 1}):
-        first = _residues(a, modulus)
-        second = _residues(b, modulus) if first is not None else None
-        if second is not None and first.isdisjoint(second):
-            return True
-    return False
+    return value.untyped_storage().data_ptr(), start, stop
 
 
 def overlapping_output(arguments, outputs):
     """(output index, other index) of the first output that overlaps another tensor.
 
-    Compares the views the caller passed within one storage: their byte ranges, and
-    for ranges that intersect the cells the views address. None when no output
+    Compares the byte range of each view within one storage; None when no output
     overlaps. An argument whose storage cannot be read is skipped: this is a refusal
     for launches that are otherwise accepted, so what cannot be decided is left alone.
-    A kernel that addresses rows its view does not cover (a view shorter than the
-    stride and length arguments describe) is compared by the view all the same.
+
+    Byte ranges, not cells: views that interleave without sharing a cell (the slots of
+    one packed buffer, a column beside its matrix) are reported as overlapping. A kernel
+    addresses its tensors through its own stride arguments, which need not be the
+    views' strides, so cells the views keep apart are not cells the kernel keeps apart.
+    For the same reason a view shorter than the rows the kernel addresses through it is
+    compared by its own extent, and an output placed inside those rows is not seen.
     """
     views = {}
     for index, value in enumerate(arguments):
         if hasattr(value, "data_ptr"):
             try:
-                views[index] = _view(value)
+                views[index] = _view_bytes(value)
             except (AttributeError, RuntimeError, TypeError, ValueError):
                 continue
     for output in outputs:
         if output not in views:
             continue
-        storage, first, last, target = views[output]
-        for index, (other, start, stop, value) in views.items():
-            if index == output or other != storage or not (start < last and first < stop):
-                continue
-            if not _never_share_a_cell(target, value):
+        storage, first, last = views[output]
+        for index, (other, start, stop) in views.items():
+            if index != output and other == storage and start < last and first < stop:
                 return output, index
     return None
