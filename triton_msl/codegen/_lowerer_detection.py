@@ -817,6 +817,16 @@ class _DetectionMixin:
                 None,
                 None,
             )
+        if src_elem in ("f16", "bf16") and k_for is not None:
+            # The accumulator the loop carries is a value of the narrow type on every trip.
+            # The templates keep one float accumulator over all of K and convert it once.
+            return (
+                f"an {src_elem} accumulator carried over the K loop is rounded to {src_elem} on every trip; the "
+                f"template would round its float accumulator once, after the last one",
+                set(),
+                None,
+                None,
+            )
         traced = self.infer_dot_strides(with_index=True)
         if traced is None:
             return ("operand addresses could not be traced", set(), None, None)

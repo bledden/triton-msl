@@ -19,6 +19,7 @@ node, which the launcher treats as unknown, never as absent.
 
 import re
 
+from ._narrow_float import without_helpers
 from .mlir_walker import _extract_shape
 
 PLAN_VERSION = 1
@@ -554,6 +555,8 @@ def text_order(pointer_names, msl):
     barrier, so a shader with a return has no usable barrier at all.
     """
     msl = re.sub(r"//[^\n]*|/\*.*?\*/", lambda found: " " * len(found.group(0)), msl, flags=re.S)
+    # The guarded quotient takes two floats and returns one: no thread leaves the kernel in it.
+    msl = without_helpers(msl, keep_positions=True)
     wanted = {found.start() for found in re.finditer(r"\bthreadgroup_barrier\(", msl)}
     stack, closes, inside = [], {}, {}
     for position, character in enumerate(msl):

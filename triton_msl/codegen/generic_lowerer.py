@@ -125,6 +125,9 @@ from triton_msl.codegen._lowerer_dot_kchunk import _DotKChunkMixin
 from triton_msl.codegen._lowerer_emission import _EmissionMixin
 from triton_msl.codegen._lowerer_reduce import _ReduceScanMixin
 from triton_msl.codegen._lowerer_control import _ControlFlowMixin
+from triton_msl.codegen._narrow_float import NARROW as NARROW_FLOATS, fused_multiply_add, narrow_constant
+from triton_msl.codegen._narrow_float import fdiv as guarded_quotient, holds_narrow as holds_narrow_float
+from triton_msl.codegen._narrow_float import round_result as round_narrow_result
 
 
 # ---------------------------------------------------------------------------
@@ -4288,18 +4291,23 @@ class GenericLowerer(
             self._lower_store(ssa)
         elif op == "tt.reduce":
             self._lower_reduce(ssa)
+            round_narrow_result(self, ssa)
         elif op == "tt.scan":
             self._lower_scan(ssa)
+            round_narrow_result(self, ssa)
         elif op == "tt.clampf":
             self._lower_clampf(ssa)
         elif op == "tt.dot":
             self._lower_dot(ssa)
+            round_narrow_result(self, ssa)
         elif op == "arith.constant":
             self._lower_constant(ssa)
         elif op.startswith("arith."):
             self._lower_arith(ssa)
+            round_narrow_result(self, ssa)
         elif op.startswith("math."):
             self._lower_math(ssa)
+            round_narrow_result(self, ssa)
         elif op == "scf.for":
             self._control_flow_depth += 1
             try:
@@ -4362,12 +4370,16 @@ class GenericLowerer(
             self._lower_tt_bitcast(ssa)
         elif op == "tt.precise_sqrt":
             self._lower_precise_math(ssa, "sqrt")
+            round_narrow_result(self, ssa)
         elif op == "tt.precise_divf":
             self._lower_precise_math(ssa, "divf")
+            round_narrow_result(self, ssa)
         elif op == "tt.extern_elementwise":
             self._lower_extern_elementwise(ssa)
+            round_narrow_result(self, ssa)
         elif op == "tt.fp_to_fp":
             self._lower_fp_to_fp(ssa)
+            round_narrow_result(self, ssa)
         elif op == "tt.assert":
             from .assertions import emit
 
@@ -6354,6 +6366,9 @@ class GenericLowerer(
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = int_dtype
         elif isinstance(value, float):
+            if ssa.elem_type in NARROW_FLOATS and math.isfinite(value):
+                # The decimal names a value of the narrow type, not the float32 beside it.
+                value = narrow_constant(value, ssa.elem_type)
             if math.isinf(value):
                 msl_val = "INFINITY" if value > 0 else "(-INFINITY)"
             elif math.isnan(value):
@@ -7304,7 +7319,8 @@ class GenericLowerer(
                             return f"{arr[0]}[{i}]" if arr else scalar
 
                         exprs = [
-                            f"fma({_read(i, a_id, a)}, {_read(i, b_id, b)}, {_read(i, c_id, c)})" for i in range(n)
+                            fused_multiply_add(ssa, _read(i, a_id, a), _read(i, b_id, b), _read(i, c_id, c))
+                            for i in range(n)
                         ]
                         var_name = self._var_array("r", exprs, "float")
                         self.env[ssa.id] = var_name
@@ -7315,7 +7331,7 @@ class GenericLowerer(
                 b = self._lookup(b_id)
                 c = self._lookup(c_id)
                 var_name = self._next_var("r")
-                self.kb.raw_line(f"    float {var_name} = fma({a}, {b}, {c});")
+                self.kb.raw_line(f"    float {var_name} = {fused_multiply_add(ssa, a, b, c)};")
                 self.env[ssa.id] = var_name
 
         elif op == "math.erf":
@@ -7407,7 +7423,10 @@ class GenericLowerer(
             a = self._lookup(ssa.operand_ids[0])
             b = self._lookup(ssa.operand_ids[1])
             var_name = self._next_var("r")
-            self.kb.raw_line(f"    float {var_name} = precise::divide({a}, {b});")
+            quotient = (
+                guarded_quotient(self, a, b, exact=True) if holds_narrow_float(self) else f"precise::divide({a}, {b})"
+            )
+            self.kb.raw_line(f"    float {var_name} = {quotient};")
             self.env[ssa.id] = var_name
             self.env_types[ssa.id] = "fp32"
         # Shape: precise math is element-wise

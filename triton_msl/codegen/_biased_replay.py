@@ -310,9 +310,13 @@ def store_follows_every_load(lowerer, msl):
     """
     import re
 
+    from ._narrow_float import without_helpers
+
     pointers = [re.escape(arg.name) for arg in lowerer.graph.args if arg.is_ptr]
     names = "|".join(pointers)
     msl = re.sub(r"//[^\n]*|/\*.*?\*/", "", msl, flags=re.S)
+    # The guarded quotient takes two floats and returns one: no thread leaves the kernel in it.
+    msl = without_helpers(msl)
     head, barrier, tail = msl.rpartition("threadgroup_barrier(")
     if not names or not barrier or head.count("{") - head.count("}") != 1:
         return False

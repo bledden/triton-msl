@@ -14,6 +14,7 @@ from triton_msl.codegen.mlir_walker import SSAValue, _extract_shape
 from triton_msl.codegen.msl_emitter import _msl_compute_type
 from triton_msl.codegen.msl_types import triton_type_to_msl
 
+from triton_msl.codegen._narrow_float import fdiv, holds_narrow, int_to_float
 from triton_msl.codegen._lowerer_helpers import (
     _UINT_TYPE_MAP,
     _mlir_to_triton_dtype,
@@ -159,6 +160,8 @@ class _EmissionMixin:
         # right, sign-fill for arithmetic right). Match CUDA so shifts never
         # silently diverge (re-audit #4). Constant amounts fold the ternary away.
         _shift_W = int(mept_dtype[1:]) if (op_str in ("<<", ">>") and not is_float) else None
+        # A division in a kernel with 16-bit floats: the quotient the compiler may not narrow.
+        guarded_division = is_float and op_str == "/" and holds_narrow(self)
         if force_unsigned and not is_float:
             unsigned_ty, _ud = _msl_int_type(ssa.elem_type, unsigned=True)
 
@@ -168,6 +171,10 @@ class _EmissionMixin:
                     return base
                 # left / logical-right out-of-range -> 0
                 return f"((uint)({bv}) >= {_W}u ? 0 : ({base}))"
+        elif guarded_division:
+
+            def _make_expr(av, bv):
+                return fdiv(self, av, bv)
         else:
 
             def _make_expr(av, bv, _op=op_str, _W=_shift_W, _arith=(op_str == ">>")):
@@ -439,11 +446,17 @@ class _EmissionMixin:
             out_dtype = "fp32"
         else:
             out_dtype = _mlir_to_triton_dtype(ssa.elem_type) if ssa.elem_type else "i32"
+
+        def _conv(expr):
+            if target_type == "float" and ssa.op == "arith.sitofp":
+                return int_to_float(ssa.elem_type, expr)
+            return f"static_cast<{target_type}>({expr})"
+
         # Phase 4b: when MEPT is on and the source SSA carries an array,
         # emit per-element cast into a parallel result array.
         if self.mept_enabled and src_id in self.env_array:
             src_name, n, _src_ty = self.env_array[src_id]
-            exprs = [f"static_cast<{target_type}>({src_name}[{i}])" for i in range(n)]
+            exprs = [_conv(f"{src_name}[{i}]") for i in range(n)]
             var_name = self._var_array("r", exprs, target_type)
             self.env[ssa.id] = var_name
             self.env_array[ssa.id] = (var_name, n, target_type)
@@ -454,7 +467,7 @@ class _EmissionMixin:
             return
         a = self._lookup(src_id)
         var_name = self._next_var("r")
-        self.kb.raw_line(f"    {target_type} {var_name} = static_cast<{target_type}>({a});")
+        self.kb.raw_line(f"    {target_type} {var_name} = {_conv(a)};")
         self.env[ssa.id] = var_name
         self.env_types[ssa.id] = out_dtype
         # Shape: cast preserves shape from source operand
@@ -490,8 +503,8 @@ class _EmissionMixin:
 
         def _conv(expr):
             if needs_unsigned_step:
-                return f"static_cast<float>(static_cast<{src_unsigned_ty}>({expr}))"
-            return f"static_cast<float>({expr})"
+                return int_to_float(ssa.elem_type, f"static_cast<{src_unsigned_ty}>({expr})")
+            return int_to_float(ssa.elem_type, expr)
 
         # Phase 4b: MEPT array path.
         if self.mept_enabled and src_id in self.env_array:
