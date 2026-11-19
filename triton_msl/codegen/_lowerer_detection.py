@@ -16,6 +16,7 @@ from triton_msl.codegen.mlir_walker import SSAValue, _extract_shape
 
 from triton_msl.codegen._lowerer_helpers import _mlir_to_triton_dtype
 from triton_msl.codegen._normalization_proof import normalization_template_matches
+from triton_msl.codegen._sort_proof import prove_row_wise_sort
 
 
 # Epilogue ops that don't compute a new value — they only reshape the layout or
@@ -4785,8 +4786,6 @@ class _DetectionMixin:
         ):
             return None
 
-        import re
-
         def _literal(vid):
             op = by_id.get(vid)
             if op is None or op.op != "arith.constant":
@@ -5577,171 +5576,35 @@ class _DetectionMixin:
             if not (is_xor or is_minmax):
                 return None
 
-        # Identify pointer args (X=input, Z=output) and stride scalars
-        scalar_args = [a for a in self.graph.args if not a.is_ptr]
-        # Preserve the prescan side effect used for driver copy-back metadata, but
-        # resolve the template's input/output roles from this detector's exact load
-        # and store. `_output_arg_ids` alone cannot identify the input when unrelated
-        # pointer args are present.
+        # The template replaces the whole kernel and keeps nothing of the source but
+        # these facts, so the source must be PROVED to be one unmasked load of the
+        # tile at `base + row * stride + column`, Triton's own sorting network, and
+        # one unmasked store. The signature above also fits a `tl.flip` of a 2xN
+        # tile (the same reshape and exclusive-or reductions), a sort whose result
+        # is changed before the store, a masked access, and addresses carrying an
+        # offset or a program term: the template computed a plain sort at the plain
+        # addresses for every one of them. Anything unproved is left to the
+        # ordinary lowering.
+        proof = prove_row_wise_sort(self.graph, load_ssa, store_ssa, M, N)
+        if proof is None:
+            return None
+        # Preserve the prescan side effect used for driver copy-back metadata.
         self._store_ptr_ids = set()
         self._prescan_stores()
-        roles = self._resolve_load_store_ptr_roles(load_ssa, store_ssa)
-        if roles is None:
-            return None
-        input_arg, output_arg = roles
+        input_arg, output_arg = proof["input"], proof["output"]
         x_ptr_name = input_arg.name
         z_ptr_name = output_arg.name
         # Compute comparisons in the INPUT domain. A mixed-dtype output-first
         # signature previously picked the output dtype from ptr_args[0], narrowing
         # values BEFORE sorting (28/32 wrong stores in the i32->i8 discriminator).
         elem_type = input_arg.elem_type
-
-        # Detect descending by the presence of hypercube-sized `arith.constant
-        # dense<1>` tensors at the start of the kernel. triton.language.sort
-        # emits them when flipping the compare direction. Shape is
-        # (1,)*(n_dims-1) x 2 or similar — any constant dense<1> with only
-        # one non-unit dim of size 2, within the within-row range.
-        descending = False
-        for ssa in const_ops:
-            if ssa.attrs.get("value") != 1:
-                continue
-            shape = _extract_shape(ssa.type_str)
-            if not shape:
-                continue
-            # The inversion constants are 1D-like: all dims size 1 except one
-            # axis of size 2. The size-2 axis corresponds to a within-row bit.
-            size2_axes = [i for i, s in enumerate(shape) if s == 2]
-            other_sizes = [s for s in shape if s != 2]
-            if len(size2_axes) == 1 and all(s == 1 for s in other_sizes):
-                descending = True
-                break
-        # Fallback: scan raw IR text for the inversion constants
-        if not descending:
-            # Look for an arith.constant dense<1> : tensor<...x2xi32 shape
-            # at the top (before the first make_range).
-            raw = getattr(self.graph, "text", None)
-            if raw:
-                # Simple heuristic: arith.constant dense<1> : ... occurs
-                # BEFORE any tt.make_range.
-                mr_pos = raw.find("tt.make_range")
-                const_match = re.search(r"arith\.constant\s+dense<1>\s*:\s*tensor<", raw)
-                if const_match and (mr_pos == -1 or const_match.start() < mr_pos):
-                    descending = True
-
-        # Identify the row-stride scalars. They appear as a factor of a make_range
-        # (the row offset) in an arith.muli. The canonical sort signature carries ONLY
-        # the strides as runtime scalars (X, stride_xm, Z, stride_zm), so a POSITIONAL
-        # pick would silently mis-assign if a NON-stride scalar (e.g. a runtime row count)
-        # were present. Guard it structurally: verify EVERY runtime scalar arg is actually
-        # a row-stride (a make_range coefficient); if any is not, the positional pick is
-        # ambiguous -> REFUSE rather than guess (correct-or-refuse). Constexpr strides
-        # (no runtime scalars) stay the safe None case (template uses the baked N).
-        def _flatten_ops(ops):
-            for s in ops:
-                yield s
-                if s.region_ops:
-                    yield from _flatten_ops(s.region_ops)
-                if s.else_ops:
-                    yield from _flatten_ops(s.else_ops)
-
-        _all_ops = list(_flatten_ops(self.graph.ops))
-        _obid = {s.id: s for s in _all_ops}
-
-        def _is_row_stride(arg):
-            for o in _all_ops:
-                if o.op == "arith.muli" and arg.id in (o.operand_ids or []):
-                    for other in o.operand_ids:
-                        if other != arg.id and self._trace_to_make_range(other, _all_ops, _obid) is not None:
-                            return True
-            return False
-
-        stride_xm_name = None
-        stride_zm_name = None
-        if len(scalar_args) >= 1:
-            if not all(_is_row_stride(a) for a in scalar_args):
-                return None  # a non-stride runtime scalar is present -> can't positionally pick
-            if len(scalar_args) > 2:
-                return None  # more stride-like scalars than the 2 rows (xm, zm) -> ambiguous
-            stride_xm_name = scalar_args[0].name
-            stride_zm_name = scalar_args[1].name if len(scalar_args) >= 2 else scalar_args[0].name
-        else:
-            # Constexpr strides (no runtime stride scalars): the row stride is baked
-            # into the IR as an integer constant multiplying the M-range
-            # (row_off = expand(make_range(0,M)) * C). Extract C separately for the
-            # load (x) and store (z) pointer chains — a padded-row layout (C != N)
-            # must use the REAL C, not an assumed N. If either constant cannot be
-            # proven unambiguously, bail to the generic path (correct-or-refuse).
-            # (2026-08-29, trifast #6b fallout: this branch became reachable when
-            # _prescan_stores learned to resolve broadcast/expand store chains; the
-            # template previously interpolated Python `None` into the MSL here.)
-            def _baked_row_stride(root_id):
-                consts = set()
-                seen = set()
-                stack = [root_id]
-                while stack:
-                    cur = stack.pop()
-                    if cur is None or cur in seen:
-                        continue
-                    seen.add(cur)
-                    o = _obid.get(cur)
-                    if o is None:
-                        continue
-                    if o.op == "arith.muli" and len(o.operand_ids or []) == 2:
-                        for mr_side, c_side in ((0, 1), (1, 0)):
-                            # Peel shape wrappers locally (the shared tracer does not
-                            # follow expand_dims, and widening it would loosen every
-                            # other detection that relies on it).
-                            _mr_root = o.operand_ids[mr_side]
-                            for _ in range(6):
-                                _w = _obid.get(_mr_root)
-                                if (
-                                    _w is not None
-                                    and _w.op in ("tt.expand_dims", "tt.broadcast", "ttg.convert_layout")
-                                    and _w.operand_ids
-                                ):
-                                    _mr_root = _w.operand_ids[0]
-                                    continue
-                                break
-                            mr_id = self._trace_to_make_range(_mr_root, _all_ops, _obid)
-                            if mr_id is None:
-                                continue
-                            mr_op = _obid.get(mr_id)
-                            try:
-                                extent = int(mr_op.attrs.get("end")) - int(mr_op.attrs.get("start", 0))
-                            except (TypeError, ValueError):
-                                continue
-                            if extent != M:
-                                continue
-                            # Other side must trace to an integer constant
-                            c_id = o.operand_ids[c_side]
-                            for _ in range(6):
-                                c_op = _obid.get(c_id)
-                                if c_op is None:
-                                    break
-                                if c_op.op == "arith.constant":
-                                    v = c_op.attrs.get("value")
-                                    if isinstance(v, int):
-                                        consts.add(v)
-                                    break
-                                if (
-                                    c_op.op in ("tt.splat", "tt.broadcast", "tt.expand_dims", "arith.extsi")
-                                    and c_op.operand_ids
-                                ):
-                                    c_id = c_op.operand_ids[0]
-                                    continue
-                                break
-                    for opd in o.operand_ids or []:
-                        stack.append(opd)
-                if len(consts) == 1:
-                    return consts.pop()
-                return None  # none found, or ambiguous (e.g. M == N with an unfolded col muli)
-
-            _sx = _baked_row_stride(load_ssa.operand_ids[0]) if load_ssa.operand_ids else None
-            _sz = _baked_row_stride(store_ssa.operand_ids[0]) if store_ssa.operand_ids else None
-            if _sx is None or _sz is None or _sx < N or _sz < K_out:
-                return None  # can't prove the baked strides -> generic path handles it
-            stride_xm_name = f"{_sx}"
-            stride_zm_name = f"{_sz}"
+        descending = proof["descending"]
+        # The comparison is the source's: integer types carry no sign of their own.
+        unsigned = proof["compare"] == "ugt"
+        if unsigned and elem_type not in ("i8", "i16", "i32", "i64"):
+            return None
+        stride_xm_name = f"{proof['input_stride']}"
+        stride_zm_name = f"{proof['output_stride']}"
 
         # Require M <= 1024 so each row fits in one thread within the tg
         if M > 1024:
@@ -5756,6 +5619,7 @@ class _DetectionMixin:
             "N": N,
             "K": K_out,
             "descending": descending,
+            "unsigned": unsigned,
             "elem_type": elem_type,
             "x_ptr": x_ptr_name,
             "z_ptr": z_ptr_name,

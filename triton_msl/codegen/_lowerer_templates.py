@@ -3453,24 +3453,21 @@ class _TemplateMixin:
         )
 
     def _lower_row_wise_sort_template(self, info) -> str:
-        """Emit a per-row bitonic sort / top-k kernel.
+        """Emit a per-row bitonic sort kernel.
 
-        Thread `lid` owns row `lid` of the (M, N) input. It loads N elements
-        into a local register array, performs an in-register bitonic sort,
-        and stores the first K elements back to row `lid` of the output.
+        Thread `lid` owns row `lid` of the (M, N) input. It loads the row's N cells
+        into a register array, runs the compare-and-swap steps of
+        ``triton.language.sort`` over them, and stores them to row `lid` of the output.
 
-        Bitonic sort for direction `asc`:
-            for stage in 2, 4, ..., N:
-                for step in stage/2, stage/4, ..., 1:
-                    for i in 0 .. N-1:
-                        j = i ^ step
-                        if j > i:
-                            up = ((i & stage) == 0) xor !asc
-                            if ((v[i] > v[j]) == up) swap
+            for stage in 1 .. log2(N):
+                for swap in stage-1 .. 0:
+                    for each pair i, j = i ^ (1 << swap), i < j:
+                        m = bit `stage` of i (the requested direction in the last stage)
+                        v[i], v[j] = (v[i] > v[j]) != m ? v[j] : v[i],
+                                     (v[j] > v[i]) == m ? v[i] : v[j]
 
-        For topk: run the full sort, then store first K elements. For
-        `descending=True`: sort ascending and reverse-store. For
-        `descending=False` + topk: the smallest K elements.
+        The detector proves the source is exactly this (`_sort_proof`) and hands over
+        the direction and whether the source compares unsigned.
         """
         M = info["M"]
         N = info["N"]
@@ -3512,6 +3509,10 @@ class _TemplateMixin:
         msl_type = triton_type_to_msl(elem_type)
         # Pick a compute type for comparisons (promote fp16/bf16 to float)
         compute_type = _msl_compute_type(elem_type)
+        if info.get("unsigned"):
+            # The source compares unsigned; the cells are held in the unsigned type of
+            # their width, and the casts on load and store keep every bit.
+            compute_type = {"char": "uchar", "short": "ushort", "int": "uint", "long": "ulong"}[compute_type]
 
         source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
@@ -3555,51 +3556,35 @@ class _TemplateMixin:
         lines.append(f"        for (uint _i = 0u; _i < {N}u; _i++) {{")
         lines.append(f"            v[_i] = static_cast<{compute_type}>({x_ptr}[_row_off + _i]);")
         lines.append(f"        }}")
-        # In-register bitonic sort (ascending). Unroll to avoid the
-        # `step /= 2u` where step=1 lap not exiting the `>=1u` condition
-        # cleanly in MSL (0 >= 1 is false so it DOES exit; but some compilers
-        # warn). We emit the sequence directly from known N.
-        lines.append(f"        // Bitonic sort of {N} elements (ascending order)")
-        stage = 2
-        while stage <= N:
-            step = stage // 2
-            while step >= 1:
-                lines.append(f"        // stage={stage}, step={step}")
+        # The network is the source's own (triton.language.sort), step for step: in each
+        # step an element takes its partner where (element > partner) != mask, the mask
+        # being its coordinate along the step's axis exclusive-or the direction of its
+        # run. Written this way rather than as "swap when out of order" it is the
+        # source's result for every input: where neither of a pair is greater (equal
+        # values, a zero of each sign, a NaN) both cells end with one of the two values.
+        lines.append(f"        // Bitonic sort of {N} elements: the source's compare-and-swap steps")
+        log_n = N.bit_length() - 1
+        for stage in range(1, log_n + 1):
+            if stage < log_n:
+                direction = f"((i >> {stage}u) & 1u) != 0u"
+            else:
+                direction = "true" if descending else "false"
+            for swap in range(stage - 1, -1, -1):
+                lines.append(f"        // stage={stage}, step={1 << swap}")
                 lines.append(f"        for (uint i = 0u; i < {N}u; i++) {{")
-                lines.append(f"            uint j = i ^ {step}u;")
+                lines.append(f"            uint j = i ^ {1 << swap}u;")
                 lines.append(f"            if (j > i) {{")
-                lines.append(f"                bool up = ((i & {stage}u) == 0u);")
-                lines.append(f"                bool gt = (v[i] > v[j]);")
-                lines.append(f"                if (gt == up) {{")
-                lines.append(f"                    {compute_type} _t = v[i]; v[i] = v[j]; v[j] = _t;")
-                lines.append(f"                }}")
+                lines.append(f"                bool m = {direction};")
+                lines.append(f"                {compute_type} a = v[i]; {compute_type} b = v[j];")
+                lines.append(f"                v[i] = ((a > b) != m) ? b : a;")
+                lines.append(f"                v[j] = ((b > a) == m) ? a : b;")
                 lines.append(f"            }}")
                 lines.append(f"        }}")
-                step //= 2
-            stage *= 2
-        # After ascending sort, v[0..N-1] is ascending.
-        # For sort descending: store reversed.
-        # For topk ascending (not descending): smallest K → v[0..K-1] in ascending order.
-        # For topk descending: largest K → v[N-K..N-1] → store in reverse order.
-        # For sort ascending: v[0..N-1].
         _row_off_zx = self._row_stride_offset_expr("lid", stride_zm, "row-wise sort output")
         lines.append(f"        long _row_off_z = {_row_off_zx};")
-        if descending:
-            if K < N:
-                # topk largest: take v[N-K..N-1], reverse for descending order
-                lines.append(f"        for (uint _i = 0u; _i < {K}u; _i++) {{")
-                lines.append(f"            {z_ptr}[_row_off_z + _i] = static_cast<{msl_type}>(v[{N}u - 1u - _i]);")
-                lines.append(f"        }}")
-            else:
-                # sort descending: reverse entire ascending output
-                lines.append(f"        for (uint _i = 0u; _i < {N}u; _i++) {{")
-                lines.append(f"            {z_ptr}[_row_off_z + _i] = static_cast<{msl_type}>(v[{N}u - 1u - _i]);")
-                lines.append(f"        }}")
-        else:
-            # ascending sort or topk ascending (smallest K): take v[0..K-1]
-            lines.append(f"        for (uint _i = 0u; _i < {K}u; _i++) {{")
-            lines.append(f"            {z_ptr}[_row_off_z + _i] = static_cast<{msl_type}>(v[_i]);")
-            lines.append(f"        }}")
+        lines.append(f"        for (uint _i = 0u; _i < {K}u; _i++) {{")
+        lines.append(f"            {z_ptr}[_row_off_z + _i] = static_cast<{msl_type}>(v[_i]);")
+        lines.append(f"        }}")
         lines.append(f"    }}")
         lines.append("}")
         lines.append("")
