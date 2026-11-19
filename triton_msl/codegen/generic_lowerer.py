@@ -772,7 +772,7 @@ class GenericLowerer(
             return "_loop_e", getattr(self, "_total_elements", 0) or self.effective_block_size
         return "lid", self.effective_block_size
 
-    def _lane_sources(self, ids):
+    def _lane_sources(self, ids, through=()):
         """How the indices behind ``ids`` are held on the lanes.
 
         Returns ``(strides, moduli, flat, unknown, bounds)``: the N of every row index
@@ -780,7 +780,8 @@ class GenericLowerer(
         the width is not known), the M of every column index written ``lane % M`` and of
         every value held as element ``lane % M``, the values held as element ``lane``,
         what was met that is held in no known way, and the lane counts past which one of
-        those values holds nothing.
+        those values holds nothing. ``through`` names further operations to follow as
+        elementwise ones, each lane computing its own element from its own.
         """
         declared = getattr(self, "_value_1d_layout", None) or {}
         widths = getattr(self, "_value_1d_block", None) or {}
@@ -857,6 +858,8 @@ class GenericLowerer(
                     moduli.add(cols)
                 bounds.append(rows * cols)
                 return True
+            if op.op in through:
+                return False
             if op.op == "tt.reshape" or not (op.op in computed or op.op.startswith(("arith.", "math."))):
                 unknown.append(op.op)
                 return True

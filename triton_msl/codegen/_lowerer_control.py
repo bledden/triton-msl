@@ -1133,6 +1133,27 @@ class _ControlFlowMixin:
             # row per W lanes (computed from a row-wise reduce) would give every one of
             # them the first row's element.
             self._refuse_row_blocked_effect(ssa.op, count, tuple(ssa.operand_ids or ()), op_name=ssa.op)
+            # The same question asked of the indices themselves, as a store of fewer
+            # elements than lanes asks it. A row index is written ``lane / N`` whether or
+            # not it was declared row-blocked, and inside a wrap loop it is not declared:
+            # the column of a (R, 1) tile flattened to R elements is held one row per N
+            # lanes there, and lanes 0..R-1 hold its first R / N rows.
+            # A float maximum or minimum arrives as the bits of its value, one lane's from its own.
+            strides, moduli, _, unknown, bounds = self._lane_sources(
+                tuple(ssa.operand_ids or ()), through=("tt.bitcast",)
+            )
+            if strides - {1} or unknown or moduli - {count} or any(bound < count for bound in bounds):
+                why = (
+                    f"depends on {unknown[0]}, whose place on the lanes is not known"
+                    if unknown
+                    else "is not held element by lane"
+                )
+                raise MetalNonRecoverableError(
+                    f"an atomic over {count} elements in a kernel that runs {lanes} lanes: its address, "
+                    f"value or mask {why}. Which lane holds each element is not proved, so the atomic is "
+                    "refused. Give it the shape of the kernel's widest block.",
+                    op_name=ssa.op,
+                )
             return f"{lane} < {count}u", False
         if self._is_2d and len(shape) == 2:
             if count >= lanes:

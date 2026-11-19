@@ -197,6 +197,23 @@ def test_a_flattened_tile_beside_a_wider_block_is_added_whole(device, dtype, row
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES, ids=["float32", "int32"])
+@pytest.mark.parametrize("rows,wide", [(8, 2048), (64, 2048), (256, 1024), (512, 1024), (1024, 4096), (128, 8192)])
+def test_a_flattened_column_beside_a_wider_block_is_added_whole_or_refused(device, dtype, rows, wide):
+    """A one-column tile is held one row per group of lanes, where the lanes are looped
+    over: the atomic read row ``lane / N`` on its first lanes and added the first rows again."""
+    _runs_flattened(rows, 1, wide, ADDED, dtype, device, refusal_allowed=True)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_an_atomic_whose_value_is_not_held_element_by_lane_is_refused(device):
+    x, y, z = _inputs(8, 2048, torch.int32, device)
+    with pytest.raises(MetalNonRecoverableError, match="an atomic over 8 elements in a kernel that runs 2048 lanes"):
+        _flattened[(GRID,)](x.to(device), y, z, 8, 1, 2048, ADDED)
+    assert torch.all(y == POISON) and torch.all(z == POISON)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=["float32", "int32"])
 @pytest.mark.parametrize("rows,cols,wide", [tile for tile in SMALL if tile != (8, 8, 1024)])
 def test_a_small_flattened_tile_beside_a_wider_block_is_summed_whole(device, dtype, rows, cols, wide):
     _runs_flattened(rows, cols, wide, SUMMED, dtype, device, refusal_allowed=False)
