@@ -99,6 +99,10 @@ _OVERLAP = (
     "the output overlaps one of its operands in memory (the template stores finished tiles while "
     "others still load, so an in-place output is refused)"
 )
+_NEGATIVE = (
+    "a stride argument is negative (the template indexes forward from each tensor's pointer with "
+    "unsigned strides, so the cells a negative stride names are not the ones it would address)"
+)
 
 
 def _output_meets_operand(cells, output):
@@ -509,36 +513,40 @@ def _dispatch_sym_int8(
         # recognized Triton body, so prove the positional interpretation at runtime
         # against every buffer extent before launching the hard-coded template ABI.
         # SOURCE DOMAIN (module docstring): descriptor[6] = the source (BM, BN), [7] = BK.
-        Ms, Ns, Ks = M, N, K
-        if all(s >= 0 for s in strides):
+        if any(s < 0 for s in strides):
+            return _decline(decline, _NEGATIVE)
 
-            def _last(m, n, k):
-                return (
-                    (m - 1) * isr_v + (k - 1) * isc_v,
-                    (k - 1) * wsk_v + (n - 1) * wsn_v,
-                    (m - 1) * osr_v + (n - 1) * osc_v,
-                    (n - 1) * ssn_v,
-                )
+        def _last(m, n, k):
+            return (
+                (m - 1) * isr_v + (k - 1) * isc_v,
+                (k - 1) * wsk_v + (n - 1) * wsn_v,
+                (m - 1) * osr_v + (n - 1) * osc_v,
+                (n - 1) * ssn_v,
+            )
 
-            bounds = tuple(zip(_last(M, N, K), (*kargs[0:3], scale)))
-            for max_index, tensor in bounds:
-                if hasattr(tensor, "numel") and max_index >= tensor.numel():
-                    return False
-            bm, bn = int(descriptor[6][0]), int(descriptor[6][1])
-            Ms, Ns = _cdiv(M, bm) * bm, _cdiv(N, bn) * bn
-            Ks = _source_k(K, descriptor[7] if len(descriptor) > 7 else None)
-            if (Ms, Ns, Ks) != (M, N, K) and not _inside_storage(
-                zip((*kargs[0:3], scale), (_FLOAT, _BYTE, _FLOAT, _FLOAT), _last(Ms, Ns, Ks))
-            ):
-                Ms, Ns, Ks = M, N, K  # undefined as written: the clipped template
-            # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles
-            # load. The furthest cell each pointer is addressed at is known here.
-            last_in, last_w, last_out, last_scale = _last(Ms, Ns, Ks)
-            if output_overlaps_operand(
-                kargs[:4], 2, last_out + 1, {0: last_in + 1, 1: last_w + 1, 3: last_scale + 1}, exact=True
-            ):
+        def _cells(m, n, k):
+            return tuple(zip((*kargs[0:3], scale), (_FLOAT, _BYTE, _FLOAT, _FLOAT), _last(m, n, k)))
+
+        bounds = tuple(zip(_last(M, N, K), (*kargs[0:3], scale)))
+        for max_index, tensor in bounds:
+            if hasattr(tensor, "numel") and max_index >= tensor.numel():
                 return False
-        elif output_overlaps_operand(kargs, 2, 0, {}):
+        # A tensor's element count is not its storage: an expanded tensor counts cells it
+        # does not have. The cells of the sizes as passed lie inside each storage, or the
+        # launch is refused.
+        if not _inside_storage(_cells(M, N, K)):
+            return _decline(decline, _OUTSIDE)
+        bm, bn = int(descriptor[6][0]), int(descriptor[6][1])
+        Ms, Ns = _cdiv(M, bm) * bm, _cdiv(N, bn) * bn
+        Ks = _source_k(K, descriptor[7] if len(descriptor) > 7 else None)
+        if (Ms, Ns, Ks) != (M, N, K) and not _inside_storage(_cells(Ms, Ns, Ks)):
+            Ms, Ns, Ks = M, N, K  # undefined as written: the clipped template
+        # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles
+        # load. The furthest cell each pointer is addressed at is known here.
+        last_in, last_w, last_out, last_scale = _last(Ms, Ns, Ks)
+        if output_overlaps_operand(
+            kargs[:4], 2, last_out + 1, {0: last_in + 1, 1: last_w + 1, 3: last_scale + 1}, exact=True
+        ):
             return False
 
         zeros = _torch.zeros(1, dtype=getattr(scale, "dtype", None), device=getattr(scale, "device", None))
@@ -606,8 +614,8 @@ def _dispatch_pergroup_int8(
         # reads). There is no structural anchor for dead args, so anchor at RUNTIME: the
         # furthest element each tensor is indexed at must lie inside that tensor. This makes
         # the launch memory-safe unconditionally and refuses (fail-closed driver raise)
-        # every non-square M/N swap under standard layouts. Skipped only for negative
-        # strides (formula invalid; the scalar template doesn't support those anyway).
+        # every non-square M/N swap under standard layouts. A negative stride is refused
+        # first: the formula and the template's unsigned strides both assume none.
         _g_s = descriptor[10] if len(descriptor) > 10 else None
         # SOURCE DOMAIN (module docstring): descriptor[11] = the source (BM, BN), [12] = BK.
         _bm, _bn = int(descriptor[11][0]), int(descriptor[11][1])
@@ -624,7 +632,9 @@ def _dispatch_pergroup_int8(
                 f"of {int(_g_s)}; the per-group templates take the group of every element, which is a "
                 "different result. Make the group size a multiple of the kernel's K block",
             )
-        if _g_s and all(_s >= 0 for _s in strides):
+        if any(_s < 0 for _s in strides):
+            return _decline(decline, _NEGATIVE)
+        if _g_s:
 
             def _last(m, n, k):
                 _ng = (k + _g_s - 1) // _g_s
@@ -637,12 +647,18 @@ def _dispatch_pergroup_int8(
                     (_ng - 1) * zsg + (n - 1) * zsn,
                 )
 
+            def _cells(m, n, k):
+                return tuple(zip(kargs[:5], (_FLOAT, _BYTE, _FLOAT, _FLOAT, _FLOAT), _last(m, n, k)))
+
             for _mx, _t in zip(_last(M, N, K), kargs[:5]):
                 if hasattr(_t, "numel") and _mx >= _t.numel():
                     return False
-            if (Ms, Ns, Ks) != (M, N, K) and not _inside_storage(
-                zip(kargs[:5], (_FLOAT, _BYTE, _FLOAT, _FLOAT, _FLOAT), _last(Ms, Ns, Ks))
-            ):
+            # A tensor's element count is not its storage: an expanded tensor counts cells
+            # it does not have. The cells of the sizes as passed lie inside each storage,
+            # or the launch is refused.
+            if not _inside_storage(_cells(M, N, K)):
+                return _decline(decline, _OUTSIDE)
+            if (Ms, Ns, Ks) != (M, N, K) and not _inside_storage(_cells(Ms, Ns, Ks)):
                 Ms, Ns, Ks = M, N, K  # undefined as written: the clipped template
             # OUTPUT ALIAS: see _operand_overlap. The template stores while other tiles
             # load. The furthest cell each pointer is addressed at is known here.
@@ -651,9 +667,7 @@ def _dispatch_pergroup_int8(
             if output_overlaps_operand(kargs[:5], 2, _ends[2] + 1, _reads, exact=True):
                 return False
         else:
-            Ms, Ns, Ks = M, N, K
-            if output_overlaps_operand(kargs, 2, 0, {}):
-                return False
+            return False  # no group size: the cells the template addresses are not known
 
         # FAST simdgroup-MMA per-group path (descriptor[6..10] = fast_msl, rr, rc, bk,
         # group_size), selected ONLY when the runtime shape meets its contract: contiguous

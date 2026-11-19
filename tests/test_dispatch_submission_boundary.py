@@ -78,9 +78,9 @@ def _case(family, monkeypatch):
         )
     if family.startswith("pergroup"):
         tag = "pergroup_int4" if "int4" in family else "pergroup_int8"
-        # Buffer-less objects bypass no contract: the public protocol permits metadata-only
-        # runtime doubles; exact stride/dimension guards still execute.
-        buffers = [object() for _ in range(5)]
+        # Real CPU tensors: the route reads each tensor's storage before it launches, and an
+        # argument whose storage cannot be read is refused.
+        buffers = [t, t, out, t, t]
         desc = (
             tag,
             "scalar",
@@ -108,7 +108,7 @@ def _case(family, monkeypatch):
         return lambda rt, hook, **kw: dispatch_quant_matmul(
             rt,
             desc,
-            [object(), object(), object(), t, 32, 32, 32, 32, 32, 32],
+            [t, t, out, t, 32, 32, 32, 32, 32, 32],
             grid=(1, 1, 1),
             launch_exit_hook=hook,
             **kw,

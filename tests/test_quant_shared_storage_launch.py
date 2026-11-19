@@ -14,6 +14,11 @@ tests/test_quant_unmasked_tail.py holds the same layouts for the float operands 
 and of the canonical GEMM; here every operand takes part, the int8 weight as a byte view of
 the float storage.
 
+The same knowledge bounds each tensor by its storage and not by its element count: an
+expanded tensor counts cells it does not have, and a launch that would address past the one
+cell it has is refused. So is a negative stride, which the templates' unsigned strides do
+not express. Those launches are observed without running a shader.
+
 Integer data and power-of-two scales, so float32 arithmetic is exact in any order and every
 comparison is exact. A storage is compared by its bits: weight bytes read as floats can be
 NaN, which compares unequal to itself.
@@ -39,6 +44,8 @@ pytestmark = pytest.mark.skipif(
 POISON = -16384.0  # fills an output before its launch and the cells between two blocks
 GAP = 5  # cells between two blocks that lie apart
 REFUSAL = "quantized.*overlaps one of its operands"
+OUTSIDE = "quantized.*storage is smaller than the cells the launch addresses"
+NEGATIVE = "quantized.*stride argument is negative"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -62,8 +69,9 @@ def _symmetric():
     w = g.integers(-32, 32, size=(K, N)).astype(np.int8)
     s = (2.0 ** g.integers(-1, 3, size=N)).astype(np.float32)
 
-    def launch(t):
-        _sym8[(M // BM, N // BN)](t["a"], t["w"], t["c"], t["s"], M, N, K, K, 1, N, 1, N, 1, BM=BM, BN=BN, BK=BK)
+    def launch(t, input_upwards=False):
+        a, row = (t["a"][(M - 1) * K :], -K) if input_upwards else (t["a"], K)
+        _sym8[(M // BM, N // BN)](a, t["w"], t["c"], t["s"], M, N, K, row, 1, N, 1, N, 1, BM=BM, BN=BN, BK=BK)
 
     want = a.astype(np.float64) @ (w.astype(np.float64) * s[None, :])
     host = {"a": a.reshape(-1), "w": w.reshape(-1), "s": s}
@@ -81,9 +89,16 @@ def _pergroup(zeros, shader):
     z = g.integers(-4, 5, size=(K // G, N)).astype(np.float32)
     zero_strides = (N, 1) if zeros == "like-scales" else (1, K // G)
 
-    def launch(t):
+    def launch(t, input_upwards=False):
+        a, row = (t["a"][(M - 1) * K :], -K) if input_upwards else (t["a"], K)
         _pergroup8[(M // BM, N // BN)](
-            *(t[name] for name in "awcsz"), M, N, K, K, 1, N, 1, N, 1, *zero_strides, N, 1, G=G, BM=BM, BN=BN, BK=BK
+            a,
+            *(t[name] for name in "wcsz"),
+            *(M, N, K, row, 1, N, 1, N, 1, *zero_strides, N, 1),
+            G=G,
+            BM=BM,
+            BN=BN,
+            BK=BK,
         )
 
     group = np.arange(K) // G
@@ -132,10 +147,7 @@ def _label(value):
     return value.label if isinstance(value, Route) else value if isinstance(value, str) else "-".join(value)
 
 
-@pytest.fixture
-def ran(monkeypatch):
-    """What ran: ``descriptors`` holds the tag of each quantized dispatch, ``quant`` its
-    result and ``shaders`` the shader entry points launched."""
+def _observe(monkeypatch, run_shaders):
     import triton_msl.autotuning._quant_matmul_dispatch as quant_dispatch
     from tests.cache_helpers import patch_live_singleton_method
     from triton_msl.backend.driver import _get_compile_shader_runtime
@@ -152,7 +164,7 @@ def ran(monkeypatch):
     def observed(_runtime, launch):
         def spy_dispatch(lib, kernel_name, args, **kwargs):
             seen.shaders.append(kernel_name)
-            return launch(lib, kernel_name, args, **kwargs)
+            return launch(lib, kernel_name, args, **kwargs) if run_shaders else None
 
         return spy_dispatch
 
@@ -161,6 +173,20 @@ def ran(monkeypatch):
     # its own ``dispatch`` on it, which a spy on the class would never see.
     patch_live_singleton_method(monkeypatch, _get_compile_shader_runtime, "dispatch", observed)
     return seen
+
+
+@pytest.fixture
+def ran(monkeypatch):
+    """What ran: ``descriptors`` holds the tag of each quantized dispatch, ``quant`` its
+    result and ``shaders`` the shader entry points launched."""
+    return _observe(monkeypatch, True)
+
+
+@pytest.fixture
+def unlaunched(monkeypatch):
+    """As ``ran``, with no shader run: a launch that reaches the runtime is recorded and
+    dropped, so a launch that would address outside a storage can be observed."""
+    return _observe(monkeypatch, False)
 
 
 def _separate(route):
@@ -264,3 +290,27 @@ def test_an_operand_view_that_runs_on_over_the_output_computes(route, operand, r
     before = _bits(storage).clone()
     out = _run(route, t)
     _assert_computed(route, storage, before, spans[route.output], out, ran)
+
+
+EVERY_TENSOR = [(route, name) for route in ROUTES for name in (*route.host, route.output)]
+
+
+@pytest.mark.parametrize("route, name", EVERY_TENSOR, ids=_label)
+def test_an_expanded_tensor_of_one_cell_is_refused(route, name, unlaunched):
+    """The tensor has the element count the kernel expects and one cell of storage."""
+    t = _separate(route)
+    t[name] = t[name][:1].clone().expand(t[name].numel())
+    with pytest.raises(MetalNonRecoverableError, match=OUTSIDE):
+        route.launch(t)
+    assert unlaunched.descriptors == [route.descriptor] and unlaunched.quant == [False]
+    assert unlaunched.shaders == []
+
+
+@pytest.mark.parametrize("route", [route for route in ROUTES if route.descriptor != "gemv"], ids=_label)
+def test_a_negative_input_row_stride_is_refused(route, unlaunched):
+    """The input is passed at its last row with the row stride negated: the same cells,
+    read upwards, which the templates do not address."""
+    with pytest.raises(MetalNonRecoverableError, match=NEGATIVE):
+        route.launch(_separate(route), input_upwards=True)
+    assert unlaunched.descriptors == [route.descriptor] and unlaunched.quant == [False]
+    assert unlaunched.shaders == []
