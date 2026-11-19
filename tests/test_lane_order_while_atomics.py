@@ -122,6 +122,21 @@ def _add_carried_own_cell_while(Z, R, TRIPS, N: tl.constexpr):
     tl.store(R + n, carried)
 
 
+@triton.jit
+def _exchange_half_width_while(Z, R, W, TRIPS, N: tl.constexpr):
+    # Half as many cells as the kernel has lanes: lanes 0 to N / 2 - 1 each exchange their
+    # own cell, and what a trip returns goes into the next.
+    n = tl.arange(0, N)
+    h = tl.arange(0, N // 2)
+    j = 0
+    old = h * 0
+    while j < TRIPS:
+        old = tl.atomic_xchg(Z + h, old * 2 + h + j)
+        j += 1
+    tl.store(R + h, old)
+    tl.store(W + n, n + 1)
+
+
 def _exchange_own_cell(cells, trips):
     lane, old = np.arange(len(cells)), np.zeros(len(cells), dtype=np.int64)
     for trip in range(trips):
@@ -181,6 +196,24 @@ def test_an_ordered_atomic_of_each_lane_on_its_own_cell_computes_in_a_while_loop
     cells, returned = source(start, trips)
     assert np.array_equal(z.cpu().numpy(), cells)
     assert np.array_equal(r.cpu().numpy(), returned)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("trips", [0, 1, 2, 3])
+@pytest.mark.parametrize("size", [16] + SIZES)
+def test_an_exchange_of_half_the_lanes_carried_by_a_while_loop_computes(size, trips, device):
+    # The exchange's value depends on what the exchange returned on the trip before. Lane i
+    # makes element i's exchange and keeps what it returned, so the value is held element
+    # by lane on every trip.
+    start = np.arange(size // 2, dtype=np.int64) * 3
+    z = torch.from_numpy(start.astype(np.int32)).to(device)
+    r = torch.full((size // 2,), -7, dtype=torch.int32, device=device)
+    w = torch.full((size,), -7, dtype=torch.int32, device=device)
+    _exchange_half_width_while[(1,)](z, r, w, trips, N=size)
+    cells, returned = _exchange_own_cell(start, trips)
+    assert np.array_equal(z.cpu().numpy(), cells)
+    assert np.array_equal(r.cpu().numpy(), returned)
+    assert np.array_equal(w.cpu().numpy(), np.arange(size) + 1)
 
 
 @pytest.mark.parametrize("device", DEVICES)

@@ -858,6 +858,17 @@ class _ControlFlowMixin:
         def _assign_result(index, yield_id):
             _, var_name = result_vars[index]
             if index not in pointer_results:
+                # The same refusal as above for a register array made inside the branch,
+                # which the pass over the yields ran too early to see.
+                if yield_id in self.env_array or getattr(self, "env_n_elems", {}).get(yield_id, 1) > 1:
+                    from triton_msl.errors import MetalNonRecoverableError
+
+                    raise MetalNonRecoverableError(
+                        "scf.if returning a multi-element-per-thread register array (block > num_threads), "
+                        "computed inside the branch, is not supported. Refusing rather than emit a "
+                        "shader that does not compile. Use BLOCK <= num_threads or restructure.",
+                        op_name="scf.if",
+                    )
                 self.kb.raw_line(f"        {var_name} = {self._lookup(yield_id)};")
                 return
             info = self._loop_pointer_parts(yield_id)

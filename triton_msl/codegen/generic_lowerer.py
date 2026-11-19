@@ -833,6 +833,20 @@ class GenericLowerer(
                 return True
             if op is None or op.op == "scf.for":
                 return False  # an argument, or a carried value: followed to what it carries
+            if op.op == "scf.if":
+                # Each lane keeps the value of the branch its program takes: held as both
+                # branches' values are, which the walk goes on to.
+                if self._branch_values(op, cur) is None:
+                    unknown.append("scf.if")
+                    return True
+                return False
+            if op.op == "scf.while":
+                # Each lane keeps its own carried value: held as the value it starts from
+                # and the value the body hands on are, which the walk goes on to.
+                if cur not in self._while_edges(op):
+                    unknown.append("scf.while")
+                    return True
+                return False
             if op.op == "arith.constant":
                 if not isinstance(op.attrs.get("value"), (bool, int, float)):
                     unknown.append("a tensor constant")
@@ -860,6 +874,19 @@ class GenericLowerer(
                 return True
             if op.op in through:
                 return False
+            if op.op in ("tt.atomic_rmw", "tt.atomic_cas"):
+                # What a one-dimensional atomic returns: lane i makes element i's update
+                # and keeps what it returned. (The atomic itself is refused when a lane
+                # does not hold its element's address, value and mask.)
+                # Asked of the atomic in hand (through a loop that carries its result),
+                # the result has no shape yet: it has its address's.
+                shape = self.env_shapes.get(cur) or (self.env_shapes.get(op.operand_ids[0]) if op.operand_ids else None)
+                if shape and len(shape) == 1:
+                    flat.append(cur)
+                    bounds.append(shape[0])
+                else:
+                    unknown.append(op.op)
+                return True
             if op.op == "tt.reshape" or not (op.op in computed or op.op.startswith(("arith.", "math."))):
                 unknown.append(op.op)
                 return True
@@ -17863,7 +17890,16 @@ class GenericLowerer(
         # scf.for block-arg id -> (for_op, iter index); result id -> (for_op, index).
         ba_of = {}
         res_of = {}
+        if_of = {}
+        while_of = {}
         for _o in by_id.values():
+            if _o.op == "scf.if":
+                for _rid in _o.result_ids or ():
+                    if_of[_rid] = _o
+                continue
+            if _o.op == "scf.while":
+                while_of.update(self._while_edges(_o))
+                continue
             if _o.op != "scf.for":
                 continue
             _bas = (_o.attrs.get("block_arg_ids", []) if _o.attrs else [])[1:]  # skip IV
@@ -17913,9 +17949,23 @@ class GenericLowerer(
                     _resolve(inits[i], visiting, d - 1),
                     _resolve(y.operand_ids[i], visiting, d - 1),
                 )
-            op = by_id.get(cur)
+            if cur in while_of:
+                # A value carried by a while loop: what it starts from combined with
+                # what the body hands on, as for a counted loop.
+                visiting = visiting | {cur}
+                out = "any"
+                for _src in while_of[cur]:
+                    out = _combine(out, _resolve(_src, visiting, d - 1))
+                return out
+            op = by_id.get(cur) or if_of.get(cur)
             if op is None:
                 return None
+            if op.op == "scf.if":
+                # Each lane keeps the value of the branch taken: the branches' layouts combined.
+                yielded = self._branch_values(op, cur)
+                if yielded is None:
+                    return None
+                return _combine(_resolve(yielded[0], visiting, d - 1), _resolve(yielded[1], visiting, d - 1))
             if op.op == "arith.constant":
                 return "any"
             if op.op == "tt.splat":
@@ -19130,14 +19180,31 @@ class GenericLowerer(
         return True
 
     def _walk_producers(self, src_id, visit):
-        """Carry-aware BFS from ``src_id`` over (operands + scf.for carry edges).
+        """Carry-aware BFS from ``src_id`` over (operands + loop carry edges + scf.if results).
 
         ``visit(value_id, op)`` is called once per value (``op`` is None for a block
-        argument or a kernel argument) and returns True to stop below that value.
+        argument or a kernel argument) and returns True to stop below that value. A result
+        of an ``scf.if`` is visited with the ``scf.if`` and followed to its condition and to
+        the value each branch yields for it. A result of an ``scf.while`` is visited with
+        the ``scf.while`` and followed, as the arguments of its two regions are, to the
+        value it starts from and the value the body hands on.
         """
         by_id = self._layout_op_index()
         _ba_edges = {}
+        _owners = {}
         for _o in by_id.values():
+            if _o.op == "scf.if":
+                for _rid in _o.result_ids or [_o.id]:
+                    _owners[_rid] = _o
+                    _yielded = self._branch_values(_o, _rid)
+                    if _yielded is not None:
+                        _ba_edges[_rid] = [_o.operand_ids[0], *_yielded]
+                continue
+            if _o.op == "scf.while":
+                for _rid in _o.result_ids or [_o.id]:
+                    _owners[_rid] = _o
+                _ba_edges.update(self._while_edges(_o))
+                continue
             if _o.op != "scf.for":
                 continue
             _bas = (_o.attrs.get("block_arg_ids", []) if _o.attrs else [])[1:]
@@ -19157,14 +19224,17 @@ class GenericLowerer(
                 if _yield is not None and _i < len(_yield.operand_ids or []):
                     _ba_edges[_rid] = [_yield.operand_ids[_i]]
 
+        # Every producer is visited. The walk stopped after 256 values before, and a caller
+        # that had not met what it looked for by then took it not to be there: a row-wise
+        # sum behind 130 additions was staged as if it were held element by lane.
         _seen = set()
         _queue = [src_id]
-        while _queue and len(_seen) < 256:
+        while _queue:
             _cur = _queue.pop()
             if _cur in _seen:
                 continue
             _seen.add(_cur)
-            _op = by_id.get(_cur)
+            _op = by_id.get(_cur) or _owners.get(_cur)
             if visit(_cur, _op):
                 continue
             if _cur in _ba_edges:
@@ -19172,6 +19242,49 @@ class GenericLowerer(
                 continue
             if _op is not None:
                 _queue.extend(_op.operand_ids or [])
+
+    @staticmethod
+    def _branch_values(op, result_id):
+        """The values the two branches of the ``scf.if`` ``op`` yield for ``result_id``, or None."""
+        results = op.result_ids or [op.id]
+        thens = [inner for inner in op.region_ops or () if inner.op == "scf.yield"]
+        elses = [inner for inner in op.else_ops or () if inner.op == "scf.yield"]
+        if result_id not in results or len(thens) != 1 or len(elses) != 1 or not op.operand_ids:
+            return None
+        position = results.index(result_id)
+        if position >= len(thens[0].operand_ids or ()) or position >= len(elses[0].operand_ids or ()):
+            return None
+        return [thens[0].operand_ids[position], elses[0].operand_ids[position]]
+
+    @staticmethod
+    def _while_edges(op):
+        """Where each value of the ``scf.while`` ``op`` comes from: {value: [values]}.
+
+        A carried value is one register on each lane. The condition's argument and the
+        loop's result are that register: the value it starts from or the one the body
+        handed on. The body's argument is what the condition forwards. Empty when the
+        loop does not have that shape, or forwards anything but its own arguments in order
+        (the lowering reads the results from the registers).
+        """
+        conditions = [inner for inner in op.region_ops or () if inner.op == "scf.condition"]
+        yields = [inner for inner in op.else_ops or () if inner.op == "scf.yield"]
+        starts = list(op.operand_ids or ())
+        attrs = op.attrs or {}
+        entering = list(attrs.get("block_arg_ids") or ())
+        inside = list(attrs.get("else_block_arg_ids") or ())
+        results = list(op.result_ids or [op.id])
+        if len(conditions) != 1 or len(yields) != 1:
+            return {}
+        forwarded = list((conditions[0].operand_ids or ())[1:])
+        handed = list(yields[0].operand_ids or ())
+        if not (len(starts) == len(entering) == len(inside) == len(results) == len(handed)) or forwarded != entering:
+            return {}
+        edges = {}
+        for position, start in enumerate(starts):
+            edges[entering[position]] = [start, handed[position]]
+            edges[results[position]] = [start, handed[position]]
+            edges[inside[position]] = [entering[position]]
+        return edges
 
     def _reduce_provenance(self, src_id, many_only=False):
         """The 2-D reductions ``src_id`` is computed from, as {(axis, inner dimension)}.
