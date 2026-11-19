@@ -119,6 +119,38 @@ class _ControlFlowMixin:
                 )
         return result
 
+    def _yields_taken_first(self, iter_vars, yield_ids, plain):
+        """Copies of the yielded values that read a carried variable written before them.
+
+        A loop's yields are simultaneous: ``a, b = b, a`` hands each the other's old value.
+        The carried variables are written one after another, in order, so a yielded value
+        that is (or reads) a variable written earlier in that order is copied before any
+        of them is written. Returns ``{index: text}`` and ``{index: array name}`` for
+        those; every other value is read where it stands.
+        """
+        import re
+
+        texts, arrays = {}, {}
+        for i, yield_id in enumerate(yield_ids):
+            if i not in plain or i >= len(iter_vars):
+                continue
+            earlier = [v for v in iter_vars[:i] if isinstance(v, str) and v != iter_vars[i]]
+            if not earlier:
+                continue
+            names = re.compile(r"(?<![A-Za-z0-9_])(?:" + "|".join(re.escape(v) for v in earlier) + r")(?![A-Za-z0-9_])")
+            desc = self.env_array.get(yield_id)
+            if desc is not None:
+                source, count, ty = desc
+                if names.search(str(source)):
+                    arrays[i] = self._var_array("carry", [f"{source}[{e}]" for e in range(count)], ty)
+                continue
+            text = self._lookup(yield_id)
+            if names.search(str(text)):
+                fresh = self._next_var("carry")
+                self.kb.raw_line(f"        auto {fresh} = {text};")
+                texts[i] = fresh
+        return texts, arrays
+
     def _lower_scf_for(self, ssa: SSAValue):
         """scf.for -> MSL for loop with iter_args.
 
@@ -580,6 +612,11 @@ class _ControlFlowMixin:
                                     "next_off", [f"long({offsets}[{e}])" for e in range(width)], "long"
                                 )
                                 pointer_next[i] = (next_base, next_offsets)
+                        # The plain values too: a, b = b, a must not read the a just written.
+                        _held = set(smem_iter_indices) | set(ptr_offset_iter_indices) | set(ptr_offset_arr_iter_indices)
+                        _plain = {i for i in range(len(iter_vars)) if i not in _held}
+                        carried_text, carried_array = self._yields_taken_first(iter_vars, body_op.operand_ids, _plain)
+                        tiles_copied_into = set()
                         # Update iter_arg variables from yield operands
                         for i, yield_id in enumerate(body_op.operand_ids):
                             if i < len(iter_vars):
@@ -605,7 +642,19 @@ class _ControlFlowMixin:
                                             "back to the tile is not implemented. The kernel is refused.",
                                             op_name="scf.for",
                                         )
+                                    if yield_smem[0] != iter_vars[i] and yield_smem[0] in tiles_copied_into:
+                                        # The other tile was copied into earlier in this same step:
+                                        # its cells are no longer the ones the source hands on.
+                                        from triton_msl.errors import MetalNonRecoverableError
+
+                                        raise MetalNonRecoverableError(
+                                            "a loop-carried tile held in threadgroup memory is handed on in the "
+                                            "place of another carried tile that is itself replaced: the exchange "
+                                            "is not implemented. The kernel is refused.",
+                                            op_name="scf.for",
+                                        )
                                     if yield_smem[0] != iter_vars[i]:
+                                        tiles_copied_into.add(iter_vars[i])
                                         src_smem = yield_smem[0]
                                         dst_smem = iter_vars[i]
                                         init_shape = self.env_shapes.get(init_ids[i], ()) if i < len(init_ids) else ()
@@ -638,6 +687,7 @@ class _ControlFlowMixin:
                                     ydesc = self.env_array.get(yield_id)
                                     if ydesc is not None:
                                         ysrc, _yn, _yt = ydesc
+                                        ysrc = carried_array.get(i, ysrc)
                                         # Symmetric with the seed-side guard: the
                                         # yielded array must match the iter-arg
                                         # width, else iter_N[e]=ysrc[e] reads OOB.
@@ -652,11 +702,11 @@ class _ControlFlowMixin:
                                         for e in range(n_arr):
                                             self.kb.raw_line(f"        {iter_vars[i]}[{e}] = {ysrc}[{e}];")
                                     else:
-                                        yval = self._lookup(yield_id)
+                                        yval = carried_text.get(i) or self._lookup(yield_id)
                                         for e in range(n_arr):
                                             self.kb.raw_line(f"        {iter_vars[i]}[{e}] = {yval};")
                                     continue
-                                yield_val = self._lookup(yield_id)
+                                yield_val = carried_text.get(i) or self._lookup(yield_id)
                                 self.kb.raw_line(f"        {iter_vars[i]} = {yield_val};")
                     else:
                         self._lower_op(body_op)
@@ -960,6 +1010,14 @@ class _ControlFlowMixin:
                 iter_dtypes.append(self._trace_ptr_dtype(init_id))
                 ptr_array_iter[i] = (base_var, width)
                 continue
+            if init_id in self.env_array or init_id in getattr(self, "_shared_mem_descs", {}):
+                from triton_msl.errors import MetalNonRecoverableError
+
+                raise MetalNonRecoverableError(
+                    "a while loop carries a value held several elements per thread or in threadgroup memory: "
+                    "that is not implemented (a counted loop carries one). The kernel is refused.",
+                    op_name="scf.while",
+                )
             var_name = self._next_var("wh")
             init_val = self._lookup(init_id)
             init_type = self.env_types.get(init_id, "i32")
@@ -1063,6 +1121,22 @@ class _ControlFlowMixin:
                             "wh_next_off", [f"long({offsets}[{e}])" for e in range(width)], "long"
                         )
                         pointer_next[j] = (next_base, next_offsets)
+                # The plain values too: a, b = b, a must not read the a just written.
+                _plain = {j for j in range(len(iter_vars)) if j not in ptr_iter and j not in ptr_array_iter}
+                for j in sorted(_plain):
+                    # The carried variable holds one element per thread (the start was checked).
+                    if j < len(body_op.operand_ids) and (
+                        body_op.operand_ids[j] in self.env_array
+                        or body_op.operand_ids[j] in getattr(self, "_shared_mem_descs", {})
+                    ):
+                        from triton_msl.errors import MetalNonRecoverableError
+
+                        raise MetalNonRecoverableError(
+                            "a while loop carries a value held several elements per thread or in threadgroup "
+                            "memory: that is not implemented (a counted loop carries one). The kernel is refused.",
+                            op_name="scf.while",
+                        )
+                carried_text, _ = self._yields_taken_first(iter_vars, body_op.operand_ids, _plain)
                 # Update iter_arg variables from yield operands
                 for j, yield_id in enumerate(body_op.operand_ids):
                     if j < len(iter_vars):
@@ -1076,7 +1150,7 @@ class _ControlFlowMixin:
                             for e in range(width):
                                 self.kb.raw_line(f"        {iter_vars[j]}[{e}] = {next_offsets}[{e}];")
                             continue
-                        yield_val = self._lookup(yield_id)
+                        yield_val = carried_text.get(j) or self._lookup(yield_id)
                         self.kb.raw_line(f"        {iter_vars[j]} = {yield_val};")
             else:
                 self._lower_op(body_op)
