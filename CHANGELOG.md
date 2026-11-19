@@ -344,23 +344,32 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
     used, when two lanes reach one cell, in one operation or from different
     trips of a loop. The source orders the trips; the shader does not. Part
     of these returned the source's result in every probe launch before. In a
-    `while` loop they are refused whatever cells they reach, because the trips
-    are not known before the launch; in a kernel of more than 1024 lanes these
-    were wrong before. An integer atomic add, and an atomic max or min, whose
-    returned value is not used still compute, in a loop too.
+    `while` loop the trips are not known before the launch, so they compute
+    only where the address is the same on every trip and keeps each lane to
+    cells of its own; otherwise they are refused, also when the launch makes
+    one trip. Where two lanes met on different trips in a kernel of more than
+    1024 lanes these were wrong before. An integer atomic add, and an atomic
+    max or min, whose returned value is not used still compute, in a loop too.
   - Two float `tl.atomic_add` operations, as two statements or as one in a
     loop, that reach one cell from different lanes. The shader applies them
     lane by lane, so the cell received the source's terms in another order,
     and the order of float additions is their rounding: `1e8 + 1 - 1e8` gave
     1.0 where the source gives 0.0. The check reads addresses, not values,
     so these are refused also where no order rounds: a float histogram or
-    scatter-add accumulated over the trips of a loop is refused, and in a
-    `while` loop a float add is refused whatever cells it reaches. These
-    returned the source's terms, in one order or the other, before. Still
-    computing: integer adds, which are exact in either order, a float add of
-    each lane to its own cell, and one float add outside a loop, whose lanes
-    the source does not order. Accumulate into integers, or make each trip
-    its own launch.
+    scatter-add accumulated over the trips of a loop is refused. Nor does the
+    check evaluate a mask made of loaded values, a branch, or an index that
+    is loaded. Two float adds that only such a mask, or a branch the launch
+    does not take, keeps to one lane per cell are refused, with a reason that
+    names the mask or branch; adds through a loaded index are refused because
+    the address is not known before the launch. In a `while` loop a float add
+    computes only where its address is the same on every trip and keeps each
+    lane to its own cell. These returned the source's terms, in one order or
+    the other, before: with values whose sum depends on the order the result
+    was wrong at 256 lanes and above, and in part of the launches at 64 and
+    128 lanes. Still computing: integer adds, which are exact in either
+    order, a float add of each lane to its own cell, and one float add
+    outside a loop, whose lanes the source does not order. Accumulate into
+    integers, or make each trip its own launch.
   - A store over a block narrower than the kernel's widest block when two of
     its elements reach one cell, or when it shares a tensor with a
     block-wide store: a narrow store inside a loop whose trips reach one
@@ -561,11 +570,17 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   met in each cell, and the lanes past the tile carried values of tile positions that
   do not exist, so the cells held wrong values with no exception: a 2 by 64 tile beside
   a 256-wide copy, a 16 by 16 tile beside a 512-wide one. The lowering now proves that
-  lane i holds element i of the flattened tile on the tile's own lanes, and the store,
-  a masked store, a sum with a one-dimensional load, an atomic add and a reduction
-  take those lanes. The same proof covers a row reshaped to a column and a range
-  reshaped to a row. Refused when the kernel is lowered, where the result was wrong
-  before: a flattened tile whose values are computed from its indices with no load.
+  lane i holds element i of the flattened tile on the tile's own lanes, and a store, a
+  masked store, a store of the tile plus a one-dimensional load and an atomic add take
+  those lanes. The stores that were wrong compute: tiles of 128 to 1024 elements beside
+  blocks of 256 to 2048 lanes were tried. The same proof covers a row reshaped to a
+  column and a range reshaped to a row. Refused when the kernel is lowered, where the
+  result was wrong before: a flattened tile whose values are computed from its indices
+  with no load. Refused as before at the shapes tried, with the reason: the same
+  stores of a tile of 64 elements or fewer (`1-D store layout was not declared by its
+  producer`), and a `tl.sum` of a flattened tile beside a block of 256 lanes or more
+  (`would be accumulated with wrapped (repeated) elements`). The sum of a tile of up to
+  64 elements beside a block of up to 128 lanes computes.
 - The row-wise sort template stood for kernels that are not a row-wise sort. The
   template replaces the whole kernel with "load row r, sort it, store it", and it was
   chosen from a signature that other kernels fit. `tl.flip(v, 1)` of a 2 by N tile
@@ -575,7 +590,12 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   these returned with no exception. The template is now chosen by a proof that the
   kernel is exactly one unmasked load, the network `tl.sort` writes and one unmasked
   store at the template's addresses; every other kernel goes to the ordinary
-  lowering, which computes it or refuses it. The template also runs the source's own
+  lowering, which computes it or refuses it. The ordinary lowering runs a tile of at
+  most 1024 elements, so a larger sort that is not that plain form is refused when the
+  kernel is lowered, and the message gives that reason. Four such forms returned the
+  source's result through the template before, at 64 by 32 and 512 by 8: a store that
+  converts the sorted values, a load of the columns in reverse, a mask that is true on
+  every lane, and a sort of a sort. The template also runs the source's own
   network now. It used to compare signed, so unsigned values above the signed range
   were sorted as negative ones, and where neither of a pair is greater (a NaN, a zero
   of each sign) it kept both values where the source leaves one value in both cells.

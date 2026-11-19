@@ -444,7 +444,8 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   the launch raises `MetalNonRecoverableError` starting `lane order:` and nothing is submitted.
   That refuses an in-place reverse, transpose, shift or gather, a cell every lane loads and the
   program stores, an exchange or compare-and-swap whose lanes meet at a cell, an exchange,
-  compare-and-swap or add with a used result inside a `while` loop, a store over a
+  compare-and-swap or add with a used result inside a `while` loop unless its address is the
+  same on every trip and keeps each lane to cells of its own, a store over a
   block narrower than the kernel's widest block that shares a tensor with a block-wide store,
   and some launches the check cannot follow although the shader matched the source in every
   probe; the changelog lists them. A kernel in which each lane loads and stores its own elements
@@ -457,14 +458,20 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   applies them lane by lane, and the order of float additions is their rounding (`1e8 + 1 - 1e8`
   is 0.0 in the source's order and 1.0 in the other). The check reads addresses, not values, so
   a float histogram or scatter-add accumulated over the trips of a loop is refused also where
-  no order would round, and a float add in a `while` loop is refused whatever cells it reaches.
+  no order would round. A mask made of loaded values, a branch and a loaded index are not
+  evaluated, so adds that only one of those keeps to one lane per cell are refused too, and
+  the message says which. In a `while` loop a float add computes only where its address is the
+  same on every trip and keeps each lane to its own cell.
   Integer atomic adds, a float add of each lane to its own cell, and one float add outside a
   loop compute.
 - **Row-wise sort:** the sort template runs only a kernel proved to be one unmasked load of a
   tile, `tl.sort` along its last axis and one unmasked store, at addresses of the form
   `base + row * stride + column`. A sort with an offset or a program term in an address, a
   mask, arithmetic on the values or a second rearrangement goes to the ordinary lowering,
-  which computes it or refuses it when the kernel is lowered.
+  which computes it or refuses it when the kernel is lowered. The ordinary lowering runs a
+  tile of at most 1024 elements: a larger sort that is not the plain form is refused with
+  that reason. A converting store, a load of reversed columns, a mask that is true everywhere
+  and a sort of a sort returned the source's result at 64 by 32 and 512 by 8 before.
 - **Blocks narrower than the kernel:** a store or an atomic over a block with fewer elements
   than the kernel's widest block computes only where the lowering proves which lane holds each
   element's address, value and mask. Otherwise the kernel is refused when it is lowered, by
@@ -474,10 +481,15 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   builds returned the source's result in probe launches: an atomic over a narrow block whose
   returned value is stored, and a tile indexed through `tl.reshape` of a range in a
   three-dimensional kernel. A block made inside a called function that is not inlined is
-  refused when the kernel is lowered, as before. A tile flattened with `tl.reshape` and stored,
-  added or reduced beside a wider block computes where the tile is loaded; a flattened tile
+  refused when the kernel is lowered, as before. A tile flattened with `tl.reshape` beside a
+  wider block, where the tile is loaded: an atomic add computes; a store computes for the
+  tiles of 128 elements and more that were tried and is refused for tiles of 64 elements or
+  fewer; a `tl.sum` computes for a tile of up to 64 elements beside a block of up to 128 lanes
+  and is refused beside a block of 256 lanes or more. A flattened tile
   whose values are computed from its indices with no load is refused when the kernel is
-  lowered. A kernel that needs one thread per lane over
+  lowered. A tile transposed with `tl.trans` computes alone and beside a block no wider, with
+  one row or one column as well, and is refused beside a wider block. A kernel that needs one
+  thread per lane over
   a block of more than 1024 lanes is refused by block size, also when its mask keeps every
   active lane below 1024.
 - **Half accumulators in matmul:** a matmul kernel that keeps a float16 accumulator across its
