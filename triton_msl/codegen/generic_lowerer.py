@@ -833,6 +833,27 @@ class GenericLowerer(
                 if not isinstance(op.attrs.get("value"), (bool, int, float)):
                     unknown.append("a tensor constant")
                 return True
+            if op.op == "tt.reshape" and self._flattened_tile_is_lane_held(cur, op):
+                # Element i of the flattened tile is the tile's element (i / C, i % C),
+                # which lane i holds.
+                shape = self.env_shapes.get(op.operand_ids[0])
+                flat.append(cur)
+                bounds.append(shape[0] * shape[1])
+                return True
+            if op.op == "tt.reshape" and self._reshaped_vector_is_lane_held(cur, op):
+                # The same elements in the same order, each lane keeping its own.
+                flat.append(cur)
+                bounds.append(max(self.env_shapes.get(cur)))
+                return True
+            if op.op == "tt.trans" and self._transposed_tile_is_lane_held(cur, op):
+                # Lane i reads back element (i / C, i % C) of the (R, C) result.
+                rows, cols = self.env_shapes.get(cur)
+                if rows > 1:
+                    strides.add(cols)
+                if cols > 1:
+                    moduli.add(cols)
+                bounds.append(rows * cols)
+                return True
             if op.op == "tt.reshape" or not (op.op in computed or op.op.startswith(("arith.", "math."))):
                 unknown.append(op.op)
                 return True
@@ -842,6 +863,77 @@ class GenericLowerer(
             if value_id is not None:
                 self._walk_producers(value_id, visit)
         return strides, moduli, flat, unknown, bounds
+
+    def _transposed_tile_is_lane_held(self, value_id, op):
+        """Whether lane i holds element (i / C, i % C) of ``value_id``, the (R, C) transpose of a tile.
+
+        The transpose is an exchange through threadgroup memory: lane i leaves the value
+        it holds in cell i, and reads back the cell of the element it is to hold. That
+        is the transpose when the kernel runs exactly one lane per element and lane i
+        held the source's element (i / N, i % N) to begin with.
+        """
+        if not op.operand_ids or self._needs_wrapping:
+            return False
+        shape = self.env_shapes.get(op.operand_ids[0])
+        out = self.env_shapes.get(value_id)
+        if not shape or len(shape) != 2 or not out or tuple(out) != (shape[1], shape[0]):
+            return False
+        total = shape[0] * shape[1]
+        if total != self.effective_block_size:
+            return False
+        strides, moduli, flat, unknown, bounds = self._lane_sources((op.operand_ids[0],))
+        if unknown or strides - {shape[1]} or moduli - {shape[1]} or flat and 1 not in shape:
+            return False
+        return all(bound >= total for bound in bounds)
+
+    def _reshaped_vector_is_lane_held(self, value_id, op):
+        """Whether lane i holds element i of ``value_id``, a reshape of one row, one column or one dimension to another.
+
+        A reshape leaves each lane the value it held. Between shapes with a single axis
+        longer than one, element i of the result is element i of the source, so lane i
+        holds it when lane i held the source's: a value held element by lane, a row or a
+        range whose index is written ``lane % K``, a column whose row index is written
+        ``lane / 1``. That holds on the first K lanes only.
+        """
+        if not op.operand_ids:
+            return False
+        shape = self.env_shapes.get(op.operand_ids[0])
+        out = self.env_shapes.get(value_id)
+        if not shape or not out or len(shape) > 2 or len(out) > 2:
+            return False
+        count = max(shape)
+        if count < 2 or sorted(out) != [1, count] or sorted(shape) not in ([count], [1, count]):
+            return False
+        layout = self._native_value_facts(value_id, op_name=op.op).layout
+        if layout is not None and layout.startswith("#ttg.slice<"):
+            return False  # rewritten from the lane's place in a reduce, not passed through
+        strides, moduli, flat, unknown, bounds = self._lane_sources((op.operand_ids[0],))
+        if unknown:
+            return False
+        if len(shape) == 1 or shape[0] == 1:
+            if strides or moduli - {count}:
+                return False
+        elif strides - {1} or moduli:
+            return False
+        return all(bound >= count for bound in bounds)
+
+    def _flattened_tile_is_lane_held(self, value_id, op):
+        """Whether lane i holds element i of ``value_id``, an (R, C) tile reshaped to R * C elements.
+
+        It does when every row index behind the tile is written ``lane / C`` and every
+        column index ``lane % C``: lane i then holds the tile's element (i / C, i % C),
+        the i-th in row-major order. That holds on the first R * C lanes only.
+        """
+        if not op.operand_ids:
+            return False
+        shape = self.env_shapes.get(op.operand_ids[0])
+        out = self.env_shapes.get(value_id)
+        if not shape or len(shape) != 2 or not out or len(out) != 1 or out[0] != shape[0] * shape[1]:
+            return False
+        strides, moduli, flat, unknown, bounds = self._lane_sources((op.operand_ids[0],))
+        if flat or unknown or strides - {shape[1]} or moduli - {shape[1]}:
+            return False
+        return all(bound >= shape[0] * shape[1] for bound in bounds)
 
     # Computed by each lane from its own operands, so a lane whose range index lies past
     # the range holds no element of the result either.
@@ -5716,7 +5808,16 @@ class GenericLowerer(
                 guard = f"{idx} < {result_size}u"
                 if self._effective_2d_shape and len(self._effective_2d_shape) == 2 and self._effective_2d_shape[1] > 0:
                     inner_N = self._effective_2d_shape[1]
-                    guard = f"{idx} % {inner_N}u == 0u && {idx} / {inner_N}u < {result_size}u"
+                    if inner_N > 1:
+                        # As many rows as lanes, in a kernel whose widest block has
+                        # columns: the rows are not that block's rows (the transpose
+                        # of a 1xN tile is one), so where each is held is read from
+                        # how its index is written, as above.
+                        guard = self._tile_lanes(
+                            tuple(ptr_shape), (ptr_id, val_id, native_mask_id), idx, span, "a store"
+                        )
+                    else:
+                        guard = f"{idx} % {inner_N}u == 0u && {idx} / {inner_N}u < {result_size}u"
                     self._one_lane_per_element(ssa, guard)
             # The mask excludes rows past the range the program was given.
             if native_mask_id is not None:
@@ -6007,6 +6108,36 @@ class GenericLowerer(
                 # what the store is computed from when every index behind it is lane i.
                 strides, moduli, _, unknown, bounds = self._lane_sources((ptr_id, val_id, native_mask_id))
                 if not (strides or moduli or unknown) and all(b >= store_wrap_guard for b in bounds):
+                    self._one_lane_per_element(ssa, clauses[-1])
+        if (
+            self._is_2d
+            and store_1d_guard is None
+            and store_wrap_guard is None
+            and len(native_ptr_shape or ()) == 1
+            and not self._is_scalar_ptr(ptr_id)
+        ):
+            # A range of n in a kernel of more lanes is written ``lane % n``, so a store
+            # through it alone is the same store on every lane that shares an element.
+            # A value held another way is not: lane n + i does not hold element i of a
+            # flattened tile. The first n lanes store when each holds its own element.
+            count = native_ptr_shape[0]
+            span = getattr(self, "_total_elements", 0) if self._needs_wrapping else self.effective_block_size
+            if 1 < count < span:
+                strides, moduli, flat, unknown, bounds = self._lane_sources((ptr_id, val_id, native_mask_id))
+                if strides or flat or unknown or moduli - {count}:
+                    if strides or unknown or moduli - {count} or any(bound < count for bound in bounds):
+                        why = (
+                            f"depends on {unknown[0]}, whose place on the lanes is not known"
+                            if unknown
+                            else "is not held element by lane"
+                        )
+                        raise MetalNonRecoverableError(
+                            f"a store of {count} elements in a kernel that runs {span} lanes: its address, value "
+                            f"or mask {why}. Which lane holds each element is not proved, so the store is "
+                            "refused. Give it the shape of the kernel's widest block.",
+                            op_name="tt.store",
+                        )
+                    clauses.append(f"{self._lid_expr} < {count}u")
                     self._one_lane_per_element(ssa, clauses[-1])
         if one_element and (self.kb.block_size > 1 or getattr(self, "_needs_wrapping", False)):
             clauses.insert(0, f"{self._lid_expr} == 0u")
@@ -19055,7 +19186,10 @@ class GenericLowerer(
 
         def _visit(_cur, _op):
             if _cur not in declared:
-                return False
+                # A whole tile flattened row by row: its row index is held one row per
+                # block of lanes and its column index tells the lanes of a block apart,
+                # so lane i holds element i.
+                return _op is not None and _op.op == "tt.reshape" and self._flattened_tile_is_lane_held(_cur, _op)
             if declared[_cur] == "blocked":
                 widths.add(self._value_1d_block.get(_cur))
             return True
