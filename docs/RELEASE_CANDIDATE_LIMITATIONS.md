@@ -499,11 +499,20 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   thread per lane over
   a block of more than 1024 lanes is refused by block size, also when its mask keeps every
   active lane below 1024.
-- **Half accumulators in matmul:** a matmul kernel that keeps a float16 accumulator across its
-  K blocks (`acc += tl.dot(a, b, out_dtype=tl.float16)`) is accumulated in float32 and rounded
-  to float16 once, at the store, where the source rounds after every block. In a 64 by 64 probe
-  with two K blocks 555 of 4096 cells differed from the source's per-block rounding and none
-  from the product rounded once, on the replacement template and the ordinary entry alike.
+- **Float16 and bfloat16 arithmetic:** a kernel's float16 and bfloat16 operations are
+  evaluated in float32, and the value is rounded to the narrow type at a store or an explicit
+  cast. The source rounds after every operation, so a chain of operations can differ from it
+  where an intermediate value does not fit the narrow type. A value stored after one add,
+  subtract, multiply, divide or square root of loaded values is the source's value. Measured
+  on float16 tensors against per-operation float16, which Triton's interpreter also returns:
+  `(x + y) - x` differed in 64 of 64 cells (0.0 in the source, the float32 remainder here);
+  2048 with 1 added on each of eight loop trips gave 2056 where the source stays at 2048; an
+  int32 converted to float16 and reduced by 2048 differed in 32 of 64 cells; a `tl.sum` of 64
+  cells of 4000 widened to float32 gave 256000 where the source's float16 sum is infinite.
+  bfloat16 behaves alike. A matmul kernel that keeps a float16 accumulator across its K blocks
+  (`acc += tl.dot(a, b, out_dtype=tl.float16)`) is the same case: in a 64 by 64 probe with two
+  K blocks 555 of 4096 cells differed from the source's per-block rounding and none from the
+  product rounded once, on the replacement template and the ordinary entry alike.
 - **Scratch aliasing:** the conservative 529 allocator and 527 store fixes have bounded focused
   evidence and passing combined 589 gates. Cross-vendor/artifact evidence remains separate.
 
