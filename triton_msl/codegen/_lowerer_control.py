@@ -1235,8 +1235,8 @@ class _ControlFlowMixin:
         """Neighbor-preserving 16-bit float atomic RMW via a 32-bit word CAS.
 
         ``half_type`` is "half" (fp16) or "bfloat" (bf16). The element lives in
-        one half of an aligned 4-byte word; we CAS the word and preserve the
-        other half. The op runs in float domain (always supported) then casts
+        one half of an aligned 4-byte word, the half its address selects; we CAS
+        the word and preserve the other half. The op runs in float domain (always supported) then casts
         back. Returns the OLD value (Triton atomic_rmw semantics).
 
         Note: ``exch`` still uses the CAS loop (not a bare atomic_exchange) so
@@ -1255,14 +1255,16 @@ class _ControlFlowMixin:
         if op_expr is None:
             raise ValueError(f"_emit_atomic_rmw_16bit: unsupported op '{rmw_op}'")
         kb = self.kb
-        kb.raw_line(f"{indent}uint _eidx_{n} = (uint)({offsets});")
-        # base_ptr is typed `device half*`/`device bfloat*` in the emitted MSL,
-        # so casting to atomic_uint* and adding (_eidx>>1) yields the 4-byte word
-        # containing element _eidx (always 4-byte aligned: buffer bindings are
-        # >=16-byte aligned).
-        kb.raw_line(f"{indent}device atomic_uint* wptr_{n} = (device atomic_uint*)({base_ptr}) + (_eidx_{n} >> 1);")
-        # little-endian: even idx -> low half (shift 0), odd idx -> high half (16).
-        kb.raw_line(f"{indent}uint _sh_{n} = 16u * (_eidx_{n} & 1u);")
+        # base_ptr is typed `device half*`/`device bfloat*` in the emitted MSL. The
+        # word is found from the element's own address, not from the index: a view
+        # binds its buffer at its byte offset, so a base pointer can sit two bytes
+        # into a word, and an index can be negative. The word of an element at an
+        # address that is 2 mod 4 starts one element before it.
+        kb.raw_line(f"{indent}device {half_type}* eptr_{n} = (device {half_type}*)({base_ptr} + ({offsets}));")
+        kb.raw_line(f"{indent}int _par_{n} = (int)((reinterpret_cast<size_t>(eptr_{n}) >> 1) & 1);")
+        kb.raw_line(f"{indent}device atomic_uint* wptr_{n} = (device atomic_uint*)(eptr_{n} - _par_{n});")
+        # little-endian: the low half of the word is at shift 0, the high half at 16.
+        kb.raw_line(f"{indent}uint _sh_{n} = 16u * (uint)_par_{n};")
         kb.raw_line(f"{indent}uint _w_{n} = atomic_load_explicit(wptr_{n}, memory_order_relaxed);")
         kb.raw_line(f"{indent}ushort cur_bits_{n};")
         kb.raw_line(f"{indent}while (true) {{")
