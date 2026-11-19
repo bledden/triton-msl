@@ -5814,18 +5814,28 @@ def _varlen_length(cu, unsigned=False, wide=False):
     return f"uint(max(int(uint({cu}[bb + 1u]) - uint({cu}[bb])), 0))"
 
 
-def _varlen_start(name, cu, unsigned=False):
-    """Declare one sequence's first row from its cumulative lengths.
+def _varlen_start(name, cu):
+    """Declare one sequence's first row from its cumulative lengths, in 32 wrapping bits.
 
-    The source adds the entry to the row index and multiplies by the row stride in signed
-    arithmetic, so a negative entry addresses rows before the pointer (a view into a larger
-    storage). A signed entry therefore stays signed and 64 bits wide here: every address
-    formed from it is exact, where 32 unsigned bits wrapped a negative start to an index
-    about 2**32 elements past the tensor. An unsigned entry is a plain row count.
+    The source adds the entry to the row index, multiplies by the row stride and adds the
+    result to the pointer. Whatever widths it does that in, and wherever it extends, its
+    offset is this template's polynomial modulo 2**32, so the template computes the offset in
+    32 wrapping bits and indexes with it as ``int`` (``_varlen_cell``): the one value within
+    2**31 elements of the pointer on either side. That is the source's cell wherever the
+    source's address is inside the storage, since the launcher holds every storage to that
+    window (``driver._attention_unsigned_scalars_reason``). A negative entry addresses rows
+    before the pointer (a view into a larger storage), and an offset the source's 32 bits
+    wrap lands where the source's lands. Held exactly in 64 bits, a start near -2**31 times
+    the row stride addressed about 2**31 rows before the storage, where the source's int32
+    product wraps into it; held in 32 unsigned bits and indexed unsigned, a negative start
+    addressed about 2**32 elements past the tensor.
     """
-    if unsigned:
-        return f"uint {name} = uint({cu}[bb]);"
-    return f"long {name} = long({cu}[bb]);"
+    return f"uint {name} = uint({cu}[bb]);"
+
+
+def _varlen_cell(offset):
+    """Index expression for a 32-bit wrapping element offset: sign-extended, as a pointer add is."""
+    return f"int({offset})"
 
 
 def make_varlen_flash_attention(
@@ -5921,10 +5931,10 @@ kernel void {kernel_name}(
     uint m_block = tgpos.x, bh = tgpos.y;
     uint bb = bh / nheads, h = bh % nheads;
 
-    {_varlen_start("q_start", b["CUQ"], b.get("unsigned_q", False))}
+    {_varlen_start("q_start", b["CUQ"])}
     uint seqlen_q = {_varlen_length(b["CUQ"], b.get("unsigned_q", False), b.get("wide_q", False))};
     if (m_block * BM >= seqlen_q) return;
-    {_varlen_start("k_start", b["CUK"], b.get("unsigned_k", False))}
+    {_varlen_start("k_start", b["CUK"])}
     uint seqlen_k = {_varlen_length(b["CUK"], b.get("unsigned_k", False), b.get("wide_k", False))};
 
     uint row = lid;
@@ -5934,7 +5944,7 @@ kernel void {kernel_name}(
     float q_reg[{D}];
     float acc[{D}];
     for (uint d = 0u; d < D; d++) {{
-        q_reg[d] = valid ? float({b["Q"]}[(q_start + qrow) * q_st + h * q_sh + d * q_sk]) : 0.0f;
+        q_reg[d] = valid ? float({b["Q"]}[{_varlen_cell("(q_start + qrow) * q_st + h * q_sh + d * q_sk")}]) : 0.0f;
         acc[d] = 0.0f;
     }}
     float m_i = -INFINITY, l_i = 0.0f;
@@ -5947,8 +5957,8 @@ kernel void {kernel_name}(
         for (uint e = lid; e < BN * D; e += BM) {{
             uint kk = e / D, dd = e % D; uint krow = kt + kk;
             bool kv = (krow < kmax);
-            tg_K[e] = kv ? float({b["K"]}[(k_start + krow) * k_st + h * k_sh + dd * k_sk]) : 0.0f;
-            tg_V[e] = kv ? float({b["V"]}[(k_start + krow) * v_st + h * v_sh + dd * v_sk]) : 0.0f;
+            tg_K[e] = kv ? float({b["K"]}[{_varlen_cell("(k_start + krow) * k_st + h * k_sh + dd * k_sk")}]) : 0.0f;
+            tg_V[e] = kv ? float({b["V"]}[{_varlen_cell("(k_start + krow) * v_st + h * v_sh + dd * v_sk")}]) : 0.0f;
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (valid) {{
@@ -5971,7 +5981,7 @@ kernel void {kernel_name}(
     }}
     if (valid) {{
         for (uint d = 0u; d < D; d++)
-            {b["O"]}[(q_start + qrow) * o_st + h * o_sh + d * o_sk] = {store_cast("acc[d] / l_i")};
+            {b["O"]}[{_varlen_cell("(q_start + qrow) * o_st + h * o_sh + d * o_sk")}] = {store_cast("acc[d] / l_i")};
     }}
 }}
 """
@@ -6084,16 +6094,16 @@ kernel void {kernel_name}(
 
     uint m_block = tgpos.x, bh = tgpos.y;
     uint bb = bh / nheads, h = bh % nheads;
-    {_varlen_start("q_start", b["CUQ"], b.get("unsigned_q", False))}
+    {_varlen_start("q_start", b["CUQ"])}
     uint seqlen_q = {_varlen_length(b["CUQ"], b.get("unsigned_q", False), b.get("wide_q", False))};
-    {_varlen_start("k_start", b["CUK"], b.get("unsigned_k", False))}
+    {_varlen_start("k_start", b["CUK"])}
     uint seqlen_k = {_varlen_length(b["CUK"], b.get("unsigned_k", False), b.get("wide_k", False))};
     if (m_block * BM >= seqlen_q) return;
     uint kmax = {kmax_expr};
 
     for (uint i = lid; i < BM*D; i += NT) {{
         uint r = i / D, c = i % D; uint qr = m_block*BM + r;
-        tg_Q[i] = qr < seqlen_q ? {TILE}({b["Q"]}[(q_start+qr)*q_st + h*q_sh + c*q_sk]) : {TILE}(0);
+        tg_Q[i] = qr < seqlen_q ? {TILE}({b["Q"]}[{_varlen_cell("(q_start+qr)*q_st + h*q_sh + c*q_sk")}]) : {TILE}(0);
     }}
     for (uint i = lid; i < BM; i += NT) {{ tg_m[i] = -INFINITY; tg_l[i] = 0.0f; }}
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -6105,8 +6115,8 @@ kernel void {kernel_name}(
     for (uint kt = 0u; kt < kmax; kt += BN) {{
         for (uint i = lid; i < BN*D; i += NT) {{
             uint r = i / D, c = i % D; uint kr = kt + r; bool ok = kr < kmax;
-            tg_K[i] = ok ? {TILE}({b["K"]}[(k_start+kr)*k_st + h*k_sh + c*k_sk]) : {TILE}(0);
-            tg_V[i] = ok ? {TILE}({b["V"]}[(k_start+kr)*v_st + h*v_sh + c*v_sk]) : {TILE}(0);
+            tg_K[i] = ok ? {TILE}({b["K"]}[{_varlen_cell("(k_start+kr)*k_st + h*k_sh + c*k_sk")}]) : {TILE}(0);
+            tg_V[i] = ok ? {TILE}({b["V"]}[{_varlen_cell("(k_start+kr)*v_st + h*v_sh + c*v_sk")}]) : {TILE}(0);
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -6171,7 +6181,7 @@ kernel void {kernel_name}(
             uint r = sg*8u + lane; uint qrow = m_block*BM + r;
             if (qrow < seqlen_q)
                 for (uint c = 0u; c < 8u; c++)
-                    {b["O"]}[(q_start+qrow)*o_st + h*o_sh + (et*8u+c)*o_sk] =
+                    {b["O"]}[{_varlen_cell("(q_start+qrow)*o_st + h*o_sh + (et*8u+c)*o_sk")}] =
                         (!isfinite(tg_l[r]) || tg_l[r] == 0.0f)
                             ? {TILE}(NAN) : {TILE}(tg_S[sg*64u + lane*8u + c] * (1.0f/tg_l[r]));
         }}

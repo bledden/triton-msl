@@ -8688,7 +8688,7 @@ class GenericLowerer(
             )
             self.effective_block_size = 32
             self._flash_attention = ("flash_attention", msl, 32)
-        self._attention_unsigned_scalars(unsigned_args, signed_args)
+        self._attention_unsigned_scalars(unsigned_args, signed_args, signed_cells=True)
         self._used_pid_axes = {0, 1}
         self._prescan_stores()
         return msl
@@ -13033,7 +13033,7 @@ class GenericLowerer(
         self._prescan_stores()
         return msl
 
-    def _attention_unsigned_scalars(self, unsigned, signed=()) -> None:
+    def _attention_unsigned_scalars(self, unsigned, signed=(), signed_cells=False) -> None:
         """Carry the arguments an attention template reads as 32-bit values to the launcher.
 
         Every attention template binds its strides, head count and lengths as ``uint`` and
@@ -13043,11 +13043,16 @@ class GenericLowerer(
         another loop count. ``signed`` names the arguments a template reinterprets as
         ``int``: any 32-bit value is the source's. The launcher refuses the other values
         (``attention_unsigned_scalars_v1``); a route's own launch contract rides inside.
+
+        ``signed_cells`` names the same contract for a template that indexes with its 32-bit
+        offset sign-extended (the varlen templates, whose first row is read from a tensor
+        and may be negative): the launcher then holds each storage to 2**31 elements on
+        either side of the tensor's first one (``attention_signed_cells_v1``).
         """
         unsigned = {int(i) for i in unsigned}
         signed = {int(i) for i in signed} - unsigned
         self._tail_access_bounds = (
-            "attention_unsigned_scalars_v1",
+            "attention_signed_cells_v1" if signed_cells else "attention_unsigned_scalars_v1",
             tuple(sorted(unsigned)),
             tuple(sorted(signed)),
             self._tail_access_bounds,

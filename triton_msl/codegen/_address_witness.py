@@ -16,16 +16,25 @@ uses three. Anything outside that vocabulary (a compare, a select, a min/max, a 
 conditional access, a narrowing cast) is refused by name rather than evaluated.
 
 A zero-extension is followed as the identity. On a negative 32-bit value it is not: the source
-address is then a multiple of 2**32 elements away from the one evaluated here. Every template
-computes its addresses in 32-bit arithmetic, so equality over the integers still gives the
-template the source's cell wherever the source address lies inside a buffer of at most 2**32
-elements, and a source address outside its buffer has no defined result to reproduce. The
-launcher holds every attention launch to that: each tensor's storage is at most 2**32 elements
-and each stride and extent the template binds is one it reads as the source does
-(``attention_unsigned_scalars_v1``, ``driver._attention_unsigned_scalars_reason``). (Refusing
-the extension instead turns away the unsigned batch decode, ``pid.to(uint32) % H`` times a
-stride, whose product is zero-extended.) The same holds for a 32-bit sum or product that wraps.
-It does not hold below 32 bits, so an 8- or 16-bit integer in an address is refused.
+address is then a multiple of 2**32 elements away from the one evaluated here. The same holds
+for a 32-bit sum or product that wraps, and for an offset the pointer add sign-extends. Every
+template computes its offsets in 32-bit arithmetic, so equality over the integers gives the
+template the source's offset modulo 2**32, and the source's cell wherever the storage holds no
+second offset with that remainder among the ones the template's index can take. A source
+address outside its storage has no defined result to reproduce. The launcher holds every
+attention launch to that (``driver._attention_unsigned_scalars_reason``): each stride and
+extent the template binds is one it reads as the source does, and
+
+- a template that indexes unsigned (``attention_unsigned_scalars_v1``) launches on a storage
+  of at most 2**32 elements, and on a view at an offset only where no wrapped offset can lie
+  inside the storage before it (at most 2**30 elements from the view's first one on);
+- a template that indexes signed (``attention_signed_cells_v1``, the varlen templates, whose
+  first row is a loaded value and may be negative) launches on a storage of at most 2**31
+  elements on either side of the tensor's first one.
+
+(Refusing the extension instead turns away the unsigned batch decode, ``pid.to(uint32) % H``
+times a stride, whose product is zero-extended.) None of this holds below 32 bits, so an 8- or
+16-bit integer in an address is refused.
 
 A program id over an integer ARGUMENT is not a free atom: quotient and remainder are computed
 from the sampled program id and divisor, so ``pid - (pid // H) * H`` is ``pid % H`` here as it

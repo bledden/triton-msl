@@ -100,7 +100,10 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   varlen, biased and backward routes the result was wrong and the stores
   landed outside the view. A stride, head count or length argument that is
   negative or does not fit 31 bits now refuses when a template receives it,
-  as does a tensor whose storage exceeds 2**32 elements. Head dimension 32
+  as does a tensor whose storage exceeds 2**32 elements, and a view that
+  starts inside its storage with more than 2**30 elements from its first one
+  on: there a wrapped 32-bit source offset can name a cell before the view,
+  which the template's unsigned index cannot reach. Head dimension 32
   with 32-row blocks takes the general path and computes negative strides as
   before, and so does a dense kernel specialized for a 64-bit argument.
 - Read the varlen cumulative sequence lengths at the width the tensor holds.
@@ -138,8 +141,15 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   cumulative entry to the row index in signed arithmetic, so a negative entry
   addresses rows before the tensor's first row, which is defined on a view
   into a larger storage. The templates held the start in 32 unsigned bits and
-  addressed about 2**32 elements past the view. A signed entry now stays
-  signed.
+  addressed about 2**32 elements past the view. The varlen templates now form
+  each offset in 32 wrapping bits and read it as signed, as the source's
+  pointer add reads a 32-bit offset: a negative entry addresses the rows
+  before the view, and an int32 or uint32 entry whose product with the row
+  stride wraps addresses the cell the wrapped product names. An int64 entry
+  agrees with the source wherever the source's cell lies in the storage. A
+  varlen launch refuses a tensor whose storage reaches more than 2**31
+  elements before or after its first element, which a 32-bit offset cannot
+  name.
 - Store the biased log-sum-exp at its tensor's element type. The templates
   wrote it through a 32-bit float pointer, so a half or bfloat16 tensor
   received four bytes for every two it holds: wrong values, and writes past

@@ -270,8 +270,22 @@ def _fa_whole_row_tiles_reason(descriptor, kargs, signatures, scalar_payloads, g
         return f"the store domain could not be evaluated ({type(exc).__name__}); mask the store with the row boundary"
 
 
-# An attention template adds its addresses in 32-bit unsigned arithmetic.
+# An attention template adds its addresses in 32-bit arithmetic: the source's offset modulo
+# 2**32, whatever widths the source adds it in. Indexed unsigned, that is the source's cell
+# only inside a storage of at most 2**32 elements.
 _ATTENTION_TEMPLATE_ELEMENTS = 1 << 32
+# A source offset that wraps its 32 bits can land before the pointer, which is inside the
+# storage only for a view at an offset; the unsigned index is then 2**32 elements past it.
+# Every template walks its rows, heads and depth up from zero one stride at a time and the
+# launcher holds each stride below 2**31, so a launch that reaches a wrapped offset also
+# reaches an unwrapped one of at least 2**30. A view whose storage ends within this many
+# elements of its first one therefore has no wrapped offset inside it.
+_ATTENTION_TEMPLATE_VIEW_ELEMENTS = 1 << 30
+# The varlen templates take their first row from a tensor, so the walk above does not start
+# at zero. They index with the 32-bit offset sign-extended (``attention_signed_cells_v1``):
+# the source's cell inside this many elements on either side of the tensor's first one.
+_ATTENTION_SIGNED_CELL_ELEMENTS = 1 << 31
+_ATTENTION_SCALAR_TAGS = ("attention_unsigned_scalars_v1", "attention_signed_cells_v1")
 
 
 def _attention_unsigned_scalars_reason(descriptor, kargs, signatures, scalar_payloads):
@@ -280,13 +294,16 @@ def _attention_unsigned_scalars_reason(descriptor, kargs, signatures, scalar_pay
     The templates read their strides, head count and lengths as ``uint`` and address in
     32-bit arithmetic. That is the source's value only for a 32-bit argument that is not
     negative (any 32-bit value for the ones a template reads as ``int``), and the source's
-    cell only inside a storage of at most 2**32 elements.
+    cell only where the storage lies within the offsets the template can form: a storage of
+    at most 2**32 elements that the tensor starts, or a view with at most 2**30 elements from
+    its first one on (``_ATTENTION_TEMPLATE_VIEW_ELEMENTS``); for a template that indexes
+    signed (``attention_signed_cells_v1``), at most 2**31 elements on either side.
     """
     try:
         if (
             type(descriptor) not in (tuple, list)
             or len(descriptor) != 4
-            or descriptor[0] != "attention_unsigned_scalars_v1"
+            or descriptor[0] not in _ATTENTION_SCALAR_TAGS
             or any(
                 type(group) not in (tuple, list)
                 or any(type(index) is not int or not 0 <= index < len(kargs) for index in group)
@@ -317,10 +334,26 @@ def _attention_unsigned_scalars_reason(descriptor, kargs, signatures, scalar_pay
         for index, argument in enumerate(kargs):
             if hasattr(argument, "untyped_storage"):
                 elements = argument.untyped_storage().nbytes() // argument.element_size()
-                if elements > _ATTENTION_TEMPLATE_ELEMENTS:
+                before = int(argument.storage_offset())
+                after = elements - before
+                if descriptor[0] == "attention_signed_cells_v1":
+                    if max(before, after) > _ATTENTION_SIGNED_CELL_ELEMENTS:
+                        return (
+                            f"argument {index} has {before} elements of storage before its first one "
+                            f"and {after} from it on; the template addresses in 32-bit signed "
+                            "arithmetic, at most 2**31 elements either way"
+                        )
+                elif elements > _ATTENTION_TEMPLATE_ELEMENTS:
                     return (
                         f"argument {index} has a storage of {elements} elements; the template "
                         "addresses in 32-bit arithmetic, at most 2**32 elements"
+                    )
+                elif before and after > _ATTENTION_TEMPLATE_VIEW_ELEMENTS:
+                    return (
+                        f"argument {index} is a view {before} elements into its storage with {after} "
+                        "from its first one on; a 32-bit offset that wraps would land inside that "
+                        "storage, where the template addresses past it. Pass a tensor that starts its "
+                        "storage, or a view with at most 2**30 elements from its first one on"
                     )
         return None
     except Exception as exc:
@@ -1217,11 +1250,7 @@ class MetalLauncher:
         address_bounds = kernel_metadata[10]
         tail_access_bounds = batched_dot_bounds = None
         validated_tail_bounds = None
-        if (
-            isinstance(address_bounds, (tuple, list))
-            and address_bounds
-            and address_bounds[0] == "attention_unsigned_scalars_v1"
-        ):
+        if isinstance(address_bounds, (tuple, list)) and address_bounds and address_bounds[0] in _ATTENTION_SCALAR_TAGS:
             _scalars_reason = _attention_unsigned_scalars_reason(address_bounds, flat_args, flat_sigs, scalar_payloads)
             if _scalars_reason is not None:
                 from triton_msl.errors import MetalNonRecoverableError

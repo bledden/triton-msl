@@ -142,6 +142,7 @@ def generic_2d_geometry(launcher, arguments, signatures, metadata, grid, *, vali
                     (7, "matmul_grid_storage_v1"),
                     (7, "matmul_grid_storage_v2"),
                     (4, "attention_unsigned_scalars_v1"),
+                    (4, "attention_signed_cells_v1"),
                 )
                 # An attention launch contract riding inside keeps the host route.
                 or (len(validated_tail_bounds) == 4 and validated_tail_bounds[3] is not None)

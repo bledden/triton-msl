@@ -7,7 +7,9 @@ pointer at the last row of a view is a defined source launch (every address is i
 allocation), and the templates ran it on other cells: inputs read from the wrong rows, outputs
 stored outside the view. The lowering now names the arguments a template reads this way
 (``attention_unsigned_scalars_v1``, the route's own launch contract riding inside) and the
-launcher refuses a value the template would read differently. The varlen templates also read
+launcher refuses a value the template would read differently. The varlen templates publish
+the same contract as ``attention_signed_cells_v1``: they index with the 32-bit offset
+sign-extended (tests/test_varlen_wrapped_start.py). The varlen templates also read
 the cumulative sequence lengths through ``int*`` whatever the tensor held: an int64 tensor
 (what ``cumsum`` returns) gave every second entry the high word of the one before. The biased
 template wrote the log-sum-exp through ``float*``: four bytes for every two of a half tensor.

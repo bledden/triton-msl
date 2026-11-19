@@ -431,6 +431,13 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   exact classification, finite controls and order-robust bounds. Welford m2 checks are
   admissibility checks, not an exact non-finite recurrence oracle or exhaustive coverage.
 
+- **Attention storage size:** the attention templates address in 32 bits. A launch that takes
+  the dense, biased, backward or MLA template refuses a tensor whose storage holds more than
+  2**32 elements, and a view that starts inside its storage with more than 2**30 elements
+  from its first one on. A varlen launch refuses a tensor whose storage reaches more than
+  2**31 elements before or after its first element. Smaller storages, and whole tensors up
+  to 2**32 elements on the first group, compute. These windows are checked by arithmetic on
+  the launch check alone; no tensor of that size was allocated or launched.
 - **In-place outputs:** a matmul whose output overlaps an operand keeps the source's
   load-then-store order by leaving the replacement template; the quantized routes and the
   attention kernels refuse such a launch by name, except the two biased source replays, which
