@@ -15,11 +15,107 @@ from triton_msl.codegen.msl_emitter import _msl_compute_type
 from triton_msl.codegen.msl_types import triton_type_to_msl
 
 from triton_msl.codegen._narrow_float import fdiv, holds_narrow, int_to_float
+from triton_msl.errors import MetalNonRecoverableError
 from triton_msl.codegen._lowerer_helpers import (
     _UINT_TYPE_MAP,
     _mlir_to_triton_dtype,
     _msl_int_type,
 )
+
+
+def _all_ops(ops):
+    for op in ops or ():
+        yield op
+        yield from _all_ops(op.region_ops)
+        yield from _all_ops(op.else_ops)
+
+
+def _value_homes(lowerer):
+    """For each SSA value the op that makes it and the op list it is made anew in, and
+    for each ``scf.for`` and its closing yield the values handed on to the loop's arguments.
+
+    A ``scf.for`` argument is made anew in the loop's body on every trip.
+    """
+    cached = getattr(lowerer, "_value_homes_cache", None)
+    if cached is None:
+        made_by, home, handed_on = {}, {}, {}
+
+        def visit(ops):
+            for op in ops or ():
+                for result in op.result_ids or (op.id,):
+                    made_by[result] = op
+                    home[result] = id(ops)
+                if op.op == "scf.for" and op.region_ops is not None:
+                    arguments = list((op.attrs or {}).get("block_arg_ids", ()))
+                    for argument in arguments:
+                        home[argument] = id(op.region_ops)
+                    handed_on[id(op)] = list(zip((op.operand_ids or ())[3:], arguments[1:]))
+                    for inner in op.region_ops:
+                        if inner.op == "scf.yield":
+                            handed_on[id(inner)] = list(zip(inner.operand_ids or (), arguments[1:]))
+                visit(op.region_ops)
+                visit(op.else_ops)
+
+        visit(lowerer.graph.ops)
+        cached = lowerer._value_homes_cache = (made_by, home, handed_on)
+    return cached
+
+
+def _one_value_per_row(lowerer, made_by, value_id, depth=0):
+    """Whether the IR shows that ``value_id`` is the same along each row of its tile."""
+    if value_id in lowerer._is_splat:
+        return True
+    op = made_by.get(value_id)
+    if op is None or op.id != value_id or depth > 32:
+        return False
+    shape = _extract_shape(op.type_str)
+    if not shape or op.op in ("arith.constant", "tt.splat") or (len(shape) == 2 and shape[1] == 1):
+        return True
+    if op.op == "tt.broadcast" or op.op.startswith(("arith.", "math.")):
+        return bool(op.operand_ids) and all(
+            _one_value_per_row(lowerer, made_by, operand, depth + 1) for operand in op.operand_ids
+        )
+    return False
+
+
+def _in_place_row_update_refusal(lowerer, ssa, tile_id, other_id, shape):
+    """Why ``ssa`` cannot update the threadgroup tile ``tile_id`` in place, or None.
+
+    The update overwrites the tile and reads the other operand as one value per row. That
+    is the source's result when the other operand is one value per row, when the tile is
+    made anew before every run of the update, and when nothing reads the old cells after
+    it: not the tile, and not another value held in the same cells.
+    """
+    made_by, home, handed_on = _value_homes(lowerer)
+    if len(shape) > 2:
+        return f"a tile of {len(shape)} dimensions is not implemented"
+    if not _one_value_per_row(lowerer, made_by, other_id):
+        return "its other operand is not shown to be one value per row"
+    if home.get(tile_id) is None or home.get(tile_id) != home.get(ssa.id):
+        return "the tile is not made anew where it is updated"
+    # Every value held in the tile's cells: an earlier update in place, a carried argument's start.
+    cells = lowerer._shared_mem_descs[tile_id][0]
+    held = {value for value, (name, _, _) in lowerer._shared_mem_descs.items() if name == cells}
+    # Outside every loop the update runs once, and what stands before it has read already.
+    done = home[ssa.id] != id(lowerer.graph.ops)
+    for op in _all_ops(lowerer.graph.ops):
+        if op is ssa:
+            done = True
+            continue
+        reads = [value for value in op.operand_ids or () if value in held]
+        if not done or not reads:
+            continue
+        # A reader that only hands the cells on (an update in place, a carried argument) is no reader.
+        pairs = handed_on.get(id(op))
+        if pairs is None:
+            results = set(op.result_ids or (op.id,))
+        else:
+            results = {argument for value, argument in pairs if value in held}
+            if sum(value in held for value, _ in pairs) != len(reads):
+                results.add(None)
+        if tile_id in reads or not results <= held:
+            return f"the tile's cells are also read by {op.op}"
+    return None
 
 
 class _EmissionMixin:
@@ -200,6 +296,7 @@ class _EmissionMixin:
         b_smem = smem_descs.get(ssa.operand_ids[1])
 
         smem_info = None  # (smem_name, shape, other_var, other_id)
+        shared_is_second = False
         if a_smem:
             shape_a = a_smem[1]
             total_a = 1
@@ -214,6 +311,7 @@ class _EmissionMixin:
                 total_b *= d
             if total_b > bs:
                 smem_info = (b_smem[0], shape_b, a, ssa.operand_ids[0])
+                shared_is_second = True
 
         if smem_info is not None:
             smem_name, shape, other_var, other_id = smem_info
@@ -221,18 +319,20 @@ class _EmissionMixin:
             N = shape[1] if len(shape) >= 2 else shape[0]
             total = M * N
 
-            # Determine if other_var is per-row broadcast (from expand_dims
-            # of a 1D vector) vs truly per-element.  Per-row values have the
-            # same value for all columns in a row.  We check env_shapes: if
-            # the original shape was (M, 1) or (M,), it's per-row.
-            other_shape = self.env_shapes.get(other_id, ())
-            is_per_row = (
-                (len(other_shape) == 1 and other_shape[0] == M)
-                or (len(other_shape) >= 2 and other_shape[1] == 1)
-                or (len(other_shape) >= 2 and other_shape == shape and total > bs)
+            # The update below is in place and reads the other operand as one value per
+            # row. The shapes do not show that: a whole tile and a broadcast column have
+            # the same one.
+            refusal = _in_place_row_update_refusal(
+                self, ssa, ssa.operand_ids[1 if shared_is_second else 0], other_id, shape
             )
+            if refusal is not None:
+                raise MetalNonRecoverableError(
+                    f"{ssa.op} on a tile of {total} cells held in threadgroup memory is an update in place, one "
+                    f"value per row: {refusal}. The kernel is refused.",
+                    op_name=ssa.op,
+                )
 
-            if is_per_row or total > bs:
+            if total > bs:
                 # Store the per-row value into temp shared memory so the
                 # strided loop can access any row's value.
                 row_stride = max(1, bs // M)
@@ -245,7 +345,11 @@ class _EmissionMixin:
                 self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
                 # Strided in-place update
                 self.kb.raw_line(f"    for (uint _sb = lid; _sb < {total}u; _sb += {bs}u) {{")
-                self.kb.raw_line(f"        {smem_name}[_sb] = {smem_name}[_sb] {op_str} {temp_smem}[_sb / {N}u];")
+                cell, other = f"{smem_name}[_sb]", f"{temp_smem}[_sb / {N}u]"
+                # The tile is updated in place whichever operand it is: `other - tile` is not `tile - other`.
+                first, second = (other, cell) if shared_is_second else (cell, other)
+                update = fdiv(self, first, second) if guarded_division else f"{first} {op_str} {second}"
+                self.kb.raw_line(f"        {cell} = {update};")
                 self.kb.raw_line(f"    }}")
                 self.kb.raw_line(f"    threadgroup_barrier(mem_flags::mem_threadgroup);")
 

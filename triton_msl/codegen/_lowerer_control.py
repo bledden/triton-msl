@@ -592,7 +592,20 @@ class _ControlFlowMixin:
                                     # pointing to a DIFFERENT array (e.g. the dot
                                     # wrote to smem_dot_X).  If so, copy it over.
                                     yield_smem = getattr(self, "_shared_mem_descs", {}).get(yield_id)
-                                    if yield_smem and yield_smem[0] != iter_vars[i]:
+                                    if yield_smem is None:
+                                        # A value each thread holds for its own cell. The tile has
+                                        # more cells than the group has threads and nothing writes
+                                        # the value into it: the next trip and the loop's result
+                                        # would read the cells as they stood before.
+                                        from triton_msl.errors import MetalNonRecoverableError
+
+                                        raise MetalNonRecoverableError(
+                                            "a loop-carried tile held in threadgroup memory is handed on as a "
+                                            f"value computed one cell per thread over {bs} threads: writing it "
+                                            "back to the tile is not implemented. The kernel is refused.",
+                                            op_name="scf.for",
+                                        )
+                                    if yield_smem[0] != iter_vars[i]:
                                         src_smem = yield_smem[0]
                                         dst_smem = iter_vars[i]
                                         init_shape = self.env_shapes.get(init_ids[i], ()) if i < len(init_ids) else ()
