@@ -775,6 +775,7 @@ def emit_msl(mod, metadata, options):
     # Native operation identity, including callees: no legacy fallback is allowed
     # to erase an assertion if walking, planning, or generic emission fails.
     retained_asserts = []
+    unlowered = "generic lowerer could not lower this kernel"
     mod.walk(lambda op: retained_asserts.append(op) if op.get_name() == "tt.assert" else None)
 
     # Primary path: new walker + generic lowerer
@@ -896,6 +897,12 @@ def emit_msl(mod, metadata, options):
             )
         # Fall through to legacy parser if unsupported ops remain
         _mept_path_log("fallback-unsupported", metadata.get("name", "?"))
+        # The refusal names what the lowering stopped at.
+        stopped = list(
+            dict.fromkeys(str(reason).removeprefix("UNSUPPORTED: ") for reason in lowerer.kb.unsupported_reasons)
+        )
+        if stopped:
+            unlowered += " (" + "; ".join(stopped[:3]) + ("; ..." if len(stopped) > 3 else "") + ")"
     except MetalResourceError:
         # A concrete capacity failure is terminal for this configuration, even
         # with legacy opt-in. Keep its type for the compiler/autotuner boundary.
@@ -921,7 +928,7 @@ def emit_msl(mod, metadata, options):
         )
         _mept_path_log("fallback-exception", str(e)[:80])
 
-    return _legacy_fallback(str(mod), metadata, options, "generic lowerer could not lower this kernel")
+    return _legacy_fallback(str(mod), metadata, options, unlowered)
 
 
 def _legacy_fallback(ir_text, metadata, options, reason):

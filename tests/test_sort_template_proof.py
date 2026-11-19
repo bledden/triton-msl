@@ -7,6 +7,10 @@ changed before the store, masked accesses and offset addresses all fit, and thos
 then ran as a plain sort. The template is now chosen by a proof of the whole kernel; every
 other kernel goes to the ordinary lowering, which computes it or refuses it.
 
+The ordinary lowering runs a tile of at most 1024 elements. A larger sort that is not the
+plain form the proof accepts (a store that converts, a load of reversed columns, a mask,
+a sort of a sort) ran as the template before and is refused now, with the reason.
+
 The template's network is also the source's own, step for step. It used to swap a pair
 that was out of order, comparing signed: unsigned values above the signed range were
 sorted as negative ones, and where neither of a pair is greater (a NaN, a zero of each
@@ -95,10 +99,23 @@ def _negated(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
 
 
 @triton.jit
-def _flip_two_rows(X, Z, C: tl.constexpr):
-    # A flip of a 2xC tile along its rows has the sort's reshape and its xor reduction.
+def _flip_two_rows(X, Z, C: tl.constexpr, AXIS: tl.constexpr):
+    # A flip of a 2xC tile has the sort's reshape and its xor reduction.
     o = tl.arange(0, 2)[:, None] * C + tl.arange(0, C)[None, :]
-    tl.store(Z + o, tl.flip(tl.load(X + o), 0))
+    tl.store(Z + o, tl.flip(tl.load(X + o), AXIS))
+
+
+@triton.jit
+def _reversed_columns(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    c = tl.arange(0, C)[None, :]
+    tl.store(Z + r * C + c, tl.sort(tl.load(X + r * C + (C - 1 - c)), dim=1, descending=D))
+
+
+@triton.jit
+def _masked_everywhere(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    o = tl.arange(0, R)[:, None] * C + tl.arange(0, C)[None, :]
+    tl.store(Z + o, tl.sort(tl.load(X + o, mask=o < R * C, other=0), dim=1, descending=D), mask=o < R * C)
 
 
 def _ordered(tile, descending):
@@ -217,16 +234,56 @@ def test_the_other_kernels_compute_on_a_small_tile(case, device):
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "i32"])
+@pytest.mark.parametrize("axis", [0, 1])
 @pytest.mark.parametrize("cols", [4, 8, 16, 64, 512])
-def test_a_flip_of_two_rows_is_not_a_sort(device, dtype, cols):
+def test_a_flip_of_two_rows_is_not_a_sort(device, dtype, axis, cols):
+    # Along axis 1, from 8 columns up, this came back sorted; along axis 0 it never did.
     x = _input(2 * cols, dtype)
     z = torch.full((2 * cols + 8,), POISON, dtype=dtype, device=device)
-    launch = _launch(_flip_two_rows, (1,), x.to(device), z, cols)
-    if launch is None:
-        return
+    launch = _flip_two_rows[(1,)](x.to(device), z, cols, axis)
     assert not _is_the_template(launch)
-    assert torch.equal(z[: 2 * cols].cpu().reshape(2, cols), x.reshape(2, cols).flip(0))
+    assert torch.equal(z[: 2 * cols].cpu().reshape(2, cols), x.reshape(2, cols).flip(axis))
     assert torch.all(z[2 * cols :] == POISON)
+
+
+TOO_LARGE = "2D kernel with cooperative ops exceeds 1024 elements"
+# name, kernel, output dtype, the source's result for an int32 input
+NOT_PLAIN = [
+    ("converting_store", _plain, torch.float32, lambda tile, d: _ordered(tile, d).to(torch.float32)),
+    ("reversed_columns", _reversed_columns, torch.int32, lambda tile, d: _ordered(tile.flip(1), d)),
+    ("masked_everywhere", _masked_everywhere, torch.int32, _ordered),
+    ("sorted_twice", _sorted_twice, torch.int32, lambda tile, d: _ordered(tile, 1 - d)),
+]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("descending", [0, 1])
+@pytest.mark.parametrize("rows,cols", [(64, 32), (512, 8)])
+@pytest.mark.parametrize("case", NOT_PLAIN, ids=[case[0] for case in NOT_PLAIN])
+def test_a_larger_sort_that_is_not_the_plain_form_is_refused_with_the_reason(case, rows, cols, descending, device):
+    _, kernel, out_dtype, _ = case
+    total = rows * cols
+    x = _input(total, torch.int32)
+    z = torch.full((total + 8,), POISON, dtype=out_dtype, device=device)
+    with pytest.raises(MetalNonRecoverableError) as caught:
+        kernel[(1,)](x.to(device), z, rows, cols, descending)
+    assert TOO_LARGE in str(caught.value)
+    assert torch.all(z == POISON)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("descending", [0, 1])
+@pytest.mark.parametrize("rows,cols", [(16, 16), (32, 32)])
+@pytest.mark.parametrize("case", NOT_PLAIN, ids=[case[0] for case in NOT_PLAIN])
+def test_the_same_sort_of_at_most_1024_elements_computes(case, rows, cols, descending, device):
+    _, kernel, out_dtype, want_of = case
+    total = rows * cols
+    x = _input(total, torch.int32)
+    z = torch.full((total + 8,), POISON, dtype=out_dtype, device=device)
+    launch = kernel[(1,)](x.to(device), z, rows, cols, descending)
+    assert not _is_the_template(launch)
+    assert torch.equal(z[:total].cpu().reshape(rows, cols), want_of(x.reshape(rows, cols), descending))
+    assert torch.all(z[total:] == POISON)
 
 
 UNSIGNED = [torch.uint8, torch.uint16, torch.uint32]
