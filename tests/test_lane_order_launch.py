@@ -889,7 +889,20 @@ def _atomics():
                 case(f"atomic max, {name}", _atomic_max, [a, o], N=lanes, K=cells),
                 case(f"atomic min, {name}", _atomic_min, [a, o], N=lanes, K=cells),
                 case(f"atomic max, masked, {name}", _atomic_max_masked, [a, o], N=lanes, K=cells),
-                case(f"add then add, one tensor, {name}", _add_then_add, [a, b, o, Shared(2)], N=lanes, K=cells),
+                # Integer adds are exact in any order. The float twin is refused: the order of
+                # float additions is their rounding (tests/test_lane_order_refusals.py).
+                case(
+                    f"add then add, one tensor, int32, {name}",
+                    _add_then_add,
+                    [
+                        whole(lanes, dtype=np.int32),
+                        whole(lanes, 1, dtype=np.int32),
+                        whole(cells, 2, dtype=np.int32),
+                        Shared(2),
+                    ],
+                    N=lanes,
+                    K=cells,
+                ),
                 case(f"add then add, separate, {name}", _add_then_add, [a, b, o, o], N=lanes, K=cells),
                 case(f"add then max, separate, {name}", _add_then_max, [a, b, o, o], N=lanes, K=cells),
                 case(f"max then min, separate, {name}", _max_then_min, [a, b, o, o], N=lanes, K=cells),

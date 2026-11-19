@@ -28,6 +28,7 @@ import triton.language as tl
 from tests.test_lane_order_launch import (
     DEVICES,
     Shared,
+    _add_then_add,
     _add_then_max,
     _conditional_pointer,
     _gathered,
@@ -292,6 +293,13 @@ def _meeting():
                 MEET,
                 "X, Y",
                 integer,
+            ),
+            # Two float adds on one tensor's cells: the terms are the source's, their order is not.
+            Refusal(
+                case(f"add then add, one tensor, {block}", _add_then_add, [a, b, cells, Shared(2)], N=block, K=37),
+                MEET,
+                "O, P",
+                case(f"add then add, separate, {block}", _add_then_add, [a, b, cells, cells], N=block, K=37),
             ),
             # Two atomic updates that do not commute with each other, on one tensor's cells.
             Refusal(

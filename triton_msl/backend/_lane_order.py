@@ -21,7 +21,9 @@ PID, LANE, LOOP, OPAQUE = 1, 2, 4, 8
 BUDGET = 1 << 22  # addresses compared at a time
 SLICES = 16  # and how many times that for one launch, a run of programs at a time
 
-_COMMUTING = ("add", "fadd", "and", "or", "xor", "max", "min", "umax", "umin")
+# Atomic updates that leave the same cell whatever order they land in. A floating-point add
+# is not one: it commutes but does not associate, so the order of the terms is the rounding.
+_COMMUTING = ("add", "and", "or", "xor", "max", "min", "umax", "umin")
 SAFE = ("no-write", "one-store", "atomic-only", "one-lane", "text", "text+lanes", "lanes")
 
 _CHILDREN = {
@@ -337,9 +339,10 @@ class LaunchCheck:
             return "no-write"
         if len(ordinals) == 1 and not accesses[0][4] and not accesses[0][5]:
             return "one-store"
-        # The lanes of one atomic operation are not ordered by the source. Its trips are:
-        # inside a loop only an update that commutes with itself is free of that order.
-        if len(ordinals) == 1 and accesses[0][0] == "A" and not accesses[0][4]:
+        # The lanes of one atomic operation are not ordered by the source. Its trips are,
+        # in a counted loop and in a ``while`` loop alike: inside a loop only an update that
+        # commutes with itself is free of that order.
+        if len(ordinals) == 1 and accesses[0][0] == "A" and not accesses[0][4] and not accesses[0][5]:
             return "atomic-only"
         if self._commuting(ordinals):
             return "atomic-only"
