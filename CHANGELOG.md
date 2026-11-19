@@ -351,8 +351,12 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
     it is refused at every size. The looped matmul in place is covered under
     "Matmul source domains" and still computes for one program.
   - An exchange, a compare-and-swap, or an atomic whose returned value is
-    used, when two lanes reach one cell, in one operation or from different
-    trips of a loop. The source orders the trips; the shader does not. Part
+    used, when two lanes reach one cell from different trips of a loop. The
+    source orders the trips; the shader does not. Where the lanes of one
+    such operation meet on a single trip, or outside a loop, the launch is
+    not refused: the source fixes no order among the lanes of one operation,
+    and the shader's is not always the interpreter's lowest lane first (4 to
+    8 of 60 launches differed at 256 lanes, none at 32 or 2048). Part
     of these returned the source's result in every probe launch before. In a
     `while` loop the trips are not known before the launch, so they compute
     only where the address is the same on every trip and keeps each lane to
@@ -582,15 +586,96 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   a 256-wide copy, a 16 by 16 tile beside a 512-wide one. The lowering now proves that
   lane i holds element i of the flattened tile on the tile's own lanes, and a store, a
   masked store, a store of the tile plus a one-dimensional load and an atomic add take
-  those lanes. The stores that were wrong compute: tiles of 128 to 1024 elements beside
-  blocks of 256 to 2048 lanes were tried. The same proof covers a row reshaped to a
-  column and a range reshaped to a row. Refused when the kernel is lowered, where the
+  those lanes. The stores that were wrong compute on tensors that start on a 16-byte
+  boundary: tiles of 128 to 1024 elements beside blocks of 256 to 2048 lanes were tried,
+  and of those the 128 by 1 tile is refused. Through a view that starts off that
+  boundary some of these stores are refused instead (2 by 64 from 256 lanes on, 16 by 16
+  from 512). The same proof covers a row reshaped to a column and a range reshaped to a
+  row in a store. An atomic over a one-column tile is not covered by it: where the
+  kernel's lanes are looped over, beside 2048 lanes or more and at some shapes beside
+  1024, such a tile is held one row per group of lanes, the atomic read row `lane / N`
+  on its first lanes and added the first rows again (an 8 by 1 tile beside 2048 lanes).
+  The atomic now asks of its address, value and mask what a
+  narrow store asks, and is refused when the kernel is lowered where they are not held
+  element by lane; the 351 probe launches that were wrong are refused and the 506 that
+  computed still compute. Refused when the kernel is lowered, where the
   result was wrong before: a flattened tile whose values are computed from its indices
   with no load. Refused as before at the shapes tried, with the reason: the same
   stores of a tile of 64 elements or fewer (`1-D store layout was not declared by its
   producer`), and a `tl.sum` of a flattened tile beside a block of 256 lanes or more
   (`would be accumulated with wrapped (repeated) elements`). The sum of a tile of up to
   64 elements beside a block of up to 128 lanes computes.
+- A float16 or bfloat16 result was a float32 number until it was stored. The ordinary
+  lowering holds every float in a Metal `float` register and narrowed a value only at a
+  store or an explicit cast, so the second of two chained operations read an unrounded
+  first one. `(x + y) - x` on float16 tensors gave the float32 remainder in 64 of 64
+  cells where the source gives 0.0; 2048 with 1 added on each of eight loop trips gave
+  2056 where the source stays at 2048; a `tl.sum` of 64 cells of 4000 widened to float32
+  gave 256000 where the source's float16 sum is infinite; a comparison
+  (`tl.where(x + y > x, ...)`) chose by the unrounded value; an integer converted to
+  bfloat16 went by way of float32 and was rounded twice; a float16 constant was read
+  as the float32 number its decimal names (`x * 0.1`); and `tl.math.fma` was rounded
+  twice. All with no exception. Each result the source declares float16 or bfloat16 is
+  now rounded to that type where it is produced: arithmetic, the math functions, a
+  conversion from an integer, a constant, a loop-carried value, and the result of a
+  reduction, a scan or a `tl.dot`. An operation the source promotes to float32 is left
+  in float32, and a reduction, a scan and a `tl.dot` still add in float32 inside and
+  round their result once. A float16 fused multiply-add is Metal's half one. A division
+  in a kernel that holds 16-bit floats goes through a guarded quotient: the Metal
+  compiler turned the narrowed quotient of a division by a constant into a half
+  multiply by the rounded reciprocal, and 19,836 float16 values of `x / 3.0` differed.
+  Refused when the kernel is lowered: a bfloat16 `tl.math.fma`, which Metal computes in
+  float; an operation with several results that computes a narrow value by arithmetic;
+  and a matmul that carries a float16 or bfloat16 accumulator over its K loop
+  (`acc += tl.dot(a, b, out_dtype=tl.float16)`), which was run with one rounding after
+  the last block and differed from the source's rounding per block in 555 of 4096
+  cells of a 64 by 64 probe. The values of float16 and bfloat16 kernels with chained
+  narrow operations change with this fix. The attention and matmul templates keep the
+  float32 accumulators their sources declare.
+- A loop-carried tile with more cells than the kernel has threads (32 by 64 in a group
+  of 1024) is held in threadgroup memory and updated in place, and four things were
+  wrong there with no exception. `a[:, None] - acc` and `a[:, None] / acc` were computed
+  as `acc - a[:, None]` and `acc / a[:, None]`, in the loop and after it. A second
+  operand of the tile's own shape was read as one value per row. The old cells stayed
+  readable by name after they were overwritten. And a value computed one cell per
+  thread from the tile (`tl.maximum(acc, 40.0)` after the dot) was never written back,
+  so the next trip and the loop's result read the cells as they stood before: 4096 of
+  4096 cells of a 32 by 64 probe. The update is now emitted with its operands in the
+  source's order, and only where the IR shows the other operand is one value per row,
+  the tile is made anew before every run of the update and nothing reads the old
+  cells after it. Every other form is refused when the kernel is lowered, and the
+  message gives the reason. Refused although it returned the source's result before,
+  where the loop's result was then divided by a column: two updates through one
+  broadcast column, `(acc * a[:, None]) * a[:, None]`.
+- A float16 or bfloat16 atomic on a view that starts an odd number of elements into its
+  storage updated the cell before the one named. Metal has no 16-bit atomic, so the
+  cell is updated by a compare-and-swap of the 4-byte word that holds it, and the word
+  was found from the element's index, which is the right word only when the tensor
+  itself starts a word. Every add on such a view landed one cell early, on the device
+  and on a host tensor alike, and a negative index became an unsigned one far outside
+  the storage. The word is now the one the element's address lies in.
+- A row-wise sum chosen by a branch, carried by a `while` loop or followed by a long
+  chain of operations lost its place on the lanes, with no exception. A sum of an N by
+  W / N tile in a W-lane kernel is held one row per W / N lanes, and where a narrow
+  store or an atomic of N cells reads it a conversion moves it to one row per lane. The
+  conversion asks where its source is held. For the result of an `if` or of a `while`
+  loop nothing answered, and behind more than 256 values the search stopped: the rows
+  were then taken from the first N lanes, which all hold the first rows. With 2 rows on
+  1024 lanes both cells got row 0. The search now follows a branch to the values its two
+  sides yield and a `while` loop to the value it starts from and the value its body
+  hands on, and goes on to every producer. The rows are moved from the lanes that hold
+  them, or the kernel is refused when it is lowered where the sources are held
+  differently or the chain is longer than the resolver follows (130 additions after
+  the sum; 60 were refused before).
+- A loop that hands one carried value on in another's place gave both the same value,
+  with no exception. `a, b = b, a` in a counted loop or a `while` loop gives each the
+  other's old value; the carried variables were written one after another, so the
+  second read the first as just written. A three-way rotation, `a, b = a + b, a` and
+  `c = b; b = a; a = a + 1` went the same way; `a, b = b, a + b` did not. A yielded
+  value that is, or reads, a carried variable written before it is now copied before
+  any of them is written. A `while` loop that carries a vector of more elements than the
+  kernel has threads did not compile; it is now refused by name when the kernel is
+  lowered (a counted loop carries one).
 - The row-wise sort template stood for kernels that are not a row-wise sort. The
   template replaces the whole kernel with "load row r, sort it, store it", and it was
   chosen from a signature that other kernels fit. `tl.flip(v, 1)` of a 2 by N tile

@@ -449,8 +449,19 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   Write the output to a tensor of its own. An ordinary kernel is checked before every launch:
   where two lanes of one program are not proved to stay apart at an element one of them stores,
   the launch raises `MetalNonRecoverableError` starting `lane order:` and nothing is submitted.
-  That refuses an in-place reverse, transpose, shift or gather, a cell every lane loads and the
-  program stores, an exchange or compare-and-swap whose lanes meet at a cell, an exchange,
+  One case is launched all the same: a plain store whose own lanes meet at a cell with
+  different values (`tl.store(Z + n % M, x)`), where no other operation touches the cell.
+  Triton's interpreter leaves the last lane's value there. The shader left the value of one
+  of the lanes that store to the cell in every cell of 192 launches tried, and in 138 of them
+  it was not the last lane's in some cell; which lane it is can change from run to run.
+  The same holds for one exchange or compare-and-swap whose own lanes meet at a cell, outside a
+  loop or on one trip of a counted loop: it is launched, and the lanes take the cell in an
+  order that is not always the interpreter's lowest lane first. At 256 lanes 4 to 8 of 60
+  launches of each of four such kernels differed from the interpreter; at 32 and at 2048 lanes
+  none of 60 did. Compiled Triton fixes no order among the lanes of one operation either.
+  The check refuses an in-place reverse, transpose, shift or gather, a cell every lane loads and
+  the program stores, an exchange or compare-and-swap whose lanes meet at a cell on different
+  trips of a loop, an exchange,
   compare-and-swap or add with a used result inside a `while` loop unless its address is the
   same on every trip and keeps each lane to cells of its own, a store over a
   block narrower than the kernel's widest block that shares a tensor with a block-wide store,
@@ -470,7 +481,10 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   the message says which. In a `while` loop a float add computes only where its address is the
   same on every trip and keeps each lane to its own cell.
   Integer atomic adds, a float add of each lane to its own cell, and one float add outside a
-  loop compute.
+  loop compute. Metal has no 16-bit atomic, so a float16 or bfloat16 atomic swaps the 4-byte
+  word its cell lies in and writes the other half back as it read it. That half is the
+  neighbouring cell, or, for the last cell of a tensor of odd length that starts a word, the
+  two bytes after the tensor.
 - **Row-wise sort:** the sort template runs only a kernel proved to be one unmasked load of a
   tile, `tl.sort` along its last axis and one unmasked store, at addresses of the form
   `base + row * stride + column`. A sort with an offset or a program term in an address, a
@@ -489,30 +503,81 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   returned value is stored, and a tile indexed through `tl.reshape` of a range in a
   three-dimensional kernel. A block made inside a called function that is not inlined is
   refused when the kernel is lowered, as before. A tile flattened with `tl.reshape` beside a
-  wider block, where the tile is loaded: an atomic add computes; a store computes for the
-  tiles of 128 elements and more that were tried and is refused for tiles of 64 elements or
-  fewer; a `tl.sum` computes for a tile of up to 64 elements beside a block of up to 128 lanes
-  and is refused beside a block of 256 lanes or more. A flattened tile
+  wider block, where the tile is loaded and the tensors start on a 16-byte boundary: an
+  atomic add computes for the tiles of two columns or more that were tried; an atomic over a
+  one-column tile is refused beside a block of 2048 lanes or more and at some shapes beside
+  1024, where earlier builds added the first rows again, and computes at the other shapes
+  tried; a store computes for the tiles of 128 elements and more that were tried, except a
+  128 by 1 tile, and is refused for that tile and for tiles of 64 elements or fewer; a
+  `tl.sum` computes for a tile of up to 64 elements beside a block of up to 128 lanes and is
+  refused beside a block of 256 lanes or more. Where a tensor is a view that starts off a
+  16-byte boundary the line between computed and refused falls at other shapes: a 2 by 64
+  store is refused from 256 lanes on, a `tl.sum` computes up to 1024 lanes. A flattened tile
   whose values are computed from its indices with no load is refused when the kernel is
   lowered. A tile transposed with `tl.trans` computes alone and beside a block no wider, with
   one row or one column as well, and is refused beside a wider block. A kernel that needs one
   thread per lane over
   a block of more than 1024 lanes is refused by block size, also when its mask keeps every
   active lane below 1024.
-- **Float16 and bfloat16 arithmetic:** a kernel's float16 and bfloat16 operations are
-  evaluated in float32, and the value is rounded to the narrow type at a store or an explicit
-  cast. The source rounds after every operation, so a chain of operations can differ from it
-  where an intermediate value does not fit the narrow type. A value stored after one add,
-  subtract, multiply, divide or square root of loaded values is the source's value. Measured
-  on float16 tensors against per-operation float16, which Triton's interpreter also returns:
-  `(x + y) - x` differed in 64 of 64 cells (0.0 in the source, the float32 remainder here);
-  2048 with 1 added on each of eight loop trips gave 2056 where the source stays at 2048; an
-  int32 converted to float16 and reduced by 2048 differed in 32 of 64 cells; a `tl.sum` of 64
-  cells of 4000 widened to float32 gave 256000 where the source's float16 sum is infinite.
-  bfloat16 behaves alike. A matmul kernel that keeps a float16 accumulator across its K blocks
-  (`acc += tl.dot(a, b, out_dtype=tl.float16)`) is the same case: in a 64 by 64 probe with two
-  K blocks 555 of 4096 cells differed from the source's per-block rounding and none from the
-  product rounded once, on the replacement template and the ordinary entry alike.
+- **Float16 and bfloat16 arithmetic:** every float is held in a Metal `float` register, and
+  a result the source declares float16 or bfloat16 is rounded to that type where it is
+  produced, so the next operation, a comparison and a widening cast read the source's value.
+  That covers add, subtract, multiply, divide, remainder, the math functions, a conversion
+  from an integer (converted once, not by way of float32), a narrow constant (the narrow
+  value, not the float32 number its decimal names), a loop-carried value and the result of
+  a `tl.sum`, a scan or a `tl.dot`. An operation the source promotes to float32 (`x / 3.0`
+  on a float16 `x`) stays in float32. Not rounded step by step: a reduction, a scan and a
+  `tl.dot` add in float32 inside and their result is rounded once, where the source's narrow
+  additions round at every step in an order it does not fix; a float16 sum that overflows is
+  infinite to its reader either way. The attention and matmul templates keep the float32
+  accumulators their sources declare. A float16 `tl.math.fma` is Metal's half one, rounded
+  once. Refused when the kernel is lowered: a bfloat16 `tl.math.fma` (Metal computes it in
+  float, which rounds twice; `a * b + c` gives the unfused value), an operation with several
+  results that computes a narrow value by arithmetic, and a matmul that carries a float16 or
+  bfloat16 accumulator over its K loop (`acc += tl.dot(a, b, out_dtype=tl.float16)`).
+  Earlier builds ran that matmul with one rounding after the last block, and 555 of 4096
+  cells differed from the source's rounding per block in a 64 by 64 probe; carry the
+  accumulator in float32 and convert it once. A float division in a kernel that holds
+  16-bit floats goes through a guarded quotient: the Metal compiler otherwise turns the
+  narrowed quotient of a division by a constant into a half multiply by the rounded
+  reciprocal, which differed from `x / 3.0` for 19,836 float16 values of `x`. The values
+  of a kernel with two or more chained narrow operations therefore differ from earlier
+  builds, which rounded only at a store or an explicit cast.
+- **Loop-carried tiles larger than the thread group:** a tile with more cells than the
+  kernel has threads (32 by 64 in a group of 1024) that a loop carries is held in
+  threadgroup memory and updated in place. An update by one value per row computes with its
+  operands in the source's order: `acc * a[:, None]`, `a[:, None] - acc`, `a[:, None] / acc`,
+  a constant on either side, a negation. Earlier builds computed `a[:, None] - acc` and
+  `a[:, None] / acc` as `acc - a[:, None]` and `acc / a[:, None]`, in the loop and after
+  it. Refused when the kernel is lowered: an update whose other operand is not shown to be
+  one value per row (`acc - q` with a whole tile), an update whose old cells are read
+  afterwards, two updates that share one broadcast column (`(acc * a[:, None]) * a[:, None]`)
+  and a carried value computed one cell per thread, such as `tl.maximum(acc, 40.0)` after
+  the dot. Earlier builds never wrote that value back to the tile: every cell was wrong
+  wherever the operation changed one. The shared broadcast column returned the source's
+  result in earlier builds where the loop's result was then divided by a column.
+- **Row-wise sums behind a branch, a `while` loop or a long chain:** a `tl.sum` over the
+  rows of a tile narrower than the kernel's block is held one row per group of lanes, and a
+  narrow store or an atomic that reads it needs it one row per lane. Where the sum reaches
+  that use through an `if`, through a `while` loop or behind other operations, the rows are
+  taken from the lanes that hold them when both sides of the branch, or the loop's starting
+  value and the value its body hands on, are held alike. Refused when the kernel is lowered:
+  a loop that starts from a plain load of one cell per lane and adds row-wise sums held one
+  per four lanes, and a sum followed by a chain of 25 or more elementwise operations before
+  the narrow use (the message says the source's thread-to-element mapping cannot be proved).
+  Earlier builds took the rows from the first lanes in these cases, with no exception.
+- **`while` loops that carry vectors:** a `while` loop carries scalars, pointers and vectors
+  of at most one element per thread. A `while` loop that carries a vector of more elements
+  than the kernel has threads is refused when the kernel is lowered (256 and 1024 elements
+  in the kernels tried, where 64 computed); a counted loop (`for _ in range(n)`) carries
+  one. Carried values are handed on all at once in both loops: `a, b = b, a` exchanges them.
+- **A reduction of fewer elements than the kernel's block, in a kernel of 1024 lanes or
+  more:** where the kernel's lanes are looped over, a `tl.sum`, `tl.max`, `tl.min`,
+  `tl.argmax` or `tl.argmin` of a vector with fewer elements than the kernel's widest block
+  is refused when the kernel is lowered; the message names the multipass phase loop. In the
+  kernels tried that was every such reduction of 4 or 16 elements beside a stored block of
+  2048 lanes, and some float32 ones of 32 elements beside 1024 lanes; beside a block of up
+  to 128 lanes they compute. This refusal is not new: 0.3.0 has it.
 - **Scratch aliasing:** the conservative 529 allocator and 527 store fixes have bounded focused
   evidence and passing combined 589 gates. Cross-vendor/artifact evidence remains separate.
 
