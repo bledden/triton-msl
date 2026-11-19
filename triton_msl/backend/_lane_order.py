@@ -25,6 +25,8 @@ SLICES = 16  # and how many times that for one launch, a run of programs at a ti
 # is not one: it commutes but does not associate, so the order of the terms is the rounding.
 _COMMUTING = ("add", "and", "or", "xor", "max", "min", "umax", "umin")
 SAFE = ("no-write", "one-store", "atomic-only", "one-lane", "text", "text+lanes", "lanes")
+# The findings that count an access in although a mask or a branch may leave it out.
+_HEDGED = {"lanes-meet": "may-meet", "lanes-meet-narrow": "may-meet", "order-meet": "may-meet"}
 
 _CHILDREN = {
     "b": (3, 4),
@@ -43,12 +45,19 @@ _M32 = (1 << 32) - 1
 _REASONS = {
     "storage": "an argument's storage could not be read, so it may share memory with any other",
     "unknown-base": "an access could not be traced to the argument it points into",
-    "unbounded": "an access sits in a loop whose trips are not known before the launch",
+    "unbounded": (
+        "an access sits in a loop whose trips are not known before the launch, and its lanes are not shown "
+        "to keep to elements of their own"
+    ),
     "untraced": "the shader does not perform these accesses one by one in the source's order",
     "opaque-address": "an address depends on a value the check cannot compute before the launch",
     "lanes-meet": "two lanes of one program reach the same element and one of them stores it",
     "lanes-meet-narrow": "an access narrower than the block reaches an element another lane also reaches",
     "order-meet": "accesses the shader performs in another order than the source reach the same element",
+    "may-meet": (
+        "two lanes of one program reach the same element, one of them storing it, unless a branch, or a mask "
+        "computed from values the check cannot know before the launch, keeps them apart"
+    ),
     "element-size": "the arguments that share memory differ in element size or are not aligned to it",
     "loop-bounds": "a loop around the accesses has bounds that are not fixed before the launch",
     "budget": "there are too many addresses to compare",
@@ -255,6 +264,8 @@ class LaunchCheck:
         # Accesses of one element per row that the row's first lane performs alone.
         self.rows = set(plan.get("rows") or ()) - self.single
         self.one_lane = plan.get("threads") == [1, False] and self.block == 1
+        # Accesses under a branch: the comparison counts them in whichever way the branch goes.
+        self.branched = set(plan.get("branched") or ())
         self.atomic = {int(ordinal): entry for ordinal, entry in (plan.get("atomic") or {}).items()}
         self.pairs = {tuple(pair) for pair in plan.get("pairs") or ()}
         # A source program of one lane is sequential. The shader is too when one thread
@@ -358,18 +369,25 @@ class LaunchCheck:
         if any(ordinal in self.unknown_base for ordinal in ordinals):
             return "unknown-base"
         loads_first = self._text_proof(members, 0, 1) and self._loads_first(ordinals, writes)
+        proved = "lanes"
         # The other way round: every store has landed before any thread reads.
         if loads_first or (self._text_proof(members, 2, 3) and self._stores_first(ordinals, writes)):
             if len(writes) == 1 and not self.accesses[writes[0]][4] and not self.accesses[writes[0]][5]:
                 return "text"
-            ordinals, proved = writes, "text+lanes"
-        else:
-            proved = "lanes"
-        if any(self.accesses[ordinal][5] for ordinal in ordinals):
-            return "unbounded"
+            # A store in a ``while`` loop comes round again after the loads of the loop's
+            # next trip, whatever the text says of one trip: the loads stay in the comparison.
+            if not any(self.accesses[ordinal][5] for ordinal in writes):
+                ordinals, proved = writes, "text+lanes"
+        # A ``while`` loop's trips are not known before the launch. What the comparison
+        # reads of an access in one is the same on every trip (an address that changes
+        # from trip to trip is one the check cannot compute, and a mask that does is
+        # left out, which only adds cells), so "apart" holds for any number of trips:
+        # each cell is one lane's alone, and a lane keeps the source's order. Any other
+        # answer there is not a finding, since a cell may be met on some trips only.
+        unbounded = any(self.accesses[ordinal][5] for ordinal in ordinals)
         # Lane order is the source's only for accesses written one by one, in order.
         if any(ordinal in self.untraced for ordinal in ordinals):
-            return "untraced"
+            return "unbounded" if unbounded else "untraced"
         swapped = self._swapped(ordinals)
         try:
             origins, spaces = self._origins(members, storages, arguments)
@@ -390,8 +408,19 @@ class LaunchCheck:
                     answer = self._per_program(ordinals, origins, arguments, grid, swapped, spaces)
                 self.cache[key] = answer
         except Unproved as unproved:
-            return unproved.reason
-        return proved if answer == "apart" else answer
+            return "unbounded" if unbounded else unproved.reason
+        if answer == "apart":
+            return proved
+        if unbounded:
+            return "unbounded"
+        if answer in _HEDGED and any(self._unread(ordinal) for ordinal in ordinals):
+            return _HEDGED[answer]
+        return answer
+
+    def _unread(self, ordinal):
+        """Does the comparison count this access in although a mask or a branch may leave it out?"""
+        mask = self.accesses[ordinal][2]
+        return ordinal in self.branched or (mask >= 0 and bool(self.flags[mask] & OPAQUE))
 
     def _per_program(self, ordinals, origins, arguments, grid, swapped, spaces):
         """The lanes of every program compared, a run of programs at a time.

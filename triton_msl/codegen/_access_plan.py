@@ -104,6 +104,8 @@ class _Builder:
         self.atomic = {}  # access: [operation, is its result used]
         self.pairs = []  # the two updates one floating-point atomic minimum or maximum is made of
         self.last_atomic = None
+        self.under_branch = 0
+        self.branched = []  # the accesses a branch may leave out
 
     # -- types ---------------------------------------------------------------------------
 
@@ -481,6 +483,8 @@ class _Builder:
                 )
                 # A called function is written once, in its own order, where it is called.
                 self.sites.append(id(op) if self.site is None else self.site)
+                if self.under_branch:
+                    self.branched.append(len(self.accesses) - 1)
                 if op.op == "tt.atomic_rmw":
                     ordinal = len(self.accesses) - 1
                     self.atomic[ordinal] = [str(op.attrs.get("rmw_op")), op.id in scope.used]
@@ -491,8 +495,10 @@ class _Builder:
             if op.op == "scf.for":
                 self.collect(scope, op.region_ops or (), (*loops, self.loop(scope, op)), unbounded)
             elif op.op == "scf.if":
+                self.under_branch += 1
                 self.collect(scope, op.region_ops or (), loops, unbounded)
                 self.collect(scope, op.else_ops or (), loops, unbounded)
+                self.under_branch -= 1
             elif op.op == "tt.call":
                 function = self.functions.get(op.attrs.get("callee"))
                 if function is None or self.depth > 8 or len(function.args) != len(op.operand_ids):
@@ -782,6 +788,7 @@ def build_access_plan(graph, msl=None, emitted=None, body=None, single=None, thr
     plan["accesses"] = builder.accesses
     plan["atomic"] = {str(ordinal): entry for ordinal, entry in builder.atomic.items()}
     plan["pairs"] = builder.pairs
+    plan["branched"] = builder.branched
     pointers = [argument for argument in graph.args if argument.is_ptr]
     plan["untraced"], plan["order"], loose = _emission_order(
         builder.sites, emitted, [argument.name for argument in pointers], body

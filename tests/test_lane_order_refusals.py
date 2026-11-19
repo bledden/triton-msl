@@ -66,10 +66,18 @@ pytestmark = requires_mps
 MEET = "two lanes of one program reach the same element and one of them stores it"
 NARROW = "an access narrower than the block reaches an element another lane also reaches"
 ORDER = "accesses the shader performs in another order than the source reach the same element"
+# The same finding where a mask or a branch the check does not evaluate may leave an access out.
+MAY = (
+    "two lanes of one program reach the same element, one of them storing it, unless a branch, or a mask "
+    "computed from values the check cannot know before the launch, keeps them apart"
+)
 OPAQUE = "an address depends on a value the check cannot compute before the launch"
 SIZE = "the arguments that share memory differ in element size or are not aligned to it"
 EVALUATE = "an address uses an operation or an argument the check does not evaluate"
-UNBOUNDED = "an access sits in a loop whose trips are not known before the launch"
+UNBOUNDED = (
+    "an access sits in a loop whose trips are not known before the launch, and its lanes are not shown "
+    "to keep to elements of their own"
+)
 UNTRACED = "the shader does not perform these accesses one by one in the source's order"
 BOUNDS = "a loop around the accesses has bounds that are not fixed before the launch"
 BUDGET = "there are too many addresses to compare"
@@ -302,15 +310,17 @@ def _meeting():
                 case(f"add then add, separate, {block}", _add_then_add, [a, b, cells, cells], N=block, K=37),
             ),
             # Two atomic updates that do not commute with each other, on one tensor's cells.
+            # A float maximum or minimum is two updates under masks made of the loaded
+            # values' signs, which the check cannot know: the finding is worded for that.
             Refusal(
                 case(f"add then max, one tensor, {block}", _add_then_max, [a, b, cells, Shared(2)], N=block, K=37),
-                MEET,
+                MAY,
                 "O, P",
                 case(f"add then max, separate, {block}", _add_then_max, [a, b, cells, cells], N=block, K=37),
             ),
             Refusal(
                 case(f"max then min, one tensor, {block}", _max_then_min, [a, b, cells, Shared(2)], N=block, K=37),
-                MEET,
+                MAY,
                 "O, P",
                 case(f"max then min, separate, {block}", _max_then_min, [a, b, cells, cells], N=block, K=37),
             ),
@@ -690,7 +700,7 @@ def test_the_refused_kernel_computes_where_no_lanes_meet(one, device):
 
 def test_every_reason_a_launch_can_reach_is_covered():
     reached = {row.reason for row in REFUSED}
-    assert reached == {MEET, NARROW, ORDER, OPAQUE, SIZE, EVALUATE, UNBOUNDED, UNTRACED, BOUNDS, BUDGET, CALL}
+    assert reached == {MEET, MAY, NARROW, ORDER, OPAQUE, SIZE, EVALUATE, UNBOUNDED, UNTRACED, BOUNDS, BUDGET, CALL}
 
 
 # ------------------------------------------------------ a storage that cannot be read

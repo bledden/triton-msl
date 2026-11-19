@@ -7,7 +7,9 @@ updated in that order by the source, and the shader's threads each run their tri
 waiting for the others. The launch check knew this for a counted loop and answered "atomic
 only" for a ``while`` loop, where an exchange, a compare-and-swap and an add whose returned
 value is used then returned values the source does not compute (in a kernel of more than
-1024 lanes). Such a launch is now refused; an update that commutes with itself still runs.
+1024 lanes, where two lanes reach one cell on different trips). Such a launch is now
+refused; an update that commutes with itself still runs, and so does any atomic whose
+address is the same on every trip and keeps each lane to cells of its own.
 """
 
 import numpy as np
@@ -23,7 +25,10 @@ pytestmark = pytest.mark.skipif(not torch.backends.mps.is_available(), reason="r
 
 DEVICES = ["mps", "cpu"]
 SIZES = [64, 1024, 2048, 4096]
-UNBOUNDED = "an access sits in a loop whose trips are not known before the launch"
+UNBOUNDED = (
+    "an access sits in a loop whose trips are not known before the launch, and its lanes are not shown "
+    "to keep to elements of their own"
+)
 
 
 @triton.jit
@@ -82,7 +87,69 @@ def _exchange_once(Z, N: tl.constexpr):
     tl.atomic_xchg(Z + n, n * 2 + 1)
 
 
+@triton.jit
+def _exchange_own_cell_while(Z, R, TRIPS, N: tl.constexpr):
+    # Each lane exchanges its own cell on every trip; what a trip returns goes into the next.
+    n = tl.arange(0, N)
+    j = 0
+    old = n * 0
+    while j < TRIPS:
+        old = tl.atomic_xchg(Z + n, old * 2 + n + j)
+        j += 1
+    tl.store(R + n, old)
+
+
+@triton.jit
+def _compare_and_swap_own_cell_while(Z, R, TRIPS, N: tl.constexpr):
+    # The second trip swaps only where the first one did.
+    n = tl.arange(0, N)
+    j = 0
+    old = n * 0
+    while j < TRIPS:
+        old = tl.atomic_cas(Z + n, n * 3 * (1 - j) + (1000 + n) * j, 1000 + n + 4000 * j)
+        j += 1
+    tl.store(R + n, old)
+
+
+@triton.jit
+def _add_carried_own_cell_while(Z, R, TRIPS, N: tl.constexpr):
+    n = tl.arange(0, N)
+    j = 0
+    carried = n * 0
+    while j < TRIPS:
+        carried = tl.atomic_add(Z + n, carried + n + 1)
+        j += 1
+    tl.store(R + n, carried)
+
+
+def _exchange_own_cell(cells, trips):
+    lane, old = np.arange(len(cells)), np.zeros(len(cells), dtype=np.int64)
+    for trip in range(trips):
+        cells, old = old * 2 + lane + trip, cells
+    return cells, old
+
+
+def _compare_and_swap_own_cell(cells, trips):
+    lane, old = np.arange(len(cells)), np.zeros(len(cells), dtype=np.int64)
+    for trip in range(trips):
+        expected = lane * 3 * (1 - trip) + (1000 + lane) * trip
+        cells, old = np.where(cells == expected, 1000 + lane + 4000 * trip, cells), cells
+    return cells, old
+
+
+def _add_carried_own_cell(cells, trips):
+    lane, old = np.arange(len(cells)), np.zeros(len(cells), dtype=np.int64)
+    for _ in range(trips):
+        cells, old = cells + old + lane + 1, cells
+    return cells, old
+
+
 ORDERED = [_exchange_while, _compare_and_swap_while, _add_carried_while]
+OWN_CELL = [
+    (_exchange_own_cell_while, _exchange_own_cell),
+    (_compare_and_swap_own_cell_while, _compare_and_swap_own_cell),
+    (_add_carried_own_cell_while, _add_carried_own_cell),
+]
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -98,6 +165,22 @@ def test_an_ordered_atomic_in_a_while_loop_is_refused_and_nothing_is_changed(ker
     assert "lane order:" in message
     assert f"for the memory of argument(s) Z: {UNBOUNDED}" in message
     assert torch.equal(z.cpu(), start)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("trips", [0, 1, 2, 3])
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("kernel, source", OWN_CELL, ids=["exchange", "compare-and-swap", "add carried"])
+def test_an_ordered_atomic_of_each_lane_on_its_own_cell_computes_in_a_while_loop(kernel, source, size, trips, device):
+    # The address is the same on every trip and no two lanes share a cell, so each cell's
+    # updates are one lane's, in the order of its trips, however many there are.
+    start = np.arange(size, dtype=np.int64) * 3
+    z = torch.from_numpy(start.astype(np.int32)).to(device)
+    r = torch.full((size,), -7, dtype=torch.int32, device=device)
+    kernel[(1,)](z, r, trips, N=size)
+    cells, returned = source(start, trips)
+    assert np.array_equal(z.cpu().numpy(), cells)
+    assert np.array_equal(r.cpu().numpy(), returned)
 
 
 @pytest.mark.parametrize("device", DEVICES)
