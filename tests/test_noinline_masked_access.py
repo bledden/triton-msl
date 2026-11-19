@@ -53,6 +53,40 @@ def _load_kept_or_nothing(X, O, N):
     tl.store(O + pid, _get_unset(X, pid, m) + 1.0, mask=m)
 
 
+@triton.jit(noinline=True)
+def _put_below(O, i, v, n):
+    tl.store(O + i, v, mask=i < n)
+
+
+@triton.jit
+def _store_below(X, O, N):
+    k = tl.program_id(0)
+    _put_below(O, k, tl.load(X + k) * 2.0, N)
+
+
+@triton.jit(noinline=True)
+def _put_even_below(O, i, v, n):
+    m = (i < n) & (i % 2 == 0)
+    tl.store(O + i, v, mask=m)
+
+
+@triton.jit
+def _store_even_below(X, O, N):
+    k = tl.program_id(0)
+    _put_even_below(O, k, tl.load(X + k) * 2.0, N)
+
+
+@triton.jit(noinline=True)
+def _get_below(X, i, n):
+    return tl.load(X + i, mask=i < n, other=-5.0)
+
+
+@triton.jit
+def _load_below(X, O, N):
+    k = tl.program_id(0)
+    tl.store(O + k, _get_below(X, k, N) * 2.0)
+
+
 CASES = [(grid, kept) for grid in (4, 16, 33) for kept in sorted({0, 1, grid // 2, grid - 1, grid})]
 
 
@@ -89,4 +123,29 @@ def test_a_masked_load_without_other_feeds_a_store_under_the_same_mask(grid, kep
     _load_kept_or_nothing[(grid,)](host.to(device), out, kept)
     want = torch.full((grid + 8,), POISON)
     want[:kept] = host[:kept] + 1.0
+    assert torch.equal(out.cpu(), want)
+
+
+@pytest.mark.parametrize("device", ["mps", "cpu"])
+@pytest.mark.parametrize("grid,kept", CASES)
+@pytest.mark.parametrize("kernel,step", [(_store_below, 1), (_store_even_below, 2)], ids=["below", "even and below"])
+def test_a_mask_computed_inside_a_called_function_is_kept_by_its_store(kernel, step, grid, kept, device):
+    host = torch.arange(grid, dtype=torch.float32) + 1.0
+    out = torch.full((grid + 8,), POISON, device=device)
+    kernel[(grid,)](host.to(device), out, kept)
+    want = torch.full((grid + 8,), POISON)
+    want[0:kept:step] = host[0:kept:step] * 2.0
+    assert torch.equal(out.cpu(), want)
+
+
+@pytest.mark.parametrize("device", ["mps", "cpu"])
+@pytest.mark.parametrize("grid,kept", CASES)
+def test_a_mask_computed_inside_a_called_function_is_kept_by_its_load(grid, kept, device):
+    # The input holds only the cells the mask keeps: the rest must not be read.
+    host = torch.arange(max(kept, 1), dtype=torch.float32) + 1.0
+    out = torch.full((grid + 8,), POISON, device=device)
+    _load_below[(grid,)](host.to(device), out, kept)
+    want = torch.full((grid + 8,), POISON)
+    want[:grid] = -10.0
+    want[:kept] = host[:kept] * 2.0
     assert torch.equal(out.cpu(), want)

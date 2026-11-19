@@ -63,6 +63,31 @@ def _store_then_call_in_a_branch(X, Y, C):
 
 
 @triton.jit
+def _store_then_call_in_a_loop(X, Y, C, T):
+    k = tl.program_id(0)
+    tl.store(Y + k, tl.load(X + k) * 2.0)
+    for _ in range(T):
+        _bump(C, C, k)
+
+
+@triton.jit
+def _only_a_call_in_a_loop(X, Y, C, T):
+    k = tl.program_id(0)
+    for _ in range(T):
+        _bump(C, C, k)
+
+
+@triton.jit
+def _store_then_call_in_a_while(X, Y, C, T):
+    k = tl.program_id(0)
+    tl.store(Y + k, tl.load(X + k) * 2.0)
+    t = 0
+    while t < T:
+        _bump(C, C, k)
+        t += 1
+
+
+@triton.jit
 def _store_then_swap(X, Y, S):
     k = tl.program_id(0)
     tl.store(Y + k, tl.load(X + k) * 2.0)
@@ -102,6 +127,22 @@ def test_a_store_in_a_called_function_comes_back(kernel, stores, bumped, device)
         want = C0.clone()
         want[:bumped] += launch
         assert torch.equal(c.cpu(), want)
+        assert torch.equal(y.cpu(), X0 * 2.0 if stores else UNSET)
+        assert torch.equal(x.cpu(), X0)
+
+
+@pytest.mark.parametrize("device", ["mps", "cpu"])
+@pytest.mark.parametrize("trips", [0, 1, 3])
+@pytest.mark.parametrize(
+    "kernel,stores",
+    [(_store_then_call_in_a_loop, True), (_only_a_call_in_a_loop, False), (_store_then_call_in_a_while, True)],
+    ids=["store then call in a loop", "only a call in a loop", "store then call in a while"],
+)
+def test_a_store_in_a_function_called_inside_a_loop_comes_back(kernel, stores, trips, device):
+    x, y, c = X0.clone().to(device), UNSET.clone().to(device), C0.clone().to(device)
+    for launch in range(1, 3):
+        kernel[(4,)](x, y, c, trips)
+        assert torch.equal(c.cpu(), C0 + launch * trips)
         assert torch.equal(y.cpu(), X0 * 2.0 if stores else UNSET)
         assert torch.equal(x.cpu(), X0)
 
