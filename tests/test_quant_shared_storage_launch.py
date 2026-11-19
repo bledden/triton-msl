@@ -16,8 +16,10 @@ the float storage.
 
 The same knowledge bounds each tensor by its storage and not by its element count: an
 expanded tensor counts cells it does not have, and a launch that would address past the one
-cell it has is refused. So is a negative stride, which the templates' unsigned strides do
-not express. Those launches are observed without running a shader.
+cell it has is refused. So is a negative stride on any tensor, which the templates' unsigned
+strides do not express. Those launches are observed without running a shader. A stride of
+zero is an ordinary stride: every row or group is then the one the tensor holds, and the
+launch computes.
 
 Integer data and power-of-two scales, so float32 arithmetic is exact in any order and every
 comparison is exact. A storage is compared by its bits: weight bytes read as floats can be
@@ -60,6 +62,7 @@ class Route:
     host: dict  # operand name -> host array, in argument order
     want: np.ndarray  # the float64 result
     launch: Callable  # device tensors by name -> None
+    strides: dict = dataclasses.field(default_factory=dict)  # stride argument -> (tensor, value, steps it is taken)
 
 
 def _symmetric():
@@ -69,13 +72,23 @@ def _symmetric():
     w = g.integers(-32, 32, size=(K, N)).astype(np.int8)
     s = (2.0 ** g.integers(-1, 3, size=N)).astype(np.float32)
 
-    def launch(t, input_upwards=False):
+    strides = {
+        "sam": ("a", K, M - 1),
+        "sak": ("a", 1, K - 1),
+        "swk": ("w", N, K - 1),
+        "swn": ("w", 1, N - 1),
+        "scm": ("c", N, M - 1),
+        "scn": ("c", 1, N - 1),
+    }
+
+    def launch(t, input_upwards=False, **changed):
         a, row = (t["a"][(M - 1) * K :], -K) if input_upwards else (t["a"], K)
-        _sym8[(M // BM, N // BN)](a, t["w"], t["c"], t["s"], M, N, K, row, 1, N, 1, N, 1, BM=BM, BN=BN, BK=BK)
+        passed = {"sam": row, **{name: value for name, (_, value, _) in strides.items() if name != "sam"}, **changed}
+        _sym8[(M // BM, N // BN)](a, t["w"], t["c"], t["s"], M, N, K, *passed.values(), BM=BM, BN=BN, BK=BK)
 
     want = a.astype(np.float64) @ (w.astype(np.float64) * s[None, :])
     host = {"a": a.reshape(-1), "w": w.reshape(-1), "s": s}
-    return Route("symmetric", "sym_int8", "int8_matmul_pergroup", "c", M * N, host, want.reshape(-1), launch)
+    return Route("symmetric", "sym_int8", "int8_matmul_pergroup", "c", M * N, host, want.reshape(-1), launch, strides)
 
 
 def _pergroup(zeros, shader):
@@ -89,12 +102,26 @@ def _pergroup(zeros, shader):
     z = g.integers(-4, 5, size=(K // G, N)).astype(np.float32)
     zero_strides = (N, 1) if zeros == "like-scales" else (1, K // G)
 
-    def launch(t, input_upwards=False):
+    strides = {
+        "sam": ("a", K, M - 1),
+        "sak": ("a", 1, K - 1),
+        "swk": ("w", N, K - 1),
+        "swn": ("w", 1, N - 1),
+        "ssg": ("s", N, K // G - 1),
+        "ssn": ("s", 1, N - 1),
+        "zsg": ("z", zero_strides[0], K // G - 1),
+        "zsn": ("z", zero_strides[1], N - 1),
+        "scm": ("c", N, M - 1),
+        "scn": ("c", 1, N - 1),
+    }
+
+    def launch(t, input_upwards=False, **changed):
         a, row = (t["a"][(M - 1) * K :], -K) if input_upwards else (t["a"], K)
+        passed = {"sam": row, **{name: value for name, (_, value, _) in strides.items() if name != "sam"}, **changed}
         _pergroup8[(M // BM, N // BN)](
             a,
             *(t[name] for name in "wcsz"),
-            *(M, N, K, row, 1, N, 1, N, 1, *zero_strides, N, 1),
+            *(M, N, K, *passed.values()),
             G=G,
             BM=BM,
             BN=BN,
@@ -105,7 +132,8 @@ def _pergroup(zeros, shader):
     want = a.astype(np.float64) @ ((w.astype(np.float64) - z[group]) * s[group])
     stored = z if zeros == "like-scales" else np.ascontiguousarray(z.T)
     host = {"a": a.reshape(-1), "w": w.reshape(-1), "s": s.reshape(-1), "z": stored.reshape(-1)}
-    return Route(f"pergroup-zeros-{zeros}", "pergroup_int8", shader, "c", M * N, host, want.reshape(-1), launch)
+    label = f"pergroup-zeros-{zeros}"
+    return Route(label, "pergroup_int8", shader, "c", M * N, host, want.reshape(-1), launch, strides)
 
 
 def _gemv():
@@ -152,11 +180,13 @@ def _observe(monkeypatch, run_shaders):
     from tests.cache_helpers import patch_live_singleton_method
     from triton_msl.backend.driver import _get_compile_shader_runtime
 
-    seen = types.SimpleNamespace(descriptors=[], quant=[], shaders=[])
+    seen = types.SimpleNamespace(descriptors=[], quant=[], shaders=[], edit=None)
     real_quant = quant_dispatch.dispatch_quant_matmul
 
     def spy_quant(rt, descriptor, *args, **kwargs):
         seen.descriptors.append(descriptor[0])
+        if seen.edit is not None:
+            descriptor = seen.edit(descriptor)
         result = real_quant(rt, descriptor, *args, **kwargs)
         seen.quant.append(bool(result))
         return result
@@ -314,3 +344,78 @@ def test_a_negative_input_row_stride_is_refused(route, unlaunched):
         route.launch(_separate(route), input_upwards=True)
     assert unlaunched.descriptors == [route.descriptor] and unlaunched.quant == [False]
     assert unlaunched.shaders == []
+
+
+EVERY_STRIDE = [(route, name) for route in ROUTES for name in route.strides]
+
+
+@pytest.mark.parametrize("route, name", EVERY_STRIDE, ids=_label)
+def test_a_negative_stride_on_any_tensor_is_refused(route, name, unlaunched):
+    """The tensor is passed at its last step along one stride, with that stride negated:
+    the cells of the launch as it stands, which the templates do not address."""
+    tensor, value, steps = route.strides[name]
+    t = _separate(route)
+    t[tensor] = t[tensor][steps * value :]
+    with pytest.raises(MetalNonRecoverableError, match=NEGATIVE):
+        route.launch(t, **{name: -value})
+    assert unlaunched.descriptors == [route.descriptor] and unlaunched.quant == [False]
+    assert unlaunched.shaders == []
+
+
+def _input_and_weight(route):
+    a, w = (route.host[name].astype(np.float64) for name in "aw")
+    M, K = route.strides["sam"][2] + 1, route.strides["sak"][2] + 1
+    return a.reshape(M, K), w.reshape(K, -1)
+
+
+def _held_once(route, name):
+    """Device tensors, zeroed stride arguments and the float64 result of the route with one
+    tensor holding a single row, or a single cell, that zero strides read for every index."""
+    t = _separate(route)
+    a, w = _input_and_weight(route)
+    N = w.shape[1]
+    groups = route.strides["ssg"][2] + 1 if "ssg" in route.strides else 1
+    group = np.arange(w.shape[0]) // (w.shape[0] // groups)
+    scale = route.host["s"].astype(np.float64).reshape(groups, N)[group]
+    zero = 0.0
+    if "z" in route.host:
+        z = route.host["z"].astype(np.float64)
+        zero = (z.reshape(N, groups).T if route.strides["zsg"][1] == 1 else z.reshape(groups, N))[group]
+    if name == "a":
+        t["a"], zeroed, a = t["a"][: a.shape[1]].clone(), {"sam": 0}, np.repeat(a[:1], a.shape[0], axis=0)
+    elif name == "s":
+        t["s"], zeroed, scale = t["s"][:1].clone(), {"ssg": 0, "ssn": 0}, scale[:1, :1]
+    else:
+        t["z"], zeroed, zero = t["z"][:1].clone(), {"zsg": 0, "zsn": 0}, zero[:1, :1]
+    return t, zeroed, (a @ ((w - zero) * scale)).reshape(-1)
+
+
+ZERO_STRIDES = [
+    (route, name) for route in ROUTES for name in "asz" if {"a": "sam", "s": "ssg", "z": "zsg"}[name] in route.strides
+]
+
+
+@pytest.mark.parametrize("route, name", ZERO_STRIDES, ids=_label)
+def test_a_tensor_read_through_zero_strides_computes(route, name, ran):
+    """One input row for every output row; one scale, or one zero point, for every group
+    and column. The storage holds exactly the cells the launch reads."""
+    t, zeroed, want = _held_once(route, name)
+    route.launch(t, **zeroed)
+    torch.mps.synchronize()
+    assert ran.descriptors == [route.descriptor] and ran.quant == [True]
+    assert ran.shaders == ["int8_matmul_pergroup"]
+    np.testing.assert_array_equal(t[route.output].cpu().numpy().astype(np.float64), want)
+
+
+@pytest.mark.parametrize("route", [route for route in ROUTES if route.descriptor == "pergroup_int8"], ids=_label)
+def test_a_per_group_descriptor_without_a_group_size_launches_no_template(route, ran):
+    """Without the group size the cells a template addresses are not known, and the launch
+    is refused. No kernel the lowering recognises publishes such a descriptor; this one is
+    edited on its way in."""
+    ran.edit = lambda descriptor: (*descriptor[:10], None, *descriptor[11:])
+    t = _separate(route)
+    with pytest.raises(MetalNonRecoverableError, match="quantized weight-only matmul runs only on"):
+        route.launch(t)
+    assert torch.all(t[route.output] == POISON)
+    assert ran.descriptors == [route.descriptor] and ran.quant == [False]
+    assert not any(name.startswith(("int8_matmul", "int4_matmul")) for name in ran.shaders)
