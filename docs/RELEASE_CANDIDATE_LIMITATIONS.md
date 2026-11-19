@@ -434,19 +434,52 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
 - **In-place outputs:** a matmul whose output overlaps an operand keeps the source's
   load-then-store order by leaving the replacement template; the quantized routes and the
   attention kernels refuse such a launch by name, except the two biased source replays, which
-  keep the order behind a barrier and compute in place. The attention refusal compares the
-  byte ranges of the tensor views as passed. Views that interleave without sharing a cell, such
-  as the slots of one packed buffer, are refused with the rest: the kernel addresses its tensors
-  through its own stride arguments, not the views' strides. Write the output to a tensor of its
-  own. A view shorter than the rows the kernel's stride and length arguments address is compared
-  by its own extent, so an output inside those rows is not refused and can be computed from
-  overwritten inputs. A generic kernel that permutes a tensor
-  in place within one program (reverse, transpose, shift) is neither detected nor refused: lanes
-  load and store their own elements with no barrier between the program's loads and stores. The
-  size at which that shows depends on how the kernel is written: on an M4 Max one in-place
-  reverse was wrong in 100 of 100 launches at 256 elements and above, another spelling of it
-  only at 1024, and a transpose at 16 by 16 and above. A kernel in which each lane loads and
-  stores the same cell is unaffected. Write a permuted result to a separate tensor.
+  keep the order behind a barrier and compute in place. The attention refusal compares whole
+  storages: an output is refused unless its storage is different from every other tensor
+  argument's, and a storage that cannot be read counts as shared. Views of one storage whose
+  cells stay apart, such as the slots of one packed buffer, are refused with the rest, because
+  the kernel addresses its tensors through its own stride and length arguments, not the views'.
+  Write the output to a tensor of its own. An ordinary kernel is checked before every launch:
+  where two lanes of one program are not proved to stay apart at an element one of them stores,
+  the launch raises `MetalNonRecoverableError` starting `lane order:` and nothing is submitted.
+  That refuses an in-place reverse, transpose, shift or gather, a cell every lane loads and the
+  program stores, an exchange or compare-and-swap whose lanes meet at a cell, an exchange,
+  compare-and-swap or add with a used result inside a `while` loop, a store over a
+  block narrower than the kernel's widest block that shares a tensor with a block-wide store,
+  and some launches the check cannot follow although the shader matched the source in every
+  probe; the changelog lists them. A kernel in which each lane loads and stores its own elements
+  computes in place. The check does not look at conflicts between different programs of one
+  launch, which are races in the source, and is not applied to a launcher built from metadata
+  without an access plan. A launch that needs more than 16 comparison runs (`x[:, 1:] += y` at
+  8192 by 8192) is refused.
+- **Float atomic adds:** two float `tl.atomic_add` operations, as two statements or as one in a
+  loop, that reach one cell from different lanes are refused before submission. The shader
+  applies them lane by lane, and the order of float additions is their rounding (`1e8 + 1 - 1e8`
+  is 0.0 in the source's order and 1.0 in the other). The check reads addresses, not values, so
+  a float histogram or scatter-add accumulated over the trips of a loop is refused also where
+  no order would round, and a float add in a `while` loop is refused whatever cells it reaches.
+  Integer atomic adds, a float add of each lane to its own cell, and one float add outside a
+  loop compute.
+- **Row-wise sort:** the sort template runs only a kernel proved to be one unmasked load of a
+  tile, `tl.sort` along its last axis and one unmasked store, at addresses of the form
+  `base + row * stride + column`. A sort with an offset or a program term in an address, a
+  mask, arithmetic on the values or a second rearrangement goes to the ordinary lowering,
+  which computes it or refuses it when the kernel is lowered.
+- **Blocks narrower than the kernel:** a store or an atomic over a block with fewer elements
+  than the kernel's widest block computes only where the lowering proves which lane holds each
+  element's address, value and mask. Otherwise the kernel is refused when it is lowered, by
+  operation, block and reason. Refused where earlier builds were wrong: a one-dimensional
+  running total laid along the rows of a narrow tile, and a narrow tile copy into an output
+  that does not start on a 16-byte boundary at some tile shapes. Refused although earlier
+  builds returned the source's result in probe launches: an atomic over a narrow block whose
+  returned value is stored, and a tile indexed through `tl.reshape` of a range in a
+  three-dimensional kernel. A block made inside a called function that is not inlined is
+  refused when the kernel is lowered, as before. A tile flattened with `tl.reshape` and stored,
+  added or reduced beside a wider block computes where the tile is loaded; a flattened tile
+  whose values are computed from its indices with no load is refused when the kernel is
+  lowered. A kernel that needs one thread per lane over
+  a block of more than 1024 lanes is refused by block size, also when its mask keeps every
+  active lane below 1024.
 - **Half accumulators in matmul:** a matmul kernel that keeps a float16 accumulator across its
   K blocks (`acc += tl.dot(a, b, out_dtype=tl.float16)`) is accumulated in float32 and rounded
   to float16 once, at the store, where the source rounds after every block. In a 64 by 64 probe

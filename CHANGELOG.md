@@ -30,8 +30,9 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   they have no compiled entry to fall back to, so an output that overlaps any
   operand now refuses, in one message that also lists the route's other
   conditions. This is a change for an in-place quantized launch that ran
-  before. Views of one storage whose byte ranges do not intersect keep the
-  replacement on every route.
+  before. Tensors in one storage that share no cell the launch addresses keep
+  the replacement: the routes compare the cells addressed through each
+  pointer, and whole storages where a route does not know that count.
 - Offer the fast matmul replacement only where it is that source domain. It
   computes exactly `args[3]` by `args[4]`, so a store clip, load clip, load
   modulus or flat-grid divisor that is a separate argument now stays on the
@@ -151,6 +152,22 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   of 32-row tiles. The MLA template has no partial-tile form: the source reads
   or zero-scores its whole last key tile and, unmasked, stores its whole last
   row tile, and the template did neither.
+- Rebuild a staged operand's address and mask from a closed set of forms.
+  The cooperative fill of a staged `tl.dot` operand recomputes the address
+  and mask of every cell of the tile. A value with no defining operation was
+  taken as one number for the whole tile, which holds for a scalar argument
+  or a scalar a loop carries. A tensor a loop carries, such as a key index
+  advanced by `kn += BLOCK_N`, is one lane's register, so every column read
+  one lane's index: a kernel written that way differed from the source in 20
+  of 20 launches on an M4 Max, with no exception. A value extended from 8 or
+  16 bits lost the wrap of its own width inside the 32-bit sum. A carried
+  tensor is now rendered as its start plus the trip count times a step that
+  is fixed over the trips, a narrow extension without a row or column index
+  is cast to its own type first, and each pointer addition keeps its own
+  sum. Forms outside that set are refused when the kernel is lowered: a
+  carried tensor that is doubled, added to twice per trip, decremented with
+  `-=`, stepped by a kernel argument or 8 bits wide. A narrow product and a
+  narrow value holding the row index were refused before and still are.
 
 ### Attention template masks
 
@@ -263,32 +280,119 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   place too. Inputs that share memory with each other, such as one tensor as
   query, key and value, are not compared and still compute. A two-dot kernel
   without a max stays on the generic lowering and is not refused.
-- The refusal compares the byte ranges of the tensor views as passed. Views
-  of one storage whose byte ranges do not intersect compute. Views that
-  interleave without sharing a cell are refused: query, key, value and
-  output as the slots of one packed buffer, or a log-sum-exp column beside
-  its output. A kernel addresses its tensors through its own stride
-  arguments, which need not be the views' strides, so cells the views keep
-  apart are not cells the kernel keeps apart: slot views `buf[:, i, :]`
-  passed with contiguous stride arguments returned 1117 to 1364 wrong cells
-  of 4096. Write the output to a tensor of its own. For the same reason a
-  view shorter than the rows the kernel's stride and length arguments
-  address is compared by its own extent. An output placed inside those rows
-  is not refused and can be computed from overwritten inputs, as it was
-  before this release; pass each tensor as a view of everything the kernel
-  addresses through it.
-- Known limitation, not changed here: a generic kernel that permutes a tensor
-  in place within one program. Each lane loads and stores its own elements
-  with no barrier between the program's loads and its stores, so a lane can
-  load a cell another lane has already stored. The size at which that shows
-  depends on how the kernel is written. On an M4 Max a one-program in-place
-  reverse that stores through the reversed index was wrong in 100 of 100
-  launches at 256 elements and above; one that loads through the reversed
-  index and stores in order was correct at 64 and 256 elements and wrong in
-  20 of 20 launches at 1024. An in-place transpose was wrong at 16 by 16 and
-  above, and an in-place shift in some launches. An in-place kernel in which
-  each lane loads and stores the same cell is unaffected. Write a permuted
-  result to a separate tensor.
+- The attention refusal compares storages, not the views as passed. A kernel
+  addresses its tensors through its own stride and length arguments, which
+  need not be the views' strides or extents, so cells the views keep apart
+  are not cells the kernel keeps apart: slot views `buf[:, i, :]` passed with
+  contiguous stride arguments returned 1117 to 1364 wrong cells of 4096, and
+  an output placed inside rows that a shorter view's arguments address was
+  computed from overwritten inputs. An output is now refused unless its
+  storage is different from every other tensor argument's, and an argument
+  whose storage cannot be read counts as shared. This gives up launches that
+  were correct: views of one storage whose cells stay apart, such as query,
+  key, value and output as slots of one packed buffer or a log-sum-exp column
+  beside its output, are refused on the attention routes. Write the output
+  to a tensor of its own. The matmul and quantized routes compare byte
+  ranges where the route knows how many elements it addresses through each
+  operand, and whole storages otherwise.
+- Refuse an ordinary launch whose lanes are not proved to keep the source's
+  order. A Triton program finishes each operation over every lane before the
+  next one starts. The ordinary shader keeps each lane's own order only, so
+  where two lanes of one program reach the same element and one of them
+  stores it, the result depended on which lane ran first, with no exception.
+  On an M4 Max an in-place reverse that stores through the reversed index was
+  wrong in 100 of 100 launches at 256 elements and above, an in-place
+  transpose at 16 by 16 and above, and a counter cell stored by every lane
+  counted more than once at large blocks. 0.2.0 and 0.3.0 lower these kernels
+  the same way. Before a launch is submitted, the launcher now groups the
+  tensor arguments by the storage they share and looks, per group, for a
+  proof that no two lanes of one program meet at an element one of them
+  stores. Without a proof it raises `MetalNonRecoverableError` with a message
+  that starts `lane order:` and names the arguments and the reason; nothing
+  is submitted and no tensor is changed. There is no switch that turns the
+  check off. A store of one element is now done by one lane. A launch with
+  more addresses than one comparison takes is compared in runs of programs,
+  each cell within its own program. `x[:, 1:] += y` as `torch.compile`
+  writes it is admitted this way from 1500 by 1501 up to 8192 by 4096. The
+  first launch of a size pays for the comparison (measured once each, with
+  other work on the machine: 156 ms and 1586 ms) and the answer is kept for
+  later launches. A launch that would need more than 16 runs is refused,
+  which that kernel reaches at 8192 by 8192.
+
+  This contains the wrong results; it does not make these kernels compute.
+  What is refused:
+
+  - A kernel that permutes or shifts a tensor in place within one program:
+    reverse, transpose, shift by one, a gather through an index tensor, two
+    lanes per cell (`i // 2`, `i % M`). Some of these returned the source's
+    result at small sizes before and are refused at every size now. Write
+    the result to a separate tensor.
+  - A cell that every lane loads and the program also stores: a scale factor
+    the block reads and the program then increments, a counter kept in cell
+    0 of the output, a column of per-row values updated beside a full block
+    that reads it. These are refused with separate tensors too, because the
+    cell itself is what the lanes share.
+  - A block that is stored and then read back through another index later in
+    the same program, such as a sum over neighbours after a store, at 256
+    elements and above.
+  - Two different atomics on one tensor in one program (add then max).
+  - A product written as one `tl.dot` without a loop over K, with its output
+    over an operand. It was wrong at 64 by 64 and right at 16 and 32 before;
+    it is refused at every size. The looped matmul in place is covered under
+    "Matmul source domains" and still computes for one program.
+  - An exchange, a compare-and-swap, or an atomic whose returned value is
+    used, when two lanes reach one cell, in one operation or from different
+    trips of a loop. The source orders the trips; the shader does not. Part
+    of these returned the source's result in every probe launch before. In a
+    `while` loop they are refused whatever cells they reach, because the trips
+    are not known before the launch; in a kernel of more than 1024 lanes these
+    were wrong before. An integer atomic add, and an atomic max or min, whose
+    returned value is not used still compute, in a loop too.
+  - Two float `tl.atomic_add` operations, as two statements or as one in a
+    loop, that reach one cell from different lanes. The shader applies them
+    lane by lane, so the cell received the source's terms in another order,
+    and the order of float additions is their rounding: `1e8 + 1 - 1e8` gave
+    1.0 where the source gives 0.0. The check reads addresses, not values,
+    so these are refused also where no order rounds: a float histogram or
+    scatter-add accumulated over the trips of a loop is refused, and in a
+    `while` loop a float add is refused whatever cells it reaches. These
+    returned the source's terms, in one order or the other, before. Still
+    computing: integer adds, which are exact in either order, a float add of
+    each lane to its own cell, and one float add outside a loop, whose lanes
+    the source does not order. Accumulate into integers, or make each trip
+    its own launch.
+  - A store over a block narrower than the kernel's widest block when two of
+    its elements reach one cell, or when it shares a tensor with a
+    block-wide store: a narrow store inside a loop whose trips reach one
+    cell from different lanes, a narrow copy one cell along its own storage,
+    a narrow store before or after a block-wide store into the same tensor,
+    and a narrow load of cells a block-wide store of the same program wrote.
+    The last three returned the source's result in every probe launch
+    before, at every size tried.
+  - Launches the check cannot follow although the shader matched the source
+    in every probe launch. With separate tensors: a store inside a loop
+    whose trip count is loaded from memory; ten nested calls of functions
+    that are not inlined. With shared memory: a pointer chosen
+    by a condition, a `tl.where` or a `while` loop; an address computed
+    through floating point or loaded from the shared storage itself (a
+    histogram whose bins lie behind its indices in one storage); views of
+    one storage with different element sizes; a cell replaced by the sum of
+    its own block; a
+    masked store beside an unmasked load of the cells it stores, where the
+    only lanes that read those cells are lanes the mask turns off.
+
+  Still computing in place: a kernel in which each lane loads and stores its
+  own elements, also over a block narrower than the kernel's widest
+  (`x[:64] *= 2` beside a 128-wide store to another tensor), views of one
+  storage that a mask or the index arithmetic keeps apart, and an
+  accumulation of per-row totals into the output (`out[row] += sum`).
+  Conflicts between
+  different programs of one launch are races in the source and are not
+  looked at. The check is not applied to a route that replaces the kernel
+  with a template (matmul, quantized matmul, attention), which has the
+  refusals above, or to a launcher built from metadata without an access
+  plan. On the opt-in C++ route only launches provable from the source alone
+  are admitted.
 
 ### Compatibility
 
@@ -379,6 +483,102 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 - Loaded Metal pipelines are owned by the loader that acquired them and released
   after its matching unload. 0.3.0 kept them in a process-global table for the life
   of the process.
+- A masked store of one value per row of a two-dimensional block ignored its mask.
+  `torch.compile` writes a reduction over the last axis this way, and when the row
+  count is not a multiple of the row block the last program wrote the rows past the
+  end, outside the output, with no exception. The store now carries the mask and is
+  done by one lane per row.
+- A masked load or store inside a function that is not inlined
+  (`@triton.jit(noinline=True)`) was lowered without its mask: the store landed where
+  the source stores nothing, and the load read memory where the source reads `other`.
+- Host tensors: memory written only through a function that is not inlined, or by
+  `tl.atomic_cas`, was not copied back after the launch, so a cpu tensor came back
+  unchanged with no exception.
+- A kernel that needs one thread per lane over a block of more than 1024 lanes ran
+  its first 1024 lanes only and left the rest of the output as it was. Metal runs at
+  most 1024 threads in a threadgroup; such a kernel is now refused when it is lowered.
+  The refusal is by block size, so it also takes a launch whose mask keeps every
+  active lane below 1024, which computed before. Use a block of at most 1024.
+- Quantized weight-only matmul (int8 and int4, GEMV and GEMM): the kernels these
+  routes accept have no masks, so as written they compute whole blocks, and every
+  route clipped the result at the `M`, `N` and `K` it was passed. With sizes that are
+  not whole blocks the output differed from the source: rows or columns the source
+  stores were left untouched, and a last `K` block was cut short. A launch now
+  computes the whole blocks the source addresses when they lie inside the tensors'
+  storages, on the fast template where only an extent changes and on a scalar
+  template otherwise, so it stores whole tiles past `N` or `M` as the source does.
+  When the whole blocks reach outside a storage the program is undefined as written
+  and the launch keeps the clipped template, provided the cells at `M`, `N` and `K`
+  are inside every storage; otherwise it is refused. Inside a storage is measured in
+  the storage's own bytes on every route: an expanded one-element scale, zero point,
+  input or weight has more elements than cells and was measured by its element count
+  on the per-group and symmetric routes, which would have launched the template on
+  cells outside the tensor. A negative stride argument is refused on these routes. A
+  per-group kernel whose `K`
+  block spans more than one scale group is refused by name: the source takes one
+  scale per block and the templates take one per element. A refusal on these routes
+  now names its reason.
+- A value reduced along the rows of a two-dimensional block was read wrongly by a
+  later operation. `tl.sum(v, axis=1)` of an (R, C) block is held with row r's result
+  on lane r*C. A second reduction, `tl.argmax` or `tl.argmin` of the row totals, the
+  totals laid along the other axis, an outer product of two such vectors and a gather
+  through each row's largest index took lanes 0 to R-1 as the R results, so they read
+  the first row's total C times and returned a wrong value with no exception. Every
+  one-dimensional value now records how the lanes hold it, and each later use takes
+  one lane per row. Where that is not proved the kernel is refused when it is
+  lowered: `tl.argmax`, `tl.argmin` and scans over a block whose rows are spread over
+  more lanes than the block, a broadcast whose users read different lane spacings,
+  and a pointer converted from such an index that reaches anything other than a load.
+  A three-dimensional block reduced to two dimensions and stored uses the
+  three-dimensional template only inside the address form it was proved for.
+- A store or an atomic over a block smaller than the kernel's widest block (a 4 by 8
+  tile beside a 32 by 32 one, 64 elements beside a 128-wide copy) ran on lanes that
+  did not hold its elements. A narrow tile copy stored wrong cells, a narrow
+  one-dimensional store through `j % H`, `j * 2` or a loaded index wrote cells the
+  source never stores, and a narrow atomic in a kernel of more than 1024 lanes was
+  repeated for every 1024 lanes of the block, all with no exception. The lowering
+  now proves, from how each index, value and mask is held on the lanes, that one lane
+  per element holds that element's address, value and mask, and guards the access
+  with it. Where the proof does not reach, the kernel is refused when it is lowered
+  and the message names the operation, the block and the reason. Refused this way
+  where the result was wrong before: a one-dimensional running total laid along the
+  rows of a narrow tile, and a narrow tile copy into an output that does not start
+  on a 16-byte boundary, at some tile shapes. Refused this way although the lowering
+  before it returned the source's result in probe launches: an atomic over a narrow
+  block whose returned value is stored, and a tile indexed through `tl.reshape` of a
+  range in a three-dimensional kernel.
+- A load over a block smaller than the kernel's widest block ran on every lane. On
+  the lanes past its own range the index is one the source never forms, so the load
+  read up to a block's worth of elements beyond the ones the source loads, beyond the
+  tensor when the tensor ends there, and a second load through a loaded index read
+  wherever the stray value pointed. Such a load is now made only on the lanes whose
+  range indices lie inside their ranges; an index written with a modulo is inside its
+  range on every lane and needs no condition. Not covered: a load inside a called
+  function that is not inlined; no launch that reaches one with a narrow range was
+  found.
+- A tile flattened with `tl.reshape(t, [R * C])` and stored through a one-dimensional
+  range beside a wider block was stored by every lane of the kernel. Two to eight lanes
+  met in each cell, and the lanes past the tile carried values of tile positions that
+  do not exist, so the cells held wrong values with no exception: a 2 by 64 tile beside
+  a 256-wide copy, a 16 by 16 tile beside a 512-wide one. The lowering now proves that
+  lane i holds element i of the flattened tile on the tile's own lanes, and the store,
+  a masked store, a sum with a one-dimensional load, an atomic add and a reduction
+  take those lanes. The same proof covers a row reshaped to a column and a range
+  reshaped to a row. Refused when the kernel is lowered, where the result was wrong
+  before: a flattened tile whose values are computed from its indices with no load.
+- The row-wise sort template stood for kernels that are not a row-wise sort. The
+  template replaces the whole kernel with "load row r, sort it, store it", and it was
+  chosen from a signature that other kernels fit. `tl.flip(v, 1)` of a 2 by N tile
+  came back sorted instead of reversed. A sort whose load or store carries an offset
+  or a program term read and wrote program 0's rows for every program of the grid. A
+  mask on the load or store and arithmetic on the sorted values were dropped. All of
+  these returned with no exception. The template is now chosen by a proof that the
+  kernel is exactly one unmasked load, the network `tl.sort` writes and one unmasked
+  store at the template's addresses; every other kernel goes to the ordinary
+  lowering, which computes it or refuses it. The template also runs the source's own
+  network now. It used to compare signed, so unsigned values above the signed range
+  were sorted as negative ones, and where neither of a pair is greater (a NaN, a zero
+  of each sign) it kept both values where the source leaves one value in both cells.
 
 ### Additions
 
