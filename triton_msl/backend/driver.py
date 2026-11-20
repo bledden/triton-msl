@@ -1193,20 +1193,32 @@ class MetalLauncher:
             # one publishes no outputs, the narrow one none once its emitted text shows
             # the order, so refuse the rest before any hook. The kernel addresses each
             # tensor through its own stride and length arguments, not the view's shape,
-            # so the comparison is of whole storages.
+            # so the first comparison is of whole storages.
             from triton_msl.autotuning._operand_overlap import overlapping_output
 
             _pair = overlapping_output(flat_args, _attention_outputs)
+            if _pair is not None:
+                # Views of one storage are apart all the same when the cells the source
+                # reaches through each argument, bounded from this launch's own strides,
+                # lengths and grid, lie inside the storage and the stored ones share no
+                # byte with any other argument's.
+                from triton_msl.backend._address_extent import written_apart
+
+                if written_apart(
+                    getattr(self, "_access_plan", None), flat_args, (gridX, gridY, gridZ), _attention_outputs
+                ):
+                    _pair = None
             if _pair is not None:
                 from triton_msl.errors import MetalNonRecoverableError
 
                 _output, _other = (self.arg_names[flat_origin[i]] for i in _pair)
                 raise MetalNonRecoverableError(
                     f"attention kernel: output argument {_output} is not known to be apart from argument "
-                    f"{_other}: they are views of one storage, or a storage could not be read. The attention "
-                    "lowering does not keep the source's load-then-store order, and the kernel addresses each "
-                    "tensor through its own stride and length arguments, so the result could be computed from "
-                    "overwritten inputs. Write the output to a tensor that has its own storage."
+                    f"{_other}: they are views of one storage and the cells this launch reaches through them "
+                    "are not shown to be apart, or a storage could not be read. The attention lowering does "
+                    "not keep the source's load-then-store order, and the kernel addresses each tensor through "
+                    "its own stride and length arguments, so the result could be computed from overwritten "
+                    "inputs. Write the output to cells no other argument of the launch reaches."
                 )
         _plan = getattr(self, "_access_plan", None)
         if _plan is not None and not (isinstance(_plan, dict) and _plan.get("replaced")):

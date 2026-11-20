@@ -290,21 +290,28 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   place too. Inputs that share memory with each other, such as one tensor as
   query, key and value, are not compared and still compute. A two-dot kernel
   without a max stays on the generic lowering and is not refused.
-- The attention refusal compares storages, not the views as passed. A kernel
-  addresses its tensors through its own stride and length arguments, which
-  need not be the views' strides or extents, so cells the views keep apart
-  are not cells the kernel keeps apart: slot views `buf[:, i, :]` passed with
-  contiguous stride arguments returned 1117 to 1364 wrong cells of 4096, and
-  an output placed inside rows that a shorter view's arguments address was
-  computed from overwritten inputs. An output is now refused unless its
-  storage is different from every other tensor argument's, and an argument
-  whose storage cannot be read counts as shared. This gives up launches that
-  were correct: views of one storage whose cells stay apart, such as query,
-  key, value and output as slots of one packed buffer or a log-sum-exp column
-  beside its output, are refused on the attention routes. Write the output
-  to a tensor of its own. The matmul and quantized routes compare byte
-  ranges where the route knows how many elements it addresses through each
-  operand, and whole storages otherwise.
+- The attention refusal does not go by the views as passed. A kernel addresses
+  its tensors through its own stride and length arguments, which need not be
+  the views' strides or extents, so cells the views keep apart are not cells
+  the kernel keeps apart: slot views `buf[:, i, :]` passed with contiguous
+  stride arguments returned 1117 to 1364 wrong cells of 4096, and an output
+  placed inside rows that a shorter view's arguments address was computed from
+  overwritten inputs. An output whose storage is different from every other
+  tensor argument's computes. For an output that is a view of another tensor
+  argument's storage, the launcher bounds the cells the source reaches through
+  each tensor argument, one range of cells for each, from the launch's own
+  strides, lengths and grid. The launch runs when every range lies inside its
+  storage and the range of each stored argument meets no other argument's, so
+  tensors laid as separate blocks of one storage compute. It is refused when
+  that is not shown, and an argument whose storage cannot be read counts as
+  shared. This still gives up launches that were correct. Tensors interleaved
+  in one buffer, such as query, key, value and output as slots of one packed
+  buffer or a log-sum-exp column beside its output, share no cell, but their
+  ranges meet. A varlen launch places its rows by the values of a tensor,
+  which the launcher does not read, so its cells have no bound. Write those
+  outputs to a tensor of their own. The matmul and quantized routes compare
+  byte ranges where the route knows how many elements it addresses through
+  each operand, and whole storages otherwise.
 - Refuse an ordinary launch whose lanes are not proved to keep the source's
   order. A Triton program finishes each operation over every lane before the
   next one starts. The ordinary shader keeps each lane's own order only, so

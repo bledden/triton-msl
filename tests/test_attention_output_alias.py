@@ -1,4 +1,4 @@
-"""An attention launch refuses an output that shares memory with another tensor argument.
+"""An attention launch refuses an output not shown apart from another tensor argument.
 
 A source program loads its rows, keys and values before it stores, so a launch whose output
 overlaps an input is defined in the source. The attention lowerings do not keep that order.
@@ -13,16 +13,21 @@ the launcher refuses one that overlaps another tensor argument. Inputs that shar
 each other, such as one tensor as query, key and value, still compute, and so does a two-dot
 kernel that is not attention.
 
-The comparison is of whole storages. A kernel addresses its tensors through its own stride
-and length arguments, so the views a caller passes do not bound the cells it reads and
-writes: slot views of one buffer given contiguous strides put the output's rows over the
-rows read as inputs (1117 to 1364 wrong cells of 4096 while a comparison of the views'
+The first comparison is of whole storages. A kernel addresses its tensors through its own
+stride and length arguments, so the views a caller passes do not bound the cells it reads
+and writes: slot views of one buffer given contiguous strides put the output's rows over
+the rows read as inputs (1117 to 1364 wrong cells of 4096 while a comparison of the views'
 cells accepted the launch), and so does a one-element view of the keys beside an output
 32 rows further along the same storage (wrong on every tree while the views' byte ranges
 were compared). An output that is a view of the storage of another tensor argument is
-therefore refused wherever the two views lie, and so is an output beside an argument whose
-storage cannot be read. Disjoint slices of one arena, which computed before, are refused
-with them; an output with a storage of its own computes.
+therefore compared by the cells the source reaches, which the launcher bounds from the
+launch's own strides, lengths and grid (tests/test_address_extent.py): one range of cells
+for each argument. The launch runs when every range lies inside its storage and the range
+of each stored argument meets no other argument's, so disjoint slices of one arena
+compute. It is refused otherwise, as is an output beside an argument whose storage cannot
+be read. Slots interleaved in one buffer share no cell and are still refused, because their
+ranges meet: a capability given up, not a wrong result. An output with a storage of its own
+computes.
 """
 
 import math
@@ -232,9 +237,9 @@ def test_one_tensor_as_query_key_and_value_computes(device):
 
 @requires_mps
 @pytest.mark.parametrize("device", ["mps", "cpu"])
-def test_disjoint_slices_of_one_storage_refuse_with_the_output_among_them(device):
-    # A capability given up: these four slices share no cell and computed while the views'
-    # byte ranges were compared. The launcher cannot see that the kernel stays inside them.
+def test_disjoint_slices_of_one_storage_compute_with_the_output_among_them(device):
+    # The cells this launch reaches through each of the four slices are the slice's own,
+    # so the output is shown apart from the three inputs.
     t = _dense_inputs(2, 32, 64, device)
     cells = t["q"].numel()
     arena = torch.full((4 * cells,), -8192.0, device=device)
@@ -242,14 +247,20 @@ def test_disjoint_slices_of_one_storage_refuse_with_the_output_among_them(device
     for name in "qkv":
         views[name].copy_(t[name])
     before = arena.clone()
+    _dense(t, 2, 32, 64, 32)
+    _dense(views, 2, 32, 64, 32)
+    assert torch.equal(views["o"], t["o"]) and float(t["o"].abs().max()) > 0
+    assert torch.equal(arena[: 3 * cells], before[: 3 * cells])
+    # The output one cell into the values is not apart from them.
+    arena.copy_(before)
+    views["o"] = arena[3 * cells - 1 : 4 * cells - 1].view(1, 2, 32, 64)
     with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("Out", "Q")):
         _dense(views, 2, 32, 64, 32)
     assert torch.equal(arena, before)
     # The inputs as slices of one storage and the output in a storage of its own compute.
     apart = dict(views, o=torch.zeros_like(t["o"]))
-    _dense(t, 2, 32, 64, 32)
     _dense(apart, 2, 32, 64, 32)
-    assert torch.equal(apart["o"], t["o"]) and float(t["o"].abs().max()) > 0
+    assert torch.equal(apart["o"], t["o"])
 
 
 def _dense_explicit(q, k, v, out, n, dim, strides):
@@ -297,7 +308,8 @@ def test_a_short_view_beside_the_output_in_one_storage_refuses(short):
 @pytest.mark.parametrize("rows, n", [(32, 32), (32, 80), (64, 64)])
 def test_the_slots_of_one_packed_buffer_refuse(device, rows, n):
     # The four views are slots of one storage. No cell is shared with these stride
-    # arguments, but the launcher does not see the kernel's addresses.
+    # arguments, but the launcher bounds the cells of each argument by one range, and the
+    # ranges of interleaved slots meet.
     t = _dense_inputs(2, n, 64, device)
     packed = torch.full((1, 2, n, 4, 64), -8192.0, device=device)
     views = {name: packed[:, :, :, i] for i, name in enumerate("qkvo")}
@@ -360,7 +372,8 @@ def test_a_log_sum_exp_column_beside_the_output_refuses(dim, dtype, keys):
     _biased(apart, heads, rows, dim, keys)
     assert float(apart["o"].abs().max()) > 0 and bool(apart["l"].isfinite().all())
     # Two outputs of one buffer: the column after the output's last one shares no cell
-    # with it, the output's own last column does. They are views of one storage either way.
+    # with it, the output's own last column does. The range of cells reached through each
+    # runs the length of the buffer either way.
     both = torch.full((1, heads, rows, dim + 1), -8192.0, dtype=dtype, device="mps")
     for column in (dim, dim - 1):
         with pytest.raises(MetalNonRecoverableError, match=REFUSAL.format("o_ptr", "lse_ptr")):
@@ -602,8 +615,8 @@ def test_backward_output_over_an_input_refuses(kind, output, over):
     [("kv", "dk", "dv"), ("kv", "dk", "k"), ("q", "dq", "q"), ("q", "delta", "lse")],
 )
 def test_backward_tensors_interleaved_in_one_buffer_refuse(kind, first, second):
-    # An output and another tensor as the two slots of one buffer: no cell shared, one
-    # storage.
+    # An output and another tensor as the two slots of one buffer: no cell shared, and
+    # the two ranges of cells meet.
     t = {name: x.to("mps") for name, x in bwd._inputs(kind, 5).items()}
     shape = tuple(max(a, b) for a, b in zip(t[first].shape, t[second].shape))
     packed = torch.full((*shape, 2), -8192.0, device="mps")

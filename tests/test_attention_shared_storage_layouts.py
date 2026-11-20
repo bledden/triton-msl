@@ -1,22 +1,32 @@
 """Every attention route with some of its tensors laid out as blocks of one storage.
 
-The launcher refuses an attention launch whose output is a view of the storage of another
-tensor argument, wherever the two views lie (tests/test_attention_output_alias.py states why
-the comparison is of whole storages). That gives up a layout that computed before the rule:
-tensors as contiguous blocks of one storage, a few cells apart, each passed with its own
-shape and strides, share no cell, and every route here computed them correctly. The refusal
-of such a layout is containment, a capability regression, and not a wrong result that was
-fixed.
+An attention launch whose output is a view of the storage of another tensor argument runs
+only when the launcher shows the two apart. The views a caller passes do not show it
+(tests/test_attention_output_alias.py states why), so the launcher bounds the cells the
+source reaches through each tensor argument from the launch's own strides, lengths and grid
+(tests/test_address_extent.py), and admits the launch when every bound lies inside its
+storage and no cell stored through one argument is reached through another. Tensors as
+contiguous blocks of one storage, each passed with its own shape and strides, are such a
+layout.
 
 For each route (dense forward, decode, varlen, MLA, biased with its output and lse, and the
 three backward kernels) and each layout:
 
 * every tensor in a storage of its own computes a float64 reference, on the template the
   route publishes;
-* an output and another tensor in one storage refuse by the two argument names, before any
-  launch, and no cell of the storage changes;
-* two outputs in one storage refuse the same way;
+* an output and another tensor as blocks of one storage, a few cells apart, compute that
+  reference on the same template, and no cell outside the outputs changes; so do two
+  outputs, and so do host tensors on the routes that take them;
+* blocks laid so that each starts on the cell after the last one reached through the block
+  before it compute, and laid one cell closer they refuse by the two argument names, before
+  any launch, and no cell of the storage changes;
+* what a forward output held before the launch does not reach the result;
 * inputs alone in one storage, the outputs apart, compute what separate storages compute.
+
+The varlen route takes each sequence's first row from a tensor, which the launcher does not
+read, so the cells of a varlen launch are not bounded and its output beside another tensor
+in one storage still refuses. Those layouts computed before the storage rule: their refusal
+is a capability regression, and not a wrong result that was fixed.
 
 The last test pins a dense kernel whose output base is chosen by a scalar branch. It
 publishes no outputs and is not replaced by a template, so the storage refusal cannot fire
@@ -35,6 +45,7 @@ import torch
 import triton
 
 import tests.test_fa_bwd_address_witness as bwd
+import triton_msl.backend._address_extent as address_extent
 from tests.test_fa_biased_routing import _biased_fa
 from tests.test_flash_attention import _flash_attn_fwd
 from tests.test_mla_value_paths import _mla_expected, _mla_value_path
@@ -49,6 +60,7 @@ pytestmark = pytest.mark.skipif(
 
 POISON = -16384.0  # fills the forward outputs and the cells between the blocks of a storage
 GAP = 7  # cells between two blocks of one storage
+GUARD = 64  # cells after its last block
 REFUSAL = "attention kernel: output argument {} is not known to be apart from argument {}:"
 MMA = "simdgroup-MMA FlashAttention-2"
 TILED = "Head-dim-tiled FlashAttention-2"
@@ -68,10 +80,12 @@ class Case:
     make: Callable  # seed -> host tensors, the outputs filled with ``unwritten``
     launch: Callable  # device tensors -> the compiled kernel
     reference: Callable  # host tensors -> float64 result per output, ``unwritten`` where nothing is stored
-    refused: tuple  # groups of tensors with an output among them
+    shared: tuple  # groups of tensors with an output among them
     inputs: tuple  # a group of inputs only
     unwritten: float = POISON
     relative: float = 0.0
+    bounded: bool = True  # the launch's scalars bound the cells it reaches
+    on_host: bool = True  # the route takes host tensors
 
 
 def _strides(t, names):
@@ -115,7 +129,7 @@ def _dense(dim, dtype, n, rows, heads, descriptor, template):
         make=make,
         launch=launch,
         reference=reference,
-        refused=(("q", "o"), ("o", "k"), ("v", "o"), ("q", "k", "v", "o")),
+        shared=(("q", "o"), ("o", "k"), ("v", "o"), ("q", "k", "v", "o")),
         inputs=("q", "k", "v"),
     )
 
@@ -164,7 +178,7 @@ def _decode(dtype, rows, queries, keys):
         make=make,
         launch=launch,
         reference=reference,
-        refused=(("q", "o"), ("o", "k"), ("v", "o")),
+        shared=(("q", "o"), ("o", "k"), ("v", "o")),
         inputs=("k", "v"),
     )
 
@@ -204,8 +218,9 @@ def _varlen(dim, lengths):
         make=make,
         launch=launch,
         reference=reference,
-        refused=(("q", "o"), ("o", "k"), ("v", "o")),
+        shared=(("q", "o"), ("o", "k"), ("v", "o")),
         inputs=("cq", "ck"),
+        bounded=False,  # each sequence's first row is read from cu_q and cu_k
     )
 
 
@@ -237,8 +252,9 @@ def _mla(rows):
         make=make,
         launch=launch,
         reference=reference,
-        refused=(("qn", "o"), ("o", "kr"), ("v", "o")),
+        shared=(("qn", "o"), ("o", "kr"), ("v", "o")),
         inputs=("qn", "kn", "v"),
+        on_host=False,
     )
 
 
@@ -277,12 +293,12 @@ def _biased(dim, dtype, rows, keys_block, template):
         make=make,
         launch=launch,
         reference=reference,
-        refused=(("q", "o"), ("b", "l"), ("o", "v"), ("o", "l"), ("l", "o")),
+        shared=(("q", "o"), ("b", "l"), ("o", "v"), ("o", "l"), ("l", "o")),
         inputs=("q", "k", "v", "b"),
     )
 
 
-def _backward(kind, stored, template, refused):
+def _backward(kind, stored, template, shared):
     names = bwd.ORDER[kind]
     if kind == "b":
         grid = (triton.cdiv(bwd.N, 32), triton.cdiv(bwd.N, 32), bwd.HC)
@@ -314,7 +330,7 @@ def _backward(kind, stored, template, refused):
         make=lambda seed: bwd._inputs(kind, seed),
         launch=launch,
         reference=reference,
-        refused=refused,
+        shared=shared,
         inputs=("q", "k", "v"),
         unwritten=bwd.POISON,
         relative=2e-3,
@@ -345,9 +361,11 @@ CASES = [
     _backward("kv", (28, 32), "FA-2 backward dK/dV", (("k", "dk"), ("dv", "v"), ("delta", "dk"), ("dk", "dv"))),
     _backward("b", (28,), "FA-2 backward dbias", (("b", "db"), ("db", "delta"))),
 ]
-GROUPS = [(case, group) for case in CASES for group in case.refused]
-WITH_AN_INPUT = [(case, group) for case, group in GROUPS if not set(group) <= set(case.outputs)]
-TWO_OUTPUTS = [(case, group) for case, group in GROUPS if set(group) <= set(case.outputs)]
+GROUPS = [(case, group) for case in CASES for group in case.shared]
+BOUNDED = [(case, group) for case, group in GROUPS if case.bounded]
+UNBOUNDED = [(case, group) for case, group in GROUPS if not case.bounded]
+FORWARD = [(case, group) for case, group in BOUNDED if not case.label.startswith("backward")]
+ON_HOST = [(case, group) for case, group in BOUNDED if case.on_host]
 
 
 def _label(value):
@@ -384,25 +402,52 @@ def launched(monkeypatch):
     return seen
 
 
-def _on_device(host):
-    return {name: x.to("mps") for name, x in host.items()}
+@pytest.fixture
+def bound(monkeypatch):
+    """What the launcher bounded last: ``extents`` holds the least and the most cell reached
+    through each tensor argument, by its position among ``arguments``."""
+    seen = types.SimpleNamespace(extents=None, arguments=None)
+    real = address_extent.reached
+
+    def spy(plan, arguments, grid):
+        out = real(plan, arguments, grid)
+        seen.extents = {index: (low, high) for index, (low, high, _stored) in out.items()}
+        seen.arguments = list(arguments)
+        return out
+
+    monkeypatch.setattr(address_extent, "reached", spy)
+    return seen
 
 
-def _in_one_storage(host, group):
-    """The device tensors of a launch with those of ``group`` as contiguous blocks of one
-    storage, in the group's order and GAP cells apart, each with its own shape and strides."""
+def _on_device(host, device="mps"):
+    return {name: x.clone().to(device) for name, x in host.items()}
+
+
+def _place(host, group, starts, device="mps"):
+    """The tensors of a launch with those of ``group`` as contiguous blocks of one storage,
+    each from its own first cell and with its own shape and strides. Every block lies whole
+    inside the storage."""
     dtype = host[group[0]].dtype
     assert all(host[name].dtype == dtype for name in group)
     fill = POISON if dtype.is_floating_point else 0
-    storage = torch.full((sum(host[name].numel() + GAP for name in group),), fill, dtype=dtype, device="mps")
-    t, spans, at = _on_device(host), {}, 0
+    cells = max(starts[name] + host[name].numel() for name in group) + GUARD
+    storage = torch.full((cells,), fill, dtype=dtype, device=device)
+    t = _on_device(host, device)
     for name in group:
-        cells = host[name].numel()
-        t[name] = storage[at : at + cells].view(host[name].shape)
+        t[name] = storage[starts[name] : starts[name] + host[name].numel()].view(host[name].shape)
         t[name].copy_(host[name])
-        spans[name] = (at, at + cells)
-        at += cells + GAP
-    return t, storage, spans
+    return t, storage
+
+
+def _in_one_storage(host, group, gap=GAP, device="mps"):
+    """The tensors of a launch with those of ``group`` laid in the group's order, ``gap``
+    cells apart, and the cells of each block in the storage."""
+    starts, at = {}, 0
+    for name in group:
+        starts[name] = at
+        at += host[name].numel() + gap
+    t, storage = _place(host, group, starts, device)
+    return t, storage, {name: (starts[name], starts[name] + host[name].numel()) for name in group}
 
 
 def _run(case, t):
@@ -428,13 +473,25 @@ def _assert_route(case, handle, launched):
     assert len(launched.shaders) == 1
 
 
+def _assert_close(case, got, expected, name):
+    written = expected != case.unwritten
+    assert torch.equal(got != case.unwritten, written), name
+    scale = max(1.0, float(expected[written].abs().max())) if case.relative and bool(written.any()) else 1.0
+    torch.testing.assert_close(got[written], expected[written], atol=case.tolerance * scale, rtol=case.relative)
+
+
 def _assert_reference(case, host, t):
     for name, expected in case.reference(host).items():
-        got = t[name].cpu().double()
-        written = expected != case.unwritten
-        assert torch.equal(got != case.unwritten, written), name
-        scale = max(1.0, float(expected[written].abs().max())) if case.relative else 1.0
-        torch.testing.assert_close(got[written], expected[written], atol=case.tolerance * scale, rtol=case.relative)
+        _assert_close(case, t[name].cpu().double(), expected, name)
+
+
+def _assert_the_rest_kept(case, group, storage, before, spans):
+    """No cell of the storage outside the blocks of its outputs changed."""
+    kept = torch.ones(storage.numel(), dtype=torch.bool)
+    for name in group:
+        if name in case.outputs:
+            kept[slice(*spans[name])] = False
+    assert torch.equal(storage.cpu()[kept], before.cpu()[kept])
 
 
 def _refusal(case, group):
@@ -445,8 +502,7 @@ def _refusal(case, group):
     return REFUSAL.format(case.pointers[output], case.pointers[other])
 
 
-def _assert_refused(case, group, launched):
-    t, storage, _ = _in_one_storage(case.make(3), group)
+def _assert_refused(case, group, launched, t, storage):
     before = storage.clone()
     with pytest.raises(MetalNonRecoverableError, match=_refusal(case, group)):
         case.launch(t)
@@ -464,21 +520,85 @@ def test_separate_storages_compute_the_reference(case, launched):
     _assert_reference(case, host, t)
 
 
-@pytest.mark.parametrize("case, group", WITH_AN_INPUT, ids=_label)
-def test_an_output_beside_an_input_in_one_storage_refuses(case, group, launched):
-    """A capability regression, not a wrong that was fixed: the output and the input are
-    blocks of one storage that share no cell, and this layout computed correctly before
-    the storage rule. It is given up as containment, because the launcher cannot see that
-    the kernel stays inside the views it is passed."""
-    _assert_refused(case, group, launched)
+@pytest.mark.parametrize("case, group", BOUNDED, ids=_label)
+def test_blocks_of_one_storage_with_an_output_among_them_compute_the_reference(case, group, launched):
+    host = case.make(3)
+    t, storage, spans = _in_one_storage(host, group)
+    before = storage.clone()
+    handle = _run(case, t)
+    _assert_route(case, handle, launched)
+    _assert_reference(case, host, t)
+    _assert_the_rest_kept(case, group, storage, before, spans)
 
 
-@pytest.mark.parametrize("case, group", TWO_OUTPUTS, ids=_label)
-def test_two_outputs_in_one_storage_refuse(case, group, launched):
-    """A capability regression, not a wrong that was fixed: the two outputs are blocks of
-    one storage that share no cell, and this layout computed correctly before the storage
-    rule. It is given up as containment, like an output beside an input."""
-    _assert_refused(case, group, launched)
+@pytest.mark.parametrize("case, group", ON_HOST, ids=_label)
+def test_blocks_of_one_host_storage_compute_the_reference(case, group):
+    host = case.make(3)
+    t, storage, spans = _in_one_storage(host, group, device="cpu")
+    before = storage.clone()
+    _run(case, t)
+    _assert_reference(case, host, t)
+    _assert_the_rest_kept(case, group, storage, before, spans)
+
+
+@pytest.mark.parametrize("case, group", BOUNDED, ids=_label)
+def test_blocks_that_touch_by_the_cells_reached_compute_and_one_cell_closer_refuse(case, group, launched, bound):
+    """The launcher compares the cells a launch reaches, not the views it is passed. The
+    backward tensors are larger than the cells their kernels reach, so their blocks overlap
+    as views here and compute."""
+    host = case.make(3)
+    t, _, _ = _in_one_storage(host, group)
+    _run(case, t)
+    last = {}
+    for name in group:
+        index = next(i for i, value in enumerate(bound.arguments) if value is t[name])
+        least, last[name] = bound.extents[index]
+        assert least == 0 and last[name] < host[name].numel(), name
+    for closer in (0, 1):
+        launched.templates.clear()
+        launched.shaders.clear()
+        starts, at = {}, 0
+        for name in group:
+            starts[name] = at
+            at += last[name] + 1 - closer
+        t, storage = _place(host, group, starts)
+        if closer:
+            _assert_refused(case, group, launched, t, storage)
+            continue
+        handle = _run(case, t)
+        _assert_route(case, handle, launched)
+        expected = case.reference(host)
+        for name in case.pointers:
+            # The cells of a block past the last one reached belong to the block after it.
+            cells = last[name] + 1 if name in group[:-1] else host[name].numel()
+            got = t[name].cpu().double().reshape(-1)[:cells]
+            if name in expected:
+                _assert_close(case, got, expected[name].reshape(-1)[:cells], name)
+            else:
+                assert torch.equal(got, host[name].double().reshape(-1)[:cells]), name
+
+
+@pytest.mark.parametrize("case, group", FORWARD, ids=_label)
+def test_what_an_output_held_before_the_launch_does_not_reach_the_result(case, group, launched):
+    """The blocks touch and every output holds NaN before the launch, so a result computed
+    from a cell of an output would hold one."""
+    host = case.make(3)
+    t, _, _ = _in_one_storage(host, group, gap=0)
+    for name in case.outputs:
+        t[name].fill_(float("nan"))
+    handle = _run(case, t)
+    _assert_route(case, handle, launched)
+    _assert_reference(case, host, t)
+
+
+@pytest.mark.parametrize("case, group", UNBOUNDED, ids=_label)
+def test_an_output_beside_another_tensor_refuses_when_a_tensor_places_the_rows(case, group, launched):
+    """A capability regression, not a wrong that was fixed: the output and the other tensor
+    are blocks of one storage that share no cell, and this layout computed correctly before
+    the storage rule. The launcher does not read the tensor that holds each sequence's first
+    row, so it cannot see that the kernel stays inside the views it is passed."""
+    t, storage, _ = _in_one_storage(case.make(3), group)
+    _assert_refused(case, group, launched, t, storage)
 
 
 @pytest.mark.parametrize("case", CASES, ids=_label)

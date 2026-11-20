@@ -438,15 +438,21 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   2**31 elements before or after its first element. Smaller storages, and whole tensors up
   to 2**32 elements on the first group, compute. These windows are checked by arithmetic on
   the launch check alone; no tensor of that size was allocated or launched.
-- **In-place outputs:** a matmul whose output overlaps an operand keeps the source's
-  load-then-store order by leaving the replacement template; the quantized routes and the
-  attention kernels refuse such a launch by name, except the two biased source replays, which
-  keep the order behind a barrier and compute in place. The attention refusal compares whole
-  storages: an output is refused unless its storage is different from every other tensor
-  argument's, and a storage that cannot be read counts as shared. Views of one storage whose
-  cells stay apart, such as the slots of one packed buffer, are refused with the rest, because
-  the kernel addresses its tensors through its own stride and length arguments, not the views'.
-  Write the output to a tensor of its own. An ordinary kernel is checked before every launch:
+- **In-place outputs:** a matmul whose output overlaps an operand keeps the source's load-then-store
+  order by leaving the replacement template; the quantized routes and the attention kernels refuse
+  such a launch by name, except the two biased source replays, which keep the order behind a barrier
+  and compute in place. An attention output whose storage is different from every other tensor
+  argument's computes. For an output that is a view of another tensor argument's storage, the
+  launcher bounds the cells the source reaches through each tensor argument, one range of cells for
+  each, from the launch's own strides, lengths and grid, because the kernel addresses its tensors
+  through its own stride and length arguments, not the views'. The launch runs when every range lies
+  inside its storage and the range of each stored argument meets no other argument's, so tensors
+  laid as separate blocks of one storage compute. It is refused otherwise, and a storage that cannot
+  be read counts as shared. Two layouts that share no cell are refused with the rest: tensors
+  interleaved in one buffer, such as the slots of one packed buffer, whose ranges meet, and a varlen
+  launch, whose rows are placed by the values of a tensor the launcher does not read. Write those
+  outputs to a tensor of their own.
+  An ordinary kernel is checked before every launch:
   where two lanes of one program are not proved to stay apart at an element one of them stores,
   the launch raises `MetalNonRecoverableError` starting `lane order:` and nothing is submitted.
   One case is launched all the same: a plain store whose own lanes meet at a cell with
