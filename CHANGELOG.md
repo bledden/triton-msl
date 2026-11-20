@@ -689,6 +689,19 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   any of them is written. A `while` loop that carries a vector of more elements than the
   kernel has threads did not compile; it is now refused by name when the kernel is
   lowered (a counted loop carries one).
+- A `while` loop whose body needs the whole block of lanes was refused, or failed
+  while its pipeline was built, where the same body in a counted loop computed. A value
+  carried by a `while` loop was not counted among the values of its kernel, so a sum, a
+  largest value or a flip of it inside the loop was refused with "native per-result
+  metadata is missing for SSA value ...". And the exit of a `while` loop is written
+  into the shader as a `break` at the head of the loop, which switched off the reuse of
+  threadgroup arrays for the whole kernel: a flip of 1024 lanes kept twenty arrays,
+  61440 bytes where 32768 are allowed, and the launch failed with a `RuntimeError` from
+  pipeline creation. An exit that is the first thing its loop decides is now read as
+  the test of a loop that tests before each trip. Every other `break`, `continue` or
+  `return` keeps all arrays apart, as before. A generically lowered kernel whose arrays
+  still do not fit is refused before a pipeline is asked for, as Triton's
+  `OutOfResources` with the bytes required and the limit.
 - The row-wise sort template stood for kernels that are not a row-wise sort. The
   template replaces the whole kernel with "load row r, sort it, store it", and it was
   chosen from a signature that other kernels fit. `tl.flip(v, 1)` of a 2 by N tile

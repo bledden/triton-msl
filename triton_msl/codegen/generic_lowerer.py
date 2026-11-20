@@ -2944,6 +2944,12 @@ class GenericLowerer(
                 allocation_aliases,
                 extra_bytes=4 if self._assert_plan is not None else 0,
             )
+        elif not self.kb.unsupported_reasons:
+            from ._lowerer_helpers import _check_generic_shared_memory_budget
+
+            # Every op has lowered, so no refusal is hidden by this one. The
+            # pipeline would fail on these arrays with a bare RuntimeError.
+            _check_generic_shared_memory_budget(msl)
         if self.kb._argument_abi is not None and self._assert_plan is None:
             from triton_msl.backend._argument_abi import producer_record
 

@@ -239,9 +239,36 @@ def _shared_memory_phases(msl: str):
     transfers = set()
     previous = ""
     contexts = []
-    for i, line in enumerate(code.split("\n")):
+    code_lines = code.split("\n")
+    arrays = set(re.findall(r"^\s*threadgroup\s+\w+\s+(\w+)\s*\[", code, re.M))
+    uses_array = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(arrays))) + r")\b") if arrays else None
+
+    def leaves_at_the_head(i):
+        # `for (;;) {` whose only way out is `if (!(c)) break;` with nothing but
+        # plain statements before it is a loop that tests `c` at its head: the
+        # same control flow as `for (...; c; ...)`, which the callers already
+        # reason about (zero trips included). The statements before the exit run
+        # once more than the body, so they may hold no barrier and touch no
+        # threadgroup array. Any other exit keeps the whole function unshared.
+        if not re.fullmatch(r"\s*if \(!\(\w+\)\) break;\s*", code_lines[i]):
+            return False
+        opened = stack[-1]
+        if blocks[opened][0] != "for" or not re.fullmatch(r"\s*for \(;;\) \{\s*", code_lines[opened]):
+            return False
+        for line in code_lines[opened + 1 : i]:
+            if (
+                "{" in line
+                or "}" in line
+                or "threadgroup" in line
+                or re.search(r"\b(?:break|continue|return|goto)\b", line)
+                or (uses_array is not None and uses_array.search(line))
+            ):
+                return False
+        return True
+
+    for i, line in enumerate(code_lines):
         contexts.append(tuple(stack))
-        if stack and re.search(r"\b(?:break|continue|return)\b", line):
+        if stack and re.search(r"\b(?:break|continue|return)\b", line) and not leaves_at_the_head(i):
             # An early exit may bypass a lexically unconditional barrier. Until
             # this post-pass has a CFG, do not reuse arrays in that function.
             transfers.add(stack[0])
@@ -536,6 +563,28 @@ def _alias_shared_memory(msl: str, *, allocation_aliases=None) -> str:
             new_lines.append(new_line)
 
     return "\n".join(new_lines)
+
+
+def _check_generic_shared_memory_budget(msl: str, *, limit=32768):
+    """Refuse a generic shader whose static threadgroup arrays cannot fit, before a pipeline is asked for.
+
+    The count is taken from the declarations of the FINAL text, after reuse. A
+    type this does not know counts as nothing and padding is not counted, so the
+    sum is a lower bound on what the pipeline will ask for: a lower bound above
+    the limit is a proof of excess, and nothing below it is refused here.
+    """
+    from triton_msl.errors import MetalResourceError
+
+    widths = {"bool": 1, "char": 1, "uchar": 1, "short": 2, "ushort": 2, "half": 2, "int": 4, "uint": 4, "float": 4}
+    lexical = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/")
+    code = lexical.sub(lambda m: re.sub(r"[^\n]", " ", m.group()), msl)
+    required = sum(
+        widths.get(dtype, 0) * int(count)
+        for dtype, count in re.findall(r"^\s*threadgroup\s+(\w+)\s+\w+\s*\[(\d+)\]\s*;", code, re.M)
+    )
+    if required > limit:
+        raise MetalResourceError(required, limit, "threadgroup memory bytes")
+    return required
 
 
 def _check_replay_shared_memory_budget(allocations, aliases, *, extra_bytes=0, limit=32768):

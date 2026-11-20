@@ -581,6 +581,17 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   than the kernel has threads is refused when the kernel is lowered (256 and 1024 elements
   in the kernels tried, where 64 computed); a counted loop (`for _ in range(n)`) carries
   one. Carried values are handed on all at once in both loops: `a, b = b, a` exchanges them.
+  A sum, a largest value, a running sum or a flip of a carried vector inside a `while`
+  loop computes as it does in a counted loop.
+- **More threadgroup memory than a group has:** flips, running sums and reductions keep
+  arrays that the lanes of a group share, and a group has 32768 bytes. Arrays whose uses
+  are kept apart on every path through the kernel share one allocation. A generically
+  lowered kernel that still needs more is refused before launch as
+  `triton.runtime.errors.OutOfResources` ("threadgroup memory bytes", with the bytes
+  required and the limit), which an autotuner skips. In the kernels tried that was, at
+  1024 lanes, a flip under an `if` inside a loop and a `while` loop around a flip whose
+  test is itself a reduction (61568 bytes each); at 256 lanes both compute. Earlier builds
+  failed there while the pipeline was built, with a `RuntimeError`.
 - **A reduction of fewer elements than the kernel's block, in a kernel of 1024 lanes or
   more:** where the kernel's lanes are looped over, a `tl.sum`, `tl.max`, `tl.min`,
   `tl.argmax` or `tl.argmin` of a vector with fewer elements than the kernel's widest block

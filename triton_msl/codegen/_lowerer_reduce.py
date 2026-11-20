@@ -60,8 +60,13 @@ class _ReduceScanMixin:
                     if op.region_ops:
                         record(op.region_ops, region_token)
 
-                    # scf.if/while else regions have a distinct native block.
+                    # scf.if/while else regions have a distinct native block. A while
+                    # loop's body is its else region, and the body has arguments of
+                    # its own: the values the condition forwards.
                     else_token = ("else", op.id)
+                    else_args = list((op.attrs or {}).get("else_block_arg_ids") or [])
+                    for index, arg_id in enumerate(else_args):
+                        owners[arg_id] = ("block_arg", None, index, else_token)
                     if op.else_ops:
                         record(op.else_ops, else_token)
 
