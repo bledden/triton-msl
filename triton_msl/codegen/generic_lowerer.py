@@ -2221,6 +2221,23 @@ class GenericLowerer(
             )
             for ssa in all_ops_iter
         )
+        # A source barrier and no other operation of that list: without the barrier the
+        # kernel is one a lane loop carries.
+        _only_source_barriers = has_barrier_ops and not any(
+            ssa.op
+            in (
+                "tt.reduce",
+                "tt.scan",
+                "tt.trans",
+                "tt.dot",
+                "ttg.local_alloc",
+                "tt.gather",
+                "tt.cat",
+                "tt.join",
+                "tt.split",
+            )
+            for ssa in all_ops_iter
+        )
         # Cooperative shared-memory-staging ops (one element per thread). When a
         # kernel ALSO contains a tt.reduce that forces the multipass path (which
         # dispatches only num_threads / 1024 threads), the staging tail is
@@ -2709,6 +2726,17 @@ class GenericLowerer(
                 self._mept_single_pass = True
                 # _needs_wrapping intentionally stays False.
             elif not has_barrier_ops:
+                self._needs_wrapping = True
+                self._total_elements = block_size
+                block_size = num_threads
+            elif _only_source_barriers and block_size > 1024:
+                # One thread per lane keeps a source barrier exact and is what a block of
+                # at most 1024 lanes gets. A wider block has no such launch, so it takes
+                # the wrapping loop, over the threads the same kernel gets without its
+                # barrier. The barrier then stands inside that loop and orders threads,
+                # not lanes: the launcher reads it as no proof and refuses a launch in
+                # which two lanes meet at an element one of them stores
+                # (triton_msl.backend._lane_order).
                 self._needs_wrapping = True
                 self._total_elements = block_size
                 block_size = num_threads

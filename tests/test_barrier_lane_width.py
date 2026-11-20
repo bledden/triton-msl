@@ -16,12 +16,17 @@ What the tree does now, and what this file holds it to:
 
 * one lane per thread, at most 1024 lanes: the barrier is exact and the launch computes
   the source's result, in place or not;
-* one lane per thread, more than 1024 lanes: the lowering refuses
-  (``1024-thread threadgroup cap``);
+* more than 1024 lanes: there is no launch with a thread per lane, so the kernel runs
+  a lane loop over the threads it would get without its barrier, and the launch decides;
 * a lane loop where two lanes of a program meet at an element one of them stores: the
   launch refuses before anything is submitted (``lane order:``);
-* a lane loop where no two lanes meet (separate input and output): the barrier decides
-  nothing, and the launch computes.
+* a lane loop where no two lanes meet (separate input and output, or every lane at its
+  own element): the barrier decides nothing, and the launch computes.
+
+A kernel that has to keep one lane per thread for another reason and is wider than 1024
+lanes is still refused by the lowering ("1024-thread threadgroup cap"). No source here
+reaches that refusal: an earlier build refused every barrier kernel past 1024 lanes with
+it, the ones that compute under a lane loop among them.
 
 Which of these a width lands in is not a property of the source alone. It follows the
 layout Triton picks (``sizePerThread``), and that follows what the launch knows about the
@@ -55,7 +60,6 @@ requires_mps = pytest.mark.skipif(
     reason="needs MPS + compile_shader",
 )
 
-CAP = "1024-thread threadgroup cap"
 ORDER = "lane order:"
 GUARD = 3  # cells past what a kernel may touch; they must come back as they went in
 SPARE = 5  # a masked kernel's length is this much short of three blocks
@@ -132,6 +136,15 @@ def _sum_beside(A, O, S, BLOCK: tl.constexpr, BARRIER: tl.constexpr):
 
 
 @triton.jit
+def _running_sum(A, O, BLOCK: tl.constexpr, BARRIER: tl.constexpr):
+    i = tl.arange(0, BLOCK)
+    x = tl.load(A + i)
+    if BARRIER:
+        tl.debug_barrier()
+    tl.store(O + i, tl.cumsum(x, 0))
+
+
+@triton.jit
 def _masked_sum(A, O, S, n, BLOCK: tl.constexpr, BARRIER: tl.constexpr):
     pid = tl.program_id(0)
     i = pid * BLOCK + tl.arange(0, BLOCK)
@@ -182,6 +195,26 @@ def _reverse_in_place(X, BLOCK: tl.constexpr, BARRIER: tl.constexpr):
     if BARRIER:
         tl.debug_barrier()
     tl.store(X + (BLOCK - 1 - i), v)
+
+
+@triton.jit
+def _own_cells(X, BLOCK: tl.constexpr, BARRIER: tl.constexpr):
+    i = tl.arange(0, BLOCK)
+    v = tl.load(X + i)
+    if BARRIER:
+        tl.debug_barrier()
+    tl.store(X + i, v * 2.0 + 1.0)
+
+
+@triton.jit
+def _own_cells_twice(X, BLOCK: tl.constexpr, BARRIER: tl.constexpr):
+    i = tl.arange(0, BLOCK)
+    tl.store(X + i, tl.load(X + i) + 1.0)
+    if BARRIER:
+        tl.debug_barrier()
+    tl.store(X + i, tl.load(X + i) * 2.0)
+    if BARRIER:
+        tl.debug_barrier()
 
 
 @triton.jit
@@ -296,6 +329,10 @@ def _r_load_store(t, w):
     t["O"][i] = x * 2.0
 
 
+def _r_running_sum(t, w):
+    t["O"][:w] = np.cumsum(t["A"][:w], dtype=np.float32)
+
+
 def _b_each_trip(w):
     return {"A": _data(3 * w + GUARD), "O": _fill(w + GUARD)}, (), (1,), {"BLOCK": w}
 
@@ -394,6 +431,16 @@ def _r_reverse_in_place(t, w):
     i = np.arange(w)
     v = t["X"][i]
     t["X"][w - 1 - i] = v
+
+
+def _r_own_cells(t, w):
+    i = np.arange(w)
+    t["X"][i] = t["X"][i] * 2.0 + 1.0
+
+
+def _r_own_cells_twice(t, w):
+    i = np.arange(w)
+    t["X"][i] = (t["X"][i] + 1.0) * 2.0
 
 
 def _b_masked_one(w):
@@ -503,11 +550,14 @@ CASES = {
     "masked_reverse_copy": (_masked_reverse_copy, _b_masked_pair, _r_masked_reverse_copy),
     "reverse_copy": (_reverse_copy, _b_pair, _r_reverse_copy),
     "sum_beside": (_sum_beside, _b_sum_beside, _r_sum_beside),
+    "running_sum": (_running_sum, _b_pair, _r_running_sum),
     "masked_sum": (_masked_sum, _b_masked_sum, _r_masked_sum),
     "masked_max_scale": (_masked_max_scale, _b_masked_pair, _r_masked_max_scale),
     "exchange": (_exchange, _b_exchange, _r_exchange),
     "shift_in_place": (_shift_in_place, _b_one, _r_shift_in_place),
     "reverse_in_place": (_reverse_in_place, _b_one, _r_reverse_in_place),
+    "own_cells": (_own_cells, _b_one, _r_own_cells),
+    "own_cells_twice": (_own_cells_twice, _b_one, _r_own_cells_twice),
     "masked_reverse_in_place": (_masked_reverse_in_place, _b_masked_one, _r_masked_reverse_in_place),
     "reverse_sum": (_reverse_sum, _b_reverse_sum, _r_reverse_sum),
     "shift_sum": (_shift_sum, _b_shift_sum, _r_shift_sum),
@@ -597,7 +647,7 @@ def _lowered(name, width, barrier, warps=4, aligned=True):
     mod = backend.make_ttir(mod, meta, options)
     mod = backend.make_ttgir(mod, meta, options)
     lowerer = GenericLowerer(walk_ttgir(mod, options), options)
-    lowerer.lower()
+    lowerer.shader_text = lowerer.lower()
     return lowerer
 
 
@@ -621,8 +671,8 @@ TILES_PAST_CAP = ((32, 64), (64, 32), (64, 64), (64, 128))
 
 # Separate input and output, no reduction. Aligned contiguous accesses get several
 # elements per thread from Triton; the lowering answers a barrier there with one lane per
-# thread (it has no lane loop it could prove), so these compute up to Metal's 1024
-# threads and are refused past it.
+# thread up to Metal's 1024 threads, where the barrier is exact. Past that it runs a
+# lane loop over the num_warps * 32 threads the same kernel gets without its barrier.
 SEPARATE = ("load_store", "barrier_last", "barrier_each_trip", "masked", "masked_reverse_copy")
 # The same dispatch, with a tensor that is both loaded and stored.
 SHARED = ("exchange", "shift_in_place", "masked_reverse_in_place")
@@ -674,29 +724,29 @@ def test_in_place_tile_the_barrier_defines_computes(device, name, width):
     _computes(name, width, device)
 
 
-# --- one lane per thread would need more than 1024 threads ------------------------------
+# --- one lane per thread would need more than 1024 threads: a lane loop instead ----------
 
 
 @requires_mps
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("name, width", _each(SEPARATE, PAST_CAP))
-def test_barrier_wider_than_the_threadgroup_refuses(device, name, width):
-    _refuses(name, width, device, CAP)
+def test_barrier_wider_than_the_threadgroup_computes_between_separate_tensors(device, name, width):
+    _computes(name, width, device)
 
 
 @requires_mps
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("name, width", _each(SHARED, PAST_CAP))
-def test_in_place_barrier_wider_than_the_threadgroup_refuses(device, name, width):
-    """Attempts to launch a kernel whose stored tensor is also loaded; the lowering refuses first."""
-    _refuses(name, width, device, CAP)
+def test_in_place_barrier_wider_than_the_threadgroup_refuses_for_its_order(device, name, width):
+    """Attempts to launch a kernel whose stored tensor is also loaded, at elements other lanes store."""
+    _refuses(name, width, device, ORDER)
 
 
 @requires_mps
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("name, width", _each(("tile",), TILES_PAST_CAP), ids=_ids)
-def test_tile_barrier_wider_than_the_threadgroup_refuses(device, name, width):
-    _refuses(name, width, device, CAP)
+def test_tile_barrier_wider_than_the_threadgroup_computes_between_separate_tensors(device, name, width):
+    _computes(name, width, device)
 
 
 @requires_mps
@@ -704,9 +754,18 @@ def test_tile_barrier_wider_than_the_threadgroup_refuses(device, name, width):
 @pytest.mark.parametrize(
     "name, width", _each(("tile_exchange",), TILES_PAST_CAP) + [("tile_transpose_in_place", (64, 64))], ids=_ids
 )
-def test_in_place_tile_barrier_wider_than_the_threadgroup_refuses(device, name, width):
-    """Attempts to launch a kernel whose stored tensor is also loaded; the lowering refuses first."""
-    _refuses(name, width, device, CAP)
+def test_in_place_tile_barrier_wider_than_the_threadgroup_refuses_for_its_order(device, name, width):
+    """Attempts to launch a kernel whose stored tensor is also loaded, at elements other lanes store."""
+    _refuses(name, width, device, ORDER)
+
+
+@requires_mps
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("name", ["own_cells", "own_cells_twice"])
+@pytest.mark.parametrize("width", (1024,) + PAST_CAP)
+def test_in_place_barrier_where_every_lane_keeps_to_its_own_element_computes(device, name, width):
+    """Launches a kernel whose stored tensor is also loaded, each lane at its own element only."""
+    _computes(name, width, device)
 
 
 @requires_mps
@@ -819,7 +878,7 @@ def test_unaligned_in_place_program_under_the_wrapping_loop_refuses(device, name
 @requires_mps
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("name, width", _each(SEPARATE, PAST_CAP) + _each(("tile",), TILES_PAST_CAP), ids=_ids)
-def test_without_the_barrier_the_refused_widths_compute(device, name, width):
+def test_without_the_barrier_the_widths_past_the_cap_compute(device, name, width):
     # Separate tensors: the program is defined without the barrier, and a lane loop runs it.
     _computes(name, width, device, barrier=0)
 
@@ -831,12 +890,45 @@ def test_without_the_barrier_the_refused_widths_compute(device, name, width):
     + [("tile_transpose_in_place", (64, 64))],
     ids=_ids,
 )
-def test_only_the_barrier_makes_the_lowering_refuse(name, width):
-    with pytest.raises(MetalNonRecoverableError, match=re.escape(CAP)):
-        _lowered(name, width, barrier=1)
-    lowerer = _lowered(name, width, barrier=0)
-    assert lowerer._actual_dispatch_threads < _lanes(width)
-    assert lowerer._actual_dispatch_threads <= 1024
+def test_past_the_cap_a_barrier_kernel_runs_a_lane_loop_as_it_does_without_the_barrier(name, width):
+    with_barrier = _lowered(name, width, barrier=1)
+    assert with_barrier._needs_wrapping
+    assert with_barrier._actual_dispatch_threads == 128
+    assert with_barrier._total_elements == _lanes(width)
+    # Without the barrier the same threads run it, by this loop or by an array per thread.
+    without = _lowered(name, width, barrier=0)
+    assert without._actual_dispatch_threads == 128
+    assert without._total_elements == _lanes(width)
+
+
+@pytest.mark.parametrize("name, width", _each(SEPARATE + SHARED, NARROW[-3:]) + [("tile", (32, 32))], ids=_ids)
+def test_up_to_the_cap_a_barrier_kernel_keeps_a_thread_per_lane(name, width):
+    """The barrier is exact there, and an in-place program it defines computes: nothing changes that."""
+    lowerer = _lowered(name, width, barrier=1)
+    assert lowerer._actual_dispatch_threads == _lanes(width)
+    assert not lowerer._needs_wrapping
+
+
+@requires_mps
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("width", (256, 1024))
+def test_a_barrier_beside_a_running_sum_computes_up_to_the_cap(device, width):
+    _computes("running_sum", width, device)
+
+
+@pytest.mark.parametrize("width", PAST_CAP[:2])
+def test_a_kernel_that_needs_a_thread_per_lane_for_more_than_its_barrier_gets_no_lane_loop(width):
+    """A running sum beside a barrier passes values between threads: the refusal it had stands."""
+    with pytest.raises(MetalNonRecoverableError, match="cooperative shared-memory staging for %d elements" % width):
+        _lowered("running_sum", width, barrier=1)
+
+
+def test_a_barrier_past_the_cap_stands_inside_the_lane_loop():
+    """What the launch check reads as no proof: the barrier of each lane, not one barrier for all."""
+    text = _lowered("load_store", 2048, barrier=1).shader_text
+    opened = text.index("for (uint _loop_e = lid; _loop_e < 2048u; _loop_e += 128u) {")
+    assert text.count("threadgroup_barrier(") == 1
+    assert opened < text.index("threadgroup_barrier(") < text.rindex("O[")
 
 
 @pytest.mark.parametrize("name, width", _each(REVERSED_SHARED, (2048, 8192)) + _each(REDUCED_SHARED, (256, 8192)))

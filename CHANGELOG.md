@@ -531,9 +531,16 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   unchanged with no exception.
 - A kernel that needs one thread per lane over a block of more than 1024 lanes ran
   its first 1024 lanes only and left the rest of the output as it was. Metal runs at
-  most 1024 threads in a threadgroup; such a kernel is now refused when it is lowered.
-  The refusal is by block size, so it also takes a launch whose mask keeps every
-  active lane below 1024, which computed before. Use a block of at most 1024.
+  most 1024 threads in a threadgroup. A kernel that needs them only for its
+  `tl.debug_barrier()` now runs a loop over its lanes, as the same kernel does without
+  the barrier. The barrier then orders threads and not lanes, so a launch in which two
+  lanes of a program meet at an element one of them stores is refused before it runs,
+  for its lane order, and a launch whose lanes keep to separate elements computes
+  (2048 to 8192 lanes were tried, between separate tensors and in place). A kernel that
+  needs a thread per lane for another reason beside its barrier (a running sum, a flip,
+  a sort, a transposed or gathered tile) is refused by block size when it is lowered,
+  also where its mask keeps every active lane below 1024. Use a block of at most 1024
+  there.
 - Quantized weight-only matmul (int8 and int4, GEMV and GEMM): the kernels these
   routes accept have no masks, so as written they compute whole blocks, and every
   route clipped the result at the `M`, `N` and `K` it was passed. With sizes that are

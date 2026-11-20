@@ -525,10 +525,15 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   store is refused from 256 lanes on, a `tl.sum` computes up to 1024 lanes. A flattened tile
   whose values are computed from its indices with no load is refused when the kernel is
   lowered. A tile transposed with `tl.trans` computes alone and beside a block no wider, with
-  one row or one column as well, and is refused beside a wider block. A kernel that needs one
-  thread per lane over
-  a block of more than 1024 lanes is refused by block size, also when its mask keeps every
-  active lane below 1024.
+  one row or one column as well, and is refused beside a wider block.
+- **A barrier in a block of more than 1024 lanes:** Metal runs at most 1024 threads in a
+  threadgroup, so past 1024 lanes a kernel with a `tl.debug_barrier()` runs a loop over its
+  lanes and the barrier orders threads, not lanes. A launch whose lanes keep to separate
+  elements computes. A launch in which two lanes of a program meet at an element one of them
+  stores (an in-place reversal or shift) is refused before it runs, with the lane-order
+  message; up to 1024 lanes the same launch computes. A barrier beside a running sum, a flip,
+  a sort or a transposed or gathered tile in a block of more than 1024 lanes is refused when
+  the kernel is lowered, by block size, also when its mask keeps every active lane below 1024.
 - **Float16 and bfloat16 arithmetic:** every float is held in a Metal `float` register, and
   a result the source declares float16 or bfloat16 is rounded to that type where it is
   produced, so the next operation, a comparison and a widening cast read the source's value.
