@@ -405,9 +405,8 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
     that are not inlined. With shared memory: a pointer chosen
     by a condition, a `tl.where` or a `while` loop; an address computed
     through floating point or loaded from the shared storage itself (a
-    histogram whose bins lie behind its indices in one storage); views of
-    one storage with different element sizes; a cell replaced by the sum of
-    its own block; a
+    histogram whose bins lie behind its indices in one storage); a cell
+    replaced by the sum of its own block; a
     masked store beside an unmasked load of the cells it stores, where the
     only lanes that read those cells are lanes the mask turns off.
 
@@ -416,6 +415,12 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   (`x[:64] *= 2` beside a 128-wide store to another tensor), views of one
   storage that a mask or the index arithmetic keeps apart, and an
   accumulation of per-row totals into the output (`out[row] += sum`).
+  Views of one storage with different element sizes, such as a `float32`
+  input and an `int16` output in one buffer, are compared byte by byte and
+  compute when they share no byte that one of them stores. A byte that views
+  of two element sizes both reach, one of them storing it, is refused
+  whichever lanes reach it, and so is a host array that does not start at a
+  multiple of its element size.
   Conflicts between
   different programs of one launch are races in the source and are not
   looked at. The check is not applied to a route that replaces the kernel

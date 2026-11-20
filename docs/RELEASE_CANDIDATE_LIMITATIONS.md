@@ -473,7 +473,11 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   block narrower than the kernel's widest block that shares a tensor with a block-wide store,
   and some launches the check cannot follow although the shader matched the source in every
   probe; the changelog lists them. A kernel in which each lane loads and stores its own elements
-  computes in place. The check does not look at conflicts between different programs of one
+  computes in place. Views of one storage with different element sizes are compared byte by byte:
+  they compute when they share no byte that one of them stores, and a byte that views of two
+  element sizes both reach, one of them storing it, is refused whichever lanes reach it. A host
+  array that does not start at a multiple of its element size is refused beside an array of another
+  element size. The check does not look at conflicts between different programs of one
   launch, which are races in the source, and is not applied to a launcher built from metadata
   without an access plan. A launch that needs more than 16 comparison runs (`x[:, 1:] += y` at
   8192 by 8192) is refused.

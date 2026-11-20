@@ -72,7 +72,10 @@ MAY = (
     "computed from values the check cannot know before the launch, keeps them apart"
 )
 OPAQUE = "an address depends on a value the check cannot compute before the launch"
-SIZE = "the arguments that share memory differ in element size or are not aligned to it"
+SIZE = (
+    "arguments of different element sizes reach the same bytes of the memory they share, or one of them "
+    "is not aligned to its element size"
+)
 EVALUATE = "an address uses an operation or an argument the check does not evaluate"
 UNBOUNDED = (
     "an access sits in a loop whose trips are not known before the launch, and its lanes are not shown "

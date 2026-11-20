@@ -58,7 +58,10 @@ _REASONS = {
         "two lanes of one program reach the same element, one of them storing it, unless a branch, or a mask "
         "computed from values the check cannot know before the launch, keeps them apart"
     ),
-    "element-size": "the arguments that share memory differ in element size or are not aligned to it",
+    "element-size": (
+        "arguments of different element sizes reach the same bytes of the memory they share, or one of them "
+        "is not aligned to its element size"
+    ),
     "loop-bounds": "a loop around the accesses has bounds that are not fixed before the launch",
     "budget": "there are too many addresses to compare",
     "eval": "an address uses an operation or an argument the check does not evaluate",
@@ -390,7 +393,7 @@ class LaunchCheck:
             return "unbounded" if unbounded else "untraced"
         swapped = self._swapped(ordinals)
         try:
-            origins, spaces = self._origins(members, storages, arguments)
+            origins, spaces, scales = self._origins(members, storages, arguments)
             used = self._used_arguments(ordinals)
             key = (
                 tuple(ordinals),
@@ -403,9 +406,9 @@ class LaunchCheck:
                 self.cache.clear()
             answer = self.cache.get(key)
             if answer is None:
-                answer = self._lanes(ordinals, origins, arguments, grid, None, swapped, spaces)
+                answer = self._lanes(ordinals, origins, arguments, grid, None, swapped, spaces, scales)
                 if answer == "per-program":
-                    answer = self._per_program(ordinals, origins, arguments, grid, swapped, spaces)
+                    answer = self._per_program(ordinals, origins, arguments, grid, swapped, spaces, scales)
                 self.cache[key] = answer
         except Unproved as unproved:
             return "unbounded" if unbounded else unproved.reason
@@ -422,7 +425,7 @@ class LaunchCheck:
         mask = self.accesses[ordinal][2]
         return ordinal in self.branched or (mask >= 0 and bool(self.flags[mask] & OPAQUE))
 
-    def _per_program(self, ordinals, origins, arguments, grid, swapped, spaces):
+    def _per_program(self, ordinals, origins, arguments, grid, swapped, spaces, scales):
         """The lanes of every program compared, a run of programs at a time.
 
         A cell is compared within its own program only, so the grid can be cut anywhere.
@@ -432,7 +435,7 @@ class LaunchCheck:
         while first < count:
             try:
                 answer = self._lanes(
-                    ordinals, origins, arguments, grid, (first, min(count, first + step)), swapped, spaces
+                    ordinals, origins, arguments, grid, (first, min(count, first + step)), swapped, spaces, scales
                 )
             except Unproved as unproved:
                 if unproved.reason != "budget" or step == 1:
@@ -515,11 +518,16 @@ class LaunchCheck:
         return False
 
     def _origins(self, members, storages, arguments):
-        """Each argument's first element, counted in elements from the group's lowest pointer."""
-        sizes = {self.pointers[index][1] for index in members}
-        if len(sizes) != 1 or not min(sizes):
+        """Each argument's first element, counted in its own elements from the group's lowest pointer.
+
+        With them, when the arguments differ in element size, how many of the smallest
+        size one element of each argument is: the comparison then counts in that size.
+        """
+        sizes = {index: self.pointers[index][1] for index in members}
+        unit, widest = min(sizes.values()), max(sizes.values())
+        if not unit or any(size % unit or widest % size for size in sizes.values()):
             raise Unproved("element-size")
-        size = sizes.pop()
+        mixed = unit != widest
         # Host addresses are one space. A device allocation is a space of its own: its
         # arguments are counted from its lowest pointer and it is told apart by number.
         first, space = {}, {}
@@ -533,10 +541,15 @@ class LaunchCheck:
         origins = {}
         for index, byte in first.items():
             low = min(other for at, other in first.items() if space[at] == space[index])
-            if (byte - low) % size:
+            if mixed:
+                # From a byte every size is aligned at, so that the lowest pointer being
+                # a narrow view at an odd byte does not put the wider views out of step.
+                low -= low % widest
+            if (byte - low) % sizes[index]:
                 raise Unproved("element-size")
-            origins[index] = (byte - low) // size
-        return origins, ({index: number[space[index]] for index in members} if len(number) > 1 else {})
+            origins[index] = (byte - low) // sizes[index]
+        scales = {index: size // unit for index, size in sizes.items()} if mixed else {}
+        return origins, ({index: number[space[index]] for index in members} if len(number) > 1 else {}), scales
 
     def _reach(self, node, seen):
         if node in seen:
@@ -626,12 +639,33 @@ class LaunchCheck:
             raise _NotSeparable
         return {node: 1}
 
-    def _lanes(self, ordinals, origins, arguments, grid, programs, swapped=frozenset(), spaces=None):
-        """ "apart", "per-program" (ask again with the grid), or the kind of meeting found."""
+    def _scale(self, ordinal, scales):
+        """How many units of the comparison one element of this access is."""
+        if not scales:
+            return 1
+        found = {scales.get(index) for index in self.bases[ordinal] or (None,)}
+        if len(found) != 1 or None in found:
+            raise Unproved("element-size")
+        return found.pop()
+
+    def _lanes(self, ordinals, origins, arguments, grid, programs, swapped=frozenset(), spaces=None, scales=None):
+        """ "apart", "per-program" (ask again with the grid), or the kind of meeting found.
+
+        ``scales`` is given when the arguments differ in element size. Each element is
+        then every unit of the smallest size it covers, and a unit that elements of two
+        sizes reach, one of them storing it, is not compared by lane: it is refused.
+        """
         separable = programs is None
         if separable:
             try:
-                parts = [self._pid_part(self.accesses[ordinal][1], arguments, grid) for ordinal in ordinals]
+                parts = [
+                    {
+                        atom: coefficient * self._scale(ordinal, scales) & _M32
+                        for atom, coefficient in self._pid_part(self.accesses[ordinal][1], arguments, grid).items()
+                    }
+                    for ordinal in ordinals
+                ]
+                parts = [{atom: coefficient for atom, coefficient in part.items() if coefficient} for part in parts]
             except _NotSeparable:
                 return "per-program"
             if any(part != parts[0] for part in parts):
@@ -662,7 +696,7 @@ class LaunchCheck:
             where_env = _Env(lead, count, pid, trips, axis, spaces, arguments, grid)
             where_env.spaces = True
         shapes = {}
-        cells, lanes, written, wheres = [], [], [], []
+        cells, lanes, written, wheres, widths = [], [], [], [], []
         total = 0
         unmasked = False  # a mask left out because it differs from program to program
         for ordinal in ordinals:
@@ -679,7 +713,8 @@ class LaunchCheck:
             use_mask = use_mask and not self.follows[mask] - set(inside)
             unmasked = unmasked or (separable and mask >= 0 and not use_mask and not self.flags[mask] & OPAQUE)
             follows = self.follows[pointer] | (self.follows[mask] if use_mask else frozenset())
-            instances = size * count
+            scale = self._scale(ordinal, scales)
+            instances = size * count * scale
             for loop in follows:
                 instances *= trips[loop]
             total += instances
@@ -734,10 +769,16 @@ class LaunchCheck:
                         raise Unproved("eval", "rank")
                     keep = np.broadcast_to(keep, full) != 0
                     value, lane, program, where = value[keep], lane[keep], program[keep], where[keep]
-            cells.append((value.reshape(-1), program.reshape(-1)))
-            wheres.append(where.reshape(-1))
-            lanes.append(lane.reshape(-1))
-            written.append(np.full(lanes[-1].shape, kind != "L"))
+            value, program, where, lane = (one.reshape(-1) for one in (value, program, where, lane))
+            if scales:
+                # Every unit of the element, in the unit the group is counted in.
+                value = (value[:, None] * scale + np.arange(scale, dtype=np.int64)).reshape(-1)
+                program, where, lane = (np.repeat(one, scale) for one in (program, where, lane))
+            cells.append((value, program))
+            wheres.append(where)
+            lanes.append(lane)
+            written.append(np.full(lane.shape, kind != "L"))
+            widths.append(np.full(lane.shape, scale, dtype=np.int64))
         cell = np.concatenate([one for one, _ in cells])
         if not cell.size:
             return "apart"
@@ -758,9 +799,16 @@ class LaunchCheck:
         order = np.argsort(cell, kind="stable")
         cell, lane, write = cell[order], lane[order], write[order]
         starts = np.concatenate(([0], np.flatnonzero(cell[1:] != cell[:-1]) + 1))
+        stored = np.logical_or.reduceat(write, starts)
+        if scales:
+            width = np.concatenate(widths)[order]
+            if (stored & (np.minimum.reduceat(width, starts) != np.maximum.reduceat(width, starts))).any():
+                if unmasked:
+                    return "per-program"
+                raise Unproved("element-size")
         lowest = np.minimum.reduceat(lane, starts)
         highest = np.maximum.reduceat(lane, starts)
-        meeting = np.logical_or.reduceat(write, starts) & (lowest != highest)
+        meeting = stored & (lowest != highest)
         if not meeting.any():
             return "apart"
         if unmasked:
