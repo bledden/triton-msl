@@ -573,8 +573,8 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   taken from the lanes that hold them when both sides of the branch, or the loop's starting
   value and the value its body hands on, are held alike. Refused when the kernel is lowered:
   a loop that starts from a plain load of one cell per lane and adds row-wise sums held one
-  per four lanes, and a sum followed by a chain of 25 or more elementwise operations before
-  the narrow use (the message says the source's thread-to-element mapping cannot be proved).
+  per four lanes (the message says the source's thread-to-element mapping cannot be proved).
+  The number of elementwise operations between the sum and its use does not matter.
   Earlier builds took the rows from the first lanes in these cases, with no exception.
 - **`while` loops that carry vectors:** a `while` loop carries scalars, pointers and vectors
   of at most one element per thread. A `while` loop that carries a vector of more elements

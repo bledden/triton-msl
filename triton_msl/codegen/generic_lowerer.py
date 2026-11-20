@@ -17858,7 +17858,7 @@ class GenericLowerer(
         "tt.load",
     )
 
-    def _value_1d_layout_of(self, val_id, depth=24):
+    def _value_1d_layout_of(self, val_id):
         """The layout of a stored 1-D value: "direct", "blocked", "any", or None.
 
         "any" means the value is UNIFORM across elements (constants, splats of a
@@ -17880,6 +17880,10 @@ class GenericLowerer(
             resolve optimistically as "any" ON THE BACK-EDGE only, which is sound
             because init and yield are ALWAYS combined: a carry that rotates two
             different layouts conflicts at the combine and yields None.
+
+        The answer is therefore the combination of every value the walk ends at, and
+        the walk is a plain traversal that meets each value once, however long the
+        chain of operations is.
         """
         rec = getattr(self, "_value_1d_layout", None)
         if not rec:
@@ -17929,13 +17933,22 @@ class GenericLowerer(
                 return a
             return a if a == b else None
 
-        def _resolve(cur, visiting, d):
-            if d <= 0:
-                return None
-            if cur in visiting:
-                return "any"  # optimistic back-edge; init⊓yield combine keeps it sound
+        # Every value the layout comes from is followed, each once. The walk gave up 24
+        # operations deep before and answered None there: a row sum behind 25 additions
+        # was refused, although the same sum behind 24 resolved.
+        out = "any"
+        seen = set()
+        pending = [val_id]
+        while pending:
+            cur = pending.pop()
+            if cur in seen:
+                continue  # also a carried value met again on its own back-edge
+            seen.add(cur)
             if cur in rec:
-                return rec[cur]
+                out = _combine(out, rec[cur])
+                if out is None:
+                    return None
+                continue
             # Carried values: combine init with yield, positionally.
             hit = res_of.get(cur) or ba_of.get(cur)
             if hit is not None:
@@ -17944,19 +17957,13 @@ class GenericLowerer(
                 y = _yield_of(for_op)
                 if y is None or i >= len(y.operand_ids or []) or i >= len(inits):
                     return None
-                visiting = visiting | {cur}
-                return _combine(
-                    _resolve(inits[i], visiting, d - 1),
-                    _resolve(y.operand_ids[i], visiting, d - 1),
-                )
+                pending += [inits[i], y.operand_ids[i]]
+                continue
             if cur in while_of:
                 # A value carried by a while loop: what it starts from combined with
                 # what the body hands on, as for a counted loop.
-                visiting = visiting | {cur}
-                out = "any"
-                for _src in while_of[cur]:
-                    out = _combine(out, _resolve(_src, visiting, d - 1))
-                return out
+                pending += while_of[cur]
+                continue
             op = by_id.get(cur) or if_of.get(cur)
             if op is None:
                 return None
@@ -17965,27 +17972,22 @@ class GenericLowerer(
                 yielded = self._branch_values(op, cur)
                 if yielded is None:
                     return None
-                return _combine(_resolve(yielded[0], visiting, d - 1), _resolve(yielded[1], visiting, d - 1))
-            if op.op == "arith.constant":
-                return "any"
-            if op.op == "tt.splat":
-                return "any"  # a splat of a scalar is uniform across elements
+                pending += yielded
+                continue
+            if op.op in ("arith.constant", "tt.splat"):
+                continue  # uniform across elements (a splat is of a scalar)
             if not op.operand_ids:
                 return None
             if op.op in self._LAYOUT_PASSTHROUGH_OPS:
-                return _resolve(op.operand_ids[0], visiting, d - 1)
+                pending.append(op.operand_ids[0])
+                continue
             if op.op in self._LAYOUT_ELEMENTWISE_OPS:
-                out = "any"
                 # arith.select's condition (operand 0) selects per element; it shares
                 # the layout requirement like any other operand, so combine all.
-                for _oid in op.operand_ids:
-                    out = _combine(out, _resolve(_oid, visiting, d - 1))
-                    if out is None:
-                        return None
-                return out
+                pending += op.operand_ids
+                continue
             return None
-
-        return _resolve(val_id, frozenset(), depth)
+        return out
 
     def _rebuild_staged_fill_mask(self, mask_id, op_by_id, M, N, kind="store"):
         """Structurally rebuild a cooperative over-threadgroup store's or load's

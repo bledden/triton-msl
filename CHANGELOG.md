@@ -677,8 +677,9 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   sides yield and a `while` loop to the value it starts from and the value its body
   hands on, and goes on to every producer. The rows are moved from the lanes that hold
   them, or the kernel is refused when it is lowered where the sources are held
-  differently or the chain is longer than the resolver follows (130 additions after
-  the sum; 60 were refused before).
+  differently. The length of the chain no longer matters: the resolver stopped 24
+  operations deep, so 25 additions after the sum were refused where 24 computed, and
+  it now meets every value once (1, 25, 60, 130 and 400 operations compute alike).
 - A loop that hands one carried value on in another's place gave both the same value,
   with no exception. `a, b = b, a` in a counted loop or a `while` loop gives each the
   other's old value; the carried variables were written one after another, so the
