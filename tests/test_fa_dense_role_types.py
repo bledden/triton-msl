@@ -4,7 +4,9 @@ The simdgroup template stages Q through a scalar cast, but it loads K and V and 
 matrices of one element type. A K, V or Out of another float type, or a bfloat Q beside half
 tiles, used to reach the Metal compiler and fail there with a template-deduction error. The
 lowering now names the refusal. A Q of another type that the cast handles still runs on the
-template and matches a float64 reference.
+template and matches a float64 reference. A float32 Q beside float16 tiles is not one of those:
+the cast would round it to float16, so it runs on the tiled template, which stages Q in float32
+(tests/test_where_the_dense_forward_multiplies_by_its_constant.py).
 """
 
 import math
@@ -80,9 +82,9 @@ def test_mixed_matrix_role_types_refuse_by_name(fa_hits, dim, base, role, odd):
 
 
 @pytest.mark.parametrize("dim", [64, 128])
-@pytest.mark.parametrize("base, odd", [("f", "h"), ("h", "f"), ("f", "b")])
-def test_query_of_another_float_type_still_computes(fa_hits, dim, base, odd):
+@pytest.mark.parametrize("base, odd, simdgroup", [("f", "h", True), ("h", "f", False), ("f", "b", True)])
+def test_query_of_another_float_type_still_computes(fa_hits, dim, base, odd, simdgroup):
     got, expected = _launch(dim, base, "q", odd)
-    assert fa_hits == [True]
+    assert fa_hits == ([True] if simdgroup else [])
     assert not bool((got == POISON).any())
     torch.testing.assert_close(got, expected, atol=3e-3, rtol=3e-3)

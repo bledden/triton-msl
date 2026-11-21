@@ -64,6 +64,34 @@ def _v_head_dim_of(info):
     return info["head_dim"] if value is None else value
 
 
+def _constant_number(op):
+    """The number an ``arith.constant`` holds, or None when it is not one number.
+
+    MLIR prints a float constant that is not finite as its bit pattern, and the walker keeps
+    that as an integer: read as a number, an infinity is 2139095040.0. A float constant's
+    integer is decoded in the constant's own type.
+    """
+    value = (op.attrs or {}).get("value")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float):
+        return value
+    t = op.type_str or ""
+    el = t.rsplit("x", 1)[-1].split(",")[0].split(">")[0].strip() if "x" in t else t.strip()
+    try:
+        if el == "f16":
+            return struct.unpack("<e", struct.pack("<H", value))[0]
+        if el == "bf16":
+            return struct.unpack("<f", struct.pack("<I", value << 16))[0]
+        if el == "f32":
+            return struct.unpack("<f", struct.pack("<I", value))[0]
+        if el == "f64":
+            return struct.unpack("<d", struct.pack("<Q", value))[0]
+    except (struct.error, OverflowError):
+        return None
+    return float(value)
+
+
 def _simd_fa_eligible(info):
     """True if the detected FA can use the simdgroup template: head_dim in {64, 128},
     block 32x32, fp32/fp16, AND contiguous innermost (head-dim) stride for all of
@@ -7767,8 +7795,7 @@ class GenericLowerer(
                 if op is None:
                     return None
                 if op.op == "arith.constant":
-                    value = (op.attrs or {}).get("value")
-                    return float(value) if isinstance(value, (int, float)) else None
+                    return _constant_number(op)
                 if op.op not in scalar_wrappers or len(op.operand_ids or []) != 1:
                     return None
                 cur = op.operand_ids[0]
@@ -8488,9 +8515,9 @@ class GenericLowerer(
                     for x in op.operand_ids or []:
                         sub = obid.get(x)
                         if sub is not None and sub.op == "arith.constant":
-                            val = sub.attrs.get("value")
-                            if isinstance(val, (int, float)):
-                                out.append(float(val))
+                            val = _constant_number(sub)
+                            if val is not None:
+                                out.append(val)
                                 continue
                         stack.append(x)
                 elif op.op in _LAYOUT and op.operand_ids:
@@ -8510,6 +8537,8 @@ class GenericLowerer(
         if not _qf and not _score_scale["op_ids"]:
             return None
         scale = (_qf[0] if _qf else 1.0) * _score_scale["factor"]
+        if not math.isfinite(scale):
+            return None  # the templates bake a number; the ordinary lowering multiplies as written
 
         # the verified per-batch seqlen values (the cu_seqlens subi results) — the ONLY
         # bounds the varlen template clips with (packet 112 load/store mask proof)
@@ -8530,6 +8559,7 @@ class GenericLowerer(
             "out_dtype": _od,
             "scale": scale,
             "q_scale": bool(_qf),
+            "q_factor": _qf[0] if _qf else None,
             "score_scale": _score_scale,
             "max_seqlen": _ms_arg,
             "causal": causal,
@@ -8625,7 +8655,7 @@ class GenericLowerer(
         # (Q) / ``iv + range(0,32) < seqlen_k`` (K, V) on the detector's verified seqlen
         # values; the Out store MUST carry exactly the seqlen_q boundary (the template stores
         # only inside the sequence; an unmasked or tighter source store is not equivalent).
-        info["scale"] *= self._fa_verify_value_paths(
+        _exp_multiplier = self._fa_verify_value_paths(
             detected_q_index=roles["q"],
             detected_k_index=roles["k"],
             detected_v_index=roles["v"],
@@ -8641,6 +8671,7 @@ class GenericLowerer(
             kv_cols=32,
             extra_stores=[(roles["o"], "Out", ("Q",), True)],
         )
+        info["scale"] *= _exp_multiplier
         info = self._witness_varlen_flash_attention(info)
         # ``index < length`` with a length that came out negative: no index when the source
         # compares signed, every launched index when it compares unsigned (uint32 or uint64
@@ -8740,6 +8771,24 @@ class GenericLowerer(
         _tb, _bn = (4, 16) if info["out_dtype"] == "f32" else (2, 32)
         _mma_tg_bytes = 32 * D * _tb + _bn * D * _tb * 2 + 32 * _bn * _tb + 32 * _bn * 4 + 32 * 4 * 2 + 4 * 64 * 4
         mma_eligible = info["out_dtype"] in ("f16", "bf16", "f32") and D % 8 == 0 and _mma_tg_bytes <= 32768
+        # The Q product where the source forms it. The MMA maker stages Q in tiles of the
+        # tensors' type: a float32 product of bfloat16 values does not fit one, and a float32
+        # Q would be rounded to a 16-bit tile (1e5 is an infinity in float16) whether it is
+        # multiplied or not. The scalar maker's float registers hold both.
+        _tile = {"f16": "half", "bf16": "bfloat", "f32": "float"}.get(info["out_dtype"], "float")
+        _q_elem = str(self.graph.args[roles["q"]].elem_type)
+        _q_elem = {"fp16": "f16", "half": "f16", "fp32": "f32", "float": "f32", "bfloat16": "bf16"}.get(
+            _q_elem, _q_elem
+        )
+        _float_product = (
+            getattr(self, "_fa_rounding", {}).get("round_q") or getattr(self, "_fa_rounding", {}).get("q_product")
+        ) == "float"
+        if info.get("q_factor") is not None and _float_product and _tile == "bfloat":
+            mma_eligible = False
+        if _q_elem == "f32" and _tile != "float":
+            mma_eligible = False
+        _q_plan = self._fa_q_product_plan(info, _exp_multiplier, _tile if mma_eligible else "float", _q_elem)
+        _scale_kw = _q_plan or {"scale": info["scale"]}
         if mma_eligible:
             from triton_msl.codegen._msl_templates import make_varlen_flash_attention_mma
 
@@ -8750,7 +8799,7 @@ class GenericLowerer(
                 arg_decls=arg_decls,
                 bindings=bindings,
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
-                scale=info["scale"],
+                **_scale_kw,
             )
             self.effective_block_size = 128
             self._flash_attention = ("flash_attention", msl, 128)
@@ -8768,7 +8817,7 @@ class GenericLowerer(
                 arg_decls=arg_decls,
                 bindings=bindings,
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
-                scale=info["scale"],
+                **_scale_kw,
             )
             self.effective_block_size = 32
             self._flash_attention = ("flash_attention", msl, 32)
@@ -9785,9 +9834,9 @@ class GenericLowerer(
                     for x in op4.operand_ids or []:
                         sub4 = op_by_id.get(x)
                         if sub4 is not None and sub4.op == "arith.constant":
-                            v4 = sub4.attrs.get("value")
-                            if isinstance(v4, (int, float)):
-                                out.append(float(v4))
+                            v4 = _constant_number(sub4)
+                            if v4 is not None:
+                                out.append(v4)
                                 continue
                         stack.append(x)
                 elif op4.op in _SG_LAYOUT and op4.operand_ids:
@@ -9811,6 +9860,8 @@ class GenericLowerer(
         if not _sg_q and not _score_scale["op_ids"]:
             _refuse("the softmax scale constant")
         scale = (_sg_q[0] if _sg_q else 1.0) * _score_scale["factor"]
+        if not math.isfinite(scale):
+            _refuse("a finite softmax scale constant")
 
         # --- out_dtype: the output pointer's element type --------------------
         out_arg = arg_by_id.get(self.graph.args[o_idx].id)
@@ -9839,6 +9890,7 @@ class GenericLowerer(
             "causal": causal,
             "scale": scale,
             "q_scale": bool(_sg_q),
+            "q_factor": _sg_q[0] if _sg_q else None,
             "score_scale": _score_scale,
             "verify_score_path": not is_mla,
             "out_dtype": out_dtype,
@@ -13209,6 +13261,46 @@ class GenericLowerer(
             self._tail_access_bounds,
         )
 
+    def _fa_q_product_plan(self, info, exp_multiplier, tile, q_elem):
+        """Where a dense, variable-length or MLA template multiplies by the source's Q constant.
+
+        The sources multiply Q by a constant before the dot product. A template that multiplies
+        the finished score instead agrees in real numbers only: a dot product that overflows
+        before the scale is applied and not after it is NaN there and finite in the source.
+        Returns the makers' keywords for staging the product the proof recorded, or ``{}`` when
+        the score multiply is the same function: no Q constant, or a float32 product of float16
+        values in half tiles, which cannot be staged there and cannot differ. The magnitudes
+        are at most 65504, so the sum of at most 256 products is below 1.2e12 in either order,
+        and a finite constant maps each infinity, NaN and zero of Q to itself.
+        """
+        rounding = getattr(self, "_fa_rounding", {})
+        rq = rounding.get("round_q") or rounding.get("q_product")
+        q_factor = info.get("q_factor")
+        if q_factor is None:
+            return {}
+        post = float(info["score_scale"]["factor"]) * float(exp_multiplier)
+        if rq is None or not math.isfinite(q_factor) or not math.isfinite(post):
+            raise MetalNonRecoverableError(
+                "FlashAttention: the constant the source multiplies Q by is not finite, or its product "
+                "was not recorded by the value proof; the template cannot stage it. Refusing rather "
+                "than scale the finished score instead.",
+                op_name="tt.dot",
+            )
+        if rq == "float" and tile == "half":
+            if q_elem != "f16":
+                raise MetalNonRecoverableError(
+                    f"FlashAttention: a float32 product of a {q_elem} Q cannot be staged in float16 tiles; "
+                    "refusing rather than round Q to float16.",
+                    op_name="tt.dot",
+                )
+            return {}
+        return {
+            "round_q": rq,
+            "scale": q_factor,
+            "post_scale": None if post == 1.0 else post,
+            "scale_chain": rounding.get("scale_chain", ()),
+        }
+
     def _fa_unmasked_store_rows(self, row_bound, block_m) -> None:
         """Carry an unmasked FlashAttention store's row domain to the launcher.
 
@@ -14114,7 +14206,7 @@ class GenericLowerer(
         # rope, same single scale, replayed transposes/casts only), plain or boundary-masked
         # loads, the exact nope + rope score into the softmax, the exact P and P@V path, the
         # canonical normalized Out — verified like the symmetric routes.
-        info["scale"] *= self._fa_verify_value_paths(
+        _exp_multiplier = self._fa_verify_value_paths(
             detected_q_index=info["q"],
             detected_k_index=info["k"],
             detected_v_index=info["v"],
@@ -14129,6 +14221,11 @@ class GenericLowerer(
             q_rows=info.get("block_m"),
             kv_cols=info.get("block_n"),
         )
+        info["scale"] *= _exp_multiplier
+        # Every role has one type here (checked above): a float32 product is staged in float
+        # tiles, and with float16 tiles the score multiply is the same function.
+        _mla_type = next(iter(_role_types))
+        _q_plan = self._fa_q_product_plan(info, _exp_multiplier, "half" if _mla_type == "f16" else "float", _mla_type)
         # The template computes the FULL output tile and gates writes only at N_CTX: a
         # tighter store mask would be silently dropped (packet 109 mode 6).
         if self._template_output_mask_nontrivial(is_fa=True, fa_ctx_index=info.get("N_CTX")):
@@ -14156,9 +14253,9 @@ class GenericLowerer(
             causal=info["causal"],
             out_dtype=info["out_dtype"],
             kernel_name=name,
-            scale=info["scale"],
             v_head_dim=info["v_head_dim"],
             half_accumulate=_fa_half_accumulate(info["out_dtype"]),
+            **(_q_plan or {"scale": info["scale"]}),
         )
         self.effective_block_size = 256
         self._used_pid_axes = {0, 1}
@@ -14740,8 +14837,7 @@ class GenericLowerer(
                 if op is None:
                     return None
                 if op.op == "arith.constant":
-                    value = (op.attrs or {}).get("value")
-                    return float(value) if isinstance(value, (int, float)) else None
+                    return _constant_number(op)
                 if op.op not in _scalar_wrappers or len(op.operand_ids or []) != 1:
                     return None
                 cur = op.operand_ids[0]
@@ -15137,8 +15233,7 @@ class GenericLowerer(
                 if op is None:
                     return None
                 if op.op == "arith.constant":
-                    value = (op.attrs or {}).get("value")
-                    return float(value) if isinstance(value, (int, float)) else None
+                    return _constant_number(op)
                 if op.op not in _scalar_wrappers or len(op.operand_ids or []) != 1:
                     return None
                 cur = op.operand_ids[0]
@@ -16238,7 +16333,7 @@ class GenericLowerer(
                 )
 
         _dense_tail = {"causal": info["causal"], "H": info["H"], "strides": info["strides"]}
-        info["scale"] *= self._fa_verify_value_paths(
+        _exp_multiplier = self._fa_verify_value_paths(
             detected_q_index=info["q"],
             detected_k_index=info["k"],
             detected_v_index=info["v"],
@@ -16254,6 +16349,7 @@ class GenericLowerer(
             kv_cols=info["block_n"],
             dense_tail_out=_dense_tail,
         )
+        info["scale"] *= _exp_multiplier
 
         self._fa_unmasked_store_rows(info.get("query_length", info.get("N_CTX")), block_m)
 
@@ -16333,7 +16429,15 @@ class GenericLowerer(
         # Q/K/V/Out; the narrow native-bf16 route emits bfloat Q/K/V/Out. The
         # arg_decls above use each argument's proved real element type, and both
         # tiled paths promote on load, compute in fp32 and cast on store.
-        if _simd_fa_eligible(info) and "query_length" not in info:
+        # A float32 Q beside float16 K, V and Out: the simdgroup maker's half tiles would round Q
+        # to float16 (an element of 1e5 becomes an infinity). The tiled maker stages Q in float32.
+        _f16 = ("f16", "fp16", "half")
+        _wide_q = (
+            all(str(args[info[r]].elem_type) in _f16 for r in ("k", "v", "out"))
+            and str(args[info["q"]].elem_type) in ("f32", "fp32", "float")
+            and v_head_dim == head_dim
+        )
+        if _simd_fa_eligible(info) and "query_length" not in info and not _wide_q:
             from triton_msl.codegen._fa_fragments import scope_reason, validate_mode
 
             # The simdgroup template stages Q through a scalar cast but loads K and V and
@@ -16359,6 +16463,10 @@ class GenericLowerer(
             requested = validate_mode(getattr(self.options, "experimental_fa_fragment_lowering", "off"))
             half_accumulate = _fa_half_accumulate(info["out_dtype"])
             rounding = getattr(self, "_fa_rounding", {})
+            # The Q product where the source forms it (see _fa_q_product_plan).
+            _q_plan = self._fa_q_product_plan(
+                info, _exp_multiplier, "half" if _role_types["out"] == "f16" else "float", _role_types["q"]
+            )
             reason = scope_reason(
                 head_dim=head_dim,
                 v_head_dim=v_head_dim,
@@ -16366,7 +16474,7 @@ class GenericLowerer(
                 causal=info["causal"],
                 half_accumulate=half_accumulate,
                 scale=info["scale"],
-                round_q=rounding.get("round_q"),
+                round_q=_q_plan.get("round_q", rounding.get("round_q")),
                 round_p=rounding.get("round_p"),
                 scale_chain=rounding.get("scale_chain", ()),
                 source_kv_block=_dense_tail["source_kv_block"],
@@ -16394,10 +16502,10 @@ class GenericLowerer(
                 arg_decls=arg_decls,
                 bindings=bindings,
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
-                scale=info["scale"],
                 v_head_dim=v_head_dim,
                 half_accumulate=half_accumulate,
                 fragment_lowering=selected,
+                **(_q_plan or {"scale": info["scale"]}),
                 source_kv_block=_dense_tail["source_kv_block"],
                 mask_tail_scores=_dense_tail["mask_tail_scores"],
                 unmasked_kv=_dense_tail["unmasked_kv"],
@@ -16425,6 +16533,9 @@ class GenericLowerer(
                     "template (contiguous, fp16/bf16); the scalar/tiled fallback is "
                     "symmetric-only. Refusing rather than mis-compute."
                 )
+            # The tiled maker stages Q in float32 at every tensor type, so it holds the
+            # product whatever its type.
+            _q_plan = self._fa_q_product_plan(info, _exp_multiplier, "float", "f32")
             msl = make_flash_attention_kernel_tiled(
                 head_dim,
                 block_m,
@@ -16438,7 +16549,6 @@ class GenericLowerer(
                 arg_decls=arg_decls,
                 bindings=bindings,
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
-                scale=info["scale"],
                 source_kv_block=_dense_tail["source_kv_block"],
                 mask_tail_scores=_dense_tail["mask_tail_scores"],
                 unmasked_kv=_dense_tail["unmasked_kv"],
@@ -16446,8 +16556,8 @@ class GenericLowerer(
                 query_tile=32 if head_dim == 64 and block_m >= 32 and (block_m, block_n) != (32, 32) else None,
                 initial_values=_dense_tail["initial_values"],
                 query_length=_expr(info["query_length"]) if "query_length" in info else None,
-                round_q=getattr(self, "_fa_rounding", {}).get("round_q") if "query_length" in info else None,
                 round_p=getattr(self, "_fa_rounding", {}).get("round_p") if "query_length" in info else None,
+                **(_q_plan or {"scale": info["scale"]}),
             )
             # Match every cooperative loop's physical stride, even for >1024 scores.
             self.effective_block_size = flash_attention_tiled_threads(block_m, block_n)

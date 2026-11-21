@@ -286,6 +286,38 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   backward kernels and 1.3e-06 on the forward kernel. With a power-of-two
   scale, and at the 16-bit types with a finite scale, every result compared
   keeps its bits.
+- On the dense, variable-length and MLA forward routes, multiply Q by the
+  softmax constant where the source does. These sources also multiply Q
+  before the dot product (`q = q * qk_scale`, `q = q * SCALE`), and their
+  templates multiplied the finished score. With a Q element near `1e30`
+  against keys near `1e9` the dot product overflowed before a constant below
+  one was applied: the template's row was NaN and the source's is finite.
+  With a constant above one the source's product overflows and its row is
+  NaN, where the template's was finite; in a 16-bit product that takes a Q
+  element near `6e4`. The templates now stage the product in the type the
+  source forms it in, and multiply the score only by a constant the source
+  puts there. Float16 tensors with a float32 product keep the score
+  multiply: half tiles cannot hold the product, and with magnitudes of at
+  most 65504 neither order can overflow.
+  Three more differences from the source were found on these routes and are
+  closed with it. A constant that is not finite in the type of its product
+  (an infinity, a NaN, `7e4` in float16, `3.4e38` in bfloat16) is printed by
+  MLIR as its bit pattern, and that integer was baked as the scale, 2139095040
+  for a float32 infinity: no template takes such a constant now, the
+  ordinary lowering multiplies as written, and a score constant that is not
+  finite is refused. A float32 Q beside float16 K, V and Out was rounded to
+  float16 by the simdgroup template, so an element of `1e5` became an
+  infinity and its row NaN: it runs on the tiled template, which stages Q in
+  float32. The variable-length MMA template rounded a float32 Q beside
+  16-bit keys the same way: it runs on the scalar template.
+  Float32 results change in their last bits when the constant is not a power
+  of two (head dimension 128, or a constant such as `0.3`): the largest
+  difference measured is 2.2e-06 of the largest value. Variable-length
+  results at the 16-bit types change with such a constant too, by up to
+  7.3e-04 of the largest value at float16 and 1.0e-02 at bfloat16, because
+  the constant and the product are now rounded to the tensors' type as the
+  source rounds them. Dense and MLA float16 results, and every result with a
+  power-of-two constant, keep their bits.
 - On the biased backward routes, prove the loaded bias and key mask along
   the axes their addresses walk. A bias tile loaded transposed
   (`Bias[key, row]`), a bias load masked by the key boundary on its rows or

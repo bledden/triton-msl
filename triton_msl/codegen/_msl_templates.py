@@ -1858,6 +1858,39 @@ def _bwd_k_other(other, round_k, scale_r):
     )
 
 
+def _fa_post_scale_decl(post_scale):
+    """The score's own multiplier once the Q product is staged: one, or the source's constant."""
+    if post_scale is None:
+        return "\n    const float s_scale = 1.0f;  // packet 164: the scale is applied to Q in the source's dtype"
+    import math
+
+    post = float(post_scale)
+    if not math.isfinite(post):
+        raise ValueError("the score scale beside a staged Q product must be finite")
+    return f"\n    const float s_scale = {post!r}f;  // the source's constant on the finished score"
+
+
+def _fa_staged_q(raw, round_q, tile):
+    """Q times the scale as the source forms it, held in a `tile` cell.
+
+    "float": the float32 product as it is (a float tile only). "half" / "bfloat": the scale
+    rounded to that type and the product rounded to it once, which is the source's
+    ``q * full(scale, dtype)``; exact in a tile of that type or a wider one.
+    """
+    if round_q is None:
+        return f"{tile}({raw})"
+    if round_q == "float":
+        if tile != "float":
+            raise ValueError("a float32 Q product is staged in a float tile only")
+        return f"(float({raw}) * scale)"
+    if round_q not in ("half", "bfloat"):
+        raise ValueError("round_q must be None, 'half', 'bfloat' or 'float'")
+    if tile == "half" and round_q == "bfloat":
+        raise ValueError("a bfloat16 Q product does not fit a half tile")
+    staged = f"{round_q}(float({raw}) * float({round_q}(scale)))"
+    return staged if tile == round_q else f"{tile}({staged})"
+
+
 def _fa_scale_chain_expr(expr, scale_chain, round_q):
     """Replay scalar conversions independently of the Q product's precision.
 
@@ -1950,8 +1983,12 @@ def make_flash_attention_kernel_simdgroup(
     initial_values=None,
     fragment_lowering="off",
     sentinel_kv_block=None,
+    post_scale=None,
 ):
     """simdgroup_matrix FlashAttention-2 (fp32/fp16, causal/non-causal, head_dim=128).
+
+    ``post_scale``: with ``round_q``, the constant the source multiplies the finished score by
+    (None: one). The Q product is staged with ``scale`` alone.
 
     packet 164 (item F-a): ``round_q`` / ``round_p`` in {None, "half", "bfloat"} replay the SOURCE's
     narrowing — ``q * tl.full([1], scale, dtype)`` (the scale rounded to the input dtype, each product
@@ -2138,9 +2175,9 @@ def make_flash_attention_kernel_simdgroup(
     _scale_value = bindings["scale"] if runtime_scale else f"{SCALE!r}f"
     scale_decl = f"const float scale = {_fa_scale_chain_expr(_scale_value, scale_chain, round_q)};"
     if round_q:
-        scale_decl += (
-            "\n    const float s_scale = 1.0f;  // packet 164: the scale is applied to Q in the source's dtype"
-        )
+        scale_decl += _fa_post_scale_decl(post_scale)
+    elif post_scale is not None:
+        raise ValueError("post_scale needs a staged Q product (round_q)")
     if runtime_neg_inf:
         if not bindings or "neg_inf" not in bindings:
             raise ValueError("simd FA: runtime_neg_inf requires bindings['neg_inf']")
@@ -4178,6 +4215,7 @@ def make_flash_attention_kernel_tiled(
     query_length=None,
     transpose_k=False,
     other_axis_masks=None,
+    post_scale=None,
 ):
     """Generate a HEAD-DIM-TILED FlashAttention-2 kernel for Metal (fp32/fp16).
 
@@ -4494,9 +4532,9 @@ def make_flash_attention_kernel_tiled(
     _scale_value = bindings["scale"] if runtime_scale else f"{SCALE!r}f"
     scale_decl = f"const float scale = {_fa_scale_chain_expr(_scale_value, scale_chain, round_q)};"
     if round_q:
-        scale_decl += (
-            "\n    const float s_scale = 1.0f;  // packet 164: the scale is applied to Q in the source's dtype"
-        )
+        scale_decl += _fa_post_scale_decl(post_scale)
+    elif post_scale is not None:
+        raise ValueError("post_scale needs a staged Q product (round_q)")
     if runtime_neg_inf:
         # the source sentinel lives in its exp domain (after the c_eff multiply); convert
         # to this template's natural units: sentinel_nat = sentinel * (1 / c_eff)
@@ -5925,6 +5963,9 @@ def make_varlen_flash_attention(
     bindings=None,
     kernel_name="varlen_fa",
     scale=None,
+    round_q=None,
+    scale_chain=(),
+    post_scale=None,
 ):
     """VARLEN FlashAttention-2 (packed cu_seqlens, route-only ABI). One thread per query
     row; K/V tiles staged in threadgroup memory; online softmax with a register acc.
@@ -5956,6 +5997,15 @@ def make_varlen_flash_attention(
     # the canonical 1/sqrt(head_dim) only for the route-free template smoke test.
     scale = float(D) ** -0.5 if scale is None else float(scale)
     inv_ln2 = 1.4426950408889634
+    # round_q: the source's Q product, staged where the source forms it (None: the scale
+    # multiplies the finished score). post_scale: the source's constant on the score beside it.
+    if round_q is None and (post_scale is not None or tuple(scale_chain)):
+        raise ValueError("post_scale and scale_chain need a staged Q product (round_q)")
+    _scale_expr = _fa_scale_chain_expr(f"{scale!r}f", scale_chain, round_q) if round_q else f"{scale}f"
+    _s_scale_decl = _fa_post_scale_decl(post_scale) if round_q else ""
+    _s_scale = "s_scale" if round_q else "scale"
+    _q_cell = f"{bindings['Q']}[{_varlen_cell('(q_start + qrow) * q_st + h * q_sh + d * q_sk')}]"
+    _q_reg = _fa_staged_q(_q_cell, round_q, "float")
     _need = [
         "Q",
         "K",
@@ -6001,7 +6051,7 @@ kernel void {kernel_name}(
     uint lid [[thread_index_in_threadgroup]]
 ) {{
     const uint D = {D}u, BM = {BM}u, BN = {BN}u;
-    const float scale = {scale}f, inv_ln2 = {inv_ln2}f;
+    const float scale = {_scale_expr}, inv_ln2 = {inv_ln2}f;{_s_scale_decl}
     const uint nheads = {b["H"]};
     const uint q_st = {b["q_st"]}, q_sh = {b["q_sh"]}, q_sk = {b["q_sk"]};
     const uint k_st = {b["k_st"]}, k_sh = {b["k_sh"]}, k_sk = {b["k_sk"]};
@@ -6023,7 +6073,7 @@ kernel void {kernel_name}(
     float q_reg[{D}];
     float acc[{D}];
     for (uint d = 0u; d < D; d++) {{
-        q_reg[d] = valid ? float({b["Q"]}[{_varlen_cell("(q_start + qrow) * q_st + h * q_sh + d * q_sk")}]) : 0.0f;
+        q_reg[d] = valid ? {_q_reg} : 0.0f;
         acc[d] = 0.0f;
     }}
     float m_i = -INFINITY, l_i = 0.0f;
@@ -6046,7 +6096,7 @@ kernel void {kernel_name}(
                 if (krow < kmax {causal_guard}) {{
                     float s = 0.0f;
                     for (uint d = 0u; d < D; d++) s += q_reg[d] * tg_K[kk * D + d];
-                    s *= scale;
+                    s *= {_s_scale};
                     float m_new = max(m_i, s);
                     float alpha = exp2((m_i - m_new) * inv_ln2);
                     float p = exp2((s - m_new) * inv_ln2);
@@ -6074,6 +6124,9 @@ def make_varlen_flash_attention_mma(
     bindings=None,
     kernel_name="varlen_fa_mma",
     scale=None,
+    round_q=None,
+    scale_chain=(),
+    post_scale=None,
 ):
     """FAST varlen FlashAttention-2 via simdgroup_matrix MMA (fp16 in/out, fp32 accumulate).
 
@@ -6144,6 +6197,17 @@ def make_varlen_flash_attention_mma(
     kmax_expr = _varlen_kmax_expr(_maxs)
     SCALE = float(D) ** -0.5 if scale is None else float(scale)
     causal_expr = "(qrow >= kr)" if causal else "true"
+    if round_q is None and (post_scale is not None or tuple(scale_chain)):
+        raise ValueError("post_scale and scale_chain need a staged Q product (round_q)")
+    _scale_decl = (
+        f"const float scale = {_fa_scale_chain_expr(f'{SCALE!r}f', scale_chain, round_q)};"
+        + _fa_post_scale_decl(post_scale)
+        if round_q
+        else f"const float SCALE = {SCALE}f;"
+    )
+    _s_scale = "s_scale" if round_q else "SCALE"
+    _q_cell = f"{bindings['Q']}[{_varlen_cell('(q_start+qr)*q_st + h*q_sh + c*q_sk')}]"
+    _q_tile = _fa_staged_q(_q_cell, round_q, TILE)
     sig = ",\n".join(arg_decls)
     return f"""#include <metal_stdlib>
 using namespace metal;
@@ -6156,7 +6220,7 @@ kernel void {kernel_name}(
     uint sgid [[simdgroup_index_in_threadgroup]]
 ) {{
     const uint D = {D}u, BM = {BM}u, BN = {BN}u, NT = {NT}u;
-    const float SCALE = {SCALE}f;
+    {_scale_decl}
     const uint nheads = {b["H"]};
     const uint q_st = {b["q_st"]}, q_sh = {b["q_sh"]}, q_sk = {b["q_sk"]};
     const uint k_st = {b["k_st"]}, k_sh = {b["k_sh"]}, k_sk = {b["k_sk"]};
@@ -6182,7 +6246,7 @@ kernel void {kernel_name}(
 
     for (uint i = lid; i < BM*D; i += NT) {{
         uint r = i / D, c = i % D; uint qr = m_block*BM + r;
-        tg_Q[i] = qr < seqlen_q ? {TILE}({b["Q"]}[{_varlen_cell("(q_start+qr)*q_st + h*q_sh + c*q_sk")}]) : {TILE}(0);
+        tg_Q[i] = qr < seqlen_q ? {_q_tile} : {TILE}(0);
     }}
     for (uint i = lid; i < BM; i += NT) {{ tg_m[i] = -INFINITY; tg_l[i] = 0.0f; }}
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -6216,7 +6280,7 @@ kernel void {kernel_name}(
             float m_old = tg_m[r], l_old = tg_l[r], m_blk = -INFINITY;
             for (uint j = 0u; j < BN; j++) {{
                 uint kr = kt + j;
-                float s = (kr < kmax && {causal_expr}) ? tg_S[r*BN+j]*SCALE : -INFINITY;
+                float s = (kr < kmax && {causal_expr}) ? tg_S[r*BN+j]*{_s_scale} : -INFINITY;
                 tg_S[r*BN+j] = s; m_blk = max(m_blk, s);
             }}
             float m_new = max(m_old, m_blk);

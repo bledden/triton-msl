@@ -455,15 +455,17 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
 - **Where attention multiplies by its scale:** the biased backward and forward templates
   multiply K (dK / dV, dQ) or Q (bias gradient, forward) by the softmax scale before the dot
   product, as the source does, at every type, so a scale that is not finite and a product that
-  overflows give the source's NaN. Float32 results differ in their last bits from 0.3.0 when the
-  scale is not a power of two. Two differences from the source remain open on forward kernels
-  with finite inputs, both near the float32 limit of the scores. The dense, variable-length and MLA
-  templates multiply the score tile by a constant scale after the dot product, so a sum that
-  overflows before the scale is applied (measured on the dense route: a Q element of 1e30, K
-  near 1e9) is NaN in the template and finite in the source. The biased template keeps scores
-  in natural units, so a score between about 2.36e38 and 3.4e38, which overflows in the
-  source's multiply by 1 / ln 2 and makes its row NaN, is finite in the template (measured with
-  float32 and with bfloat16 tensors: the scores are float32 at every tensor type).
+  overflows give the source's NaN. The dense, variable-length and MLA forward templates stage
+  Q times the source's constant the same way, in the type the source forms the product in;
+  float16 tensors with a float32 product keep the multiply on the score, where neither order
+  can overflow. A constant that is not finite in the type of its product reaches no template.
+  Float32 results differ in their last bits from 0.3.0 when the scale is not a power of two,
+  and variable-length results at the 16-bit types by up to 1e-02 of the largest value, where
+  the source's 16-bit product is now replayed. One difference from the source remains open on
+  forward kernels with finite inputs, near the float32 limit of the scores. The biased template
+  keeps scores in natural units, so a score between about 2.36e38 and 3.4e38, which overflows
+  in the source's multiply by 1 / ln 2 and makes its row NaN, is finite in the template
+  (measured with float32 and with bfloat16 tensors: the scores are float32 at every tensor type).
 - **In-place outputs:** a matmul whose output overlaps an operand keeps the source's load-then-store
   order by leaving the replacement template; the quantized routes and the attention kernels refuse
   such a launch by name, except the two biased source replays, which keep the order behind a barrier
