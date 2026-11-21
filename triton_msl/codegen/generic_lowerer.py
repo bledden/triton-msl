@@ -8799,6 +8799,7 @@ class GenericLowerer(
                 arg_decls=arg_decls,
                 bindings=bindings,
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
+                source_block=32,  # the detector admits BLOCK_N == 32 alone
                 **_scale_kw,
             )
             self.effective_block_size = 128
@@ -8817,6 +8818,7 @@ class GenericLowerer(
                 arg_decls=arg_decls,
                 bindings=bindings,
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
+                source_block=32,  # the detector admits BLOCK_N == 32 alone
                 **_scale_kw,
             )
             self.effective_block_size = 32
@@ -13948,7 +13950,13 @@ class GenericLowerer(
             bindings["neg_inf"] = "(-INFINITY)" if _sc == float("-inf") else f"({_sc!r}f)"
         else:
             raise MetalNonRecoverableError("biased FlashAttention: the score sentinel was not proven; refusing.")
-        _ni_unit = 1.0 / float(info.get("c_eff", 1.0))
+        # A source that multiplies its scores by a constant is computed in its own units:
+        # the same float32 product (an overflow is the source's infinity), its exponential,
+        # its constant on the stored maximum. The sentinel then needs no conversion.
+        # (tl.dot accumulates in float32 alone, so the product is a float32 one.)
+        _ni_unit = 1.0
+        _su = float(_bout["score_unit"])
+        _score_unit = None if _su == 1.0 else (_su, _bout["exp_base"], float(_bout["lse_unit"]))
 
         # 3-D grid (trifast): h = pid3.y (triangle-i), z = pid3.z (batch*heads). When
         # the mask's batch offset is divui(pid_h, H_heads) (cross-head-shared mask,
@@ -13994,7 +14002,7 @@ class GenericLowerer(
             # A 64-wide tile lines up with the source's iterations when the source's key block
             # divides it or is a whole number of tiles; the template then tells the padding
             # keys the source visits from the ones it never reaches.
-            and (64 % block_n == 0 or block_n % 64 == 0)
+            and ((64 % block_n == 0 and block_n % 8 == 0) or block_n % 64 == 0)
             # The fragment loads of this template take whole rows and whole key columns.
             and not _other_axis
         )
@@ -14019,6 +14027,7 @@ class GenericLowerer(
                 mask_batch_div=mask_batch_div,
                 runtime_neg_inf=True,
                 neg_inf_unit=_ni_unit,
+                score_unit=_score_unit,
                 round_q=_rq,
                 round_p=_rp,
                 scale_chain=_scale_chain,
@@ -14074,6 +14083,7 @@ class GenericLowerer(
                 mask_batch_div=mask_batch_div,
                 runtime_neg_inf=True,
                 neg_inf_unit=_ni_unit,
+                score_unit=_score_unit,
                 round_q=_rq,
                 round_p=_rp,
                 scale_chain=_scale_chain,
@@ -14255,6 +14265,7 @@ class GenericLowerer(
             kernel_name=name,
             v_head_dim=info["v_head_dim"],
             half_accumulate=_fa_half_accumulate(info["out_dtype"]),
+            source_block_ends=int(info["block_n"]),
             **(_q_plan or {"scale": info["scale"]}),
         )
         self.effective_block_size = 256
@@ -15239,6 +15250,8 @@ class GenericLowerer(
                 cur = op.operand_ids[0]
             return None
 
+        _exp_shapes = {}
+
         def _parse_exp(exp_op, role):
             if exp_op is None or len(exp_op.operand_ids or []) != 1:
                 _refuse(role, "the softmax exponential does not have one input")
@@ -15267,6 +15280,7 @@ class GenericLowerer(
                 base_log = 1.0
             else:
                 _refuse(role, f"unsupported exponential operation {exp_op.op}")
+            _exp_shapes[exp_op.id] = (factor, exp_op.op)
             return core, factor * base_log
 
         _p_core, _p_multiplier = _parse_exp(_p_exp, "P")
@@ -15484,6 +15498,7 @@ class GenericLowerer(
             verify_score_path = True
             if biased_out is not None:
                 biased_out.update(_biased_snt)
+                biased_out["score_unit"] = _biased_expected["factor"]
                 biased_out["certified_selects"] = tuple(sorted(_certified_selects))
 
         _varlen_select = None
@@ -15617,6 +15632,19 @@ class GenericLowerer(
                 "the probability and alpha exponent chains use different effective "
                 f"bases ({_p_multiplier:.9g} vs {_alpha_multiplier:.9g})",
             )
+        if biased is not None:
+            # The biased templates take the exponentials as the source spells them, on
+            # value-minus-max itself. A multiplier inside the exponent is a temperature they do
+            # not carry. (The two multipliers agree above, so without one the operations do.)
+            _p_factor, _p_op = _exp_shapes[_p_exp.id]
+            if _p_factor != 1.0 or _exp_shapes[_alpha_exps[0].id][0] != 1.0:
+                _refuse(
+                    "P",
+                    "the biased route replays the exponential of value-minus-max; "
+                    "a multiplier inside the exponent is not replayed",
+                )
+            if biased_out is not None:
+                biased_out["exp_base"] = 2.0 if _p_op == "math.exp2" else _math.e
 
         # Biased FA also stores LSE, so select Out by its independently traced pointer.
         _out_stores = []
@@ -16196,6 +16224,8 @@ class GenericLowerer(
                 _want = 1.0 / _c_eff
                 if len(_consts) != 1 or abs(_consts[0][0] - _want) > 1e-6 * abs(_want):
                     _refuse("Lse", "the max conversion constant is not 1/c (the base conversion the template applies)")
+                if biased_out is not None:
+                    biased_out["lse_unit"] = _consts[0][0]
                 _R_m = _peel_id(next(x for v, x in _cs if v is None), _b_wr)
             else:
                 _R_m = _peel_id(_other, _b_wr)

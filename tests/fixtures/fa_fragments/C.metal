@@ -108,7 +108,12 @@ kernel void _flash_attn_fwd(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lid < BM) {
                 uint r = lid; float m_prev = tg_m[r], l_prev = tg_l[r], m_new = m_prev;
-                for (uint j = 0u; j < 8u; j++) m_new = max(m_new, tg_pmax[r*8u+j]);
+                bool m_ended = false;
+                for (uint j = 0u; j < 8u; j++) {
+                    m_new = max(m_new, tg_pmax[r*8u+j]);
+                    if ((j % 4u) == 3u && m_new == -INFINITY) m_ended = true;
+                }
+                if (m_ended) m_new = NAN;
                 tg_m[r] = m_new; tg_alpha[r] = exp(m_prev - m_new); tg_l[r] = l_prev * tg_alpha[r];
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -203,7 +208,12 @@ kernel void _flash_attn_fwd(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lid < BM) {
                 uint r = lid; float m_prev = tg_m[r], l_prev = tg_l[r], m_new = m_prev;
-                for (uint j = 0u; j < 8u; j++) m_new = max(m_new, tg_pmax[r*8u+j]);
+                bool m_ended = false;
+                for (uint j = 0u; j < 8u; j++) {
+                    m_new = max(m_new, tg_pmax[r*8u+j]);
+                    if ((j % 4u) == 3u && m_new == -INFINITY) m_ended = true;
+                }
+                if (m_ended) m_new = NAN;
                 tg_m[r] = m_new; tg_alpha[r] = exp(m_prev - m_new); tg_l[r] = l_prev * tg_alpha[r];
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);

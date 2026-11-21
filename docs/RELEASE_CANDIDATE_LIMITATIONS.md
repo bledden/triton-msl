@@ -461,11 +461,16 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   can overflow. A constant that is not finite in the type of its product reaches no template.
   Float32 results differ in their last bits from 0.3.0 when the scale is not a power of two,
   and variable-length results at the 16-bit types by up to 1e-02 of the largest value, where
-  the source's 16-bit product is now replayed. One difference from the source remains open on
-  forward kernels with finite inputs, near the float32 limit of the scores. The biased template
-  keeps scores in natural units, so a score between about 2.36e38 and 3.4e38, which overflows
-  in the source's multiply by 1 / ln 2 and makes its row NaN, is finite in the template
-  (measured with float32 and with bfloat16 tensors: the scores are float32 at every tensor type).
+  the source's 16-bit product is now replayed. The biased forward template computes the softmax
+  in the source's units (its float32 product with the score constant, its exponential, its
+  constant on the stored maximum), so a product that overflows gives the source's NaN row;
+  biased results differ from 0.3.0 in their last bits, and an exponent that carries a
+  multiplier of its own is refused on that route.
+- **Where a source's key block ends:** a row whose running maximum is still minus infinity when
+  one of the source's key blocks ends is NaN in the source. The forward templates decide at the
+  same key whatever their own tile width, so a block of keys masked with an infinite sentinel,
+  or scoring minus infinity, gives the source's rows on the biased, dense, variable-length and
+  MLA routes.
 - **In-place outputs:** a matmul whose output overlaps an operand keeps the source's load-then-store
   order by leaving the replacement template; the quantized routes and the attention kernels refuse
   such a launch by name, except the two biased source replays, which keep the order behind a barrier

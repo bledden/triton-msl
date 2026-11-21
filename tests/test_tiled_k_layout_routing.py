@@ -46,13 +46,13 @@ def test_option_default_and_cache_hash():
     [
         (
             True,
-            "78ebeab998aae1e8bbfd2da8da6a35bf77047b4a4e428fc36796942244e5bb65",
-            "eb2a0b7be9c3c957438389b18d4ba058f76f7b311c7314a13c31c065d3f0620c",
+            "1d0e83f41923c1a46681859d79a7a0fd70050555d6b246f3af6f24ff054c5cec",
+            "4c6b20dc73ee35ab639e716abaaeccdd2420d4332d30d1f93a23293a23ec025e",
         ),
         (
             False,
-            "33a0ed641681c458118adc96e2b7a980ced301a60912d001ea9588b1d74aa7d5",
-            "817c023ac204723e2976db89a23c0708634290caf91b6ef0fec0b03c9759ed35",
+            "36b7f796c604fc7a6b53e8e1107f9ef236ee27997760051c334e1583b0aae50d",
+            "3bcfadbb8b7110e14951b8445fe91da16f00ccf9e376f2175165e2726442c222",
         ),
     ],
 )

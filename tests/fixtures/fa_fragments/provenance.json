@@ -2,32 +2,38 @@
   {
     "file": "C.metal",
     "source": "fa512-fragment-lowering-inquiry-20261028/proposed-sources/C.metal",
-    "sha256": "e6c47ea86a2a5eaab29d1a3c9d89383a66b31442b7a6013a7b96692270782545"
+    "sha256": "a6d88ea86b9225411da73a0817550065ef8caabd17a456ac4294f0f635a35f7e",
+    "amended": "source block-end rule (a row is NaN where a 32-key source block ends on -inf): the maximum loop only"
   },
   {
     "file": "C_U.metal",
     "source": "fa512-fragment-lowering-inquiry-20261028/proposed-sources/C_U.metal",
-    "sha256": "4de5ef53339bbbd9c2c8ca1ad03e72172091e69446aab00b0d97d39328c072d0"
+    "sha256": "153f4f88397cc92d8c1d9af087be78ecb7aceaebed115e674da6fd8569cfe41f",
+    "amended": "source block-end rule (a row is NaN where a 32-key source block ends on -inf): the maximum loop only"
   },
   {
     "file": "S_U.metal",
     "source": "fa512-fragment-lowering-inquiry-20261028/proposed-sources/S_U.metal",
-    "sha256": "608fe56cd7924481b1be14d356f46319129094ae00cb9dd576914207d60173ff"
+    "sha256": "c5e389795892c784979153c03d0c09c7b5ffef404453a79fc9bfe13f6825f058",
+    "amended": "source block-end rule (a row is NaN where a 32-key source block ends on -inf): the maximum loop only"
   },
   {
     "file": "B_U.metal",
     "source": "fa512-fragment-lowering-inquiry-20261028/proposed-sources/B_U.metal",
-    "sha256": "ca614cdc3b089ec417047530865d48753f4b341eaf23d93e6a8c2d2c3a0996f4"
+    "sha256": "9575efeb519e4dc89ae1e6c624bf31ee8be3fcb2ea750082a7be50d0bee16eaa",
+    "amended": "source block-end rule (a row is NaN where a 32-key source block ends on -inf): the maximum loop only"
   },
   {
     "file": "SB_U.metal",
     "source": "fa512-fragment-lowering-inquiry-20261028/proposed-sources/SB_U.metal",
-    "sha256": "87d773319f0b260fdceaee1c910f7de193a6d3c9194938060e9ce48a56ef5a3e"
+    "sha256": "78d5b2abd252eef35182dfb6ba0ab60c02fac0ff4a257e5448d26f8ec438c4f6",
+    "amended": "source block-end rule (a row is NaN where a 32-key source block ends on -inf): the maximum loop only"
   },
   {
     "file": "F_U.metal",
     "source": "fa512-fragment-lowering-inquiry-20261028/proposed-sources/F_U.metal",
-    "sha256": "c2289c1d80e3319c485af2cd31d4daf29f09be1f1e96b93641cb2074576d88c9"
+    "sha256": "53f7f837e500af49dd81ab2e9ebee008405b633f4aee43789f16475925a13aa7",
+    "amended": "source block-end rule (a row is NaN where a 32-key source block ends on -inf): the maximum loop only"
   },
   {
     "file": "_flash_attn_fwd.ttgir",

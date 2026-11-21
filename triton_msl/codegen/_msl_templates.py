@@ -1870,6 +1870,25 @@ def _fa_post_scale_decl(post_scale):
     return f"\n    const float s_scale = {post!r}f;  // the source's constant on the finished score"
 
 
+def _fa_source_units(score_unit):
+    """The softmax of a source that multiplies its scores by a constant, in that source's units.
+
+    ``score_unit`` is ``(c, base, lse_unit)``: the source computes ``s * c`` in float32, takes
+    ``base ** (s * c - max)`` with base 2 or e, and stores ``max * lse_unit + log(denominator)``.
+    A product that overflows float32 is the source's infinity, so the template forms the same
+    product instead of keeping natural units. Returns the statement that multiplies a score
+    ``s``, the name of the exponential, and the factor of the stored maximum.
+    """
+    import math as _math
+
+    c, base, lse_unit = (float(x) for x in score_unit)
+    if base not in (2.0, _math.e):
+        raise ValueError("score_unit: the exponential base must be 2 or e")
+    if not (_math.isfinite(c) and c > 0.0 and _math.isfinite(lse_unit) and lse_unit > 0.0):
+        raise ValueError("score_unit: the score and log-sum-exp constants must be positive and finite")
+    return f"s *= {c!r}f;", ("exp2" if base == 2.0 else "exp"), f"{lse_unit!r}f"
+
+
 def _fa_staged_q(raw, round_q, tile):
     """Q times the scale as the source forms it, held in a `tile` cell.
 
@@ -1973,6 +1992,7 @@ def make_flash_attention_kernel_simdgroup(
     mask_batch_div=None,
     runtime_neg_inf=False,
     neg_inf_unit=1.0,
+    score_unit=None,
     round_q=None,
     round_p=None,
     scale_chain=(),
@@ -1983,6 +2003,7 @@ def make_flash_attention_kernel_simdgroup(
     initial_values=None,
     fragment_lowering="off",
     sentinel_kv_block=None,
+    source_block_ends=None,
     post_scale=None,
 ):
     """simdgroup_matrix FlashAttention-2 (fp32/fp16, causal/non-causal, head_dim=128).
@@ -2204,6 +2225,10 @@ def make_flash_attention_kernel_simdgroup(
             if runtime_neg_inf
             else "(lv > 0.0f) ? (tg_m[lid] + log(lv)) : -INFINITY"
         )
+        if score_unit is not None:
+            _lse_value = _lse_value.replace(
+                "tg_m[lid] + log(lv)", f"tg_m[lid] * {_fa_source_units(score_unit)[2]} + log(lv)"
+            )
         lse_store = (
             "\n    // ---- per-query log-sum-exp: lse = m + log(l) (natural log) ----\n"
             "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
@@ -2220,6 +2245,10 @@ def make_flash_attention_kernel_simdgroup(
 
     # bias/mask cell fragments (guard-independent; combined with the guard in block()).
     _bias_add = "\n                    s += float(Bias[bias_base + qrow_b*b_sm + kvrow_b*b_sn]);" if bias else ""
+    _EXP = "exp"
+    if score_unit is not None:
+        _unit_mul, _EXP, _ = _fa_source_units(score_unit)
+        _bias_add += "\n                    " + _unit_mul
     _mask_apply = "\n                    if (Mask[mask_base + kvrow_b*mask_sn] != 0) s = " + _NI + ";" if mask else ""
 
     if round_q not in (None, "half", "bfloat", "float") or round_p not in (None, "half", "bfloat"):
@@ -2411,6 +2440,47 @@ def make_flash_attention_kernel_simdgroup(
                 + " : -INFINITY)"
             )
 
+    # A source whose running maximum is still -inf when one of ITS key blocks ends subtracts
+    # -inf from -inf: that row is NaN from there on. A 64-wide tile ends where the source's
+    # block does only at equal widths. Narrower source blocks end inside the tile, at whole
+    # 8-key partial maxima; a wider one ends every few tiles, and a tile before its end that
+    # has seen no key above -inf carries the empty row forward instead of dividing it.
+    if score_unit is not None and (not (bias or mask) or float(neg_inf_unit) != 1.0):
+        raise ValueError("score_unit needs a biased or masked score, with its sentinel in the source's units")
+    _m_store = f"tg_m[r] = m_new; tg_alpha[r] = {_EXP}(m_prev - m_new); tg_l[r] = l_prev * tg_alpha[r];"
+    _p_expr = f"{_EXP}(tg_S[pr*BN+cj] - mr)"
+    _src_block = next((b for b in (sentinel_kv_block, source_kv_block, source_block_ends) if type(b) is int), None)
+    if _src_block is not None and _src_block != BLOCK_N:
+        if _src_block > BLOCK_N:
+            if _src_block % BLOCK_N != 0:
+                raise ValueError("a wider source KV block must be a whole number of tiles")
+            _open = f"(((kv_start + BN) % {_src_block}u) != 0u)"
+            _m_store = (
+                f"if (m_new == -INFINITY && {_open}) {{ tg_m[r] = m_new; tg_alpha[r] = 1.0f; tg_l[r] = l_prev; }}\n"
+                f"                else {{ {_m_store} }}"
+            )
+            _p_expr = f"((mr == -INFINITY && {_open}) ? 0.0f : {_p_expr})"
+        else:
+            if _src_block % 8 != 0 or BLOCK_N % _src_block != 0:
+                raise ValueError("a narrower source KV block must be a multiple of 8 that divides the tile")
+            _per = _src_block // 8
+            _ended = f"if ((j % {_per}u) == {_per - 1}u && m_new == -INFINITY)"
+            _narrow = "m_new = (isnan(m_new) || isnan(pj)) ? NAN : max(m_new, pj);\n"
+            _plain = "                for (uint j = 0u; j < 8u; j++) m_new = max(m_new, tg_pmax[r*8u+j]);"
+            if _mnew_loop.count(_narrow) == 1:
+                _mnew_loop = _mnew_loop.replace(_narrow, _narrow + f"                    {_ended} m_new = NAN;\n")
+            else:
+                assert _mnew_loop == _plain
+                # max() drops a NaN operand: carry the ended block in a flag past the loop.
+                _mnew_loop = (
+                    "                bool m_ended = false;\n"
+                    "                for (uint j = 0u; j < 8u; j++) {\n"
+                    "                    m_new = max(m_new, tg_pmax[r*8u+j]);\n"
+                    f"                    {_ended} m_ended = true;\n"
+                    "                }\n"
+                    "                if (m_ended) m_new = NAN;"
+                )
+
     # ---- per-block body emitter (mode in {'full','tail'}) ----
     def guard_decls(mode):
         if mode == "full" and not causal:
@@ -2508,12 +2578,12 @@ def make_flash_attention_kernel_simdgroup(
             if (lid < BM) {
                 uint r = lid; float m_prev = tg_m[r], l_prev = tg_l[r], m_new = m_prev;
 %(MNEW_LOOP)s
-                tg_m[r] = m_new; tg_alpha[r] = exp(m_prev - m_new); tg_l[r] = l_prev * tg_alpha[r];
+                %(M_STORE)s
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             float ps = 0.0f; float mr = tg_m[pr];
             for (uint cj = cA; cj < cB; cj++) {
-                float p = exp(tg_S[pr*BN+cj] - mr); %(PWRITE_PR)s ps += p;
+                float p = %(P_EXPR)s; %(PWRITE_PR)s ps += p;
             }
             tg_psum[pr*8u + pc] = ps;
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -2552,6 +2622,8 @@ def make_flash_attention_kernel_simdgroup(
             "KD": kd,
             "GUARD": g,
             "SCORE_CELL": score_cell,
+            "M_STORE": _m_store,
+            "P_EXPR": _p_expr,
             "PWRITE": p_write,
             "PWRITE_PR": p_write.replace("[r*BN", "[pr*BN"),  # prob store for row = pr
             "SCORE_STORE_UPDATE": _score_store_update,
@@ -4203,6 +4275,7 @@ def make_flash_attention_kernel_tiled(
     mask_batch_div=None,
     runtime_neg_inf=False,
     neg_inf_unit=1.0,
+    score_unit=None,
     round_q=None,
     round_p=None,
     scale_chain=(),
@@ -4578,6 +4651,8 @@ def make_flash_attention_kernel_tiled(
                 f"\n                    s += ({_bias_cell})"
                 " ? float(Bias[bias_base + q_row * b_sm + kv_row * b_sn]) : 0.0f;"
             )
+        if score_unit is not None:
+            _bias_add += "\n                    " + _fa_source_units(score_unit)[0]
         _mask_apply = (
             "\n                    if (Mask[mask_base + kv_row * mask_sn] != 0) s = " + _NI + ";" if mask else ""
         )
@@ -4602,6 +4677,10 @@ def make_flash_attention_kernel_tiled(
             if runtime_neg_inf
             else "(l_val > 0.0f) ? (tg_m[r] + log(l_val)) : -INFINITY"
         )
+        if score_unit is not None:
+            _lse_value = _lse_value.replace(
+                "tg_m[r] + log(l_val)", f"tg_m[r] * {_fa_source_units(score_unit)[2]} + log(l_val)"
+            )
         lse_store_block = (
             "\n    // ---- Log-sum-exp per query row (lse = m + log(l), natural log) ----\n"
             "    if (lid < BM) {\n"
@@ -4621,6 +4700,11 @@ def make_flash_attention_kernel_tiled(
     _mnew_update = (
         "m_new = (isnan(m_new) || isnan(s)) ? NAN : max(m_new, s);" if runtime_neg_inf else "m_new = max(m_new, s);"
     )
+    _EXP = "exp"
+    if score_unit is not None:
+        if not (bias or mask) or float(neg_inf_unit) != 1.0:
+            raise ValueError("score_unit needs a biased or masked score, with its sentinel in the source's units")
+        _EXP = _fa_source_units(score_unit)[1]
     # Route-lowered biased kernels always set runtime_neg_inf: their source
     # recurrence distinguishes a nonfinite denominator from an empty row.  The
     # standalone biased maker predates that source contract and deliberately
@@ -4757,11 +4841,11 @@ kernel void {kernel_name}(
                 }}
 
                 // P = exp(S - m_new); rescale running sum.
-                float alpha = exp(m_prev - m_new);
+                float alpha = {_EXP}(m_prev - m_new);
                 float l_new = l_prev * alpha;
                 for (uint cj = 0u; cj < BN; cj++) {{
                     uint kv_row = kv_start + cj;
-                    float p = {prob_guard} ? exp(tg_S[r * BN + cj] - m_new) : 0.0f;
+                    float p = {prob_guard} ? {_EXP}(tg_S[r * BN + cj] - m_new) : 0.0f;
                     tg_S[r * BN + cj] = {_p_store};   // store P in place of S
                     l_new += p;
                 }}
@@ -5966,6 +6050,7 @@ def make_varlen_flash_attention(
     round_q=None,
     scale_chain=(),
     post_scale=None,
+    source_block=None,
 ):
     """VARLEN FlashAttention-2 (packed cu_seqlens, route-only ABI). One thread per query
     row; K/V tiles staged in threadgroup memory; online softmax with a register acc.
@@ -5993,6 +6078,15 @@ def make_varlen_flash_attention(
         raise ValueError(f"varlen FA out_dtype must be fp32/fp16/bf16 (got {out_dtype!r})")
     D = head_dim
     BM = BN = 32
+    # This template takes one key at a time; the source takes ``source_block`` of them. A row
+    # that has seen no key above -inf is NaN in the source when its block ends, not before.
+    _alpha, _p = "exp2((m_i - m_new) * inv_ln2)", "exp2((s - m_new) * inv_ln2)"
+    if source_block is not None:
+        if type(source_block) is not int or source_block < 1:
+            raise ValueError("source_block must be a positive key count")
+        if source_block > 1:
+            _open = f"(m_new == -INFINITY && ((krow + 1u) % {source_block}u) != 0u)"
+            _alpha, _p = f"({_open} ? 1.0f : {_alpha})", f"({_open} ? 0.0f : {_p})"
     # The detector BAKES the kernel's own constant Q-scale (refuses if absent); default to
     # the canonical 1/sqrt(head_dim) only for the route-free template smoke test.
     scale = float(D) ** -0.5 if scale is None else float(scale)
@@ -6098,8 +6192,8 @@ kernel void {kernel_name}(
                     for (uint d = 0u; d < D; d++) s += q_reg[d] * tg_K[kk * D + d];
                     s *= {_s_scale};
                     float m_new = max(m_i, s);
-                    float alpha = exp2((m_i - m_new) * inv_ln2);
-                    float p = exp2((s - m_new) * inv_ln2);
+                    float alpha = {_alpha};
+                    float p = {_p};
                     l_i = l_i * alpha + p;
                     for (uint d = 0u; d < D; d++) acc[d] = acc[d] * alpha + p * tg_V[kk * D + d];
                     m_i = m_new;
@@ -6127,6 +6221,7 @@ def make_varlen_flash_attention_mma(
     round_q=None,
     scale_chain=(),
     post_scale=None,
+    source_block=None,
 ):
     """FAST varlen FlashAttention-2 via simdgroup_matrix MMA (fp16 in/out, fp32 accumulate).
 
@@ -6158,6 +6253,14 @@ def make_varlen_flash_attention_mma(
         raise ValueError(f"varlen MMA FA dtype must be fp16/bf16/fp32 (got {out_dtype!r})")
     D, BM, NT = head_dim, 32, 128
     NG = NT // 32
+    # A source block of several of these tiles ends where its last tile does: a row that has
+    # seen no key above -inf carries on until then (see make_varlen_flash_attention).
+    _alpha, _p = "exp(m_old - m_new)", "exp(tg_S[r*BN+j]-m_new)"
+    if source_block is not None and source_block != BN:
+        if type(source_block) is not int or source_block < 1 or source_block % BN != 0:
+            raise ValueError("source_block must be a whole number of this maker's key tiles")
+        _open = f"(m_new == -INFINITY && ((kt + BN) % {source_block}u) != 0u)"
+        _alpha, _p = f"({_open} ? 1.0f : {_alpha})", f"({_open} ? 0.0f : {_p})"
     if D % 8 != 0:
         raise ValueError(f"varlen MMA FA needs head_dim %% 8 == 0 (got {D})")
     # register-O budget (no tg_O): tg_Q + tg_K + tg_V + tg_P (TB bytes each) + tg_S (float,
@@ -6284,8 +6387,8 @@ kernel void {kernel_name}(
                 tg_S[r*BN+j] = s; m_blk = max(m_blk, s);
             }}
             float m_new = max(m_old, m_blk);
-            float alpha = exp(m_old - m_new), lsum = 0.0f;
-            for (uint j = 0u; j < BN; j++) {{ float p = exp(tg_S[r*BN+j]-m_new); tg_P[r*BN+j]={TILE}(p); lsum += p; }}
+            float alpha = {_alpha}, lsum = 0.0f;
+            for (uint j = 0u; j < BN; j++) {{ float p = {_p}; tg_P[r*BN+j]={TILE}(p); lsum += p; }}
             tg_l[r] = l_old*alpha + lsum; tg_m[r] = m_new;
             bool finite_row = isfinite(tg_l[r]);
             // Keep a nonfinite row out of both MMAs.  Even an off-diagonal

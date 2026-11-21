@@ -318,6 +318,43 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   the constant and the product are now rounded to the tensors' type as the
   source rounds them. Dense and MLA float16 results, and every result with a
   power-of-two constant, keep their bits.
+- On the biased forward route, compute the softmax in the units of its
+  source. The source multiplies its float32 scores by a constant
+  (`scores *= inv_ln2`) and takes `exp2`; the template kept natural units.
+  A score between about `2.36e38` and `3.4e38` overflows in the source's
+  multiply and its row is NaN, and so is a row whose every score lies below
+  `-2.36e38`: both rows were finite in the template. The template now forms
+  the same float32 product, takes the source's exponential, keeps the
+  sentinel as the source passes it and stores the maximum times the
+  source's own constant. Two more differences are closed with it. A constant
+  within `1e-4` of `1 / ln 2` (or of 1 before a natural `exp`) was computed
+  as if it were exact, up to 8.1e-05 of the largest value against 4e-07 now.
+  An exponent with a multiplier of its own (`exp((s - max) * 1.5)`) was
+  computed without the multiplier, 38% of the largest value in the case
+  measured: it is refused.
+  Biased results change in their last bits with it: by up to 3.7e-07 of the
+  largest value at float32, 2.7e-04 at float16 and 2.2e-03 at bfloat16,
+  where a probability rounds to the tensors' type one step away.
+- End the online softmax where the source's key block ends, on every
+  forward route. A source row whose running maximum is still minus infinity
+  when one of the source's key blocks ends subtracts infinity from infinity
+  and is NaN from there on. A template tile wider than the source's block
+  had seen later keys by then and stayed finite; a narrower one was NaN
+  where the source's block still had a finite key to come. On the biased
+  float32 route this takes only finite tensors: with the first 32 keys
+  masked by an infinite sentinel and 32-key source blocks the source is NaN
+  in every row and the 64-wide template was finite, and with 128-key
+  source blocks and the first 64 keys masked the source is finite and the
+  template was NaN (31 of 480 launches measured differed). The dense,
+  causal dense, variable-length and MLA routes differed the same way with
+  keys that are not finite (19 of 166). The simdgroup, variable-length MMA
+  and variable-length scalar templates now carry such a row to the end of
+  the source's block and decide there. Results on these routes with finite
+  scores keep their bits (46 launches compared), and no launch time moved
+  (ratios 0.98 to 1.03). The text of the canonical dense kernel changes in
+  its maximum loop, so the six fragment-lowering fixture sources and 26 of
+  the 98 baseline emission hashes are regenerated; each fixture differs
+  from the reviewed one in that loop alone.
 - On the biased backward routes, prove the loaded bias and key mask along
   the axes their addresses walk. A bias tile loaded transposed
   (`Bias[key, row]`), a bias load masked by the key boundary on its rows or
