@@ -336,8 +336,11 @@ def _alias_shared_memory(msl: str, *, allocation_aliases=None) -> str:
     contexts, blocks, barriers, transfers = synchronization
 
     # 1. Parse declarations: name -> (size, decl_line_idx, dtype)
-    # Handle common threadgroup types: float, int, uint, half, etc.
-    decl_re = re.compile(r"^\s*threadgroup\s+(float|int|uint|half|short|ushort|char|uchar|bool)\s+(\w+)\[(\d+)\];")
+    # Every type an array is declared with. A type left out keeps one array per
+    # allocation: forty arrays of ``long`` for two sorts of 256 int64 lanes.
+    decl_re = re.compile(
+        r"^\s*threadgroup\s+(float|int|uint|long|ulong|half|short|ushort|char|uchar|bool)\s+(\w+)\[(\d+)\];"
+    )
     decls = {}  # name -> (size, line_idx, dtype)
     for i, line in enumerate(lines):
         m = decl_re.match(line)
@@ -575,7 +578,8 @@ def _check_generic_shared_memory_budget(msl: str, *, limit=32768):
     """
     from triton_msl.errors import MetalResourceError
 
-    widths = {"bool": 1, "char": 1, "uchar": 1, "short": 2, "ushort": 2, "half": 2, "int": 4, "uint": 4, "float": 4}
+    widths = {"bool": 1, "char": 1, "uchar": 1, "short": 2, "ushort": 2, "half": 2, "bfloat": 2}
+    widths.update({"int": 4, "uint": 4, "float": 4, "long": 8, "ulong": 8})
     lexical = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/")
     code = lexical.sub(lambda m: re.sub(r"[^\n]", " ", m.group()), msl)
     required = sum(

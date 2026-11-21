@@ -737,6 +737,17 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   `return` keeps all arrays apart, as before. A generically lowered kernel whose arrays
   still do not fit is refused before a pipeline is asked for, as Triton's
   `OutOfResources` with the bytes required and the limit.
+- Threadgroup arrays of 64-bit integers were never reused. The pass that lets arrays
+  share an allocation read their declarations with a list of types that left out `long`
+  and `ulong`, so a kernel of int64 or uint64 lanes kept every array it declared: forty
+  of them for a loop around a flip of 1024 lanes, and the launch failed with a
+  `RuntimeError` from pipeline creation ("Threadgroup memory size ... exceeds the maximum
+  threadgroup memory allowed (32768)", or a compilation interrupted after several
+  tries). In the loop kernels tried, every int64 one at 512 and 1024 lanes went that way
+  where the int32 one computed. Arrays of 64-bit integers now share as the others do;
+  arrays of two types never share. The count made before a pipeline is asked for takes
+  eight bytes a lane for them, so a kernel whose 64-bit arrays still do not fit is
+  refused as `OutOfResources`.
 - The row-wise sort template stood for kernels that are not a row-wise sort. The
   template replaces the whole kernel with "load row r, sort it, store it", and it was
   chosen from a signature that other kernels fit. `tl.flip(v, 1)` of a 2 by N tile

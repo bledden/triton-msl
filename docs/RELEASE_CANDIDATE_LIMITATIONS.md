@@ -604,8 +604,12 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   `triton.runtime.errors.OutOfResources` ("threadgroup memory bytes", with the bytes
   required and the limit), which an autotuner skips. In the kernels tried that was, at
   1024 lanes, a flip under an `if` inside a loop and a `while` loop around a flip whose
-  test is itself a reduction (61568 bytes each); at 256 lanes both compute. Earlier builds
-  failed there while the pipeline was built, with a `RuntimeError`.
+  test is itself a reduction (61568 bytes each); at 256 lanes both compute. Arrays of
+  64-bit integers share as the others do and take eight bytes a lane, so the same two
+  kernels on int64 are refused from 512 lanes (59392 bytes; 131072 at 1024) and compute
+  at 256. Earlier builds failed there while the pipeline was built, with a
+  `RuntimeError`, and failed the same way for an int64 or uint64 kernel whose arrays,
+  none of them shared, did not fit (more than four of 1024 lanes).
 - **A reduction of fewer elements than the kernel's block, in a kernel of 1024 lanes or
   more:** where the kernel's lanes are looped over, a `tl.sum`, `tl.max`, `tl.min`,
   `tl.argmax` or `tl.argmin` of a vector with fewer elements than the kernel's widest block
