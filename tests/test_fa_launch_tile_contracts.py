@@ -626,8 +626,12 @@ def _mla_kernel(masked):
     return _variant(_mla_value_path, *[e for key in masked for e in _MLA_MASKS[key]])
 
 
-def _mla_run(fn, n_ctx, masked, seed):
-    """Launch MODE 0 with ``n_ctx`` and return (out, float64 expectation of the SOURCE)."""
+def _mla_run(fn, n_ctx, masked, seed, select=None, block_n=32):
+    """Launch MODE 0 with ``n_ctx`` and return (out, float64 expectation of the SOURCE).
+
+    ``select(row, start, column)`` is a select the source applies to each score tile:
+    the query row in its tile, the first key of the key tile and the key's column in it.
+    """
     z, nh, alloc = 1, 2, 160
     gen = torch.Generator().manual_seed(seed)
     t = {
@@ -636,7 +640,7 @@ def _mla_run(fn, n_ctx, masked, seed):
     }
     out = torch.full((z, nh, alloc, 128), POISON, dtype=torch.float16, device="mps")
     tiles = triton.cdiv(n_ctx, 32)
-    rows = tiles * 32  # the K/V loop also covers whole 32-key tiles (BN = 32)
+    rows = tiles * 32  # the expectation is for whole 32-key tiles (block_n = 32)
     q = torch.cat([t["qn"], t["qr"]], -1).double()[:, :, :rows].clone() / 192**0.5
     k = torch.cat([t["kn"], t["kr"]], -1).double()[:, :, :rows].clone()
     v = t["v"].double()[:, :, :rows].clone()
@@ -646,13 +650,18 @@ def _mla_run(fn, n_ctx, masked, seed):
             x[:, :, n_ctx:] = 0
     expected = torch.full(out.shape, POISON, dtype=torch.float64)
     keep = n_ctx if "o" in masked else rows
-    expected[:, :, :keep] = (torch.softmax(q @ k.transpose(-1, -2), -1) @ v)[:, :, :keep]
+    scores = q @ k.transpose(-1, -2)
+    if select is not None:
+        at = torch.arange(rows)
+        kept = select(at[:, None] % 32, at[None, :] // 32 * 32, at[None, :] % 32).expand(rows, rows)
+        scores = scores.masked_fill(~kept, float("-inf"))
+    expected[:, :, :keep] = (torch.softmax(scores, -1) @ v)[:, :, :keep]
     d = {n: x.to("mps") for n, x in t.items()}
     st = lambda x: tuple(x.stride())  # noqa: E731
     fn[(tiles, z * nh)](
         d["qn"], d["qr"], d["kn"], d["kr"], d["v"], out,
         *st(d["qn"]), *st(d["qr"]), *st(d["kn"]), *st(d["kr"]), *st(d["v"]), *st(out),
-        z, nh, n_ctx, 32, 32, 128, 64, 128, 0,
+        z, nh, n_ctx, 32, block_n, 128, 64, 128, 0,
     )  # fmt: skip
     torch.mps.synchronize()
     return out, expected

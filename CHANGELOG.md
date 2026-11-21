@@ -192,7 +192,29 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   store and score-select masks on the biased 2-D and 3-D forward routes and
   the varlen route, and for the causal select on the MLA route. Each mask
   must now vary along the template's axis for its role, or the kernel
-  refuses. The dense route already refused these.
+  refuses; the two entries after this one are the forms that compute
+  instead. The dense route already refused these.
+- Compute a Q, K or bias load mask written along the other axis of a square
+  tile on the biased forward routes. `tl.load(q_ptrs, mask_m[None, :])` on a
+  32 by 32 tile leaves out the head columns `d` with `start_m + d >= N` in
+  every row, where `mask_m[:, None]` leaves out the rows past the length. The
+  source computes with zero in those cells, so in the last, partial tile the
+  scores of live rows change. Such a kernel now runs on the tiled template,
+  which leaves out the cells the source leaves out: for each of the three
+  loads, for either boundary of the bias mask, at float32, float16 and
+  bfloat16. A vector mask on a square tile (`tl.load(q_ptrs, mask_m)`) is
+  broadcast along the last axis and is the same mask. The masks as usually
+  written keep their template and its shader text. A V load, a score select
+  or a store masked along the other axis refuses as before, and so do such a
+  load with an `other` that is not zero and a boundary whose coordinate got
+  its axis from a reshape.
+- On the MLA route, accept the key bound of the score select written along
+  the rows of a square tile (`(s + n0)[:, None] < N_CTX`). It names other
+  cells than the bound along the columns. An MLA launch refuses a sequence
+  that is not a whole number of tiles, and on whole tiles both bounds hold in
+  every cell the loop visits, so the template's result is the source's. The
+  query bound along the columns, a bound one key short and a reshaped
+  coordinate refuse.
 - Prove the varlen score select. The template gives every key past a
   sequence's last a score of negative infinity. The source select was not
   checked at all, so a kernel without it, with its branches exchanged, with a

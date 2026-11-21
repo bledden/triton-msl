@@ -9731,8 +9731,14 @@ class GenericLowerer(
             # Queries are the score's rows and keys its columns. The dense templates prove
             # this in the value-path verifier; the MLA route has no later axis proof.
             _want = {"query": 0, "key": 1}
+            # The key bound written along the rows of a square tile is `s + row < N_CTX`.
+            # The launch contract makes N_CTX a whole number of key tiles, so that holds in
+            # every cell of every tile the loop visits, as the bound along the columns does.
+            _key_bound_along_rows = (
+                is_bounds and lhs_kind == "key" and block_m == block_n and _mask_index_axis(cond_id, 0) == 0
+            )
             if is_mla and (
-                (is_bounds and _mask_index_axis(cond_id, 0) != _want[lhs_kind])
+                (is_bounds and _mask_index_axis(cond_id, 0) != _want[lhs_kind] and not _key_bound_along_rows)
                 or (is_causal and (_mask_index_axis(cond_id, 0) != 0 or _mask_index_axis(cond_id, 1) != 1))
             ):
                 _refuse("a score mask whose query index runs along the rows and key index along the columns")
@@ -13630,7 +13636,11 @@ class GenericLowerer(
                 "c_eff": info.get("c_eff", 1.0),
             },
             biased_out=(_bout := {}),
+            other_axis_masks=(_other_axis := {}),
         )
+        # A boundary written along the other axis of the tile leaves out other cells than
+        # the row and key boundaries do. The tiled template leaves out exactly those.
+        _other_axis = {role: leaves for role, leaves in _other_axis.items() if leaves}
         # Every stride below is the one the PROVED address multiplies on that axis, not
         # the detector's positional guess.
         info = {**info, **self._prove_biased_fa_addresses(info)}
@@ -13829,6 +13839,8 @@ class GenericLowerer(
             # divides it or is a whole number of tiles; the template then tells the padding
             # keys the source visits from the ones it never reaches.
             and (64 % block_n == 0 or block_n % 64 == 0)
+            # The fragment loads of this template take whole rows and whole key columns.
+            and not _other_axis
         )
         if simd_eligible:
             from triton_msl.codegen._msl_templates import make_flash_attention_kernel_simdgroup
@@ -13910,6 +13922,7 @@ class GenericLowerer(
                 round_p=_rp,
                 scale_chain=_scale_chain,
                 transpose_k=_transpose_k,
+                other_axis_masks=_other_axis,
             )
             self.effective_block_size = flash_attention_tiled_threads(block_m, block_n)
         self._flash_attention = ("flash_attention", msl, self.effective_block_size)
@@ -14156,8 +14169,17 @@ class GenericLowerer(
         biased=None,
         biased_out=None,
         dense_tail_out=None,
+        other_axis_masks=None,
     ):
         """Verify every value boundary a forward-FA template replaces.
+
+        ``other_axis_masks``: a dict the caller hands in when its template can apply a
+        boundary along the other axis of a square tile. A Q, K or Bias load whose mask
+        leaf is the proved boundary of its role but varies along the other axis (in a
+        32 by 32 tile ``mask_m[None, :]`` has the shape of ``mask_m[:, None]`` and leaves
+        out other cells) is then reported here as ``{load role: (leaf roles)}`` instead
+        of refused, and the template must leave out exactly those cells. Without the dict
+        such a mask is refused.
 
         Packet 114 (113 HOLD): ``biased={"bias": i, "mask": j|None, "lse": k, "c_eff": c}``
         adds the biased-route WHOLE-VALUE proof — the QK dot's accumulator IS the unique
@@ -14790,12 +14812,13 @@ class GenericLowerer(
         # varlen lowering needs the signedness each length is compared in.
         _boundary_signs = self._fa_boundary_signs = {}
 
-        def _boundary_leaf(cid, role, allowed_roles, axes=None, above=(), negated=False):
+        def _boundary_leaf(cid, role, allowed_roles, axes=None, above=(), negated=False, other_axis=None):
             """One comparison leaf; returns the leaf role it is EXACTLY the boundary of.
 
             ``axes`` maps a leaf role to the axis its coordinate must vary along in the
             tensor the mask applies to (``-1`` for a vector); ``above`` are the expands
-            between that tensor and this leaf.
+            between that tensor and this leaf. ``other_axis`` is a list: a leaf that
+            varies along the other axis of a matrix is appended to it instead of refused.
             """
             lhs, rhs, own = _leaf_compare(cid, role, negated)
             for r in allowed_roles:
@@ -14805,7 +14828,9 @@ class GenericLowerer(
                     if axes is not None:
                         below = _range_expands(lhs)
                         got = _expand_axis(None if below is None else list(above) + own + below)
-                        if got != axes[r]:
+                        if other_axis is not None and axes[r] in (0, 1) and got == 1 - axes[r]:
+                            other_axis.append(r)
+                        elif got != axes[r]:
                             _refuse(
                                 role,
                                 f"the {r} boundary does not vary along the template's axis for this role "
@@ -14819,11 +14844,13 @@ class GenericLowerer(
                 f"< {'seqlen' if load_mask_policy == 'varlen' else 'N_CTX'}, BM={_BM}, BN={_BN})",
             )
 
-        def _mask_leaf_roles(mid, role, allowed_roles, axes, negated=False):
+        def _mask_leaf_roles(mid, role, allowed_roles, axes, negated=False, other_axis=None):
             core, above = _peel_expands(mid)
             if not negated and core is not None and core.op == "arith.andi" and len(core.operand_ids or []) == 2:
-                return [_boundary_leaf(x, role, allowed_roles, axes, above) for x in core.operand_ids]
-            return [_boundary_leaf(mid, role, allowed_roles, axes, negated=negated)]
+                return [
+                    _boundary_leaf(x, role, allowed_roles, axes, above, other_axis=other_axis) for x in core.operand_ids
+                ]
+            return [_boundary_leaf(mid, role, allowed_roles, axes, negated=negated, other_axis=other_axis)]
 
         def _mask_axes(tensor_id, matrix_axes, role):
             """Leaf role -> required axis for a mask on ``tensor_id`` (a vector masks along -1)."""
@@ -14842,9 +14869,20 @@ class GenericLowerer(
         def _check_load_mask(load, role, allowed_roles=None, exact_leaves=None, *, axes):
             if load_mask_policy is None or len(load.operand_ids or []) < 2:
                 return
-            leaves = _mask_leaf_roles(load.operand_ids[1], role, allowed_roles or (role,), axes)
+            # Only these loads have a template that applies the boundary along either axis.
+            turned = [] if other_axis_masks is not None and role in ("Q", "K", "Bias") else None
+            leaves = _mask_leaf_roles(load.operand_ids[1], role, allowed_roles or (role,), axes, other_axis=turned)
             if exact_leaves is not None and sorted(leaves) != sorted(exact_leaves):
                 _refuse(role, f"the mask leaves {leaves} are not exactly the template's {list(exact_leaves)} boundary")
+            if turned is not None:
+                # The coordinate of a query boundary has BM entries and that of a key boundary
+                # BN; along the other axis it names a cell only when that axis is as long.
+                shape = _shape_of(load.id)
+                for leaf in turned:
+                    if len(shape) != 2 or int(shape[1 - axes[leaf]]) != (_BM if leaf in _ROW_ROLES else _BN):
+                        _refuse(role, f"the {leaf} boundary lies along an axis of another length (tile {shape})")
+                if other_axis_masks.setdefault(role, tuple(sorted(set(turned)))) != tuple(sorted(set(turned))):
+                    _refuse(role, "two loads of this tensor carry different masks")
             if len(load.operand_ids) >= 3 and _const_value(load.operand_ids[2]) != 0.0:
                 _refuse(role, "the load's 'other' value is not zero (the template supplies zero beyond the boundary)")
 

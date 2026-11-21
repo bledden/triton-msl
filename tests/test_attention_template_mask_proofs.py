@@ -30,6 +30,8 @@ from tests.test_fa_launch_tile_contracts import FA_TAG, _assert_poisoned_match, 
 from tests.test_mla_value_paths import _mla_value_path
 from tests.test_template_scalar_abi import _lower
 from tests.test_varlen_fa_routing import _ref_varlen, _run_varlen, _varlen_causal_fwd, _varlen_fwd
+from triton.compiler.errors import CompilationError
+
 from triton_msl.backend._launch_signature import scalar_bytes
 from triton_msl.errors import MetalNonRecoverableError
 
@@ -742,12 +744,8 @@ BIASED_REFUSED = {
         (B_BSEL, "scores = tl.where(mask_m[None, :] & mask_n[:, None], scores, neg_inf)"),
         AXIS,
     ),
-    "q_mask_transposed": ((B_Q, "q_block = tl.load(q_ptrs, mask_m[None, :], other=0.0)"), AXIS),
-    "k_mask_transposed": ((B_K, "kt_block = tl.load(kt_ptrs, mask_n[:, None], other=0.0)"), AXIS),
-    "bias_mask_transposed": (
-        (B_B, "b_block = tl.load(b_ptrs, mask_m[None, :] & mask_n[:, None], other=0.0)"),
-        AXIS,
-    ),
+    # The Q, K and bias loads masked along the other axis are computed as the source wrote
+    # them: tests/test_load_masks_along_the_other_axis.py.
     "v_mask_transposed": ((B_V, "v_block = tl.load(v_ptrs, mask_n[None, :], other=0.0)"), AXIS),
     "store_mask_transposed": (
         (B_OUT, "tl.store(o_ptrs, normalize.to(q_block.type.element_ty), mask=mask_m[None, :])"),
@@ -1029,6 +1027,85 @@ def test_mla_key_mask_bound_first_computes(mla_hits):
     out, expected = _mla_run(fn, 64, "", seed=1127)
     assert mla_hits == [True]
     _assert_poisoned_match(out, expected, 3e-2)
+
+
+# The key bound as a select on the scores. Along the rows of the square tile it is
+# `s + row < N_CTX`: other cells than the bound along the columns, and the same answer
+# only because a launch has whole key tiles, where both hold in every cell.
+MLA_KEY_BOUNDS = {
+    "along_the_columns": ("(s + n0)[None, :] < N_CTX", lambda n: lambda row, start, column: start + column < n),
+    "along_the_rows": ("(s + n0)[:, None] < N_CTX", lambda n: lambda row, start, column: start + row < n),
+    "along_the_rows_spread": (
+        "tl.broadcast_to((s + n0)[:, None], (BM, BN)) < N_CTX",
+        lambda n: lambda row, start, column: start + row < n,
+    ),
+}
+
+
+@requires_mps
+@pytest.mark.parametrize("n_ctx", [32, 64, 96, 160])
+@pytest.mark.parametrize("name", sorted(MLA_KEY_BOUNDS))
+def test_mla_key_bound_select_computes_along_either_axis(name, n_ctx, mla_hits):
+    expr, select = MLA_KEY_BOUNDS[name]
+    fn = _variant(_mla_value_path, _mla_select(expr))
+    out, expected = _mla_run(fn, n_ctx, "", seed=1130 + n_ctx, select=select(n_ctx))
+    assert mla_hits == [True]
+    _assert_poisoned_match(out, expected, 3e-2)
+
+
+@requires_mps
+@pytest.mark.parametrize("n_ctx", [16, 48, 80])
+@pytest.mark.parametrize("name", sorted(MLA_KEY_BOUNDS))
+def test_mla_key_bound_select_on_a_partial_tile_refuses_at_launch(name, n_ctx, mla_hits):
+    # Here the two bounds differ: along the rows the last rows of a tile lose its keys.
+    fn = _variant(_mla_value_path, _mla_select(MLA_KEY_BOUNDS[name][0]))
+    with pytest.raises(MetalNonRecoverableError, match="Refusing MLA attention launch") as info:
+        _mla_run(fn, n_ctx, "", seed=1131)
+    assert f"the sequence length {n_ctx} is not a whole number of 32-row tiles" in str(info.value)
+    assert mla_hits == []
+
+
+@requires_mps
+@pytest.mark.parametrize("name", ["along_the_rows", "along_the_rows_spread"])
+def test_mla_key_bound_along_the_rows_needs_a_square_tile(name, mla_hits):
+    # 64 keys do not fit along 32 rows: the frontend rejects the source before the proof reads it.
+    fn = _variant(_mla_value_path, _mla_select(MLA_KEY_BOUNDS[name][0]))
+    with pytest.raises(CompilationError, match="incompatible dimensions|Cannot broadcast"):
+        _mla_run(fn, 128, "", seed=1133, block_n=64)
+    assert mla_hits == []
+
+
+MLA_AXES = "query index runs along the rows and key index along the columns"
+MLA_BOUND = "a score mask equivalent to either the N_CTX boundary or the canonical within-sequence lower triangle"
+MLA_SELECT_REFUSED = {
+    # The query bound along the columns is not the key bound along the rows.
+    "query_bound_along_the_columns": ("tl.where(m[None, :] < N_CTX, qk, NINF)", MLA_AXES),
+    # An axis the proof cannot read.
+    "key_bound_reshaped": ("tl.where(tl.reshape(s + n0, (BN, 1)) < N_CTX, qk, NINF)", MLA_AXES),
+    # Bounds that do not hold in every cell of a whole tile.
+    "one_key_short": ("tl.where((s + n0)[:, None] < N_CTX - 1, qk, NINF)", MLA_BOUND),
+    "a_constant_bound": ("tl.where((s + n0)[:, None] < 40, qk, NINF)", MLA_BOUND),
+    "the_column_in_the_tile": ("tl.where(n0[:, None] < N_CTX, qk, NINF)", MLA_BOUND),
+    "one_key_further": ("tl.where((s + n0 + 1)[:, None] < N_CTX, qk, NINF)", MLA_BOUND),
+    "kept_where_past_the_bound": (
+        "tl.where((s + n0)[:, None] < N_CTX, NINF, qk)",
+        "a score mask of where\\(proven_mask, score, -inf\\)",
+    ),
+    "another_fill": (
+        "tl.where((s + n0)[:, None] < N_CTX, qk, 0.0)",
+        "a score mask of where\\(proven_mask, score, -inf\\)",
+    ),
+}
+
+
+@requires_mps
+@pytest.mark.parametrize("name", sorted(MLA_SELECT_REFUSED))
+def test_mla_select_on_other_cells_refuses(name, mla_hits):
+    line, reason = MLA_SELECT_REFUSED[name]
+    fn = _variant(_mla_value_path, (MLA_QK, MLA_QK + IND + "qk = " + line.replace("NINF", NINF)))
+    with pytest.raises(MetalNonRecoverableError, match=reason):
+        _mla_run(fn, 64, "", seed=1132)
+    assert mla_hits == []
 
 
 # ---------------------------------------------------------------------------------------

@@ -4133,8 +4133,16 @@ def make_flash_attention_kernel_tiled(
     initial_values=None,
     query_length=None,
     transpose_k=False,
+    other_axis_masks=None,
 ):
     """Generate a HEAD-DIM-TILED FlashAttention-2 kernel for Metal (fp32/fp16).
+
+    ``other_axis_masks`` maps ``"Q"``, ``"K"`` or ``"Bias"`` to the boundaries its load
+    mask applies along the other axis of a square tile: ``{"Q": ("Q",)}`` is a query load
+    masked by ``(q_start + column) < N_CTX``, ``{"K": ("K",)}`` a key load masked by
+    ``(kv_start + head column) < N_CTX``, and for Bias ``"Q"`` is ``(q_start + key column)``
+    and ``"K"`` is ``(kv_start + query row)``. A cell the mask leaves out is zero, as in
+    the ordinary lowering of a masked load. None or empty keeps the source text.
 
     packet 164 (item F-a): ``round_q`` / ``round_p`` in {None, "half", "bfloat"} replay the SOURCE's
     narrowing (see make_flash_attention_kernel_simdgroup). None keeps the MSL byte-identical.
@@ -4229,6 +4237,19 @@ def make_flash_attention_kernel_tiled(
     """
     if type(transpose_k) is not bool:
         raise ValueError("transpose_k must be an exact bool")
+    _other_axis = {role: frozenset(leaves) for role, leaves in (other_axis_masks or {}).items() if leaves}
+    if _other_axis:
+        _allowed = {"Q": {"Q"}, "K": {"K"}, "Bias": {"Q", "K"}}
+        if any(role not in _allowed or not leaves <= _allowed[role] for role, leaves in _other_axis.items()):
+            raise ValueError(f"no boundary along the other axis for {sorted(_other_axis)}")
+        if (
+            ("Q" in _other_axis and head_dim != BLOCK_M)
+            or ("K" in _other_axis and head_dim != BLOCK_N)
+            or ("Bias" in _other_axis and (BLOCK_M != BLOCK_N or not bias))
+        ):
+            raise ValueError("a boundary along the other axis needs a square tile")
+        if source_kv_block is not None or unmasked_kv or query_tile is not None or query_length is not None:
+            raise ValueError("a boundary along the other axis is not combined with the dense source replays")
     _k_stage_index = "c * BN + r" if transpose_k else "i"
     _k_score_index = "c * BN + cj" if transpose_k else "cj * DC + c"
     # Element type of the Q/K/V/Out device buffers. fp16 inputs are promoted to
@@ -4302,6 +4323,9 @@ def make_flash_attention_kernel_tiled(
     if unmasked_kv and (_source_tail is None or not set(unmasked_kv) <= {"K", "V"}):
         raise ValueError("unmasked KV roles require the proved source block")
     _k_tail = _source_tail if "K" in unmasked_kv else "(kv_row < N_CTX)"
+    if "K" in _other_axis:
+        # A key past the boundary reaches only scores the select replaces.
+        _k_tail = "(kv_row < N_CTX && (kv_start + dc + c) < N_CTX)"
     _v_tail = _source_tail if "V" in unmasked_kv else "(kv_row < N_CTX)"
     _dot_tail = _source_tail if "K" in unmasked_kv else "kv_row < N_CTX"
     if source_causal_stop is not None and (_source_tail is None or type(source_causal_stop) is not bool):
@@ -4339,6 +4363,8 @@ def make_flash_attention_kernel_tiled(
         raise ValueError("round_q / round_p must be None, 'half' or 'bfloat'")
     # packet 164: the source's rounding points (fp32 sources: None -> byte-identical MSL)
     _q_raw = "Q[q_base + q_row * q_sm + (dc + c) * q_sk]"
+    if "Q" in _other_axis:
+        _q_raw = f"(((q_start + dc + c) < N_CTX) ? float({_q_raw}) : 0.0f)"
     _qv = f"float({round_q}(float({_q_raw}) * float({round_q}(scale))))" if round_q else _q_raw
     _p_store = f"float({round_p}(p))" if round_p else "p"
     _s_scale = "s_scale" if round_q else "scale"
@@ -4461,6 +4487,15 @@ def make_flash_attention_kernel_tiled(
     # single braces (real MSL), not f-string-doubled braces.
     if bias or mask:
         _bias_add = "\n                    s += float(Bias[bias_base + q_row * b_sm + kv_row * b_sn]);" if bias else ""
+        if "Bias" in _other_axis:
+            _bias_cell = " && ".join(
+                {"Q": "(q_start + cj) < N_CTX", "K": "(kv_start + r) < N_CTX"}[leaf]
+                for leaf in sorted(_other_axis["Bias"])
+            )
+            _bias_add = (
+                f"\n                    s += ({_bias_cell})"
+                " ? float(Bias[bias_base + q_row * b_sm + kv_row * b_sn]) : 0.0f;"
+            )
         _mask_apply = (
             "\n                    if (Mask[mask_base + kv_row * mask_sn] != 0) s = " + _NI + ";" if mask else ""
         )
