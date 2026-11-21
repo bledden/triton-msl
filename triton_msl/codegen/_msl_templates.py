@@ -1837,6 +1837,28 @@ kernel void flash_attention(
 """
 
 
+def _bwd_k_other(other, round_k, scale_r):
+    """What the dQ kernels stage for a key past N_CTX: K's `other` times the scale, rounded
+    as the source rounds the product.
+
+    A constant times the scale is not always an arithmetic result when Metal compiles it
+    (1.0f * x is x), and Metal's float-to-bfloat conversion of a value it has only loaded
+    returns the float16 bit pattern. The bfloat16 rounding is therefore done on the bits
+    (round to nearest even; NaN kept).
+    """
+    if other is None:
+        return "0.0f"
+    if not round_k:
+        return f"float({other})"
+    prod = f"(float({other}) * {scale_r})"
+    if round_k != "bfloat":
+        return f"float({round_k}{prod})"
+    return (
+        f"(isnan({prod}) ? {prod} : as_type<float>((as_type<uint>({prod}) + "
+        f"0x7FFFu + ((as_type<uint>({prod}) >> 16u) & 1u)) & 0xFFFF0000u))"
+    )
+
+
 def _fa_scale_chain_expr(expr, scale_chain, round_q):
     """Replay scalar conversions independently of the Q product's precision.
 
@@ -2678,6 +2700,7 @@ def make_flash_attention_bwd_kv_kernel(
     mask_batch_div=None,
     runtime_neg_inf=False,
     output_casts=None,
+    others=None,
 ):
     """Tiled FA-2 BACKWARD dK/dV for biased/triangle attention (route-only ABI).
 
@@ -2776,13 +2799,16 @@ def make_flash_attention_bwd_kv_kernel(
     scale_decl = f"const float scale = {bindings['scale']};"
     if runtime_neg_inf:
         # packet 134: the source applies ONE sentinel to masked / out-of-range score
-        # cells and then subtracts the row lse; replay it on in-bounds masked cells so
-        # a NaN lse propagates exactly as in the source (finite data: exp2 underflows
-        # to 0, bit-identical to the old hard-coded 0).
+        # cells and then subtracts the row lse; replay it on every such cell, the ones
+        # past N_CTX included, so a NaN lse and a sentinel whose exp is not zero reach
+        # the sums exactly as in the source (the usual sentinels: exp2 underflows to 0,
+        # bit-identical to the old hard-coded 0).
         if not bindings or "neg_inf" not in bindings:
             raise ValueError(f"{kernel_name}: runtime_neg_inf requires bindings['neg_inf']")
         scale_decl += f"\n    const float neg_inf = {bindings['neg_inf']};"
-    _masked_cond = "jrow < N_CTX && krow < N_CTX" if runtime_neg_inf else "false"
+    # What the source computes with where a load's mask drops the element: the load's
+    # `other`, proved a constant by the route (zero when the load has none).
+    _oth = lambda role: (others or {}).get(role, "0.0f")
     _masked_p = "exp2((neg_inf - tg_lse[jj]) * inv_ln2)" if runtime_neg_inf else "0.0f"
     if grid_3d:
         grid_decode = "uint h = pid3.y; uint z = pid3.z;"
@@ -2849,12 +2875,12 @@ kernel void {kernel_name}(
         uint j_start = jb * BJ;
         for (uint i = lid; i < BJ*D; i += TPG) {{
             uint jj = i / D, dd = i % D; uint jrow = j_start + jj;
-            tg_Q[i] = (jrow < N_CTX) ? float(Q[q_base + jrow*q_sm + dd*q_sk]) : 0.0f;
+            tg_Q[i] = (jrow < N_CTX) ? float(Q[q_base + jrow*q_sm + dd*q_sk]) : {_oth("q")};
         }}
         for (uint i = lid; i < BJ; i += TPG) {{
             uint jrow = j_start + i;
-            tg_lse[i]   = (jrow < N_CTX) ? Lse[lse_base + jrow*lse_sm] : 0.0f;
-            tg_delta[i] = (jrow < N_CTX) ? Delta[dlt_base + jrow*dlt_sm] : 0.0f;
+            tg_lse[i]   = (jrow < N_CTX) ? Lse[lse_base + jrow*lse_sm] : {_oth("lse")};
+            tg_delta[i] = (jrow < N_CTX) ? Delta[dlt_base + jrow*dlt_sm] : {_oth("delta")};
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -2866,10 +2892,8 @@ kernel void {kernel_name}(
                 for (uint d = 0u; d < D; d++) s += tg_Q[jj*D + d] * tg_K[kk*D + d];
                 s = {_s_scaled} + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
-            }} else if ({_masked_cond}) {{
-                tg_P[i] = {_masked_p};
             }} else {{
-                tg_P[i] = 0.0f;
+                tg_P[i] = {_masked_p};
             }}
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -2880,7 +2904,9 @@ kernel void {kernel_name}(
             float acc = 0.0f;
             for (uint jj = 0u; jj < BJ; jj++) {{
                 uint jrow = j_start + jj;
-                if (jrow < N_CTX) acc += {_p_rd("tg_P[jj*KS + kk]")} * float(dO[do_base + jrow*do_sm + dd*do_sk]);
+                // A row past N_CTX is a term of the source's sum too: its P (the sentinel's)
+                // times the dO load's `other`. Never the device there (packet 136).
+                acc += {_p_rd("tg_P[jj*KS + kk]")} * ((jrow < N_CTX) ? float(dO[do_base + jrow*do_sm + dd*do_sk]) : {_oth("do")});
             }}
             dv_acc[i] += acc;
         }}
@@ -2894,9 +2920,10 @@ kernel void {kernel_name}(
             // columns too). For finite data 0 * finite == 0, bit-identical to the skip.
             {{
                 float dp = 0.0f;
-                // packet 136: the source's dO load is masked (other = 0) beyond N_CTX; a physical
-                // padding row must never be read (0 * NaN is NaN). In-range cells stay unconditional.
-                if (jrow < N_CTX) for (uint d = 0u; d < D; d++) dp += float(dO[do_base + jrow*do_sm + d*do_sk]) * tg_V[kk*D + d];
+                // packet 136: the source's dO load is masked beyond N_CTX; a physical padding row
+                // must never be read (0 * NaN is NaN). The source's dot still runs over that row
+                // with the load's `other`, so the products stay (0 * a non-finite V is NaN).
+                for (uint d = 0u; d < D; d++) dp += ((jrow < N_CTX) ? float(dO[do_base + jrow*do_sm + d*do_sk]) : {_oth("do")}) * tg_V[kk*D + d];
                 tg_dS[i] = {_ds_rd("tg_P[i] * (dp - tg_delta[jj])")};
             }}
         }}
@@ -2940,6 +2967,7 @@ def make_flash_attention_bwd_kv_kernel_simd(
     mask_batch_div=None,
     runtime_neg_inf=False,
     output_casts=None,
+    others=None,
 ):
     """simdgroup-MMA FA-2 backward dK/dV (same ABI/bindings as the scalar template).
 
@@ -3048,13 +3076,16 @@ def make_flash_attention_bwd_kv_kernel_simd(
     scale_decl = f"const float scale = {bindings['scale']};"
     if runtime_neg_inf:
         # packet 134: the source applies ONE sentinel to masked / out-of-range score
-        # cells and then subtracts the row lse; replay it on in-bounds masked cells so
-        # a NaN lse propagates exactly as in the source (finite data: exp2 underflows
-        # to 0, bit-identical to the old hard-coded 0).
+        # cells and then subtracts the row lse; replay it on every such cell, the ones
+        # past N_CTX included, so a NaN lse and a sentinel whose exp is not zero reach
+        # the sums exactly as in the source (the usual sentinels: exp2 underflows to 0,
+        # bit-identical to the old hard-coded 0).
         if not bindings or "neg_inf" not in bindings:
             raise ValueError(f"{kernel_name}: runtime_neg_inf requires bindings['neg_inf']")
         scale_decl += f"\n    const float neg_inf = {bindings['neg_inf']};"
-    _masked_cond = "jrow < N_CTX && krow < N_CTX" if runtime_neg_inf else "false"
+    # What the source computes with where a load's mask drops the element: the load's
+    # `other`, proved a constant by the route (zero when the load has none).
+    _oth = lambda role: (others or {}).get(role, "0.0f")
     _masked_p = "exp2((neg_inf - tg_lse[jj]) * inv_ln2)" if runtime_neg_inf else "0.0f"
     if grid_3d:
         grid_decode = "uint h = pid3.y; uint z = pid3.z;"
@@ -3125,13 +3156,13 @@ kernel void {kernel_name}(
         uint j_start = jb * BJ;
         for (uint i = lid; i < BJ*D; i += TPG) {{
             uint jj = i / D, dd = i % D; uint jrow = j_start + jj;
-            tg_Q[i]  = (jrow < N_CTX) ? float(Q[q_base + jrow*q_sm + dd*q_sk]) : 0.0f;
-            tg_dO[i] = (jrow < N_CTX) ? float(dO[do_base + jrow*do_sm + dd*do_sk]) : 0.0f;
+            tg_Q[i]  = (jrow < N_CTX) ? float(Q[q_base + jrow*q_sm + dd*q_sk]) : {_oth("q")};
+            tg_dO[i] = (jrow < N_CTX) ? float(dO[do_base + jrow*do_sm + dd*do_sk]) : {_oth("do")};
         }}
         for (uint i = lid; i < BJ; i += TPG) {{
             uint jrow = j_start + i;
-            tg_lse[i]   = (jrow < N_CTX) ? Lse[lse_base + jrow*lse_sm] : 0.0f;
-            tg_delta[i] = (jrow < N_CTX) ? Delta[dlt_base + jrow*dlt_sm] : 0.0f;
+            tg_lse[i]   = (jrow < N_CTX) ? Lse[lse_base + jrow*lse_sm] : {_oth("lse")};
+            tg_delta[i] = (jrow < N_CTX) ? Delta[dlt_base + jrow*dlt_sm] : {_oth("delta")};
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -3152,16 +3183,14 @@ kernel void {kernel_name}(
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // recompute P[j,k] = exp2((S*scale + bias - lse) * inv_ln2), masked -> 0
+        // recompute P[j,k] = exp2((S*scale + bias - lse) * inv_ln2), masked -> the sentinel's
         for (uint i = lid; i < BJ*BK; i += TPG) {{
             uint jj = i / BK, kk = i % BK; uint jrow = j_start + jj, krow = k_start + kk;
             if (jrow < N_CTX && krow < N_CTX && tg_mask[kk] == 0) {{
                 float s = {"tg_P[i]" if round_k else "tg_P[i]*scale"} + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
-            }} else if ({_masked_cond}) {{
-                tg_P[i] = {_masked_p};
             }} else {{
-                tg_P[i] = 0.0f;
+                tg_P[i] = {_masked_p};
             }}
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -3263,6 +3292,7 @@ def make_flash_attention_bwd_q_kernel(
     mask_batch_div=None,
     runtime_neg_inf=False,
     output_casts=None,
+    others=None,
 ):
     """Tiled FA-2 BACKWARD dQ + delta for biased/triangle attention (route-only ABI).
 
@@ -3366,13 +3396,18 @@ def make_flash_attention_bwd_q_kernel(
     scale_decl = f"const float scale = {bindings['scale']};"
     if runtime_neg_inf:
         # packet 134: the source applies ONE sentinel to masked / out-of-range score
-        # cells and then subtracts the row lse; replay it on in-bounds masked cells so
-        # a NaN lse propagates exactly as in the source (finite data: exp2 underflows
-        # to 0, bit-identical to the old hard-coded 0).
+        # cells and then subtracts the row lse; replay it on every such cell, the ones
+        # past N_CTX included, so a NaN lse and a sentinel whose exp is not zero reach
+        # the sums exactly as in the source (the usual sentinels: exp2 underflows to 0,
+        # bit-identical to the old hard-coded 0).
         if not bindings or "neg_inf" not in bindings:
             raise ValueError(f"{kernel_name}: runtime_neg_inf requires bindings['neg_inf']")
         scale_decl += f"\n    const float neg_inf = {bindings['neg_inf']};"
-    _masked_cond = "jrow < N_CTX && krow < N_CTX" if runtime_neg_inf else "false"
+    # What the source computes with where a load's mask drops the element: the load's
+    # `other`, proved a constant by the route (zero when the load has none).
+    _oth = lambda role: (others or {}).get(role, "0.0f")
+    # K past N_CTX is the load's `other` through the source's own scaling (and rounding).
+    _k_oth = _bwd_k_other((others or {}).get("k"), round_k, _scale_r)
     _masked_p = "exp2((neg_inf - tg_lse[jj]) * inv_ln2)" if runtime_neg_inf else "0.0f"
     if grid_3d:
         grid_decode = "uint h = pid3.y; uint z = pid3.z;"
@@ -3445,8 +3480,8 @@ kernel void {kernel_name}(
         uint k_start = kb * BK;
         for (uint i = lid; i < BK*D; i += TPG) {{
             uint kk = i / D, dd = i % D; uint krow = k_start + kk;
-            tg_K[i] = (krow < N_CTX) ? {_k_stage("K[k_base + krow*k_sn + dd*k_sk]")} : 0.0f;
-            tg_V[i] = (krow < N_CTX) ? float(V[v_base + krow*v_sn + dd*v_sk]) : 0.0f;
+            tg_K[i] = (krow < N_CTX) ? {_k_stage("K[k_base + krow*k_sn + dd*k_sk]")} : {_k_oth};
+            tg_V[i] = (krow < N_CTX) ? float(V[v_base + krow*v_sn + dd*v_sk]) : {_oth("v")};
         }}
         for (uint i = lid; i < BK; i += TPG) {{
             uint krow = k_start + i;
@@ -3462,10 +3497,8 @@ kernel void {kernel_name}(
                 for (uint d = 0u; d < D; d++) s += tg_Q[jj*D + d] * tg_K[kk*D + d];
                 s = {_s_scaled} + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
-            }} else if ({_masked_cond}) {{
-                tg_P[i] = {_masked_p};
             }} else {{
-                tg_P[i] = 0.0f;
+                tg_P[i] = {_masked_p};
             }}
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -3522,6 +3555,7 @@ def make_flash_attention_bwd_q_kernel_simd(
     mask_batch_div=None,
     runtime_neg_inf=False,
     output_casts=None,
+    others=None,
 ):
     """simdgroup-MMA FA-2 backward dQ + delta (same ABI/bindings as the scalar template).
 
@@ -3670,13 +3704,18 @@ def make_flash_attention_bwd_q_kernel_simd(
     scale_decl = f"const float scale = {bindings['scale']};"
     if runtime_neg_inf:
         # packet 134: the source applies ONE sentinel to masked / out-of-range score
-        # cells and then subtracts the row lse; replay it on in-bounds masked cells so
-        # a NaN lse propagates exactly as in the source (finite data: exp2 underflows
-        # to 0, bit-identical to the old hard-coded 0).
+        # cells and then subtracts the row lse; replay it on every such cell, the ones
+        # past N_CTX included, so a NaN lse and a sentinel whose exp is not zero reach
+        # the sums exactly as in the source (the usual sentinels: exp2 underflows to 0,
+        # bit-identical to the old hard-coded 0).
         if not bindings or "neg_inf" not in bindings:
             raise ValueError(f"{kernel_name}: runtime_neg_inf requires bindings['neg_inf']")
         scale_decl += f"\n    const float neg_inf = {bindings['neg_inf']};"
-    _masked_cond = "jrow < N_CTX && krow < N_CTX" if runtime_neg_inf else "false"
+    # What the source computes with where a load's mask drops the element: the load's
+    # `other`, proved a constant by the route (zero when the load has none).
+    _oth = lambda role: (others or {}).get(role, "0.0f")
+    # K past N_CTX is the load's `other` through the source's own scaling (and rounding).
+    _k_oth = _bwd_k_other((others or {}).get("k"), round_k, _scale_r)
     _masked_p = "exp2((neg_inf - tg_lse[jj]) * inv_ln2)" if runtime_neg_inf else "0.0f"
     if grid_3d:
         grid_decode = "uint h = pid3.y; uint z = pid3.z;"
@@ -3744,8 +3783,8 @@ kernel void {kernel_name}(
         uint k_start = kb * BK;
         for (uint i = lid; i < BK*D; i += TPG) {{
             uint kk = i / D, dd = i % D; uint krow = k_start + kk;
-            tg_K[i] = (krow < N_CTX) ? {_k_stage("K[k_base + krow*k_sn + dd*k_sk]")} : 0.0f;
-            tg_V[i] = (krow < N_CTX) ? float(V[v_base + krow*v_sn + dd*v_sk]) : 0.0f;
+            tg_K[i] = (krow < N_CTX) ? {_k_stage("K[k_base + krow*k_sn + dd*k_sk]")} : {_k_oth};
+            tg_V[i] = (krow < N_CTX) ? float(V[v_base + krow*v_sn + dd*v_sk]) : {_oth("v")};
         }}
         for (uint i = lid; i < BK; i += TPG) {{
             uint krow = k_start + i;
@@ -3776,10 +3815,8 @@ kernel void {kernel_name}(
             if (jrow < N_CTX && krow < N_CTX && tg_mask[kk] == 0) {{
                 float s = {"tg_P[i]" if round_k else "tg_P[i]*scale"} + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
-            }} else if ({_masked_cond}) {{
-                tg_P[i] = {_masked_p};
             }} else {{
-                tg_P[i] = 0.0f;
+                tg_P[i] = {_masked_p};
             }}
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);

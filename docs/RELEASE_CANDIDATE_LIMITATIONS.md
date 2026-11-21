@@ -438,13 +438,20 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   2**31 elements before or after its first element. Smaller storages, and whole tensors up
   to 2**32 elements on the first group, compute. These windows are checked by arithmetic on
   the launch check alone; no tensor of that size was allocated or launched.
-- **Attention masks along the other axis:** on the biased forward routes a Q, K or bias load
-  whose boundary mask lies along the other axis of a square tile (`mask_m[None, :]`, or a vector
-  mask) computes on the tiled template, which leaves out the cells the source leaves out; a V
-  load, a score select or a store written that way, such a load with a non-zero `other`, and a
-  coordinate given its axis by a reshape are refused. On the MLA route the key bound of the
-  score select may lie along the rows of a square tile, because a launch has whole tiles; other
-  selects are refused.
+- **Attention masks along the other axis, and `other` values:** on the biased forward routes a
+  Q, K or bias load whose boundary mask lies along the other axis of a square tile
+  (`mask_m[None, :]`, or a vector mask) computes on the tiled template, which leaves out the
+  cells the source leaves out; a V load, a score select or a store written that way, such a load
+  with a non-zero `other`, and a coordinate given its axis by a reshape are refused. On the MLA
+  route the key bound of the score select may lie along the rows of a square tile, because a
+  launch has whole tiles; other selects are refused. On the biased backward routes the dK / dV
+  and dQ templates hold the constant `other` of the loads their sums run over past the sequence
+  length (Q, dO, log-sum-exp and delta; K and V) and give the cells past the length the
+  sentinel score, so a partial tile is the source for any constant and any sentinel; the other
+  loads, and every load of the bias gradient kernel, may supply any constant. An `other` that is
+  not a constant of the kernel, or that the kernel rounds to a 16-bit type, is refused, as are
+  two loads of one tensor with different values and an unmasked log-sum-exp load. Measured at
+  tiles of 8 to 64 query rows and keys, square and not, at every size these routes take.
 - **In-place outputs:** a matmul whose output overlaps an operand keeps the source's load-then-store
   order by leaving the replacement template; the quantized routes and the attention kernels refuse
   such a launch by name, except the two biased source replays, which keep the order behind a barrier

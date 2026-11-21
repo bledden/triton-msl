@@ -15,6 +15,7 @@ Metal-specific considerations:
 import math
 import os
 import re
+import struct
 from typing import Any, Dict, List, Optional
 
 from triton_msl.codegen.mlir_walker import IRGraph, SSAValue, FuncArg, CalledFunc, _extract_shape
@@ -10868,6 +10869,35 @@ class GenericLowerer(
                 return float(v) if v == 0 else None
             return float(v)
 
+        def _float_const(o):
+            """A float constant's value in its own type, the non-finite ones included (MLIR
+            prints those as the bit pattern, which `_const_val` reads only for the infinities)."""
+            v = (o.attrs or {}).get("value")
+            t = o.type_str or ""
+            el = t.rsplit("x", 1)[-1].split(",")[0].split(">")[0].strip() if "x" in t else t.strip()
+            if isinstance(v, bool) or el not in ("f16", "bf16", "f32"):
+                return None
+            try:
+                if isinstance(v, int):
+                    if el == "f16":
+                        return struct.unpack("<e", struct.pack("<H", v))[0]
+                    return struct.unpack("<f", struct.pack("<I", v << 16 if el == "bf16" else v))[0]
+                if isinstance(v, float):
+                    # the decimal MLIR prints round-trips in the constant's type, not as a double
+                    if el == "f32":
+                        return struct.unpack("<f", struct.pack("<f", v))[0]
+                    return narrow_constant(v, el)
+            except (struct.error, OverflowError):
+                return None
+            return None
+
+        def _msl_float(v):
+            if v != v:
+                return "NAN"
+            if v in (float("inf"), float("-inf")):
+                return "INFINITY" if v > 0 else "(-INFINITY)"
+            return f"({float(v)!r}f)"
+
         sentinel_ref = None
         # packet 139/140: the N_CTX operand of a boundary compare may peel ONLY value-preserving
         # wrappers — broadcast-family ops and sign-extension (both compare operands are then
@@ -11604,19 +11634,51 @@ class GenericLowerer(
                     _refuse(f"{what} computed in {_mel}, which the templates cannot replay")
                 return ld[li], m
 
-            # The templates supply ZERO for every element a load's mask drops, and skip the
-            # rows past N_CTX. A source ``other`` is what the source computes with there
-            # (NaN or -inf reach the sums through 0 * x and exp), and an unmasked lse load
-            # reads the tensor there. The Mask load is the exception: a key its key-boundary
-            # mask drops gets the sentinel from the bounds select whatever the Mask says there
-            # (both selects supply the one sentinel), so any constant, such as other=1, is the
-            # same source.
+            # A source ``other`` is what the source computes with where the load's mask drops
+            # the element (NaN or -inf reach the sums through 0 * x and exp). The sums that
+            # run over dropped elements are the ones over the query rows of a dK/dV tile
+            # (Q, dO, lse, delta) and over the keys of a dQ tile (K, V): the makers stage the
+            # constant there, zero when the load has none. Every other dropped element is
+            # read only by a cell the bounds select gives the sentinel, or reaches only a
+            # row or a key column past N_CTX, which no kernel stores, so any constant there
+            # is the same source (the Mask load's other=1 is one). An unmasked lse load reads
+            # the tensor there and stays refused below.
+            _role_addr = {
+                "q": load_addr(scores_dot.operand_ids[0]),
+                "k": load_addr(scores_dot.operand_ids[1]),
+                "bias": load_addr(scores_dot.operand_ids[2]) if len(scores_dot.operand_ids or []) > 2 else None,
+                "v": v_addr,
+                "do": do_addr,
+                "delta": dlt_addr,
+                "o": o_addr,
+                "lse": lse_addr,
+            }
+            _staged = {"kv": ("q", "do", "lse", "delta"), "q": ("k", "v")}.get(kind, ())
+            _others = {}
             for _ld in allops:
-                if _ld.op != "tt.load" or len(_ld.operand_ids or []) < 3 or _is_zero_const(_ld.operand_ids[2]):
+                if _ld.op != "tt.load":
                     continue
-                _oc = op_by_id.get(_peel_ids(_ld.operand_ids[2], _bcast))
-                if _ld.id != mask_loads[0].id or _oc is None or _oc.op != "arith.constant":
-                    _refuse("every masked load's `other` being absent or zero (the templates supply zero)")
+                _la = load_addr(_ld.id)
+                _roles = [r for r, a in _role_addr.items() if a is not None and a == _la]
+                _val = 0.0
+                if len(_ld.operand_ids or []) >= 3 and not _is_zero_const(_ld.operand_ids[2]):
+                    _oc = op_by_id.get(_peel_ids(_ld.operand_ids[2], _bcast))
+                    if _oc is None or _oc.op != "arith.constant":
+                        _refuse("every masked load's `other` being absent or a constant")
+                    if _ld.id == mask_loads[0].id:
+                        continue
+                    if not _roles:
+                        _refuse("a constant `other` only on a load the proof recognises")
+                    _val = _float_const(_oc)
+                for _r in _roles:
+                    if _r not in _staged:
+                        continue
+                    if _val is None:
+                        _refuse(f"the {_r} load's `other` being a decodable fp16 / bf16 / fp32 constant")
+                    if _r in _others and not (_others[_r] == _val or (_others[_r] != _others[_r] and _val != _val)):
+                        _refuse(f"every {_r} load supplying the same `other`")
+                    _others[_r] = _val
+            _others = {r: _msl_float(v) for r, v in _others.items() if v != 0.0}
             _lse_ld = op_by_id.get(_peel_ids(lse_sub_op.operand_ids[1], _bcast))
             if (
                 _lse_ld is None
@@ -11892,7 +11954,7 @@ class GenericLowerer(
             return {
                 "k_orient": k_orient,
                 "v_orient": v_orient,
-                "rounding": {**_rounding, "output_casts": _output_casts},
+                "rounding": {**_rounding, "output_casts": _output_casts, **({"others": _others} if _others else {})},
             }
 
         # ----- N_CTX (loop bound) + H (mask cross-head divisor): shared by q/kv -----

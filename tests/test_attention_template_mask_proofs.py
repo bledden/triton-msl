@@ -1109,17 +1109,13 @@ def test_mla_select_on_other_cells_refuses(name, mla_hits):
 
 
 # ---------------------------------------------------------------------------------------
-# GPU: biased backward on a partial tile (48 rows): what a masked load supplies, and the lse mask
+# GPU: biased backward on a partial tile (48 rows): the mask of each load
+# (what a load supplies where its mask drops: tests/test_what_a_masked_backward_load_supplies.py)
 # ---------------------------------------------------------------------------------------
 
-OTHER = "every masked load's `other` being absent or zero"
 KV_Q = "q_block = tl.load(q_ptrs, mask_j[:, None])"
 KV_L = "row_max = tl.load(l_ptrs, mask=mask_j)"
-KV_DO = "do = tl.load(do_ptrs, mask_j[:, None])"
-KV_D = "delta = tl.load(d_ptrs, mask_j)"
 Q_K = "k_block = tl.load(k_ptrs, mask_k[:, None])"
-Q_VT = "vt_block = tl.load(vt_ptrs, mask_k[None, :])"
-NAN = "other=float('nan'))"
 BIAS = "the Bias load masked by the query-row boundary along its rows and the key boundary along its columns"
 MASK_KEYS = "the Mask load masked by exactly the key boundary"
 BW_B = "b_block = tl.load(b_ptrs, mask_j[:, None] & mask_k[None, :]"
@@ -1128,16 +1124,11 @@ BW_B_T = "b_block = tl.load(b_ptrs, mask_j[None, :] & mask_k[:, None], other=0.0
 BW_M_ROWS = "m_block = tl.load(mask_ptrs, mask_j, other=0, "
 
 BACKWARD_REFUSED = {
-    "kv_q_other_nan": ("kv", (KV_Q, KV_Q[:-1] + ", " + NAN), OTHER),
-    "kv_do_other_nan": ("kv", (KV_DO, KV_DO[:-1] + ", " + NAN), OTHER),
-    "kv_delta_other_nan": ("kv", (KV_D, KV_D[:-1] + ", " + NAN), OTHER),
-    "kv_lse_other_minus_inf": ("kv", (KV_L, KV_L[:-1] + ", other=float('-inf'))"), OTHER),
     "kv_lse_unmasked": (
         "kv",
         (KV_L, "row_max = tl.load(l_ptrs)"),
         "the lse load masked by exactly the query-row boundary",
     ),
-    "q_k_other_nan": ("q", (Q_K, Q_K[:-1] + ", " + NAN), OTHER),
     # No dot orients the Bias and Mask loads: a boundary on the other axis zeroes live cells.
     "kv_bias_mask_transposed": ("kv", (BW_B, BW_B_T), BIAS),
     "q_bias_mask_transposed": ("q", (BW_B, BW_B_T), BIAS),
@@ -1151,7 +1142,6 @@ BACKWARD_REFUSED = {
     "q_mask_load_on_the_row_boundary": ("q", (BW_M, BW_M_ROWS), MASK_KEYS),
     "b_mask_load_on_the_row_boundary": ("b", (BW_M, BW_M_ROWS), MASK_KEYS),
     "kv_mask_load_one_key_short": ("kv", (BW_M, "m_block = tl.load(mask_ptrs, k_idxs < N - 1, "), MASK_KEYS),
-    "q_vt_other_nan": ("q", (Q_VT, Q_VT[:-1] + ", " + NAN), OTHER),
 }
 
 BACKWARD_ADMITTED = {
@@ -1180,7 +1170,7 @@ def bwd_hits(fa_hits):
 
 @requires_mps
 @pytest.mark.parametrize("name", sorted(BACKWARD_REFUSED))
-def test_backward_load_that_supplies_another_value_refuses(name, bwd_hits):
+def test_backward_load_under_another_mask_refuses(name, bwd_hits):
     kind, edit, fragment = BACKWARD_REFUSED[name]
     with pytest.raises(MetalNonRecoverableError) as info:
         bwd._launch(kind, bwd._variant(bwd.KERNELS[kind], edit), bwd._inputs(kind, seed=1128))

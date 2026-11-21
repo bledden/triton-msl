@@ -236,11 +236,32 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   output through a zero probability. The varlen route refuses the kernel. The
   biased routes refuse, at launch, a sequence length that is not a whole
   number of key tiles, and compute whole-tile launches as before.
-- On the biased backward routes, refuse a masked load that supplies a value
-  other than zero and an unmasked log-sum-exp load. The templates supply zero
-  for every operand row past the sequence length. The loaded key mask may
-  supply any constant: a key past the sequence gets the sentinel score
-  whatever the mask holds there.
+- On the biased backward routes, compute what the source computes past the
+  sequence length. In a partial tile the dK and dV kernels sum each key
+  column over every query row of the tile, and the dQ kernel sums each query
+  row over every key of its tiles. The source takes those terms from each
+  masked load's `other` and from the sentinel score of the cells past the
+  length. The templates counted zero for all of them, which is the source
+  only when every `other` is zero and every such term is zero times a finite
+  number. With a sequence length that is not a whole number of tiles, a
+  kernel whose Q, dO, log-sum-exp or delta load (dK and dV) or K or V load
+  (dQ) supplied another constant returned other gradients. So did a launch
+  whose sentinel makes `exp2(sentinel - lse)` infinite or NaN (`100.0`,
+  `1e9`, infinity, NaN, and `80.0` at float16): the source's sums
+  hold a NaN there and the templates returned numbers. A sentinel of `0.0`
+  or `5.0` with no `other` was right. The templates now hold each of those
+  constants in the rows and keys past the length, rounded where the source
+  rounds it, and give the cells past the length the sentinel score, at
+  every type and tile size these routes take. With no `other`, a sentinel of
+  `-1e9` or negative infinity and finite tensors, every result keeps its
+  bits (480 launches compared).
+  Every other load may supply any constant, the loaded key mask among them:
+  what it holds past the length reaches no stored cell. The bias gradient
+  kernel stores no cell that depends on one, and accepts any constant on
+  every load. Refused: an `other` that is not a constant of the kernel (a
+  launch argument, or a value the kernel itself rounds to a 16-bit tensor
+  type, such as `0.1`), two loads of one tensor that supply different
+  values, and an unmasked log-sum-exp load.
 - On the biased backward routes, prove the loaded bias and key mask along
   the axes their addresses walk. A bias tile loaded transposed
   (`Bias[key, row]`), a bias load masked by the key boundary on its rows or
