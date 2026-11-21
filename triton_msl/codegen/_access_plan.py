@@ -107,6 +107,8 @@ class _Builder:
         self.last_atomic = None
         self.under_branch = 0
         self.branched = []  # the accesses a branch may leave out
+        self.conditions = []  # the branches around the operation being read: [condition, way taken]
+        self.guards = []  # [access, its branches from the outermost in]
 
     # -- types ---------------------------------------------------------------------------
 
@@ -486,6 +488,7 @@ class _Builder:
                 self.sites.append(id(op) if self.site is None else self.site)
                 if self.under_branch:
                     self.branched.append(len(self.accesses) - 1)
+                    self.guards.append([len(self.accesses) - 1, [list(guard) for guard in self.conditions]])
                 if op.op == "tt.atomic_rmw":
                     ordinal = len(self.accesses) - 1
                     self.atomic[ordinal] = [str(op.attrs.get("rmw_op")), op.id in scope.used]
@@ -496,9 +499,13 @@ class _Builder:
             if op.op == "scf.for":
                 self.collect(scope, op.region_ops or (), (*loops, self.loop(scope, op)), unbounded)
             elif op.op == "scf.if":
+                condition = self.value(scope, op.operand_ids[0]) if op.operand_ids else self.opaque()
                 self.under_branch += 1
+                self.conditions.append([condition, True])
                 self.collect(scope, op.region_ops or (), loops, unbounded)
+                self.conditions[-1] = [condition, False]
                 self.collect(scope, op.else_ops or (), loops, unbounded)
+                self.conditions.pop()
                 self.under_branch -= 1
             elif op.op == "tt.call":
                 function = self.functions.get(op.attrs.get("callee"))
@@ -792,6 +799,7 @@ def build_access_plan(graph, msl=None, emitted=None, body=None, single=None, thr
     plan["atomic"] = {str(ordinal): entry for ordinal, entry in builder.atomic.items()}
     plan["pairs"] = builder.pairs
     plan["branched"] = builder.branched
+    plan["guards"] = builder.guards
     pointers = [argument for argument in graph.args if argument.is_ptr]
     plan["untraced"], plan["order"], loose = _emission_order(
         builder.sites, emitted, [argument.name for argument in pointers], body

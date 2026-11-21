@@ -10,9 +10,10 @@ by one lane only, that lane's own order is the source's and the launch computes,
 loop as well; so does one float atomic add outside a loop, whose lanes the source does not order.
 
 The check compares addresses it can compute before the launch. A mask made of loaded values
-and a branch are counted as taken, and an index that is loaded is not followed at all, so a
-launch that only such a mask, branch or index keeps to one lane per cell is refused too, and
-the refusal says which of the two it is.
+is counted as taken, and an index that is loaded is not followed at all, so a launch that
+only such a mask or index keeps to one lane per cell is refused too, and the refusal says
+which of the two it is. A branch on the launch's integer scalars is read: the add under it
+is counted where the branch is taken and left out where it is not.
 """
 
 import numpy as np
@@ -120,6 +121,7 @@ MAY_MEET = (
     "two lanes of one program reach the same element, one of them storing it, unless a branch, or a mask "
     "computed from values the check cannot know before the launch, keeps them apart"
 )
+MEET = "two lanes of one program reach the same element and one of them stores it"
 NOT_COMPUTED = "an address depends on a value the check cannot compute before the launch"
 
 KERNELS = [_two_statements, _counted_loop, _while_loop]
@@ -222,10 +224,22 @@ def test_a_loaded_mask_that_keeps_the_lanes_apart_is_not_read(size, device):
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("size", [64, 2048])
-def test_a_branch_that_is_not_taken_is_counted_as_taken(size, device):
+@pytest.mark.parametrize("scalar", [0, -3])
+def test_an_add_under_a_branch_on_a_scalar_that_is_not_taken_is_left_out(scalar, size, device):
     start = np.full(size, 1e8, dtype=np.float32)
     values = np.concatenate([np.ones(size), np.full(size, -1e8)]).astype(np.float32)
-    _refused_for(MAY_MEET, _second_add_under_a_branch, start, values, 0, size, device)
+    z = torch.from_numpy(start.copy()).to(device)
+    _second_add_under_a_branch[(1,)](z, torch.from_numpy(values).to(device), scalar, N=size)
+    assert np.array_equal(z.cpu().numpy(), start + values[:size])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("size", [64, 2048])
+@pytest.mark.parametrize("scalar", [2, 2**31 - 1])
+def test_an_add_under_a_branch_on_a_scalar_that_is_taken_is_counted(scalar, size, device):
+    start = np.full(size, 1e8, dtype=np.float32)
+    values = np.concatenate([np.ones(size), np.full(size, -1e8)]).astype(np.float32)
+    _refused_for(MEET, _second_add_under_a_branch, start, values, scalar, size, device)
 
 
 @pytest.mark.parametrize("device", DEVICES)

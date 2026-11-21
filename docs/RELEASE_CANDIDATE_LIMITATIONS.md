@@ -477,7 +477,14 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   they compute when they share no byte that one of them stores, and a byte that views of two
   element sizes both reach, one of them storing it, is refused whichever lanes reach it. A host
   array that does not start at a multiple of its element size is refused beside an array of another
-  element size. The check does not look at conflicts between different programs of one
+  element size. An access under a branch is counted whichever way the branch goes, unless
+  the condition is made of the launch's integer scalars and constants, or of such a scalar
+  advanced by one fixed amount on each trip of a counted loop: that condition is computed
+  before the launch, wrapping at its type's width, and what is under the way not taken is left
+  out. A condition that follows a loaded value, the program id, a loop's trip, a float scalar,
+  a division by zero or the smallest integer divided by -1 is not read, so an in-place
+  permutation under such a branch is refused also in a launch that does not take it.
+  The check does not look at conflicts between different programs of one
   launch, which are races in the source, and is not applied to a launcher built from metadata
   without an access plan. A launch that needs more than 16 comparison runs (`x[:, 1:] += y` at
   8192 by 8192) is refused.
@@ -486,9 +493,9 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   applies them lane by lane, and the order of float additions is their rounding (`1e8 + 1 - 1e8`
   is 0.0 in the source's order and 1.0 in the other). The check reads addresses, not values, so
   a float histogram or scatter-add accumulated over the trips of a loop is refused also where
-  no order would round. A mask made of loaded values, a branch and a loaded index are not
-  evaluated, so adds that only one of those keeps to one lane per cell are refused too, and
-  the message says which. In a `while` loop a float add computes only where its address is the
+  no order would round. A mask made of loaded values, a loaded index, and a branch on anything
+  but the launch's integer scalars are not evaluated, so adds that only one of those keeps to
+  one lane per cell are refused too, and the message says which. In a `while` loop a float add computes only where its address is the
   same on every trip and keeps each lane to its own cell.
   Integer atomic adds, a float add of each lane to its own cell, and one float add outside a
   loop compute. Metal has no 16-bit atomic, so a float16 or bfloat16 atomic swaps the 4-byte

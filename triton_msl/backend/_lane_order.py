@@ -130,6 +130,10 @@ def _unsigned(value, width):
 def _binary(name, width, left, right):
     if name in ("sdiv", "udiv", "srem", "urem", "fdiv", "cdiv") and not np.all(right):
         raise Unproved("eval", "division by zero")
+    if name in ("sdiv", "srem", "fdiv", "cdiv") and 1 < width <= 64:
+        # The smallest value over -1 is outside the type; the source does not say what it is.
+        if np.any((np.asarray(right) == -1) & (np.asarray(left) == -(1 << (width - 1)))):
+            raise Unproved("eval", "quotient outside the type")
     if name == "add":
         out = left + right
     elif name == "sub":
@@ -269,6 +273,13 @@ class LaunchCheck:
         self.one_lane = plan.get("threads") == [1, False] and self.block == 1
         # Accesses under a branch: the comparison counts them in whichever way the branch goes.
         self.branched = set(plan.get("branched") or ())
+        # The branches around each of them, [condition, the way that reaches the access]. A
+        # condition that is one number before the launch is read: the launch performs the
+        # access or it does not, and the comparison no longer has to count it in both ways.
+        self.guards = {
+            int(ordinal): [(int(node), bool(way)) for node, way in guards]
+            for ordinal, guards in plan.get("guards") or ()
+        }
         self.atomic = {int(ordinal): entry for ordinal, entry in (plan.get("atomic") or {}).items()}
         self.pairs = {tuple(pair) for pair in plan.get("pairs") or ()}
         # A source program of one lane is sequential. The shader is too when one thread
@@ -337,16 +348,43 @@ class LaunchCheck:
         # An argument whose storage cannot be read may share memory with anything.
         if unread:
             groups = [sorted(unread + [index for group in groups for index in group])]
+        left_out, reached = self._branches(arguments, grid)
         out = []
         for members in groups:
             members = sorted(members)
             ordinals = sorted(
-                {ordinal for index in members for ordinal in self.by_pointer.get(index, ())} | set(self.unknown_base)
+                ({ordinal for index in members for ordinal in self.by_pointer.get(index, ())} | set(self.unknown_base))
+                - left_out
             )
-            out.append((self._group(members, ordinals, bool(unread), storages, arguments, grid), tuple(members)))
+            answer = self._group(members, ordinals, bool(unread), storages, arguments, grid, reached)
+            out.append((answer, tuple(members)))
         return out
 
-    def _group(self, members, ordinals, unread, storages, arguments, grid):
+    def _branches(self, arguments, grid):
+        """(the accesses this launch does not perform, those it is known to perform), of the ones under a branch.
+
+        A branch condition that follows nothing but the launch's scalar arguments is one
+        number for every program, lane and trip, so the source performs what is under the
+        other way of it nowhere in this launch. Any other condition stays unread, and the
+        accesses under it are counted in as before.
+        """
+        known, left_out, reached = {}, set(), set()
+        for ordinal, guards in self.guards.items():
+            ways = []
+            for node, way in guards:
+                if node not in known:
+                    try:
+                        known[node] = bool(self._scalar(node, arguments, grid))
+                    except Exception:
+                        known[node] = None
+                ways.append(None if known[node] is None else known[node] == way)
+            if False in ways:
+                left_out.add(ordinal)
+            elif None not in ways:
+                reached.add(ordinal)
+        return left_out, reached
+
+    def _group(self, members, ordinals, unread, storages, arguments, grid, reached=frozenset()):
         accesses = [self.accesses[ordinal] for ordinal in ordinals]
         writes = [ordinal for ordinal in ordinals if self.accesses[ordinal][0] != "L"]
         if not writes:
@@ -416,14 +454,15 @@ class LaunchCheck:
             return proved
         if unbounded:
             return "unbounded"
-        if answer in _HEDGED and any(self._unread(ordinal) for ordinal in ordinals):
+        if answer in _HEDGED and any(self._unread(ordinal, reached) for ordinal in ordinals):
             return _HEDGED[answer]
         return answer
 
-    def _unread(self, ordinal):
+    def _unread(self, ordinal, reached=frozenset()):
         """Does the comparison count this access in although a mask or a branch may leave it out?"""
         mask = self.accesses[ordinal][2]
-        return ordinal in self.branched or (mask >= 0 and bool(self.flags[mask] & OPAQUE))
+        branch = ordinal in self.branched and ordinal not in reached
+        return branch or (mask >= 0 and bool(self.flags[mask] & OPAQUE))
 
     def _per_program(self, ordinals, origins, arguments, grid, swapped, spaces, scales):
         """The lanes of every program compared, a run of programs at a time.

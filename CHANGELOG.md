@@ -336,6 +336,18 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   later launches. A launch that would need more than 16 runs is refused,
   which that kernel reaches at 8192 by 8192.
 
+  An access under a branch is counted whichever way the branch goes, with one
+  exception. A condition made of the launch's integer scalars and constants is
+  one number for every program, lane and trip. The launcher computes it as the
+  shader does, wrapping at the type's width, and leaves out what is under the
+  way the launch does not take: a kernel that reverses a row in place only
+  `if S > 0` is refused where `S` is positive and computes where it is not. A
+  scalar that a counted loop advances by one fixed amount each trip is read
+  the same way. A condition that follows a loaded value, the program id, a
+  loop's trip, any other carried value, a float scalar, a division by zero or
+  the smallest integer divided by -1 is not read, and what is under it is
+  counted in.
+
   This contains the wrong results; it does not make these kernels compute.
   What is refused:
 
@@ -378,11 +390,13 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
     1.0 where the source gives 0.0. The check reads addresses, not values,
     so these are refused also where no order rounds: a float histogram or
     scatter-add accumulated over the trips of a loop is refused. Nor does the
-    check evaluate a mask made of loaded values, a branch, or an index that
-    is loaded. Two float adds that only such a mask, or a branch the launch
-    does not take, keeps to one lane per cell are refused, with a reason that
-    names the mask or branch; adds through a loaded index are refused because
-    the address is not known before the launch. In a `while` loop a float add
+    check evaluate a mask made of loaded values, an index that is loaded, or
+    a branch on anything but the launch's integer scalars. Two float adds
+    that only such a mask or branch keeps to one lane per cell are refused,
+    with a reason that names the mask or branch; adds through a loaded index
+    are refused because the address is not known before the launch. An add
+    under a branch on integer scalars is counted where the launch takes the
+    branch and left out where it does not. In a `while` loop a float add
     computes only where its address is the same on every trip and keeps each
     lane to its own cell. These returned the source's terms, in one order or
     the other, before: with values whose sum depends on the order the result
