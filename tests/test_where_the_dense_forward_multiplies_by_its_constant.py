@@ -14,8 +14,12 @@ Each kernel here is the source of tests/test_flash_attention.py, tests/test_varl
 or tests/test_mla_value_paths.py, as written or with the multiply moved, and every result is
 compared with the source evaluated in float64 with its float32 overflow.
 
-Float16 tensors with a float32 product keep the score multiply: half tiles cannot hold the
-product, and with magnitudes of at most 65504 neither order can overflow.
+Float16 tensors with a float32 product keep the score multiply where the constant is between
+1e-20 and 1e25 in magnitude: half tiles cannot hold the product, and with magnitudes of at most
+65504 neither order can overflow or underflow there. A larger or smaller constant does differ
+(a Q of 2 times 3e38 is an infinity, and times a key of zero NaN, where zero times 3e38 is
+zero): the variable-length route then takes the maker that stages the float32 product, and the
+dense and MLA simdgroup routes refuse.
 """
 
 import importlib.util
@@ -172,6 +176,23 @@ def _nan(q, k, big):
     q[5, 3] = float("nan")
 
 
+def _two_times_zero(q, k, big):
+    """Every key is zero: a score is zero, or NaN where Q times the constant is an infinity."""
+    q[5, :] = 2.0
+    q[6, :] = 1e-3
+    k[:, :] = 0.0
+
+
+def _smallest_values(q, k, big):
+    """Rows of the smallest float16 magnitudes: with a small constant the source's product
+    underflows float32, and with any constant the scores stay far below one."""
+    q[5, :] = 2.0**-24
+    q[6, :] = -(2.0**-14)
+    k[:, 0] = 2.0**-24
+
+
+EDGE_FORMS = {"two-times-zero": _two_times_zero, "smallest-values": _smallest_values}
+
 FORMS = {
     "random": _random,
     "dot-overflows": _dot_overflows,
@@ -204,7 +225,7 @@ def _run_dense(kernel, variant, type_name, dim, form, q_type=None, literal=None)
     n = 64
     torch.manual_seed(1)
     q, k, v = (torch.randn(n, dim) for _ in range(3))
-    FORMS[form](q, k, type_name != "f16")
+    {**FORMS, **EDGE_FORMS}[form](q, k, type_name != "f16")
     q, k, v = q.to(_dtype(q_type or type_name)), k.to(_dtype(type_name)), v.to(_dtype(type_name))
     constant = 1.0 / math.sqrt(dim) if literal is None else literal
     own = torch.float32 if literal is None else q.dtype
@@ -224,7 +245,7 @@ def _run_varlen(kernel, variant, type_name, dim, form, constant, q_type=None):
     total = sum(lens)
     q, k, v = (torch.randn(total, heads, dim) for _ in range(3))
     for h in range(heads):
-        FORMS[form](q[:48, h], k[:48, h], type_name != "f16")
+        {**FORMS, **EDGE_FORMS}[form](q[:48, h], k[:48, h], type_name != "f16")
     q, k, v = q.to(_dtype(q_type or type_name)), k.to(_dtype(type_name)), v.to(_dtype(type_name))
     want = _source(q[:48, 1], k[:48, 1], v[:48, 1], constant, *_plan(variant, q.dtype, q.dtype, constant))
     dev = [x.contiguous().to("mps") for x in (q, k, v)]
@@ -512,6 +533,170 @@ def test_the_plan_for_a_product_the_tiles_hold():
     assert _plan_of({}, {"q_factor": None, "score_scale": {"factor": 0.5}, "scale": 0.5}, 1.0, "float", "f32") == {}
     # float16 values, float32 product, half tiles: the score multiply is the same function
     assert _plan_of({"q_product": "float"}, info, 1.0, "half", "f16") == {}
+
+
+# ---------------------------------------------------------------------------------------
+# a float32 product of float16 values, with a constant the score multiply does not follow
+# ---------------------------------------------------------------------------------------
+
+LOW, HIGH = 1e-20, 1e25
+OUTSIDE = [3e38, -3e38, 1e30, 1.0001e25, 9.999e-21, -1e-30, 1e-45, 0.0]
+INSIDE = [HIGH, -HIGH, LOW, -LOW, 0.125, -0.25, 2.0, 1e10, 1e-10]
+
+
+def _float32_orders(constant, q_value, k_value, terms=256, alternate=False):
+    """One score both ways in float32, term by term: the source's, and the score multiply."""
+    np = pytest.importorskip("numpy")
+    with np.errstate(all="ignore"):
+        c = np.float32(constant)
+        q = np.full(terms, q_value, dtype=np.float16).astype(np.float32)
+        k = np.full(terms, k_value, dtype=np.float16).astype(np.float32)
+        if alternate:
+            k[1::2] = -k[1::2]
+        source, template = np.float32(0), np.float32(0)
+        for i in range(terms):
+            source = np.float32(source + np.float32(q[i] * c) * k[i])
+            template = np.float32(template + q[i] * k[i])
+        return float(source), float(np.float32(template * c))
+
+
+def _kind(value):
+    return "nan" if math.isnan(value) else "inf" if math.isinf(value) else "zero" if value == 0 else "number"
+
+
+_EDGE = [65504.0, -65504.0, 2.0**-24, -(2.0**-24), 2.0, 0.0, INF, -INF, float("nan")]
+
+
+@pytest.mark.parametrize("constant", INSIDE)
+def test_inside_the_bounds_the_two_orders_differ_by_rounding_only(constant):
+    for q_value in _EDGE:
+        for k_value in _EDGE:
+            for alternate in (False, True):
+                source, template = _float32_orders(constant, q_value, k_value, alternate=alternate)
+                where = (constant, q_value, k_value, alternate)
+                assert _kind(source) == _kind(template), where
+                if _kind(source) == "number":
+                    assert abs(source - template) <= 1e-4 * abs(source), where
+                    # normal in float32: no underflow in either order
+                    assert 1.1754944e-38 <= abs(source) <= F32_MAX, where
+
+
+@pytest.mark.parametrize(
+    "constant,q_value,k_value,kinds",
+    [
+        (3e38, 2.0, 0.0, ("nan", "zero")),
+        (1e30, 65504.0, 65504.0, ("inf", "inf")),
+        (1e36, 65504.0, 2.0**-24, ("inf", "number")),
+        (1e-45, 2.0**-24, 65504.0, ("zero", "number")),
+    ],
+)
+def test_outside_the_bounds_the_two_orders_differ_in_kind(constant, q_value, k_value, kinds):
+    assert tuple(map(_kind, _float32_orders(constant, q_value, k_value))) == kinds
+
+
+def _half_tile_plan(constant, post=1.0, multiplier=1.0):
+    info = {"q_factor": constant, "score_scale": {"factor": post}, "scale": constant * post * multiplier}
+    return _plan_of({"q_product": "float"}, info, multiplier, "half", "f16")
+
+
+@pytest.mark.parametrize("constant", INSIDE)
+def test_half_tiles_keep_the_score_multiply_inside_the_bounds(constant):
+    assert _half_tile_plan(constant) == {}
+
+
+@pytest.mark.parametrize("constant", OUTSIDE)
+def test_half_tiles_refuse_a_float32_product_outside_the_bounds(constant):
+    with pytest.raises(MetalNonRecoverableError, match="multiplies a float16 Q by .* in float32 before the"):
+        _half_tile_plan(constant)
+
+
+@pytest.mark.parametrize(
+    "constant,post,multiplier",
+    [(1.0, 1.0001e25, 1.0), (1e20, 1e3, 1e3), (1.0, 1.0, 9e-21), (1e-10, 1e-11, 1.0), (1e-10, 1.0, 0.0)],
+)
+def test_half_tiles_refuse_where_the_whole_constant_is_outside_the_bounds(constant, post, multiplier):
+    with pytest.raises(MetalNonRecoverableError, match="multiplies a float16 Q by .* in float32 before the"):
+        _half_tile_plan(constant, post, multiplier)
+    # the same product staged in float tiles is the source's
+    info = {"q_factor": constant, "score_scale": {"factor": post}, "scale": constant * post * multiplier}
+    assert _plan_of({"q_product": "float"}, info, multiplier, "float", "f32")["scale"] == constant
+
+
+def test_the_bounds_are_the_ones_tested_here():
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+
+    inside = GenericLowerer._fa_half_tile_scale_is_the_source
+    assert inside(HIGH, 1.0) and inside(LOW, 1.0) and inside(-HIGH, 1.0) and inside(-LOW, 1.0)
+    assert not inside(math.nextafter(HIGH, INF), 1.0) and not inside(math.nextafter(LOW, 0.0), 1.0)
+    assert not inside(1.0, math.nextafter(HIGH, INF)) and not inside(1.0, math.nextafter(LOW, 0.0))
+    assert inside(1e30 / 1e10, 1e-10) and not inside(1e30, 1e-10)
+
+
+VARLEN_OUTSIDE = [3e38, 1e30, 1.0001e25, 9.999e-21, 1e-30]
+
+
+@requires_mps
+@pytest.mark.parametrize("form", ["two-times-zero", "smallest-values", "random", "infinite", "nan"])
+@pytest.mark.parametrize("dim", [64, 128])
+# 9e24 and 2e-20 are inside the bounds as float32 values too.
+@pytest.mark.parametrize("constant", VARLEN_OUTSIDE + [9e24, 2e-20, 0.125])
+def test_variable_length_float32_product_of_float16_values_is_the_source_at_any_constant(
+    constant, dim, form, variant_dir, cold_caches, maker_spy
+):
+    kernel = _variant(varlen_source._varlen_fwd, "wide", VARLEN["wide"], variant_dir)
+    got, want = _run_varlen(kernel, "wide", "f16", dim, form, constant)
+    staged = ("make_varlen_flash_attention", "float", None)
+    assert maker_spy == [staged if constant in VARLEN_OUTSIDE else ("make_varlen_flash_attention_mma", None, None)]
+    if form == "two-times-zero" and constant == 3e38:
+        # the reviewer's case: 2 times 3e38 is an infinity, and times a key of zero NaN
+        assert bool(want[5].isnan().all()) and not bool(want[6].isnan().any())
+    _compare(got, want, "f16", f"varlen wide f16 D={dim} {constant} {form}")
+
+
+@requires_mps
+@pytest.mark.parametrize("form", ["two-times-zero", "random"])
+# powers of two, the same number in float32: 1.5e26 and 8.5e-22
+@pytest.mark.parametrize("post,staged", [(2.0**87, True), (2.0**-70, True), (2.0, False)])
+def test_variable_length_whole_constant_outside_the_bounds_is_staged_too(
+    post, staged, form, variant_dir, cold_caches, maker_spy, monkeypatch
+):
+    """Q's constant of 0.125 is inside the bounds; with the score's the whole one may not be."""
+    name = f"wide_post_{post}"
+    monkeypatch.setitem(PLAN, name, ("f32", post))
+    kernel = _variant(
+        varlen_source._varlen_fwd, name, [*VARLEN["wide"], (_QK, _QK[:-1] + f" * {post!r}\n")], variant_dir
+    )
+    got, want = _run_varlen(kernel, name, "f16", 64, form, 0.125)
+    if staged:
+        # the constant is read from its nine printed digits
+        assert [hit[:2] for hit in maker_spy] == [("make_varlen_flash_attention", "float")]
+        assert maker_spy[0][2] == pytest.approx(post, rel=1e-7)
+    else:
+        assert maker_spy == [("make_varlen_flash_attention_mma", None, None)]
+    _compare(got, want, "f16", f"varlen wide f16 0.125 then {post} {form}")
+
+
+@requires_mps
+@pytest.mark.parametrize("form", ["two-times-zero", "smallest-values", "random"])
+@pytest.mark.parametrize("dim", [64, 128])
+@pytest.mark.parametrize("constant", [3e38, 1e-30, 9e24, 2e-20])
+def test_dense_float32_product_of_float16_values_is_the_source_or_refused(
+    constant, dim, form, variant_dir, cold_caches, maker_spy
+):
+    kernel = _variant(
+        dense_source._flash_attn_fwd,
+        f"wide_{constant}",
+        [("    q = q * qk_scale\n", f"    q = q.to(tl.float32) * {constant!r}\n")],
+        variant_dir,
+    )
+    if constant in (3e38, 1e-30):
+        with pytest.raises(MetalNonRecoverableError, match="multiplies a float16 Q by .* in float32 before the"):
+            _run_dense(kernel, "wide", "f16", dim, form, literal=constant)
+        assert maker_spy == []
+        return
+    got, want = _run_dense(kernel, "wide", "f16", dim, form, literal=constant)
+    assert maker_spy == [("make_flash_attention_kernel_simdgroup", None, None)]
+    _compare(got, want, "f16", f"dense wide f16 D={dim} {constant} {form}")
 
 
 @pytest.mark.parametrize(

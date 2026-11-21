@@ -147,13 +147,16 @@ def _binary(name, width, left, right):
     elif name == "xor":
         out = left ^ right
     elif name in ("sdiv", "srem"):
-        quotient = np.abs(left) // np.abs(right)
-        quotient = np.where((left < 0) != (right < 0), -quotient, quotient)
+        # No absolute value and no negation: the smallest 64-bit value has neither.  The floor
+        # quotient is one below the truncated one where the signs differ and a remainder is left.
+        floor = left // right
+        quotient = floor + (((left < 0) != (right < 0)) & (floor * right != left))
         out = quotient if name == "sdiv" else left - quotient * right
     elif name == "fdiv":
         out = left // right
     elif name == "cdiv":
-        out = -((-left) // right)
+        floor = left // right
+        out = floor + (floor * right != left)
     elif name in ("udiv", "urem", "umin", "umax", "lshr"):
         a, b = _unsigned(left, width), _unsigned(right, width)
         if name == "udiv":

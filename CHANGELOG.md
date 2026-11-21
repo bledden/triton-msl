@@ -297,8 +297,10 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   element near `6e4`. The templates now stage the product in the type the
   source forms it in, and multiply the score only by a constant the source
   puts there. Float16 tensors with a float32 product keep the score
-  multiply: half tiles cannot hold the product, and with magnitudes of at
-  most 65504 neither order can overflow.
+  multiply where the constant is between `1e-20` and `1e25` in magnitude:
+  half tiles cannot hold the product, and with magnitudes of at most 65504
+  neither order can overflow or underflow there (see the entry on that
+  constant below).
   Three more differences from the source were found on these routes and are
   closed with it. A constant that is not finite in the type of its product
   (an infinity, a NaN, `7e4` in float16, `3.4e38` in bfloat16) is printed by
@@ -318,6 +320,34 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   the constant and the product are now rounded to the tensors' type as the
   source rounds them. Dense and MLA float16 results, and every result with a
   power-of-two constant, keep their bits.
+- Bound the constant for which float16 attention tiles multiply the
+  finished score. A source that multiplies a float16 Q by a constant in
+  float32 (`q = q.to(tl.float32) * SCALE`) kept the score multiply at any
+  finite constant, on the argument that float16 magnitudes cannot overflow
+  float32. The constant can: with `SCALE = 3e38`, a Q of 2 and keys of zero
+  the source has infinity times zero and its row is NaN, where the template
+  computed zero times `3e38` and a finite row (found in review, on the
+  emitted shader's arithmetic). The score multiply is now kept only where
+  the constant on Q, and the whole constant on the score, are between
+  `1e-20` and `1e25` in magnitude, where every product and sum of either
+  order is finite and normal in float32. Outside those bounds the
+  variable-length route takes the maker that stages the float32 product,
+  and computes the source's result; the dense and MLA simdgroup routes
+  refuse. No constant of an ordinary softmax scale is affected.
+- Divide the smallest 64-bit integer in the launch check as the shader
+  does. The lane-order check reads a branch on the launch's integer
+  scalars before the launch and leaves what is under the way not taken out
+  of its comparison. Its signed quotient took the absolute value of both
+  operands, and the smallest 64-bit value has none: `-2**63 // 2` was
+  `+2**62` in the check and is `-2**62` in the shader. A kernel that
+  reverses a row in place under the `else` of `if S // T > 1` was launched
+  with `S = -2**63`: the check read the branch as taken and the shader took
+  the other one (found in review). The remainder used the same quotient and
+  the ceiling quotient negated its dividend the same way; 38 of 7,896
+  quotients and remainders at the edges of the 8 to 64-bit types differed
+  from the integer ones, all at 64 bits. The quotient is now computed with
+  no absolute value or negation. A zero divisor and the smallest value over
+  -1 are still not read, and what is under such a branch is still counted.
 - On the biased forward route, compute the softmax in the units of its
   source. The source multiplies its float32 scores by a constant
   (`scores *= inv_ln2`) and takes `exp2`; the template kept natural units.
