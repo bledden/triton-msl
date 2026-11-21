@@ -456,13 +456,14 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   multiply K (dK / dV, dQ) or Q (bias gradient, forward) by the softmax scale before the dot
   product, as the source does, at every type, so a scale that is not finite and a product that
   overflows give the source's NaN. Float32 results differ in their last bits from 0.3.0 when the
-  scale is not a power of two. Two differences from the source remain open on float32 forward
-  kernels with finite inputs, both near the float32 limit. The dense, variable-length and MLA
+  scale is not a power of two. Two differences from the source remain open on forward kernels
+  with finite inputs, both near the float32 limit of the scores. The dense, variable-length and MLA
   templates multiply the score tile by a constant scale after the dot product, so a sum that
   overflows before the scale is applied (measured on the dense route: a Q element of 1e30, K
   near 1e9) is NaN in the template and finite in the source. The biased template keeps scores
   in natural units, so a score between about 2.36e38 and 3.4e38, which overflows in the
-  source's multiply by 1 / ln 2 and makes its row NaN, is finite in the template.
+  source's multiply by 1 / ln 2 and makes its row NaN, is finite in the template (measured with
+  float32 and with bfloat16 tensors: the scores are float32 at every tensor type).
 - **In-place outputs:** a matmul whose output overlaps an operand keeps the source's load-then-store
   order by leaving the replacement template; the quantized routes and the attention kernels refuse
   such a launch by name, except the two biased source replays, which keep the order behind a barrier
