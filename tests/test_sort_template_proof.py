@@ -7,9 +7,12 @@ changed before the store, masked accesses and offset addresses all fit, and thos
 then ran as a plain sort. The template is now chosen by a proof of the whole kernel; every
 other kernel goes to the ordinary lowering, which computes it or refuses it.
 
-The ordinary lowering runs a tile of at most 1024 elements. A larger sort that is not the
-plain form the proof accepts (a store that converts, a load of reversed columns, a mask,
-a sort of a sort) ran as the template before and is refused now, with the reason.
+The ordinary lowering runs a tile of at most 1024 elements. Beside the plain form the proof
+reads four more things, each a fact the template is then handed: a store that converts the
+sorted values, a load that takes each column from one fixed place of its row, masks that
+are true on every cell, and a sort of a sort, up to four. A sort of more than 1024 elements
+in those forms takes the template. At most 1024 elements it keeps the ordinary lowering,
+and a larger kernel that is anything more is refused, with the reason.
 
 The template's network is also the source's own, step for step. It used to swap a pair
 that was out of order, comparing signed: unsigned values above the signed range were
@@ -118,6 +121,111 @@ def _masked_everywhere(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
     tl.store(Z + o, tl.sort(tl.load(X + o, mask=o < R * C, other=0), dim=1, descending=D), mask=o < R * C)
 
 
+@triton.jit
+def _pair_swapped_columns(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    c = tl.arange(0, C)[None, :]
+    tl.store(Z + r * C + c, tl.sort(tl.load(X + r * C + (c ^ 1)), dim=1, descending=D))
+
+
+@triton.jit
+def _shifted_load(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    o = tl.arange(0, R)[:, None] * C + tl.arange(0, C)[None, :]
+    tl.store(Z + o, tl.sort(tl.load(X + o + 3), dim=1, descending=D))
+
+
+@triton.jit
+def _one_column(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    c = tl.arange(0, C)[None, :]
+    tl.store(Z + r * C + c, tl.sort(tl.load(X + r * C + c * 0 + 1), dim=1, descending=D))
+
+
+@triton.jit
+def _four_sorts(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    o = tl.arange(0, R)[:, None] * C + tl.arange(0, C)[None, :]
+    twice = tl.sort(tl.sort(tl.load(X + o), dim=1, descending=D), dim=1, descending=1 - D)
+    tl.store(Z + o, tl.sort(tl.sort(twice, dim=1, descending=1 - D), dim=1, descending=D))
+
+
+@triton.jit
+def _five_sorts(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    o = tl.arange(0, R)[:, None] * C + tl.arange(0, C)[None, :]
+    twice = tl.sort(tl.sort(tl.load(X + o), dim=1, descending=D), dim=1, descending=1 - D)
+    four = tl.sort(tl.sort(twice, dim=1, descending=1 - D), dim=1, descending=D)
+    tl.store(Z + o, tl.sort(four, dim=1, descending=1 - D))
+
+
+@triton.jit
+def _all_together(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    c = tl.arange(0, C)[None, :]
+    every = r * C + c < R * C
+    loaded = tl.load(X + r * C + (C - 1 - c), mask=every, other=0)
+    tl.store(Z + r * C + c, tl.sort(tl.sort(loaded, dim=1, descending=1 - D), dim=1, descending=D), mask=every)
+
+
+@triton.jit
+def _stored_as(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr, AS: tl.constexpr):
+    o = tl.arange(0, R)[:, None] * C + tl.arange(0, C)[None, :]
+    tl.store(Z + o, tl.sort(tl.load(X + o), dim=1, descending=D).to(AS))
+
+
+@triton.jit
+def _half_of_the_columns(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    c = tl.arange(0, C)[None, :]
+    tl.store(Z + r * C + c, tl.sort(tl.load(X + r * C + c // 2 * 2), dim=1, descending=D))
+
+
+@triton.jit
+def _columns_that_follow_the_row(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    o = r * C + tl.arange(0, C)[None, :]
+    tl.store(Z + o, tl.sort(tl.load(X + (o ^ r)), dim=1, descending=D))
+
+
+@triton.jit
+def _columns_scaled_by_the_row(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    c = tl.arange(0, C)[None, :]
+    tl.store(Z + r * C + c, tl.sort(tl.load(X + r * C + c * r), dim=1, descending=D))
+
+
+@triton.jit
+def _partly_masked(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    o = tl.arange(0, R)[:, None] * C + tl.arange(0, C)[None, :]
+    most = o < R * C - 1
+    tl.store(Z + o, tl.sort(tl.load(X + o, mask=most, other=0), dim=1, descending=D), mask=most)
+
+
+@triton.jit
+def _in_its_own_argument(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    o = tl.arange(0, R)[:, None] * C + tl.arange(0, C)[None, :]
+    tl.store(X + o, tl.sort(tl.load(X + o), dim=1, descending=D))
+
+
+@triton.jit
+def _a_converted_value_for_no_cell(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    o = tl.arange(0, R)[:, None] * C + tl.arange(0, C)[None, :]
+    loaded = tl.load(X + o, mask=o < R * C, other=o.to(tl.float32))
+    tl.store(Z + o, tl.sort(loaded, dim=1, descending=D))
+
+
+@triton.jit
+def _rows_that_share_a_loaded_cell(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    c = tl.arange(0, C)[None, :]
+    tl.store(Z + r * C + c, tl.sort(tl.load(X + r * (C - 1) + c), dim=1, descending=D))
+
+
+@triton.jit
+def _rows_that_share_a_stored_cell(X, Z, R: tl.constexpr, C: tl.constexpr, D: tl.constexpr):
+    r = tl.arange(0, R)[:, None]
+    c = tl.arange(0, C)[None, :]
+    tl.store(Z + r * (C - 1) + c, tl.sort(tl.load(X + r * C + c), dim=1, descending=D))
+
+
 def _ordered(tile, descending):
     return torch.sort(tile, dim=1, descending=bool(descending)).values
 
@@ -195,7 +303,6 @@ OTHER_KERNELS = [
     ("masked_load", _masked_load, 1, 0, _want_masked_load),
     ("masked_store", _masked_store, 1, 0, _want_masked_store),
     ("offsets", _offsets, 1, 5, lambda x, r, c, d: _ordered(x[3 : 3 + r * c].reshape(r, c), d).reshape(-1)),
-    ("sorted_twice", _sorted_twice, 1, 0, lambda x, r, c, d: _ordered(x[: r * c].reshape(r, c), 1 - d).reshape(-1)),
     ("negated", _negated, 1, 0, lambda x, r, c, d: _ordered(-x[: r * c].reshape(r, c), d).reshape(-1)),
 ]
 
@@ -247,43 +354,191 @@ def test_a_flip_of_two_rows_is_not_a_sort(device, dtype, axis, cols):
 
 
 TOO_LARGE = "2D kernel with cooperative ops exceeds 1024 elements"
-# name, kernel, output dtype, the source's result for an int32 input
-NOT_PLAIN = [
-    ("converting_store", _plain, torch.float32, lambda tile, d: _ordered(tile, d).to(torch.float32)),
-    ("reversed_columns", _reversed_columns, torch.int32, lambda tile, d: _ordered(tile.flip(1), d)),
-    ("masked_everywhere", _masked_everywhere, torch.int32, _ordered),
-    ("sorted_twice", _sorted_twice, torch.int32, lambda tile, d: _ordered(tile, 1 - d)),
+LARGER = [(64, 32), (512, 8), (4, 512)]
+
+
+def _tile(x, rows, cols):
+    return x[: rows * cols].reshape(rows, cols)
+
+
+# name, kernel, output dtype, the source's result for an int32 input of rows * cols + 8 cells
+BESIDE_PLAIN = [
+    ("converting_store", _plain, torch.float32, lambda x, r, c, d: _ordered(_tile(x, r, c), d).to(torch.float32)),
+    ("reversed_columns", _reversed_columns, torch.int32, lambda x, r, c, d: _ordered(_tile(x, r, c), d)),
+    ("pair_swapped_columns", _pair_swapped_columns, torch.int32, lambda x, r, c, d: _ordered(_tile(x, r, c), d)),
+    ("shifted_load", _shifted_load, torch.int32, lambda x, r, c, d: _ordered(_tile(x[3:], r, c), d)),
+    ("one_column", _one_column, torch.int32, lambda x, r, c, d: _tile(x, r, c)[:, 1:2].expand(r, c)),
+    ("masked_everywhere", _masked_everywhere, torch.int32, lambda x, r, c, d: _ordered(_tile(x, r, c), d)),
+    ("sorted_twice", _sorted_twice, torch.int32, lambda x, r, c, d: _ordered(_tile(x, r, c), 1 - d)),
+    ("four_sorts", _four_sorts, torch.int32, lambda x, r, c, d: _ordered(_tile(x, r, c), d)),
+    ("all_together", _all_together, torch.float32, lambda x, r, c, d: _ordered(_tile(x, r, c), d).to(torch.float32)),
 ]
 
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("descending", [0, 1])
-@pytest.mark.parametrize("rows,cols", [(64, 32), (512, 8)])
-@pytest.mark.parametrize("case", NOT_PLAIN, ids=[case[0] for case in NOT_PLAIN])
-def test_a_larger_sort_that_is_not_the_plain_form_is_refused_with_the_reason(case, rows, cols, descending, device):
-    _, kernel, out_dtype, _ = case
+@pytest.mark.parametrize("rows,cols", LARGER)
+@pytest.mark.parametrize("case", BESIDE_PLAIN, ids=[case[0] for case in BESIDE_PLAIN])
+def test_a_larger_sort_in_a_form_the_proof_reads_takes_the_template(case, rows, cols, descending, device):
+    _, kernel, out_dtype, want_of = case
     total = rows * cols
-    x = _input(total, torch.int32)
+    x = _input(total + 8, torch.int32)
     z = torch.full((total + 8,), POISON, dtype=out_dtype, device=device)
-    with pytest.raises(MetalNonRecoverableError) as caught:
-        kernel[(1,)](x.to(device), z, rows, cols, descending)
-    assert TOO_LARGE in str(caught.value)
-    assert torch.all(z == POISON)
+    launch = kernel[(1,)](x.to(device), z, rows, cols, descending)
+    assert _is_the_template(launch)
+    assert torch.equal(z[:total].cpu().reshape(rows, cols), want_of(x, rows, cols, descending))
+    assert torch.all(z[total:] == POISON)
 
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("descending", [0, 1])
 @pytest.mark.parametrize("rows,cols", [(16, 16), (32, 32)])
-@pytest.mark.parametrize("case", NOT_PLAIN, ids=[case[0] for case in NOT_PLAIN])
-def test_the_same_sort_of_at_most_1024_elements_computes(case, rows, cols, descending, device):
+@pytest.mark.parametrize("case", BESIDE_PLAIN, ids=[case[0] for case in BESIDE_PLAIN])
+def test_the_same_sort_of_at_most_1024_elements_keeps_the_ordinary_lowering(case, rows, cols, descending, device):
     _, kernel, out_dtype, want_of = case
     total = rows * cols
-    x = _input(total, torch.int32)
+    x = _input(total + 8, torch.int32)
     z = torch.full((total + 8,), POISON, dtype=out_dtype, device=device)
     launch = kernel[(1,)](x.to(device), z, rows, cols, descending)
     assert not _is_the_template(launch)
-    assert torch.equal(z[:total].cpu().reshape(rows, cols), want_of(x.reshape(rows, cols), descending))
+    assert torch.equal(z[:total].cpu().reshape(rows, cols), want_of(x, rows, cols, descending))
     assert torch.all(z[total:] == POISON)
+
+
+# name, kernel, grid, input dtype, output dtype, input cells for each cell of the tile
+MORE_THAN_THESE = [
+    ("partly_masked", _partly_masked, 1, torch.int32, torch.int32, 1),
+    ("a_column_masked_off_the_load", _masked_load, 1, torch.int32, torch.int32, 1),
+    ("a_column_masked_off_the_store", _masked_store, 1, torch.int32, torch.int32, 1),
+    ("shifted_store", _offsets, 1, torch.int32, torch.int32, 1),
+    ("plus_one", _plus_one, 1, torch.int32, torch.int32, 1),
+    ("flipped", _flipped, 1, torch.int32, torch.int32, 1),
+    ("negated", _negated, 1, torch.int32, torch.int32, 1),
+    ("per_program", _per_program, 3, torch.int32, torch.int32, 1),
+    ("five_sorts", _five_sorts, 1, torch.int32, torch.int32, 1),
+    ("half_of_the_columns", _half_of_the_columns, 1, torch.int32, torch.int32, 1),
+    ("columns_that_follow_the_row", _columns_that_follow_the_row, 1, torch.int32, torch.int32, 1),
+    ("columns_scaled_by_the_row", _columns_scaled_by_the_row, 1, torch.int32, torch.int32, 2),
+    ("float_to_integer", _plain, 1, torch.float32, torch.int32, 1),
+    ("integer_to_bfloat16", _plain, 1, torch.int32, torch.bfloat16, 1),
+    ("in_its_own_argument", _in_its_own_argument, 1, torch.int32, torch.int32, 1),
+    # Rows one cell closer than they are wide: the last cell of a row is the next row's first.
+    ("rows_that_share_a_loaded_cell", _rows_that_share_a_loaded_cell, 1, torch.int32, torch.int32, 1),
+    ("rows_that_share_a_stored_cell", _rows_that_share_a_stored_cell, 1, torch.int32, torch.int32, 1),
+    # The mask leaves no cell out, so the converted value is given to none; a conversion
+    # that is not the stored one is refused wherever it stands.
+    ("a_converted_value_for_no_cell", _a_converted_value_for_no_cell, 1, torch.float32, torch.float32, 1),
+]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("descending", [0, 1])
+@pytest.mark.parametrize("rows,cols", LARGER)
+@pytest.mark.parametrize("case", MORE_THAN_THESE, ids=[case[0] for case in MORE_THAN_THESE])
+def test_a_larger_kernel_that_is_more_than_these_forms_is_refused_with_the_reason(case, rows, cols, descending, device):
+    _, kernel, grid, in_dtype, out_dtype, cells = case
+    total = rows * cols
+    x = _input(cells * total + 8, in_dtype).to(device)
+    z = torch.full((grid * total + 8,), POISON, dtype=out_dtype, device=device)
+    held = x.clone()
+    with pytest.raises(MetalNonRecoverableError) as caught:
+        kernel[(grid,)](x, z, rows, cols, descending)
+    assert TOO_LARGE in str(caught.value)
+    assert torch.all(z == POISON) and torch.equal(x, held)
+
+
+def _values(kind, count, special):
+    """``count`` values of ``kind`` with the ``special`` ones among them; no zero of the other sign, no NaN."""
+    rng = np.random.default_rng(count + np.dtype(kind).itemsize)
+    if np.issubdtype(kind, np.floating):
+        values = (rng.integers(-200, 200, count) * 0.25).astype(kind)
+    else:
+        info = np.iinfo(kind)
+        values = rng.integers(max(info.min, -100), min(info.max, 100), count, endpoint=True).astype(kind)
+    for position, value in enumerate(special):
+        values[3 + position :: 11 + 2 * position] = value
+    return values
+
+
+# input type, output type, values the conversion rounds or reads by their sign
+CONVERSIONS = [
+    (np.int32, np.float32, [16777217, 16777219, -16777217, 33554434, 2**31 - 1, -(2**31)]),
+    (np.int64, np.float32, [2**40 + 2**16, 2**40 + 3 * 2**16, 2**53 + 1, -(2**62) - 2**38, 16777217]),
+    (np.uint32, np.float32, [2**32 - 1, 2**31, 2**31 + 129, 16777217]),
+    (np.int32, np.float16, [2049, 2051, 65520, -100000, 4097]),
+    # 65505 to 65519 round to the largest float16; Metal's own long to half gives infinity there.
+    (np.int64, np.float16, [65505, 65519, -65512, 65520, 65504, 2049, 2**40]),
+    (np.int8, np.float32, [-128, 127, -1]),
+    (np.uint8, np.float16, [255, 128, 129]),
+    (np.int32, np.int64, [-1, 2**31 - 1, -(2**31)]),
+    (np.int8, np.int32, [-128, -1, 127]),
+    (np.uint8, np.int32, [255, 128]),
+    (np.int16, np.int64, [-32768, 32767, -1]),
+    (np.float16, np.float32, [65504.0, -65504.0, 0.333]),
+    (np.float32, np.float16, [2049.0, 2051.0, 65520.0, -100000.0, 0.1]),
+    (np.int64, np.int32, [2**40 + 5, -(2**40) - 5, 2**31]),
+    (np.int32, np.int8, [300, -300, 128]),
+]
+
+
+def _name(kind):
+    return np.dtype(kind).name
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("descending", [0, 1])
+@pytest.mark.parametrize("rows,cols", [(16, 16), (64, 32), (4, 512)])
+@pytest.mark.parametrize("case", CONVERSIONS, ids=[f"{_name(case[0])}-{_name(case[1])}" for case in CONVERSIONS])
+def test_a_converting_store_converts_as_the_source_does(case, rows, cols, descending, device):
+    in_kind, out_kind, special = case
+    total = rows * cols
+    x = _values(in_kind, total, special)
+    z = torch.from_numpy(np.full(total + 8, POISON, dtype=out_kind)).to(device)
+    launch = _plain[(1,)](torch.from_numpy(x).to(device), z, rows, cols, descending)
+    # A store that keeps the low bits of an integer is the plain form.
+    narrowed = np.issubdtype(out_kind, np.integer) and np.dtype(out_kind).itemsize < np.dtype(in_kind).itemsize
+    assert _is_the_template(launch) == (narrowed or total > 1024)
+    ordered = np.sort(x.reshape(rows, cols), axis=1)
+    with np.errstate(over="ignore"):
+        want = (ordered[:, ::-1] if descending else ordered).astype(out_kind)
+    got = z.cpu().numpy()
+    assert np.array_equal(got[:total].reshape(rows, cols).view(np.uint8), want.view(np.uint8))
+    assert np.all(got[total:] == POISON)
+
+
+# input type, the type the sorted values are read as, output type
+READ_AS = [
+    (np.int32, tl.uint32, np.uint32, np.float32),
+    (np.uint32, tl.int32, np.int32, np.float32),
+    (np.int32, tl.uint32, np.uint32, np.int64),
+    (np.uint32, tl.int32, np.int32, np.int64),
+    (np.int8, tl.uint8, np.uint8, np.int32),
+    (np.uint8, tl.int8, np.int8, np.float32),
+]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("descending", [0, 1])
+@pytest.mark.parametrize("rows,cols", [(16, 16), (64, 32), (512, 8)])
+@pytest.mark.parametrize("case", READ_AS, ids=[f"{_name(c[0])}-as-{_name(c[2])}-{_name(c[3])}" for c in READ_AS])
+def test_the_conversion_reads_the_sorted_value_by_its_own_sign_not_the_comparison_s(
+    case, rows, cols, descending, device
+):
+    # Sorted as the input's type compares, then widened or made a float as the other sign.
+    in_kind, read_as, read_kind, out_kind = case
+    total = rows * cols
+    info = np.iinfo(in_kind)
+    x = _values(in_kind, total, [info.max, info.min, info.max // 2 + 1, info.max - 5])
+    if info.min == 0:
+        x[1::3] = info.max - x[1::3]  # a third of the values above the signed range
+    z = torch.from_numpy(np.full(total + 8, POISON, dtype=out_kind)).to(device)
+    launch = _stored_as[(1,)](torch.from_numpy(x).to(device), z, rows, cols, descending, read_as)
+    assert _is_the_template(launch) == (total > 1024)
+    ordered = np.sort(x.reshape(rows, cols), axis=1)
+    want = (ordered[:, ::-1] if descending else ordered).astype(read_kind).astype(out_kind)
+    got = z.cpu().numpy()
+    assert np.array_equal(got[:total].reshape(rows, cols).view(np.uint8), want.view(np.uint8))
+    assert np.all(got[total:] == POISON)
 
 
 UNSIGNED = [torch.uint8, torch.uint16, torch.uint32]
@@ -332,6 +587,38 @@ def _with_pairs_neither_greater(kind, count):
         values[pick[: count // 2]] = 0.0
         values[pick[count // 2 : 3 * count // 4]] = -0.0
     return values
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kind", ["nan", "zeros"])
+@pytest.mark.parametrize("descending", [0, 1])
+@pytest.mark.parametrize("rows,cols", [(16, 16), (64, 32), (4, 512)])
+@pytest.mark.parametrize(
+    "kernel", [_reversed_columns, _pair_swapped_columns, _shifted_load, _sorted_twice, _four_sorts]
+)
+def test_the_order_of_the_loaded_columns_and_of_the_sorts_is_the_source_s(kernel, rows, cols, descending, kind, device):
+    # Where neither of a pair is greater, the network's result follows the order its
+    # values arrive in and the direction of every sort before the last.
+    total = rows * cols
+    x = _with_pairs_neither_greater(kind, total + 8)
+    z = torch.full((total + 8,), float(POISON), device=device)
+    launch = kernel[(1,)](torch.from_numpy(x).to(device), z, rows, cols, descending)
+    assert _is_the_template(launch) == (total > 1024)
+    tile = x[:total].reshape(rows, cols)
+    if kernel is _reversed_columns:
+        want = _network(tile[:, ::-1], descending)
+    elif kernel is _pair_swapped_columns:
+        want = _network(tile[:, np.arange(cols) ^ 1], descending)
+    elif kernel is _shifted_load:
+        want = _network(x[3 : 3 + total].reshape(rows, cols), descending)
+    elif kernel is _sorted_twice:
+        want = _network(_network(tile, descending), 1 - descending)
+    else:
+        want = _network(_network(tile, descending), 1 - descending)
+        want = _network(_network(want, 1 - descending), descending)
+    got = z.cpu().numpy()
+    assert np.array_equal(got[:total].view(np.uint32), want.reshape(-1).view(np.uint32))
+    assert np.all(got[total:] == POISON)
 
 
 @pytest.mark.parametrize("device", DEVICES)

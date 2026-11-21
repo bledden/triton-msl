@@ -755,15 +755,17 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   or a program term read and wrote program 0's rows for every program of the grid. A
   mask on the load or store and arithmetic on the sorted values were dropped. All of
   these returned with no exception. The template is now chosen by a proof that the
-  kernel is exactly one unmasked load, the network `tl.sort` writes and one unmasked
-  store at the template's addresses; every other kernel goes to the ordinary
-  lowering, which computes it or refuses it. The ordinary lowering runs a tile of at
-  most 1024 elements, so a larger sort that is not that plain form is refused when the
-  kernel is lowered, and the message gives that reason. Four such forms returned the
-  source's result through the template before, at 64 by 32 and 512 by 8: a store that
-  converts the sorted values, a load of the columns in reverse, a mask that is true on
-  every lane, and a sort of a sort. The template also runs the source's own
-  network now. It used to compare signed, so unsigned values above the signed range
+  kernel is exactly one load of a tile, the network `tl.sort` writes and one store at
+  the template's addresses; every other kernel goes to the ordinary lowering, which
+  computes it or refuses it. The ordinary lowering runs a tile of at most 1024
+  elements. Four forms beside the plain one are proved too, and run as the template
+  where the tile is larger than that: a load that takes each column from a constant
+  place in its row (the columns in reverse), a mask that is true on every cell, a sort
+  of a sort (up to four, in either direction each), and one conversion of the sorted
+  values to the stored type (a wider integer, float16 or float32 from an integer,
+  float16 to or from float32). Any other sort of more than 1024 elements is refused
+  when the kernel is lowered, and the message gives that reason. The template also
+  runs the source's own network now. It used to compare signed, so unsigned values above the signed range
   were sorted as negative ones, and where neither of a pair is greater (a NaN, a zero
   of each sign) it kept both values where the source leaves one value in both cells.
 

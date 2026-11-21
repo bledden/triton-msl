@@ -1,17 +1,27 @@
-"""Proof that a kernel is one row-wise ``tl.sort`` and nothing else.
+"""Proof that a kernel is a row-wise ``tl.sort`` and nothing else.
 
 The row-wise sort template replaces the whole kernel: each thread reads one row of N
 cells from ``X + row * stride + column``, sorts it in registers and writes it to the same
 place under Z. It reads nothing of the source but the facts it is handed, so it may stand
-only for a source that is exactly that: one unmasked load of an (M, N) tile from a base
-argument at those addresses, the bitonic network ``triton.language.sort`` writes, and one
-unmasked store of the result. Anything else the source says (an offset or a program term
-in an address, a mask, arithmetic on the values, a second rearrangement, a ``tl.flip``,
-whose reshape and exclusive-or reductions resemble a sort's) is lost by the template.
+only for a source that is exactly that: one load of an (M, N) tile from a base argument at
+those addresses, the bitonic network ``triton.language.sort`` writes, and one store of the
+result. Four things more are facts the template can be handed, and are proved here:
+
+- the load takes column ``c`` of every row from a constant place ``columns[c]`` of the row
+  (the columns in reverse, say);
+- a mask on the load or on the store that is true on every cell of the tile, which is no
+  mask;
+- the network run again on its own result (a sort of a sort), in either direction each time;
+- one conversion of the sorted values to the stored type.
+
+Anything else the source says (a program term in an address, an offset in the store's, a
+mask that leaves a cell out, arithmetic on the values, another rearrangement, a
+``tl.flip``, whose reshape and exclusive-or reductions resemble a sort's) is lost by the
+template.
 
 ``prove_row_wise_sort`` checks the source operation by operation and evaluates its index
-tensors on the host. It answers with the facts the template needs, or None, which leaves
-the kernel to the ordinary lowering.
+and mask tensors on the host. It answers with the facts the template needs, or None, which
+leaves the kernel to the ordinary lowering.
 """
 
 import numpy as np
@@ -25,10 +35,16 @@ _VOCABULARY = frozenset(
         "arith.cmpf",
         "arith.cmpi",
         "arith.constant",
+        "arith.extsi",
         "arith.extui",
+        "arith.extf",
+        "arith.truncf",
         "arith.muli",
         "arith.select",
+        "arith.sitofp",
+        "arith.subi",
         "arith.trunci",
+        "arith.uitofp",
         "arith.xori",
         "tt.addptr",
         "tt.bitcast",
@@ -46,6 +62,38 @@ _VOCABULARY = frozenset(
 )
 
 _GREATER = {"arith.cmpf": ("ogt",), "arith.cmpi": ("sgt", "ugt")}
+
+# A conversion the stored value may be, of the sorted values. ``arith.extui`` is also how
+# every step of the network widens its comparison, so it is known by where it stands; each
+# of the others may stand nowhere else in the kernel.
+_CONVERSIONS = frozenset(
+    {"arith.extsi", "arith.extui", "arith.extf", "arith.truncf", "arith.sitofp", "arith.trunci", "arith.uitofp"}
+)
+_STORED_ONLY = _CONVERSIONS - {"arith.extui"}
+
+# The comparisons a mask is read through. Index tensors are exact integers that fit 32
+# bits, so the signed orders and equality are the source's.
+_MASK_COMPARISONS = {
+    "eq": np.equal,
+    "ne": np.not_equal,
+    "slt": np.less,
+    "sle": np.less_equal,
+    "sgt": np.greater,
+    "sge": np.greater_equal,
+}
+
+# The most networks one kernel may run on a tile; the shader writes each of them out.
+MOST_SORTS = 4
+
+
+# The arithmetic an index tensor is built with. Its operands fit 32 bits, so every result
+# is exact in 64, and one that leaves 32 bits is not followed.
+_INDEX_ARITHMETIC = {
+    "arith.addi": np.add,
+    "arith.muli": np.multiply,
+    "arith.subi": np.subtract,
+    "arith.xori": np.bitwise_xor,
+}
 
 
 class _Values(dict):
@@ -110,11 +158,10 @@ def _index_tensor(by_id, value_id, depth=0):
         if operands[0].size != int(np.prod(shape, dtype=np.int64)):
             return None
         result = operands[0].reshape(shape)
-    elif op.op in ("arith.addi", "arith.muli", "arith.xori") and len(operands) == 2:
+    elif op.op in _INDEX_ARITHMETIC and len(operands) == 2:
         if operands[0].shape != operands[1].shape:
             return None
-        combine = {"arith.addi": np.add, "arith.muli": np.multiply, "arith.xori": np.bitwise_xor}[op.op]
-        result = combine(operands[0], operands[1])
+        result = _INDEX_ARITHMETIC[op.op](operands[0], operands[1])
     else:
         return None
     if result.shape != shape or (result.size and (result.min() < -(2**31) or result.max() >= 2**31)):
@@ -154,17 +201,61 @@ def _pointer_offsets(by_id, arguments, pointer_id, depth=0):
     return None
 
 
-def _row_stride(by_id, arguments, pointer_id, rows, columns):
-    """(argument, S) when ``pointer_id`` is ``argument + row * S + column`` over the (rows, columns) tile."""
+def _mask_tensor(by_id, value_id, depth=0):
+    """The boolean tensor ``value_id`` holds when it compares tensors of ranges and constants, else None."""
+    op = by_id.get(value_id)
+    if op is None or depth > 8:
+        return None
+    shape = tuple(_extract_shape(op.type_str or "") or ())
+    attrs = op.attrs or {}
+    if op.op == "arith.cmpi" and len(op.operand_ids or ()) == 2:
+        compare = _MASK_COMPARISONS.get(attrs.get("predicate_name"))
+        left, right = (_index_tensor(by_id, operand) for operand in op.operand_ids)
+        if compare is None or left is None or right is None or left.shape != right.shape:
+            return None
+        result = compare(left, right)
+    elif op.op in ("tt.expand_dims", "tt.broadcast") and len(op.operand_ids or ()) == 1:
+        inner = _mask_tensor(by_id, op.operand_ids[0], depth + 1)
+        if inner is None:
+            return None
+        if op.op == "tt.expand_dims":
+            axis = attrs.get("axis")
+            if not isinstance(axis, int) or not 0 <= axis <= inner.ndim:
+                return None
+            result = np.expand_dims(inner, axis)
+        else:
+            if inner.ndim != len(shape) or any(have not in (1, want) for have, want in zip(inner.shape, shape)):
+                return None
+            result = np.broadcast_to(inner, shape)
+    else:
+        return None
+    return result if result.shape == shape else None
+
+
+def _every_cell(by_id, mask_id, rows, columns):
+    """Whether the mask ``mask_id`` is proved true on every cell of the (rows, columns) tile."""
+    mask = _mask_tensor(by_id, mask_id)
+    return mask is not None and mask.shape == (rows, columns) and bool(mask.all())
+
+
+def _row_stride(by_id, arguments, pointer_id, rows, columns, placed=False):
+    """(argument, S, places) when ``pointer_id`` is ``argument + row * S + places[column]`` over the tile.
+
+    ``places`` is ``0 .. columns - 1`` unless ``placed``, which lets it be any constants
+    that are the same on every row and fit 32 bits.
+    """
     traced = _pointer_offsets(by_id, arguments, pointer_id)
     if traced is None or traced[1].shape != (rows, columns):
         return None
     argument, offsets = traced
     stride = int(offsets[1, 0] - offsets[0, 0]) if rows > 1 else columns
-    row, column = np.indices((rows, columns), dtype=np.int64)
-    if not columns <= stride < 2**31 or not np.array_equal(offsets, row * stride + column):
+    places = offsets[0] if placed else np.arange(columns, dtype=np.int64)
+    row = np.arange(rows, dtype=np.int64)[:, None]
+    if not columns <= stride < 2**31 or not np.array_equal(offsets, row * stride + places[None, :]):
         return None
-    return argument, stride
+    if places.min() < -(2**31) or places.max() >= 2**31:
+        return None
+    return argument, stride, tuple(int(place) for place in places)
 
 
 def _expected_networks(dims, row_bits):
@@ -261,9 +352,13 @@ def _swap_step(by_id, select, hypercube):
 def prove_row_wise_sort(graph, load, store, rows, columns):
     """The facts of a kernel that is exactly a sort of each row of one loaded tile, or None.
 
-    Returns ``{"descending", "compare", "input", "output", "input_stride", "output_stride"}``:
-    the direction, the comparison every step makes (``ogt``, ``sgt`` or ``ugt``), the two
-    pointer arguments and the constant row strides of their addresses.
+    Returns ``{"networks", "compare", "input", "output", "input_stride", "output_stride",
+    "columns", "convert", "masked"}``: the direction of each network in the order they run
+    (True: descending), the comparison every step makes (``ogt``, ``sgt`` or ``ugt``), the
+    two pointer arguments and the constant row strides of their addresses, the place in
+    its row each column is loaded from (None: its own), the conversion the stored value
+    is of the sorted one (None: none), and whether an access carries a mask, which is
+    then true on every cell.
     """
     by_id = _Values(graph.ops)
     if any(op.op not in _VOCABULARY for op in graph.ops):
@@ -272,8 +367,8 @@ def prove_row_wise_sort(graph, load, store, rows, columns):
         return None  # the template's strides are constants of the source
     if sum(op.op == "tt.load" for op in graph.ops) != 1 or sum(op.op == "tt.store" for op in graph.ops) != 1:
         return None
-    if len(load.operand_ids or ()) != 1 or len(store.operand_ids or ()) != 2:
-        return None  # a mask, or a value for the cells a mask leaves out
+    if not 1 <= len(load.operand_ids or ()) <= 3 or not 2 <= len(store.operand_ids or ()) <= 3:
+        return None
     if (load.attrs or {}).get("isVolatile", False):
         return None
     total = rows * columns
@@ -283,35 +378,48 @@ def prove_row_wise_sort(graph, load, store, rows, columns):
     hypercube = (2,) * dims
 
     arguments = {argument.id: argument for argument in graph.args}
-    source = _row_stride(by_id, arguments, load.operand_ids[0], rows, columns)
+    source = _row_stride(by_id, arguments, load.operand_ids[0], rows, columns, placed=True)
     target = _row_stride(by_id, arguments, store.operand_ids[0], rows, columns)
     if source is None or target is None or source[0].id == target[0].id:
         return None
+    # A mask that is true on every cell leaves nothing out, and the value a masked load
+    # gives the cells it leaves out is then given to none.
+    masks = [load.operand_ids[1]] if len(load.operand_ids) > 1 else []
+    masks += [store.operand_ids[2]] if len(store.operand_ids) > 2 else []
+    if not all(_every_cell(by_id, mask, rows, columns) for mask in masks):
+        return None
 
-    # The stored value, read back to the load one compare-and-swap at a time. A store to
-    # a narrower integer type truncates it first; nothing else may stand in between.
-    narrowings = [op for op in graph.ops if op.op == "arith.trunci"]
-    folded = by_id.get(store.operand_ids[1])
-    if narrowings:
-        if len(narrowings) != 1 or folded is not narrowings[0] or len(folded.operand_ids or ()) != 1:
+    # The stored value, read back to the load one compare-and-swap at a time. One
+    # conversion to the stored type may stand before the store; nothing else may stand in
+    # between.
+    folded, convert = by_id.get(store.operand_ids[1]), None
+    if folded is not None and folded.op in _CONVERSIONS and len(folded.operand_ids or ()) == 1:
+        if tuple(_extract_shape(folded.type_str or "") or ()) != (rows, columns):
             return None
-        folded = by_id.get(folded.operand_ids[0])
+        convert, folded = folded.op, by_id.get(folded.operand_ids[0])
+    if sum(op.op in _STORED_ONLY for op in graph.ops) != (convert in _STORED_ONLY):
+        return None
     if folded is None or folded.op != "tt.reshape" or len(folded.operand_ids or ()) != 1:
         return None
     if tuple(_extract_shape(folded.type_str or "") or ()) != (rows, columns):
         return None
     networks = _expected_networks(dims, row_bits)
     count = len(networks[False])
+    # A sort of a sort is the second network's steps on the first one's result.
     current, steps = folded.operand_ids[0], []
-    for _ in range(count):
+    while len(steps) < MOST_SORTS * count:
         select = by_id.get(current)
-        if select is None or tuple(_extract_shape(select.type_str or "") or ()) != hypercube:
+        if select is None or select.op != "arith.select":
+            break
+        if tuple(_extract_shape(select.type_str or "") or ()) != hypercube:
             return None
         step = _swap_step(by_id, select, hypercube)
         if step is None:
             return None
         current = step[0]
         steps.append(step[1:])
+    if not steps or len(steps) % count:
+        return None
     steps.reverse()
     comparisons = {comparison for _, _, comparison in steps}
     if len(comparisons) != 1:
@@ -326,14 +434,25 @@ def prove_row_wise_sort(graph, load, store, rows, columns):
         or tuple(_extract_shape(load.type_str or "") or ()) != (rows, columns)
     ):
         return None
-    for descending, expected in networks.items():
-        if all(axis == want and np.array_equal(mask, swap) for (axis, mask, _), (want, swap) in zip(steps, expected)):
-            return {
-                "descending": descending,
-                "compare": comparisons.pop(),
-                "input": source[0],
-                "output": target[0],
-                "input_stride": source[1],
-                "output_stride": target[1],
-            }
-    return None
+    directions = []
+    for start in range(0, len(steps), count):
+        ran = steps[start : start + count]
+        found = [
+            descending
+            for descending, expected in networks.items()
+            if all(axis == want and np.array_equal(mask, swap) for (axis, mask, _), (want, swap) in zip(ran, expected))
+        ]
+        if len(found) != 1:
+            return None
+        directions.append(found[0])
+    return {
+        "networks": directions,
+        "compare": comparisons.pop(),
+        "input": source[0],
+        "output": target[0],
+        "input_stride": source[1],
+        "output_stride": target[1],
+        "columns": None if source[2] == tuple(range(columns)) else source[2],
+        "convert": convert,
+        "masked": bool(masks),
+    }

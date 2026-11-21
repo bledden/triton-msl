@@ -502,14 +502,18 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   word its cell lies in and writes the other half back as it read it. That half is the
   neighbouring cell, or, for the last cell of a tensor of odd length that starts a word, the
   two bytes after the tensor.
-- **Row-wise sort:** the sort template runs only a kernel proved to be one unmasked load of a
-  tile, `tl.sort` along its last axis and one unmasked store, at addresses of the form
+- **Row-wise sort:** the sort template runs only a kernel proved to be one load of a tile,
+  `tl.sort` along its last axis and one store, at addresses of the form
   `base + row * stride + column`. A sort with an offset or a program term in an address, a
-  mask, arithmetic on the values or a second rearrangement goes to the ordinary lowering,
-  which computes it or refuses it when the kernel is lowered. The ordinary lowering runs a
-  tile of at most 1024 elements: a larger sort that is not the plain form is refused with
-  that reason. A converting store, a load of reversed columns, a mask that is true everywhere
-  and a sort of a sort returned the source's result at 64 by 32 and 512 by 8 before.
+  mask that leaves a cell out, arithmetic on the values or another rearrangement goes to the
+  ordinary lowering, which computes it or refuses it when the kernel is lowered. The ordinary
+  lowering runs a tile of at most 1024 elements. Above that the template also runs four
+  proved forms: columns loaded from constant places in their row (reversed, say), a mask
+  that is true on every cell, up to four sorts of the sorted tile, and one conversion of the
+  sorted values to the stored type (a wider integer, float16 or float32 from an integer,
+  float16 to or from float32). Any other sort of more than 1024 elements is refused with that
+  reason: a float stored as an integer, five sorts, a load and a store through one argument,
+  a place that changes from row to row.
 - **Blocks narrower than the kernel:** a store or an atomic over a block with fewer elements
   than the kernel's widest block computes only where the lowering proves which lane holds each
   element's address, value and mask. Otherwise the kernel is refused when it is lowered, by

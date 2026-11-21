@@ -37,6 +37,22 @@ _EPI_PASSTHROUGH = frozenset(
     }
 )
 
+# The conversions of sorted values the row-wise sort template writes before its store, by
+# (loaded type, stored type). Each pair is one the template is tested on.
+_SORT_INTEGERS = ("i8", "i16", "i32", "i64")
+_SORT_WIDENINGS = frozenset(
+    (narrow, wide) for position, narrow in enumerate(_SORT_INTEGERS) for wide in _SORT_INTEGERS[position + 1 :]
+)
+_SORT_TO_FLOAT = frozenset((integer, real) for integer in _SORT_INTEGERS for real in ("f16", "f32"))
+_SORT_STORE_CONVERSIONS = {
+    "arith.sitofp": _SORT_TO_FLOAT,
+    "arith.uitofp": _SORT_TO_FLOAT,
+    "arith.extsi": _SORT_WIDENINGS,
+    "arith.extui": _SORT_WIDENINGS,
+    "arith.extf": frozenset({("f16", "f32")}),
+    "arith.truncf": frozenset({("f32", "f16")}),
+}
+
 
 class _DetectionMixin:
     """Pattern-detection predicates for GenericLowerer.
@@ -5457,8 +5473,9 @@ class _DetectionMixin:
         a kernel where thread `lid` handles row `lid` with a local register
         array. That avoids needing > 1024 threads in a single threadgroup.
 
-        Returns dict with {M, N, k, descending, elem_type, x_ptr, z_ptr,
-        stride_xm, stride_zm, block_size} if detected, None otherwise.
+        Returns dict with {M, N, K, networks, columns, convert, out_elem_type,
+        unsigned, elem_type, x_ptr, z_ptr, stride_xm, stride_zm, block_size} if
+        detected, None otherwise.
         """
         # Only consider kernels with tt.load + tt.store + multiple tt.reduce
         if any(
@@ -5587,28 +5604,45 @@ class _DetectionMixin:
                 return None
 
         # The template replaces the whole kernel and keeps nothing of the source but
-        # these facts, so the source must be PROVED to be one unmasked load of the
-        # tile at `base + row * stride + column`, Triton's own sorting network, and
-        # one unmasked store. The signature above also fits a `tl.flip` of a 2xN
-        # tile (the same reshape and exclusive-or reductions), a sort whose result
-        # is changed before the store, a masked access, and addresses carrying an
-        # offset or a program term: the template computed a plain sort at the plain
-        # addresses for every one of them. Anything unproved is left to the
-        # ordinary lowering.
+        # these facts, so the source must be PROVED to be one load of the tile at
+        # `base + row * stride + place of the column`, Triton's own sorting network
+        # (once or several times over), at most one conversion to the stored type and
+        # one store at `base + row * stride + column`, with no mask that leaves a cell
+        # out. The signature above also fits a `tl.flip` of a 2xN tile (the same
+        # reshape and exclusive-or reductions), a sort whose result is changed before
+        # the store, a mask that leaves cells out, and addresses carrying a program
+        # term: the template computed a plain sort at the plain addresses for every
+        # one of them. Anything unproved is left to the ordinary lowering.
         proof = prove_row_wise_sort(self.graph, load_ssa, store_ssa, M, N)
         if proof is None:
+            return None
+        input_arg, output_arg = proof["input"], proof["output"]
+        convert = proof["convert"]
+        if (
+            convert not in (None, "arith.trunci")
+            and (input_arg.elem_type, output_arg.elem_type) not in (_SORT_STORE_CONVERSIONS[convert])
+        ):
+            return None
+        # The one plain form runs as the template at every size. The others run as it
+        # only where the ordinary lowering has no room (it holds a tile of at most 1024
+        # elements), so a kernel that computes there keeps the shader it has.
+        plain = (
+            len(proof["networks"]) == 1
+            and convert in (None, "arith.trunci")
+            and proof["columns"] is None
+            and not proof["masked"]
+        )
+        if not plain and M * N <= 1024:
             return None
         # Preserve the prescan side effect used for driver copy-back metadata.
         self._store_ptr_ids = set()
         self._prescan_stores()
-        input_arg, output_arg = proof["input"], proof["output"]
         x_ptr_name = input_arg.name
         z_ptr_name = output_arg.name
         # Compute comparisons in the INPUT domain. A mixed-dtype output-first
         # signature previously picked the output dtype from ptr_args[0], narrowing
         # values BEFORE sorting (28/32 wrong stores in the i32->i8 discriminator).
         elem_type = input_arg.elem_type
-        descending = proof["descending"]
         # The comparison is the source's: integer types carry no sign of their own.
         unsigned = proof["compare"] == "ugt"
         if unsigned and elem_type not in ("i8", "i16", "i32", "i64"):
@@ -5628,7 +5662,10 @@ class _DetectionMixin:
             "M": M,
             "N": N,
             "K": K_out,
-            "descending": descending,
+            "networks": list(proof["networks"]),
+            "columns": proof["columns"],
+            "convert": convert,
+            "out_elem_type": output_arg.elem_type,
             "unsigned": unsigned,
             "elem_type": elem_type,
             "x_ptr": x_ptr_name,

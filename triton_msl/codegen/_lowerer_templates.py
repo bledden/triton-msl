@@ -21,6 +21,7 @@ from triton_msl.codegen.msl_emitter import _msl_compute_type, _sanitize_msl_name
 from triton_msl.codegen.msl_types import triton_type_to_msl
 
 from triton_msl.codegen._lowerer_helpers import _mlir_to_triton_dtype
+from triton_msl.codegen._narrow_float import NARROW, int_to_narrow
 
 
 def _scalar_buffer_decl(arg, index, source_bindings=None):
@@ -3457,7 +3458,8 @@ class _TemplateMixin:
 
         Thread `lid` owns row `lid` of the (M, N) input. It loads the row's N cells
         into a register array, runs the compare-and-swap steps of
-        ``triton.language.sort`` over them, and stores them to row `lid` of the output.
+        ``triton.language.sort`` over them (once for each sort the source applies),
+        and stores them to row `lid` of the output.
 
             for stage in 1 .. log2(N):
                 for swap in stage-1 .. 0:
@@ -3467,7 +3469,8 @@ class _TemplateMixin:
                                      (v[j] > v[i]) == m ? v[i] : v[j]
 
         The detector proves the source is exactly this (`_sort_proof`) and hands over
-        the direction and whether the source compares unsigned.
+        the direction of each sort, whether the source compares unsigned, the place in
+        its row each column is loaded from, and the conversion the store makes.
         """
         M = info["M"]
         N = info["N"]
@@ -3486,7 +3489,9 @@ class _TemplateMixin:
                 f"results. Use a full tl.sort and slice, or k == N.",
                 op_name="tt.reduce",
             )
-        descending = info["descending"]
+        networks = info["networks"]
+        columns = info["columns"]
+        convert = info["convert"]
         elem_type = info["elem_type"]
         x_ptr = info["x_ptr"]
         z_ptr = info["z_ptr"]
@@ -3509,10 +3514,27 @@ class _TemplateMixin:
         msl_type = triton_type_to_msl(elem_type)
         # Pick a compute type for comparisons (promote fp16/bf16 to float)
         compute_type = _msl_compute_type(elem_type)
+        unsigned_types = {"char": "uchar", "short": "ushort", "int": "uint", "long": "ulong"}
         if info.get("unsigned"):
             # The source compares unsigned; the cells are held in the unsigned type of
             # their width, and the casts on load and store keep every bit.
-            compute_type = {"char": "uchar", "short": "ushort", "int": "uint", "long": "ulong"}[compute_type]
+            compute_type = unsigned_types[compute_type]
+        if convert in (None, "arith.trunci"):
+            # The cell's own type; a narrower output cell keeps the low bits of it.
+            stored = f"static_cast<{msl_type}>(v[_i])"
+        else:
+            # The conversion says how the sorted value is read, whatever the comparison
+            # read it as: an integer widens or becomes a float as a signed or as an
+            # unsigned one.
+            read = "v[_i]"
+            if convert in ("arith.sitofp", "arith.extsi"):
+                read = f"static_cast<{msl_type}>(v[_i])"
+            elif convert in ("arith.uitofp", "arith.extui"):
+                read = f"static_cast<{unsigned_types[msl_type]}>(v[_i])"
+            if convert in ("arith.sitofp", "arith.uitofp") and info["out_elem_type"] in NARROW:
+                stored = int_to_narrow(info["out_elem_type"], read)
+            else:
+                stored = f"static_cast<{triton_type_to_msl(info['out_elem_type'])}>({read})"
 
         source_bindings = {arg.name: f"_mmarg{i}" for i, arg in enumerate(self.graph.args)}
         safe_name = _sanitize_msl_name(self.graph.func_name)
@@ -3553,8 +3575,13 @@ class _TemplateMixin:
         lines.append(f"        {compute_type} v[{N}];")
         _row_off_x = self._row_stride_offset_expr("lid", stride_xm, "row-wise sort input")
         lines.append(f"        long _row_off = {_row_off_x};")
+        place = "_i"
+        if columns is not None:
+            # The place in its row the source loads each column from.
+            lines.append(f"        const int _places[{N}] = {{{', '.join(str(place) for place in columns)}}};")
+            place = "(long)_places[_i]"
         lines.append(f"        for (uint _i = 0u; _i < {N}u; _i++) {{")
-        lines.append(f"            v[_i] = static_cast<{compute_type}>({x_ptr}[_row_off + _i]);")
+        lines.append(f"            v[_i] = static_cast<{compute_type}>({x_ptr}[_row_off + {place}]);")
         lines.append(f"        }}")
         # The network is the source's own (triton.language.sort), step for step: in each
         # step an element takes its partner where (element > partner) != mask, the mask
@@ -3564,26 +3591,27 @@ class _TemplateMixin:
         # values, a zero of each sign, a NaN) both cells end with one of the two values.
         lines.append(f"        // Bitonic sort of {N} elements: the source's compare-and-swap steps")
         log_n = N.bit_length() - 1
-        for stage in range(1, log_n + 1):
-            if stage < log_n:
-                direction = f"((i >> {stage}u) & 1u) != 0u"
-            else:
-                direction = "true" if descending else "false"
-            for swap in range(stage - 1, -1, -1):
-                lines.append(f"        // stage={stage}, step={1 << swap}")
-                lines.append(f"        for (uint i = 0u; i < {N}u; i++) {{")
-                lines.append(f"            uint j = i ^ {1 << swap}u;")
-                lines.append(f"            if (j > i) {{")
-                lines.append(f"                bool m = {direction};")
-                lines.append(f"                {compute_type} a = v[i]; {compute_type} b = v[j];")
-                lines.append(f"                v[i] = ((a > b) != m) ? b : a;")
-                lines.append(f"                v[j] = ((b > a) == m) ? a : b;")
-                lines.append(f"            }}")
-                lines.append(f"        }}")
+        for descending in networks:
+            for stage in range(1, log_n + 1):
+                if stage < log_n:
+                    direction = f"((i >> {stage}u) & 1u) != 0u"
+                else:
+                    direction = "true" if descending else "false"
+                for swap in range(stage - 1, -1, -1):
+                    lines.append(f"        // stage={stage}, step={1 << swap}")
+                    lines.append(f"        for (uint i = 0u; i < {N}u; i++) {{")
+                    lines.append(f"            uint j = i ^ {1 << swap}u;")
+                    lines.append(f"            if (j > i) {{")
+                    lines.append(f"                bool m = {direction};")
+                    lines.append(f"                {compute_type} a = v[i]; {compute_type} b = v[j];")
+                    lines.append(f"                v[i] = ((a > b) != m) ? b : a;")
+                    lines.append(f"                v[j] = ((b > a) == m) ? a : b;")
+                    lines.append(f"            }}")
+                    lines.append(f"        }}")
         _row_off_zx = self._row_stride_offset_expr("lid", stride_zm, "row-wise sort output")
         lines.append(f"        long _row_off_z = {_row_off_zx};")
         lines.append(f"        for (uint _i = 0u; _i < {K}u; _i++) {{")
-        lines.append(f"            {z_ptr}[_row_off_z + _i] = static_cast<{msl_type}>(v[_i]);")
+        lines.append(f"            {z_ptr}[_row_off_z + _i] = {stored};")
         lines.append(f"        }}")
         lines.append(f"    }}")
         lines.append("}")
