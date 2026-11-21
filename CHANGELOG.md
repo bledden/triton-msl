@@ -661,12 +661,16 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   twice. All with no exception. Each result the source declares float16 or bfloat16 is
   now rounded to that type where it is produced: arithmetic, the math functions, a
   conversion from an integer, a constant, a loop-carried value, and the result of a
-  reduction, a scan or a `tl.dot`. An operation the source promotes to float32 is left
-  in float32, and a reduction, a scan and a `tl.dot` still add in float32 inside and
-  round their result once. A float16 fused multiply-add is Metal's half one. A division
-  in a kernel that holds 16-bit floats goes through a guarded quotient: the Metal
-  compiler turned the narrowed quotient of a division by a constant into a half
-  multiply by the rounded reciprocal, and 19,836 float16 values of `x / 3.0` differed.
+  reduction, a scan or a `tl.dot`. An integer goes to bfloat16 in one conversion and to
+  float16 by way of float32: every integer below 2^24 is a float32 exactly and a larger
+  one is past the largest float16 either way, while Metal's own conversion of a 64-bit
+  integer to `half` gives infinity for 65505 to 65519, which round to 65504. An
+  operation the source promotes to float32 is left in float32, and a reduction, a scan
+  and a `tl.dot` still add in float32 inside and round their result once. A float16
+  fused multiply-add is Metal's half one. A division in a kernel that holds 16-bit
+  floats goes through a guarded quotient: the Metal compiler turned the narrowed
+  quotient of a division by a constant into a half multiply by the rounded reciprocal,
+  and 19,836 float16 values of `x / 3.0` differed.
   Refused when the kernel is lowered: a bfloat16 `tl.math.fma`, which Metal computes in
   float; an operation with several results that computes a narrow value by arithmetic;
   and a matmul that carries a float16 or bfloat16 accumulator over its K loop

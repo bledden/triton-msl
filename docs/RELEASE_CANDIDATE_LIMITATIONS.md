@@ -545,15 +545,17 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   a result the source declares float16 or bfloat16 is rounded to that type where it is
   produced, so the next operation, a comparison and a widening cast read the source's value.
   That covers add, subtract, multiply, divide, remainder, the math functions, a conversion
-  from an integer (converted once, not by way of float32), a narrow constant (the narrow
-  value, not the float32 number its decimal names), a loop-carried value and the result of
-  a `tl.sum`, a scan or a `tl.dot`. An operation the source promotes to float32 (`x / 3.0`
-  on a float16 `x`) stays in float32. Not rounded step by step: a reduction, a scan and a
-  `tl.dot` add in float32 inside and their result is rounded once, where the source's narrow
-  additions round at every step in an order it does not fix; a float16 sum that overflows is
-  infinite to its reader either way. The attention and matmul templates keep the float32
-  accumulators their sources declare. A float16 `tl.math.fma` is Metal's half one, rounded
-  once. Refused when the kernel is lowered: a bfloat16 `tl.math.fma` (Metal computes it in
+  from an integer (rounded once: to bfloat16 in one conversion, and to float16 by way of
+  float32, which holds every integer below 2^24 exactly, a larger one being past the largest
+  float16 either way), a narrow constant (the narrow value, not the float32 number its
+  decimal names), a loop-carried value and the result of a `tl.sum`, a scan or a `tl.dot`.
+  An operation the source promotes to float32 (`x / 3.0` on a float16 `x`) stays in float32.
+  Not rounded step by step: a reduction, a scan and a `tl.dot` add in float32 inside and
+  their result is rounded once, where the source's narrow additions round at every step in
+  an order it does not fix; a float16 sum that overflows is infinite to its reader either
+  way. The attention and matmul templates keep the float32 accumulators their sources
+  declare. A float16 `tl.math.fma` is Metal's half one, rounded once. Refused when the
+  kernel is lowered: a bfloat16 `tl.math.fma` (Metal computes it in
   float, which rounds twice; `a * b + c` gives the unfused value), an operation with several
   results that computes a narrow value by arithmetic, and a matmul that carries a float16 or
   bfloat16 accumulator over its K loop (`acc += tl.dot(a, b, out_dtype=tl.float16)`).

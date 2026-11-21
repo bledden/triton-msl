@@ -113,16 +113,28 @@ def fdiv(lowerer, a: str, b: str, exact: bool = False) -> str:
     return f"tm_pdiv({a}, {b})" if exact else f"tm_fdiv({a}, {b})"
 
 
-def int_to_float(elem_type: str, expr: str) -> str:
-    """An integer converted to a float of ``elem_type``, held as ``float``.
+def int_to_narrow(elem_type: str, expr: str) -> str:
+    """An integer converted to the narrow type ``elem_type``, as a value of that type.
 
-    To a narrow type the integer is converted directly. Through ``float`` it is rounded
+    To bfloat16 the integer is converted directly. Through ``float`` it is rounded
     twice: 33685505 is 33816576 in bfloat16, and 33554432 by way of float32.
+
+    To float16 it goes through ``float``. Metal's own conversion of a ``long`` to
+    ``half`` gives infinity for 65505 to 65519, which round to 65504, the largest
+    float16. ``float`` holds every integer below 65520 exactly, so the one rounding is
+    the one to float16, and it takes a larger integer to a value that is infinity in
+    float16 as the integer is.
     """
-    narrow = NARROW.get(elem_type)
-    if narrow is None:
+    if elem_type == "f16":
+        return f"static_cast<half>(static_cast<float>({expr}))"
+    return f"static_cast<{NARROW[elem_type]}>({expr})"
+
+
+def int_to_float(elem_type: str, expr: str) -> str:
+    """An integer converted to a float of ``elem_type``, held as ``float``."""
+    if elem_type not in NARROW:
         return f"static_cast<float>({expr})"
-    return f"static_cast<float>(static_cast<{narrow}>({expr}))"
+    return f"static_cast<float>({int_to_narrow(elem_type, expr)})"
 
 
 def fused_multiply_add(ssa, a: str, b: str, c: str) -> str:
