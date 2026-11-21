@@ -13,7 +13,9 @@ the score tile is no longer scaled again; P is rounded before P @ V. Because the
 kv block relative to ITS running max, the replay must walk the source's block width: the tiled maker
 does (its block_n is the source's), the simdgroup maker is fixed at 64-wide blocks, so a P-rounding
 source with a narrower block routes to the tiled maker (exact; slower — the simdgroup half-block
-variant is the ledgered performance follow-up). fp32 sources record nothing and emit byte-identical MSL.
+variant is the ledgered performance follow-up). fp32 sources record no rounding point, only that Q is
+multiplied by the scale before the dot (`q_product`), and Q is staged as that float32 product
+(tests/test_where_attention_multiplies_by_its_scale.py).
 
 The oracle below is the SOURCE's own online loop, block by block, in fp32 with the same exp2 /
 inv_ln2 arithmetic, rounding P per block; only accumulation-order effects remain, which show up as
@@ -154,7 +156,7 @@ def _ulp(o_ref, dtype):
 @pytest.mark.parametrize(
     "dtype,maker,rq,rp",
     [
-        (torch.float32, "simdgroup", None, None),
+        (torch.float32, "simdgroup", "float", None),  # the float32 product: no rounding point
         (torch.bfloat16, "tiled", "bfloat", "bfloat"),
         (
             torch.float16,
@@ -198,8 +200,9 @@ def test_biased_forward_replays_source_rounding(cold_gpu_caches, maker_spy, dtyp
 
 
 @requires_gpu
-def test_biased_forward_fp32_msl_unchanged(tmp_path):
-    """fp32 sources record no rounding points; the emitted MSL carries no rounding and no s_scale."""
+def test_biased_forward_fp32_records_the_product_only(tmp_path):
+    """fp32 sources record no rounding point, only the float32 product q * scale; the emitted MSL
+    carries no rounding, stages that product once and does not scale the scores again."""
     fn = _biased_tri_fa
     cex = {n: (32 if n in ("DIM", "BLOCK_J", "BLOCK_K") else 256) for n in [fn.arg_names[i] for i in fn.constexprs]}
     sig = {
@@ -213,8 +216,9 @@ def test_biased_forward_fp32_msl_unchanged(tmp_path):
     }
     lw = _build_lowerer(fn, sig, cex)
     msl = lw.lower()
-    assert "s_scale" not in msl and "bfloat(" not in msl and "half(" not in msl
-    assert getattr(lw, "_fa_rounding", {}) == {}
+    assert "bfloat(" not in msl and "half(" not in msl
+    assert msl.count("* float(float(scale))") == 1 and "s_scale = 1.0f" in msl
+    assert getattr(lw, "_fa_rounding", {}) == {"q_product": "float"}
 
 
 @requires_gpu

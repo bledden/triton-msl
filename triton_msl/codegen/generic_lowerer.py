@@ -13877,11 +13877,13 @@ class GenericLowerer(
         qs2, ks2, vs2, os2 = info["q_strides"], info["k_strides"], info["v_strides"], info["o_strides"]
         # packet 164 (item F-a): the rounding points the value-path verifier recorded for THIS
         # kernel (bf16 / fp16 sources round q*scale and P; fp32 sources record nothing).
-        _rq = getattr(self, "_fa_rounding", {}).get("round_q")
+        _rq = getattr(self, "_fa_rounding", {}).get("round_q") or getattr(self, "_fa_rounding", {}).get("q_product")
         _rp = getattr(self, "_fa_rounding", {}).get("round_p")
         _scale_chain = getattr(self, "_fa_rounding", {}).get("scale_chain", ())
         simd_eligible = (
             head_dim % 8 == 0
+            # A float32 product of a narrower Q is staged in float32: the tiled maker's staging.
+            and (_rq != "float" or info["out_dtype"] in ("fp32", "f32"))
             # Valid v_head_dim tilings: <=64 (guarded surplus groups) OR the exact
             # multiples 128/192. 72..120 (non-64-multiple >64) mis-tile -> tiled path.
             and (8 <= head_dim <= 64 or head_dim in (128, 192))
@@ -15044,7 +15046,11 @@ class GenericLowerer(
                     _round_q = {"f16": "half", "bf16": "bfloat"}.get(_el)
                     if _round_q is not None:
                         _rounding["round_q"] = _round_q
-                    elif _el not in ("f32", ""):
+                    elif _el == "f32":
+                        # The float32 product is no rounding point, but it is where the source
+                        # multiplies: an overflow, or a scale that is not finite, starts here.
+                        _rounding["q_product"] = "float"
+                    elif _el != "":
                         _refuse(role, f"a scale multiply in {_el} the templates cannot replay")
                     n_scale += 1
                     cur = loaded[0]

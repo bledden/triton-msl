@@ -1838,19 +1838,18 @@ kernel void flash_attention(
 
 
 def _bwd_k_other(other, round_k, scale_r):
-    """What the dQ kernels stage for a key past N_CTX: K's `other` times the scale, rounded
-    as the source rounds the product.
+    """What the dQ kernels stage for a key past N_CTX: K's `other` (zero when the load has
+    none) times the scale, rounded as the source rounds the product. Zero times a scale
+    that is not finite is NaN, in the source and here.
 
     A constant times the scale is not always an arithmetic result when Metal compiles it
     (1.0f * x is x), and Metal's float-to-bfloat conversion of a value it has only loaded
     returns the float16 bit pattern. The bfloat16 rounding is therefore done on the bits
     (round to nearest even; NaN kept).
     """
-    if other is None:
-        return "0.0f"
     if not round_k:
-        return f"float({other})"
-    prod = f"(float({other}) * {scale_r})"
+        return f"(float({other or '0.0f'}) * scale)"
+    prod = f"(float({other or '0.0f'}) * {scale_r})"
     if round_k != "bfloat":
         return f"float({round_k}{prod})"
     return (
@@ -2186,11 +2185,15 @@ def make_flash_attention_kernel_simdgroup(
     _bias_add = "\n                    s += float(Bias[bias_base + qrow_b*b_sm + kvrow_b*b_sn]);" if bias else ""
     _mask_apply = "\n                    if (Mask[mask_base + kvrow_b*mask_sn] != 0) s = " + _NI + ";" if mask else ""
 
-    if round_q not in (None, "half", "bfloat") or round_p not in (None, "half", "bfloat"):
-        raise ValueError("round_q / round_p must be None, 'half' or 'bfloat'")
+    if round_q not in (None, "half", "bfloat", "float") or round_p not in (None, "half", "bfloat"):
+        raise ValueError("round_q must be None, 'half', 'bfloat' or 'float'; round_p None, 'half' or 'bfloat'")
+    if round_q == "float" and elem != "float":
+        raise ValueError("a float32 Q product is staged by the float32 maker only")
     # packet 164: the source's rounding points. round_q: stage elem(float(Q) * float(elem(scale)))
     # and do NOT scale the score tile again (the `* scale` below becomes `* 1.0f` — written as a
     # separate constant so the fp32 path stays byte-identical). round_p: round P before P @ V.
+    # round_q "float": the source's float32 product q * scale, staged as it is, so a product
+    # that overflows, or a scale that is not finite, reaches the dot as it does in the source.
     _q_raw = "Q[q_base + qr*q_sm + (i%D)*q_sk]"
     # (elem == round_q on the half maker: one conversion rounds and stages)
     _q_stage = (
@@ -2709,7 +2712,7 @@ def make_flash_attention_bwd_kv_kernel(
         dV[k,d] += sum_j P[j,k] * dO[j,d]
         dP[j,k]  = sum_d dO[j,d] * V[k,d];  dS[j,k] = P[j,k] * (dP[j,k] - delta[j])
         dK[k,d] += sum_j dS[j,k] * Q[j,d]
-    and finally dK *= sm_scale. P[j,k] = exp2((sm_scale*Q@Kᵀ + bias - lse[j]) * inv_ln2)
+    and finally dK *= sm_scale. P[j,k] = exp2((Q@(sm_scale*K)ᵀ + bias - lse[j]) * inv_ln2)
     (== softmax prob; row_max stored by the fwd IS the natural lse). dO is read from
     device (its 4 KB stays cached) so the threadgroup budget is 7*[BLOCK*head_dim]
     fp32 buffers = ~28 KB < 32 KB. delta[j] = rowsum(O*dO) is precomputed by _bwd_q.
@@ -2729,15 +2732,17 @@ def make_flash_attention_bwd_kv_kernel(
 
     store_cast_k, store_cast_v = _bwd_output_casts(output_casts, ("dk", "dv"), store_cast)
     D, BJ, BK = head_dim, BLOCK_J, BLOCK_K
-    # packet 174: the source's rounding points (None = fp32 source, text unchanged).
+    # packet 174: the source's rounding points (None = fp32 source). K is staged as the
+    # source's k * scale in every type, so a product that overflows does so where the source's does.
     _rd = lambda t: (lambda e: f"float({t}({e}))") if t else (lambda e: e)
     _scale_r = (
         "(isnan(scale) ? scale : as_type<float>((as_type<uint>(scale) + 0x7FFFu + ((as_type<uint>(scale) >> 16u) & 1u)) & 0xFFFF0000u))"
         if round_k == "bfloat"
         else f"float({round_k}(scale))"
     )
-    _k_stage = (lambda e: f"float({round_k}(float({e}) * {_scale_r}))") if round_k else (lambda e: f"float({e})")
-    _s_scaled = "s" if round_k else "s*scale"
+    _k_stage = (
+        (lambda e: f"float({round_k}(float({e}) * {_scale_r}))") if round_k else (lambda e: f"(float({e}) * scale)")
+    )
     _p_rd, _ds_rd = _rd(round_p), _rd(round_ds)
     # K-SUB-TILE so a large head_dim fits Metal's limits: TPG = KS*D <= 1024 threads
     # and the threadgroup footprint < 32 KB (see _bwd_kv_subtile_size). KS == BK for the
@@ -2884,13 +2889,13 @@ kernel void {kernel_name}(
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // scores -> P[j,k] = exp2((scale*Q@Kᵀ + bias - lse) * inv_ln2)
+        // scores -> P[j,k] = exp2((Q@(scale*K)ᵀ + bias - lse) * inv_ln2)
         for (uint i = lid; i < BJ*KS; i += TPG) {{
             uint jj = i / KS, kk = i % KS; uint jrow = j_start + jj, krow = ks_start + kk;
             if (jrow < N_CTX && krow < N_CTX && tg_mask[kk] == 0) {{
                 float s = 0.0f;
                 for (uint d = 0u; d < D; d++) s += tg_Q[jj*D + d] * tg_K[kk*D + d];
-                s = {_s_scaled} + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
+                s = s + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
             }} else {{
                 tg_P[i] = {_masked_p};
@@ -2994,15 +2999,17 @@ def make_flash_attention_bwd_kv_kernel_simd(
 
     store_cast_k, store_cast_v = _bwd_output_casts(output_casts, ("dk", "dv"), store_cast)
     D, BJ, BK = head_dim, BLOCK_J, BLOCK_K
-    # packet 174: the source's rounding points (None = fp32 source, text unchanged).
+    # packet 174: the source's rounding points (None = fp32 source). K is staged as the
+    # source's k * scale in every type, so a product that overflows does so where the source's does.
     _rd = lambda t: (lambda e: f"float({t}({e}))") if t else (lambda e: e)
     _scale_r = (
         "(isnan(scale) ? scale : as_type<float>((as_type<uint>(scale) + 0x7FFFu + ((as_type<uint>(scale) >> 16u) & 1u)) & 0xFFFF0000u))"
         if round_k == "bfloat"
         else f"float({round_k}(scale))"
     )
-    _k_stage = (lambda e: f"float({round_k}(float({e}) * {_scale_r}))") if round_k else (lambda e: f"float({e})")
-    _s_scaled = "s" if round_k else "s*scale"
+    _k_stage = (
+        (lambda e: f"float({round_k}(float({e}) * {_scale_r}))") if round_k else (lambda e: f"(float({e}) * scale)")
+    )
     _p_rd, _ds_rd = _rd(round_p), _rd(round_ds)
     if not (D % 8 == 0 and BJ % 8 == 0 and BK % 8 == 0 and D <= 32 and BJ <= 32 and BK <= 32):
         raise ValueError("bwd_kv(simd) requires BJ,BK,head_dim %8 and <=32")
@@ -3183,11 +3190,11 @@ kernel void {kernel_name}(
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // recompute P[j,k] = exp2((S*scale + bias - lse) * inv_ln2), masked -> the sentinel's
+        // recompute P[j,k] = exp2((S + bias - lse) * inv_ln2), S = Q@(scale*K)ᵀ, masked -> the sentinel's
         for (uint i = lid; i < BJ*BK; i += TPG) {{
             uint jj = i / BK, kk = i % BK; uint jrow = j_start + jj, krow = k_start + kk;
             if (jrow < N_CTX && krow < N_CTX && tg_mask[kk] == 0) {{
-                float s = {"tg_P[i]" if round_k else "tg_P[i]*scale"} + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
+                float s = tg_P[i] + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
             }} else {{
                 tg_P[i] = {_masked_p};
@@ -3299,7 +3306,7 @@ def make_flash_attention_bwd_q_kernel(
     Per (j-block, i, batch*heads): delta[j] = rowsum(O[j]*dO[j]) (stored for _bwd_kv),
     then recompute P and accumulate over k-blocks
         dP[j,k] = sum_d dO[j,d]*V[k,d];  dS[j,k] = P[j,k]*(dP[j,k] - delta[j])
-        dQ[j,d] += sum_k dS[j,k]*K[k,d]      (dQ *= sm_scale at store)
+        dQ[j,d] += sum_k dS[j,k]*K[k,d]      (K staged as k * sm_scale)
     O and dO read from device (cached); the threadgroup budget is tg_Q + dq_acc +
     tg_K + tg_V + tg_P + tg_dS = 6 fp32 [BLOCK*head_dim] buffers ~24 KB. Grid:
     (n_j_blocks, I, Z*H); bias shared across i + cross-head mask as in the forward.
@@ -3320,18 +3327,17 @@ def make_flash_attention_bwd_q_kernel(
     store_cast_q, store_cast_delta = _bwd_output_casts(output_casts, ("dq", "delta"), store_cast)
 
     D, BJ, BK = head_dim, BLOCK_J, BLOCK_K
-    # packet 174: the source's rounding points (None = fp32 source, text unchanged). With round_k
-    # the staged K IS the source's rounded k * scale, which also feeds the dQ dot: no store-time scale.
+    # packet 174: the source's rounding points (None = fp32 source). The staged K IS the
+    # source's k * scale (rounded with round_k), which also feeds the dQ dot: no store-time scale.
     _rd = lambda t: (lambda e: f"float({t}({e}))") if t else (lambda e: e)
     _scale_r = (
         "(isnan(scale) ? scale : as_type<float>((as_type<uint>(scale) + 0x7FFFu + ((as_type<uint>(scale) >> 16u) & 1u)) & 0xFFFF0000u))"
         if round_k == "bfloat"
         else f"float({round_k}(scale))"
     )
-    _k_stage = (lambda e: f"float({round_k}(float({e}) * {_scale_r}))") if round_k else (lambda e: f"float({e})")
-    _s_scaled = "s" if round_k else "s*scale"
-    _dq_out = "dq_acc[i]" if round_k else "dq_acc[i] * scale"
-    _dq_out_simd = "tg_P[i]" if round_k else "tg_P[i] * scale"
+    _k_stage = (
+        (lambda e: f"float({round_k}(float({e}) * {_scale_r}))") if round_k else (lambda e: f"(float({e}) * scale)")
+    )
     _ds_rd = _rd(round_ds)
     _dp_rd = _rd(round_dprod)  # each O*dO product rounded before the fp32 rowsum (delta)
     # J-SUB-TILE so a large head_dim fits: TPG = JS*D <= 1024 threads and the threadgroup
@@ -3495,7 +3501,7 @@ kernel void {kernel_name}(
             if (jrow < N_CTX && krow < N_CTX && tg_mask[kk] == 0) {{
                 float s = 0.0f;
                 for (uint d = 0u; d < D; d++) s += tg_Q[jj*D + d] * tg_K[kk*D + d];
-                s = {_s_scaled} + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
+                s = s + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
             }} else {{
                 tg_P[i] = {_masked_p};
@@ -3531,7 +3537,7 @@ kernel void {kernel_name}(
 
     for (uint i = lid; i < JS*D; i += TPG) {{
         uint jj = i / D, dd = i % D; uint jrow = j_start + jj;
-        if (jrow < N_CTX) DQ[dq_base + jrow*dq_sm + dd*dq_sk] = {store_cast_q(_dq_out)};
+        if (jrow < N_CTX) DQ[dq_base + jrow*dq_sm + dd*dq_sk] = {store_cast_q("dq_acc[i]")};
     }}
     threadgroup_barrier(mem_flags::mem_threadgroup);
     }}
@@ -3578,18 +3584,17 @@ def make_flash_attention_bwd_q_kernel_simd(
 
     store_cast_q, store_cast_delta = _bwd_output_casts(output_casts, ("dq", "delta"), store_cast)
     D, BJ, BK = head_dim, BLOCK_J, BLOCK_K
-    # packet 174: the source's rounding points (None = fp32 source, text unchanged). With round_k
-    # the staged K IS the source's rounded k * scale, which also feeds the dQ dot: no store-time scale.
+    # packet 174: the source's rounding points (None = fp32 source). The staged K IS the
+    # source's k * scale (rounded with round_k), which also feeds the dQ dot: no store-time scale.
     _rd = lambda t: (lambda e: f"float({t}({e}))") if t else (lambda e: e)
     _scale_r = (
         "(isnan(scale) ? scale : as_type<float>((as_type<uint>(scale) + 0x7FFFu + ((as_type<uint>(scale) >> 16u) & 1u)) & 0xFFFF0000u))"
         if round_k == "bfloat"
         else f"float({round_k}(scale))"
     )
-    _k_stage = (lambda e: f"float({round_k}(float({e}) * {_scale_r}))") if round_k else (lambda e: f"float({e})")
-    _s_scaled = "s" if round_k else "s*scale"
-    _dq_out = "dq_acc[i]" if round_k else "dq_acc[i] * scale"
-    _dq_out_simd = "tg_P[i]" if round_k else "tg_P[i] * scale"
+    _k_stage = (
+        (lambda e: f"float({round_k}(float({e}) * {_scale_r}))") if round_k else (lambda e: f"(float({e}) * scale)")
+    )
     _ds_rd = _rd(round_ds)
     _dp_rd = _rd(round_dprod)  # each O*dO product rounded before the fp32 rowsum (delta)
     if round_delta not in (None, "half", "bfloat"):
@@ -3813,7 +3818,7 @@ kernel void {kernel_name}(
         for (uint i = lid; i < BJ*BK; i += TPG) {{
             uint jj = i / BK, kk = i % BK; uint jrow = j_start + jj, krow = k_start + kk;
             if (jrow < N_CTX && krow < N_CTX && tg_mask[kk] == 0) {{
-                float s = {"tg_P[i]" if round_k else "tg_P[i]*scale"} + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
+                float s = tg_P[i] + float(Bias[bias_base + jrow*b_sm + krow*b_sn]);
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
             }} else {{
                 tg_P[i] = {_masked_p};
@@ -3866,7 +3871,7 @@ kernel void {kernel_name}(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = lid; i < BJ*D; i += TPG) {{
         uint jj = i / D, dd = i % D; uint jrow = j_start + jj;
-        if (jrow < N_CTX) DQ[dq_base + jrow*dq_sm + dd*dq_sk] = {store_cast_q(_dq_out_simd)};
+        if (jrow < N_CTX) DQ[dq_base + jrow*dq_sm + dd*dq_sk] = {store_cast_q("tg_P[i]")};
     }}
 }}
 """
@@ -3927,14 +3932,16 @@ def make_flash_attention_bwd_b_kernel(
     (store_cast_b,) = _bwd_output_casts(output_casts, ("db",), store_cast)
 
     D, BJ, BK = head_dim, BLOCK_J, BLOCK_K
-    # packet 174: the source's rounding point q * full(scale, dtype) (None = fp32 source, text unchanged).
+    # packet 174: the source's rounding point q * full(scale, dtype) (None = fp32 source). Q is
+    # staged as the source's q * scale in every type.
     _scale_r = (
         "(isnan(scale) ? scale : as_type<float>((as_type<uint>(scale) + 0x7FFFu + ((as_type<uint>(scale) >> 16u) & 1u)) & 0xFFFF0000u))"
         if round_q == "bfloat"
         else f"float({round_q}(scale))"
     )
-    _q_stage = (lambda e: f"float({round_q}(float({e}) * {_scale_r}))") if round_q else (lambda e: f"float({e})")
-    _s_scaled = "s" if round_q else "s*scale"
+    _q_stage = (
+        (lambda e: f"float({round_q}(float({e}) * {_scale_r}))") if round_q else (lambda e: f"(float({e}) * scale)")
+    )
     TPG = BJ * BK
     # For a large head_dim, DE-STAGE Q (read from device in the score dot) so the
     # threadgroup footprint fits 32 KB; stage_q True for head_dim<=32 (byte-identical).
@@ -4084,7 +4091,7 @@ kernel void {kernel_name}(
             if (jrow < N_CTX && krow < N_CTX && tg_mask[kk] == 0) {{
                 float s = 0.0f;
                 for (uint d = 0u; d < D; d++) s += {q_score} * tg_K[kk*D + d];
-                s = {_s_scaled} + tg_bias[i];
+                s = s + tg_bias[i];
                 tg_P[i] = exp2((s - tg_lse[jj]) * inv_ln2);
             }} else if ({_masked_cond}) {{
                 tg_P[i] = {_masked_p};
@@ -4396,9 +4403,9 @@ def make_flash_attention_kernel_tiled(
     # THAT exact value so a kernel with a non-standard temperature computes
     # correctly.  When None, fall back to the canonical 1/sqrt(head_dim).
     SCALE = float(scale) if scale is not None else 1.0 / _math.sqrt(float(head_dim))
-    if round_q not in (None, "half", "bfloat") or round_p not in (None, "half", "bfloat"):
-        raise ValueError("round_q / round_p must be None, 'half' or 'bfloat'")
-    # packet 164: the source's rounding points (fp32 sources: None -> byte-identical MSL)
+    if round_q not in (None, "half", "bfloat", "float") or round_p not in (None, "half", "bfloat"):
+        raise ValueError("round_q must be None, 'half', 'bfloat' or 'float'; round_p None, 'half' or 'bfloat'")
+    # packet 164: the source's rounding points (None: the scale multiplies the score tile)
     _q_raw = "Q[q_base + q_row * q_sm + (dc + c) * q_sk]"
     if "Q" in _other_axis:
         _q_raw = f"(((q_start + dc + c) < N_CTX) ? float({_q_raw}) : 0.0f)"

@@ -175,16 +175,17 @@ def _inputs(kind, n, dim, dtype, seed, masked_keys=True):
     return t
 
 
-def _launch(kind, fn, t, n, dim, sentinel, tile=(BLOCK, BLOCK)):
+def _launch(kind, fn, t, n, dim, sentinel, tile=(BLOCK, BLOCK), scale=None):
     """One program per tile of keys (dK / dV) or of query rows (dQ); ``tile`` is the query
-    rows and the keys of one."""
+    rows and the keys of one. The scale is ``1 / sqrt(dim)`` unless one is given."""
     dev = {name: x.to("mps") for name, x in t.items()}
     args = []
     for name in ORDER[kind]:
         args += [dev[name], *dev[name].stride()]
     block_j, block_k = tile
     programs = triton.cdiv(n, block_k if kind == "kv" else block_j)
-    fn[(programs, 1, 1)](*args, 1.0 / math.sqrt(dim), sentinel, n, 1, dim, n, block_j, block_k)
+    sm = 1.0 / math.sqrt(dim) if scale is None else scale
+    fn[(programs, 1, 1)](*args, sm, sentinel, n, 1, dim, n, block_j, block_k)
     torch.mps.synchronize()
     return [dev[name].cpu() for name in OUTPUTS[kind]]
 
@@ -218,13 +219,13 @@ def _row_sums(x, dim, dtype):
     return r(r(c[:, 0] + c[:, 2]) + r(c[:, 1] + c[:, 3]))
 
 
-def _source(kind, t, others, sentinel, n, dim, dtype, tile=(BLOCK, BLOCK)):
+def _source(kind, t, others, sentinel, n, dim, dtype, tile=(BLOCK, BLOCK), scale=None):
     """The source on one head and instance, tile by tile, rounding where it rounds."""
     bj, bk = tile
     r = lambda x: x.to(dtype).double()  # a value of the tensors' type
     f = lambda x: x.float().double()  # an fp32 value
     o = lambda role: others.get(role, 0.0)
-    sm = f(torch.tensor(1.0 / math.sqrt(dim), dtype=torch.float64))
+    sm = f(torch.tensor(1.0 / math.sqrt(dim) if scale is None else scale, dtype=torch.float64))
     snt = f(torch.tensor(float(sentinel), dtype=torch.float64))
     q, k, v, do, lse = (t[name][0, 0] for name in ("q", "k", "v", "do", "lse"))
     out = {name: torch.full(t[name].shape, POISON, dtype=torch.float64) for name in OUTPUTS[kind]}
@@ -292,19 +293,31 @@ def _same(outputs, expected, tol):
 
 
 def _run(
-    kind, others, sentinel, n, dim, dtype, maker, makers, seed, masked_keys=True, edit_inputs=None, tile=(BLOCK, BLOCK)
+    kind,
+    others,
+    sentinel,
+    n,
+    dim,
+    dtype,
+    maker,
+    makers,
+    seed,
+    masked_keys=True,
+    edit_inputs=None,
+    tile=(BLOCK, BLOCK),
+    scale=None,
 ):
     t = _inputs(kind, n, dim, dtype, seed, masked_keys)
     if edit_inputs:
         edit_inputs(t)
-    outputs = _launch(kind, _kernel(kind, others), t, n, dim, sentinel, tile)
+    outputs = _launch(kind, _kernel(kind, others), t, n, dim, sentinel, tile, scale)
     summed = {role: others[role] for role in SUMMED[kind] if others.get(role, 0.0) != 0.0}
     key = (kind, dim, dtype, tile, tuple(sorted((role, _spell(value)) for role, value in others.items())))
     if makers or key not in ROUTES:
         assert [name for name, _ in makers] == [maker]
         ROUTES[key] = set(makers[0][1])
     assert ROUTES[key] == set(summed)
-    _same(outputs, _source(kind, t, others, sentinel, n, dim, dtype, tile), TOLERANCE[dtype])
+    _same(outputs, _source(kind, t, others, sentinel, n, dim, dtype, tile, scale), TOLERANCE[dtype])
     return outputs, t
 
 

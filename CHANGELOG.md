@@ -253,8 +253,9 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   constants in the rows and keys past the length, rounded where the source
   rounds it, and give the cells past the length the sentinel score, at
   every type and tile size these routes take. With no `other`, a sentinel of
-  `-1e9` or negative infinity and finite tensors, every result keeps its
-  bits (480 launches compared).
+  `-1e9` or negative infinity and finite tensors, this change keeps every
+  result's bits (480 launches compared); the next entry changes float32
+  results in their last bits.
   Every other load may supply any constant, the loaded key mask among them:
   what it holds past the length reaches no stored cell. The bias gradient
   kernel stores no cell that depends on one, and accepts any constant on
@@ -262,6 +263,29 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   launch argument, or a value the kernel itself rounds to a 16-bit tensor
   type, such as `0.1`), two loads of one tensor that supply different
   values, and an unmasked log-sum-exp load.
+- On the biased backward and forward routes, multiply by the softmax scale
+  where the source does. The source multiplies an operand by the scale
+  before the dot product: K in the dK, dV and dQ kernels, Q in the bias
+  gradient kernel and in the forward kernel. The float32 templates
+  multiplied the finished score instead, and the dQ sum once more at the
+  store. That is the same number while the scale and every product are
+  finite. It is another when the scale is infinite, or when an operand times
+  the scale overflows float32 and the dot product alone does not: the
+  source's output is NaN there, and the templates returned infinities or
+  finite numbers. The forward template returned an output without a NaN in
+  it where the source's is NaN throughout. The dQ templates also counted a
+  key past the sequence length as zero, at every type, where the source has
+  zero times the scale, which is NaN when the scale is infinite in the
+  tensors' type (for float16, a scale such as `1e30`). The float32 templates
+  now stage the product, as the 16-bit templates staged the rounded product,
+  and the dQ templates stage zero times the scale past the length. A forward
+  kernel that converts a 16-bit Q to float32 before the multiply runs on the
+  tiled template, which holds the float32 product.
+  Float32 results change in their last bits when the scale is not a power of
+  two: the largest difference measured is 7e-07 of the largest value on the
+  backward kernels and 1.3e-06 on the forward kernel. With a power-of-two
+  scale, and at the 16-bit types with a finite scale, every result compared
+  keeps its bits.
 - On the biased backward routes, prove the loaded bias and key mask along
   the axes their addresses walk. A bias tile loaded transposed
   (`Bias[key, row]`), a bias load masked by the key boundary on its rows or

@@ -269,13 +269,23 @@ def test_q_fp32_delta_variant_replays_product_k_and_ds_rounding(dt, tmp_path):
     assert f"= {e}(tg_P[i]);" in msl and "tg_P[i] * scale" not in msl
 
 
+# Where each fp32 text multiplies by the scale: the operand the source scales, staged before the
+# dot. A key past the length in dQ is zero times the scale, as the source's masked load gives it.
+_FP32_STAGED = {
+    "kv": "tg_K[i] = (krow < N_CTX) ? (float(K[k_base + krow*k_sn + dd*k_sk]) * scale) : 0.0f;",
+    "q": "tg_K[i] = (krow < N_CTX) ? (float(K[k_base + krow*k_sn + dd*k_sk]) * scale) : (float(0.0f) * scale);",
+    "b": "tg_Q[i] = (jrow < N_CTX) ? (float(Q[q_hbase + ii*q_si + jrow*q_sm + dd*q_sk]) * scale) : 0.0f;",
+}
+
+
 @pytest.mark.parametrize("fn,name", [(_bwd_kv, "kv"), (_bwd_q, "q"), (_bwd_b, "b")])
 def test_fp32_sources_emit_no_rounding(fn, name):
-    """Control on both sides: fp32 sources record nothing; the text carries no rounding and keeps
-    the post-dot scale (byte-identical to 168, checked in the packet's evidence)."""
+    """Control on both sides: fp32 sources record nothing; the text carries no rounding and stages
+    the operand times the scale in fp32, with no scale after the dot or at the dQ store."""
     msl = _lower(fn, "fp32")
     assert "bfloat(" not in msl and "half(" not in msl
-    assert ("s*scale" in msl) or ("tg_P[i]*scale" in msl)
+    assert _FP32_STAGED[name] in msl
+    assert "s*scale" not in msl and "tg_P[i]*scale" not in msl and "tg_P[i] * scale" not in msl
 
 
 @pytest.mark.parametrize(
