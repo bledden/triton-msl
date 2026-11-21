@@ -27,7 +27,7 @@ def test_blocked_store_preserves_program_offset_at_lowering(tmp_path, monkeypatc
         )
     source = (Path(__file__).parent / "fixtures/arg_store_offset.ttgir").read_text()
     msl = _lower(source, tmp_path)
-    program_offset = re.search(r"int (r_\d+) = pid \* c_0;", msl).group(1)
+    program_offset = re.search(r"int (r_\d+) = \(int\)\(\(uint\)\(pid\) \* \(uint\)\(c_0\)\);", msl).group(1)
     store = next(line for line in msl.splitlines() if " arg1[" in line)
     assert f"arg1[(int({program_offset}) + int((lid / 16u)))]" in store
     assert "lid % 16u == 0u" in store

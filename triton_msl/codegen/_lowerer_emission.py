@@ -272,8 +272,16 @@ class _EmissionMixin:
             def _make_expr(av, bv):
                 return fdiv(self, av, bv)
         else:
+            # A signed sum, difference or product wraps in the source. The shader compiler
+            # reads a signed one as never leaving its range (`x + 1 > x` became true); the
+            # unsigned one is the same bits and wraps.
+            _wide = None
+            if not is_float and op_str in ("+", "-", "*") and ssa.elem_type != "i1":
+                _wide = "ulong" if mept_ty == "long" else "uint"
 
-            def _make_expr(av, bv, _op=op_str, _W=_shift_W, _arith=(op_str == ">>")):
+            def _make_expr(av, bv, _op=op_str, _W=_shift_W, _arith=(op_str == ">>"), _wide=_wide, _ty=mept_ty):
+                if _wide is not None:
+                    return f"({_ty})(({_wide})({av}) {_op} ({_wide})({bv}))"
                 base = f"{av} {_op} {bv}"
                 if _W is None:
                     return base
@@ -371,9 +379,9 @@ class _EmissionMixin:
         else:
             # Use the correct signed width from elem_type
             ty, dtype = _msl_int_type(ssa.elem_type, unsigned=False)
-        # Route the scalar emission through _make_expr so the shift-amount clamp
-        # (and the unsigned-cast for force_unsigned) apply uniformly with the MEPT
-        # path. For non-shifts _make_expr is byte-identical to the prior inline form.
+        # Route the scalar emission through _make_expr so the shift-amount clamp, the
+        # unsigned cast for force_unsigned and the wrapping form of a signed sum,
+        # difference or product apply uniformly with the MEPT path.
         self.kb.raw_line(f"    {ty} {var_name} = {_make_expr(a, b)};")
         self.env[ssa.id] = var_name
         self.env_types[ssa.id] = dtype

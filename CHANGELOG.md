@@ -492,6 +492,16 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 
 ### Fixes
 
+- A signed 32- or 64-bit sum, difference or product that leaves its type's range
+  now wraps, as Triton's integer arithmetic does. The generic lowering wrote these
+  as signed shader arithmetic, and the Metal shader compiler reads a signed sum as
+  one that never overflows: `x + 1 > x` was true where `x` is the largest int32,
+  `(x * 3) // 3` was turned back into `x`, and a branch on `S + 1 > 3` was taken
+  for the largest `S`. Nothing was refused or reported. The sources of 0.2.0 and
+  0.3.0 write the same shader text. These operations are now computed on the
+  unsigned type of the same width, which holds the same bits and wraps, and the
+  result is converted back. Narrower integers and unsigned ones were right before.
+  The text of every generically lowered shader with integer arithmetic changes.
 - Opt-in C++ route (`TRITON_MSL_USE_CPP=1` with a separately built extension):
   a masked `tt.load` was lowered to an unconditional load followed by a select, so
   inactive lanes could read outside their allocation. The load is now control
