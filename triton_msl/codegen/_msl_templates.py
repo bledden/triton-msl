@@ -2120,6 +2120,19 @@ def make_flash_attention_kernel_simdgroup(
     else:
         acc_frag, acc_zero, acc_buf = "simdgroup_float8x8", "0.0f", "float"
     Dc_tail = 8
+    # A float32 product of float16 values (round_q "float" beside half tiles). Where it fits,
+    # Q's tile is float and holds the product; the final store's scratch then lives in the
+    # score tile, which is dead by then and of which each SIMD group owns 256 cells. Where it
+    # does not fit (a QK head dimension above 128), the half tile holds Q as it is and each
+    # fragment is multiplied by the constant as it is loaded: a product with a diagonal
+    # matrix, in float32, whose every cell is q * scale plus exact zeros.
+    _wide_q = round_q == "float" and elem == "half"
+    if _wide_q and half_accumulate:
+        raise ValueError("a float32 Q product needs float32 score accumulators")
+    _float_q = _wide_q and (
+        BM * D * 4 + BM * BN * 4 + BM * BN * 2 + BM * 4 * 3 + BM * 8 * 4 * 2 + BN * Dc_tail * 2 <= 32768
+    )
+    _q_tile_t = "float" if _float_q else elem
     # Threadgroup-memory budget (32KB on M-series). tgQ (BM*head_dim) is the
     # head_dim-dependent term; the rest is fixed by BM/BN. Raise a CLEAR error early
     # instead of a cryptic AGX pipeline-state failure at load time. Empirically: fp16
@@ -2253,8 +2266,6 @@ def make_flash_attention_kernel_simdgroup(
 
     if round_q not in (None, "half", "bfloat", "float") or round_p not in (None, "half", "bfloat"):
         raise ValueError("round_q must be None, 'half', 'bfloat' or 'float'; round_p None, 'half' or 'bfloat'")
-    if round_q == "float" and elem != "float":
-        raise ValueError("a float32 Q product is staged by the float32 maker only")
     # packet 164: the source's rounding points. round_q: stage elem(float(Q) * float(elem(scale)))
     # and do NOT scale the score tile again (the `* scale` below becomes `* 1.0f` — written as a
     # separate constant so the fp32 path stays byte-identical). round_p: round P before P @ V.
@@ -2263,7 +2274,9 @@ def make_flash_attention_kernel_simdgroup(
     _q_raw = "Q[q_base + qr*q_sm + (i%D)*q_sk]"
     # (elem == round_q on the half maker: one conversion rounds and stages)
     _q_stage = (
-        (
+        (f"(float({_q_raw}) * scale)" if _float_q else _q_raw)
+        if _wide_q
+        else (
             f"{round_q}(float({_q_raw}) * float({round_q}(scale)))"
             if elem == round_q
             else f"{elem}({round_q}(float({_q_raw}) * float({round_q}(scale))))"
@@ -2273,7 +2286,9 @@ def make_flash_attention_kernel_simdgroup(
     )
     _s_scale = "s_scale" if round_q else "scale"
     if elem == "half":
-        p_buffers = f"    threadgroup half tgP[{BM} * {BN}];\n    threadgroup {acc_buf} on_scratch[{n_groups} * 64];"
+        p_buffers = f"    threadgroup half tgP[{BM} * {BN}];" + (
+            "" if _float_q else f"\n    threadgroup {acc_buf} on_scratch[{n_groups} * 64];"
+        )
         p_write, p_src = "tgP[r*BN+cj] = half(p);", "tgP"  # fp16 P is rounded by construction (== round_p 'half')
         p_zero = "tgP[pr*BN+cj] = half(0.0f);"
         if round_p == "bfloat":
@@ -2546,13 +2561,13 @@ def make_flash_attention_kernel_simdgroup(
             ) % {"elem": elem}
         tmpl = """    {
         %(ACC)s s0(%(AZ)s), s1(%(AZ)s), s2(%(AZ)s), s3(%(AZ)s);
-        %(KVFRAG)s qf, kf;
+        %(QKDECL)s
         for (uint kc = 0u; kc < D; kc += %(DCT)du) {
 %(KLOAD)s
-            simdgroup_load(qf, tgQ + 0u*D + kc, D);  simdgroup_multiply_accumulate(s0, qf, kf, s0);
-            simdgroup_load(qf, tgQ + 8u*D + kc, D);  simdgroup_multiply_accumulate(s1, qf, kf, s1);
-            simdgroup_load(qf, tgQ + 16u*D + kc, D); simdgroup_multiply_accumulate(s2, qf, kf, s2);
-            simdgroup_load(qf, tgQ + 24u*D + kc, D); simdgroup_multiply_accumulate(s3, qf, kf, s3);
+            simdgroup_load(%(QH)s, tgQ + 0u*D + kc, D);%(QMUL)s  simdgroup_multiply_accumulate(s0, qf, kf, s0);
+            simdgroup_load(%(QH)s, tgQ + 8u*D + kc, D);%(QMUL)s  simdgroup_multiply_accumulate(s1, qf, kf, s1);
+            simdgroup_load(%(QH)s, tgQ + 16u*D + kc, D);%(QMUL)s simdgroup_multiply_accumulate(s2, qf, kf, s2);
+            simdgroup_load(%(QH)s, tgQ + 24u*D + kc, D);%(QMUL)s simdgroup_multiply_accumulate(s3, qf, kf, s3);
         }
         simdgroup_store(s0, tg_S + 0u*BN + sgitg*8u, BN);
         simdgroup_store(s1, tg_S + 8u*BN + sgitg*8u, BN);
@@ -2615,6 +2630,15 @@ def make_flash_attention_kernel_simdgroup(
             "ACC": acc_frag,
             "AZ": acc_zero,
             "KVFRAG": kv_frag,
+            "QKDECL": (
+                "simdgroup_float8x8 qf; simdgroup_half8x8 kf;"
+                if _float_q
+                else "simdgroup_half8x8 qh, kf; simdgroup_float8x8 qf; simdgroup_float8x8 qc(scale);"
+                if _wide_q
+                else f"{kv_frag} qf, kf;"
+            ),
+            "QH": "qh" if _wide_q and not _float_q else "qf",
+            "QMUL": " simdgroup_multiply(qf, qh, qc);" if _wide_q and not _float_q else "",
             "DCT": Dc_tail,
             "KLOAD": kload,
             "QD": qd,
@@ -2645,12 +2669,12 @@ def make_flash_attention_kernel_simdgroup(
     # is present.  Plain/MLA routes cannot form an empty masked row; a
     # nonfinite denominator there necessarily came from source data.
     _preserve_nonfinite = runtime_neg_inf or not bias
-    _normalized = (
-        f"{acc_buf}(on_scratch[sgitg*64u+e] * {acc_buf}((tg_l[rb*8u+dr]>0.0f) ? (1.0f/tg_l[rb*8u+dr]) : 0.0f))"
-    )
+    _scratch = "tg_S + sgitg*256u" if _float_q else "on_scratch + sgitg*64u"
+    _scratch_cell = "tg_S[sgitg*256u+e]" if _float_q else "on_scratch[sgitg*64u+e]"
+    _normalized = f"{acc_buf}({_scratch_cell} * {acc_buf}((tg_l[rb*8u+dr]>0.0f) ? (1.0f/tg_l[rb*8u+dr]) : 0.0f))"
     _final_value = f"!isfinite(tg_l[rb*8u+dr]) ? NAN : {_normalized}" if _preserve_nonfinite else _normalized
     final_store = (
-        "            simdgroup_store(o[rb][t], on_scratch + sgitg*64u, 8u);\n"
+        f"            simdgroup_store(o[rb][t], {_scratch}, 8u);\n"
         "            threadgroup_barrier(mem_flags::mem_threadgroup);\n"
         "            for (uint e=lid%32u;e<64u;e+=32u) {\n"
         "                uint dr=e/8u, dc=e%8u;\n"
@@ -2726,7 +2750,7 @@ kernel void {kernel_name}(
     uint q_base = z*q_sz+h*q_sh, k_base = z*k_sz+h*k_sh, v_base = z*v_sz+h*v_sh, o_base = z*o_sz+h*o_sh;
 {biased_base_lines}
 
-    threadgroup {elem} tgQ[{BM} * {D}];
+    threadgroup {_q_tile_t} tgQ[{BM} * {D}];
     threadgroup {acc_buf}  tg_S[{BM} * {BN}];
 {p_buffers}
     threadgroup float  tg_m[{BM}], tg_l[{BM}], tg_alpha[{BM}];
@@ -2738,7 +2762,7 @@ kernel void {kernel_name}(
 
     for (uint i = lid; i < BM*D; i += NT) {{
         uint qr = q_start + i/D;
-        tgQ[i] = (qr < N_CTX) ? {_q_stage} : {elem}(0);
+        tgQ[i] = (qr < N_CTX) ? {_q_stage} : {_q_tile_t}(0);
     }}
     if (lid < BM) {{ tg_m[lid]=-INFINITY; tg_l[lid]={_initial_den}; }}
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -6310,7 +6334,16 @@ def make_varlen_flash_attention_mma(
     )
     _s_scale = "s_scale" if round_q else "SCALE"
     _q_cell = f"{bindings['Q']}[{_varlen_cell('(q_start+qr)*q_st + h*q_sh + c*q_sk')}]"
-    _q_tile = _fa_staged_q(_q_cell, round_q, TILE)
+    # A float32 product of float16 values: the half tile holds Q as it is, and each fragment
+    # is multiplied by the constant as it is loaded (see the dense simdgroup maker).
+    _wide_q = round_q == "float" and TILE == "half"
+    _q_tile = f"{TILE}({_q_cell})" if _wide_q else _fa_staged_q(_q_cell, round_q, TILE)
+    _q_frags = "simdgroup_half8x8 qh, kf; simdgroup_float8x8 qf;" if _wide_q else f"{SGT} qf, kf;"
+    _q_load = (
+        "simdgroup_load(qh, tg_Q + (sg*8u)*D + dt*8u, D); simdgroup_multiply(qf, qh, simdgroup_float8x8(scale));"
+        if _wide_q
+        else "simdgroup_load(qf, tg_Q + (sg*8u)*D + dt*8u, D);"
+    )
     sig = ",\n".join(arg_decls)
     return f"""#include <metal_stdlib>
 using namespace metal;
@@ -6369,8 +6402,8 @@ kernel void {kernel_name}(
         for (uint nt = 0u; nt < BN/8u; nt++) {{
             simdgroup_float8x8 S = simdgroup_float8x8(0.0f);
             for (uint dt = 0u; dt < D/8u; dt++) {{
-                {SGT} qf, kf;
-                simdgroup_load(qf, tg_Q + (sg*8u)*D + dt*8u, D);
+                {_q_frags}
+                {_q_load}
                 simdgroup_load(kf, tg_K + (nt*8u)*D + dt*8u, D, ulong2(0,0), true);
                 simdgroup_multiply_accumulate(S, qf, kf, S);
             }}

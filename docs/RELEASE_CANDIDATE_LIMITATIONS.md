@@ -457,10 +457,15 @@ the named commit, not a new installed PyPI 0.2.0 compatibility test.
   product, as the source does, at every type, so a scale that is not finite and a product that
   overflows give the source's NaN. The dense, variable-length and MLA forward templates stage
   Q times the source's constant the same way, in the type the source forms the product in;
-  float16 tensors with a float32 product keep the multiply on the score where the constant is
-  between 1e-20 and 1e25 in magnitude, where neither order can overflow or underflow; with a
-  constant outside those bounds the variable-length route stages the float32 product and the
-  dense and MLA routes refuse. A constant that is not finite in the type of its product reaches no template.
+  float16 tensors with a float32 product keep the multiply on the score only where the constant
+  is a power of two, and otherwise form the float32 product (in a float32 Q tile up to a QK head
+  dimension of 128, as each fragment is loaded above that), which costs about an eighth more
+  time per launch at a head dimension of 128. That
+  holds for constants between 1e-20 and 1e25 in magnitude; outside those bounds the
+  variable-length route stages the float32 product in float registers and the dense and MLA
+  routes refuse. A dot product's own rounding (the order of its terms, a fused multiply-add)
+  is not the source's on any route, so scores whose terms cancel to the last bits can differ
+  by that rounding. A constant that is not finite in the type of its product reaches no template.
   Float32 results differ in their last bits from 0.3.0 when the scale is not a power of two,
   and variable-length results at the 16-bit types by up to 1e-02 of the largest value, where
   the source's 16-bit product is now replayed. The biased forward template computes the softmax

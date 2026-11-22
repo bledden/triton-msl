@@ -8787,14 +8787,14 @@ class GenericLowerer(
             mma_eligible = False
         if _q_elem == "f32" and _tile != "float":
             mma_eligible = False
-        # A float32 product of float16 values is not staged in half tiles: outside the constants
-        # for which the score multiply is the same function, the scalar maker stages it.
+        # A float32 product of float16 values that leaves the bounds the half tiles follow it
+        # in: the scalar maker's float registers stage it.
         if (
             info.get("q_factor") is not None
             and _float_product
             and _tile == "half"
             and math.isfinite(info["q_factor"])
-            and not self._fa_half_tile_scale_is_the_source(
+            and not self._fa_half_tile_constant_in_bounds(
                 info["q_factor"], float(info["score_scale"]["factor"]) * float(_exp_multiplier)
             )
         ):
@@ -13276,20 +13276,33 @@ class GenericLowerer(
         )
 
     @staticmethod
+    def _fa_half_tile_constant_in_bounds(q_factor, post):
+        """Whether a float32 product of a float16 Q, and its score, stay normal in float32.
+
+        Float16 magnitudes are zero or between 2**-24 and 65504, so a dot product of at most
+        256 terms is zero or between 2**-48 and 1.2e12 in magnitude. With the constant on Q
+        and the whole constant on the score both between 1e-20 and 1e25 in magnitude, every
+        product and sum is finite and normal in float32 (at most 1.2e37, at least 3.5e-35 when
+        not zero).
+        """
+        low, high = 1e-20, 1e25
+        return low <= abs(q_factor) <= high and low <= abs(q_factor * post) <= high
+
+    @staticmethod
     def _fa_half_tile_scale_is_the_source(q_factor, post):
         """Whether scaling the finished score is the source's float32 product of a float16 Q.
 
         The source computes ``(float32(Q) * c) . K`` and multiplies that by ``post``; the
-        float16-tile makers compute ``Q . K`` and multiply by ``c * post``. Float16 magnitudes
-        are zero or between 2**-24 and 65504, so a dot product of at most 256 terms is zero or
-        between 2**-48 and 1.2e12 in magnitude. With ``|c|`` and ``|c * post|`` both between
-        1e-20 and 1e25, every product and sum of either order is finite and normal in float32
-        (at most 1.2e37, at least 3.5e-35 when not zero), so the two differ by rounding only,
-        and an infinity or NaN of Q or K is one in both. Outside those bounds they differ in
-        kind: with ``c = 3e38``, ``Q = 2`` and ``K = 0`` the source has infinity times zero.
+        score multiply computes ``Q . K`` and multiplies by ``c * post``. They are one function
+        only where multiplying by ``c`` rounds nothing: ``c`` a power of two, inside the bounds
+        above so that nothing overflows or underflows. Each term and each partial sum of the
+        source is then ``c`` times the template's, exactly. With any other constant the
+        products ``Q * c`` are rounded one by one, and terms that cancel exactly without the
+        constant do not cancel with it: with ``c = 0.3``, a Q of ``[40960, 57344]`` and a key
+        of ``[57344, -40960]`` the source's score is -64 and the score multiply's is 0, and
+        beside a key of zero the attention weights are 0 and 1/2 (found in review).
         """
-        low, high = 1e-20, 1e25
-        return low <= abs(q_factor) <= high and low <= abs(q_factor * post) <= high
+        return GenericLowerer._fa_half_tile_constant_in_bounds(q_factor, post) and math.frexp(abs(q_factor))[0] == 0.5
 
     def _fa_q_product_plan(self, info, exp_multiplier, tile, q_elem):
         """Where a dense, variable-length or MLA template multiplies by the source's Q constant.
@@ -13299,10 +13312,11 @@ class GenericLowerer(
         before the scale is applied and not after it is NaN there and finite in the source.
         Returns the makers' keywords for staging the product the proof recorded, or ``{}`` when
         the score multiply is the same function: no Q constant, or a float32 product of float16
-        values in half tiles, which cannot be staged there and, for the constants of
-        ``_fa_half_tile_scale_is_the_source``, cannot differ by more than rounding. Any other
-        constant is refused here; a caller with a maker that stages the float32 product asks
-        that predicate first and takes that maker.
+        values in half tiles with a constant for which the two are one function
+        (``_fa_half_tile_scale_is_the_source``). With another constant inside the bounds of
+        ``_fa_half_tile_constant_in_bounds`` the half-tile makers form the float32 product
+        as they load each Q fragment (``round_q="float"``). Outside those bounds this refuses;
+        a caller with a maker of float registers asks the bounds first and takes that maker.
         """
         rounding = getattr(self, "_fa_rounding", {})
         rq = rounding.get("round_q") or rounding.get("q_product")
@@ -13324,16 +13338,17 @@ class GenericLowerer(
                     "refusing rather than round Q to float16.",
                     op_name="tt.dot",
                 )
-            if not GenericLowerer._fa_half_tile_scale_is_the_source(q_factor, post):
+            if not GenericLowerer._fa_half_tile_constant_in_bounds(q_factor, post):
                 raise MetalNonRecoverableError(
                     f"FlashAttention: the source multiplies a float16 Q by {q_factor!r} in float32 before the "
-                    "dot product; this template's float16 tiles multiply the finished score instead, and "
-                    "with a constant this large or this small the two differ where the source's product "
-                    "overflows or underflows. Refusing rather than compute a finite score where the "
-                    "source has an infinity or NaN.",
+                    "dot product, and with a constant this large or this small that product, or the "
+                    "score, overflows or underflows float32; this template's float16 tiles do not follow "
+                    "it there. Refusing rather than compute a finite score where the source has an "
+                    "infinity or NaN.",
                     op_name="tt.dot",
                 )
-            return {}
+            if GenericLowerer._fa_half_tile_scale_is_the_source(q_factor, post):
+                return {}
         return {
             "round_q": rq,
             "scale": q_factor,

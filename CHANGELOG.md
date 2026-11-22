@@ -297,10 +297,9 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   element near `6e4`. The templates now stage the product in the type the
   source forms it in, and multiply the score only by a constant the source
   puts there. Float16 tensors with a float32 product keep the score
-  multiply where the constant is between `1e-20` and `1e25` in magnitude:
-  half tiles cannot hold the product, and with magnitudes of at most 65504
-  neither order can overflow or underflow there (see the entry on that
-  constant below).
+  multiply only where the constant is a power of two, and otherwise form
+  the float32 product as each Q fragment is loaded (see the entry on that
+  product below).
   Three more differences from the source were found on these routes and are
   closed with it. A constant that is not finite in the type of its product
   (an infinity, a NaN, `7e4` in float16, `3.4e38` in bfloat16) is printed by
@@ -320,20 +319,37 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   the constant and the product are now rounded to the tensors' type as the
   source rounds them. Dense and MLA float16 results, and every result with a
   power-of-two constant, keep their bits.
-- Bound the constant for which float16 attention tiles multiply the
-  finished score. A source that multiplies a float16 Q by a constant in
-  float32 (`q = q.to(tl.float32) * SCALE`) kept the score multiply at any
-  finite constant, on the argument that float16 magnitudes cannot overflow
-  float32. The constant can: with `SCALE = 3e38`, a Q of 2 and keys of zero
-  the source has infinity times zero and its row is NaN, where the template
-  computed zero times `3e38` and a finite row (found in review, on the
-  emitted shader's arithmetic). The score multiply is now kept only where
-  the constant on Q, and the whole constant on the score, are between
-  `1e-20` and `1e25` in magnitude, where every product and sum of either
-  order is finite and normal in float32. Outside those bounds the
-  variable-length route takes the maker that stages the float32 product,
-  and computes the source's result; the dense and MLA simdgroup routes
-  refuse. No constant of an ordinary softmax scale is affected.
+- Form the source's float32 product of a float16 Q on the float16
+  attention routes. A source that multiplies a float16 Q by a constant in
+  float32 (the canonical dense kernel's `q = q * qk_scale`, the MLA
+  source, `q = q.to(tl.float32) * SCALE`) kept the multiply on the finished
+  score at every finite constant, on the argument that float16 magnitudes
+  cannot overflow float32. Two cases found in review show the orders are
+  not one function. With a constant of `3e38`, a Q of 2 and keys of zero
+  the source has infinity times zero and a NaN row, where the template had
+  zero. And with an ordinary constant the products of Q are rounded one by
+  one, so terms that cancel exactly without the constant do not cancel
+  with it: at `0.3`, a Q of `[40960, 57344]` against a key of
+  `[57344, -40960]` scores -64 in the source and 0 on the score multiply,
+  and beside keys of zero the output was 0.5 where the source's is 0. The
+  score multiply is now kept only where it rounds nothing: a constant that
+  is a power of two (`1/8` at a head dimension of 64), with it and the
+  whole score constant between `1e-20` and `1e25` in magnitude. With any
+  other constant inside those bounds the templates form the source's
+  product. The dense and MLA simdgroup template holds it in a float32 Q
+  tile where that fits the 32 KB of threadgroup memory (a QK head
+  dimension up to 128; the final store's scratch moves into the score
+  tile, which is dead by then, to make the room). Above that, and on the
+  variable-length simdgroup template, the half tile holds Q as it is and
+  each fragment is multiplied by the constant as it is loaded, in float32;
+  on the device every cell of that product has the bits of the source's
+  (about 900,000 float16 values per constant compared). Outside the bounds
+  the variable-length route takes the maker with float registers, and the
+  dense and MLA routes refuse. Cost: the canonical float16 dense kernel at
+  a head dimension of 128 (constant `1/sqrt(128)`) takes 1.12 times as long
+  per launch at 1024 and 4096 tokens (four alternating runs; 1.22 to 1.27
+  with the multiply at each load); at a head dimension of 64 nothing
+  changes (0.99 to 1.02).
 - Divide the smallest 64-bit integer in the launch check as the shader
   does. The lane-order check reads a branch on the launch's integer
   scalars before the launch and leaves what is under the way not taken out

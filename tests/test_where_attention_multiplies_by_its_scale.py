@@ -311,7 +311,11 @@ def test_a_float32_product_of_a_16_bit_q_is_staged_by_the_tiled_maker(
     supplies._same([o.cpu(), lse.cpu()], list(want), TOLERANCE[dtype])
 
 
-def test_the_simdgroup_maker_stages_a_float32_product_of_float32_q_only():
-    """The lowering sends a float32 product of a narrower Q to the tiled maker."""
-    with pytest.raises(ValueError, match="staged by the float32 maker only"):
-        templates.make_flash_attention_kernel_simdgroup(head_dim=32, out_dtype="fp16", round_q="float")
+def test_the_simdgroup_maker_holds_a_float32_product_of_float16_q_in_a_float_tile():
+    """The biased lowering sends such a product to the tiled maker; the dense and MLA ones here."""
+    text = templates.make_flash_attention_kernel_simdgroup(head_dim=32, out_dtype="fp16", round_q="float")
+    assert "threadgroup float tgQ[" in text and "* scale) : float(0);" in text
+    with pytest.raises(ValueError, match="needs float32 score accumulators"):
+        templates.make_flash_attention_kernel_simdgroup(
+            head_dim=32, out_dtype="fp16", round_q="float", half_accumulate=True
+        )
