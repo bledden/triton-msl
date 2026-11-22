@@ -319,6 +319,12 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   the constant and the product are now rounded to the tensors' type as the
   source rounds them. Dense and MLA float16 results, and every result with a
   power-of-two constant, keep their bits.
+- Round each float16 or bfloat16 result of an operation with several results to its
+  own type instead of refusing the kernel. The float16 and bfloat16 rounding fix refused
+  `tl.associative_scan` over a tuple whenever its combine computed a narrow value, and
+  upstream's own `roll` scan over bfloat16 (56 cases of `test_scan2d`) was refused with
+  it; the full upstream run on the frozen tree caught that. Each result has a type of
+  its own: a narrow one is rounded to it, an integer one beside it is left alone.
 - Form the source's float32 product of a float16 Q on the float16
   attention routes. A source that multiplies a float16 Q by a constant in
   float32 (the canonical dense kernel's `q = q * qk_scale`, the MLA
@@ -854,8 +860,7 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   quotient of a division by a constant into a half multiply by the rounded reciprocal,
   and 19,836 float16 values of `x / 3.0` differed.
   Refused when the kernel is lowered: a bfloat16 `tl.math.fma`, which Metal computes in
-  float; an operation with several results that computes a narrow value by arithmetic;
-  and a matmul that carries a float16 or bfloat16 accumulator over its K loop
+  float; and a matmul that carries a float16 or bfloat16 accumulator over its K loop
   (`acc += tl.dot(a, b, out_dtype=tl.float16)`), which was run with one rounding after
   the last block and differed from the source's rounding per block in 555 of 4096
   cells of a 64 by 64 probe. The values of float16 and bfloat16 kernels with chained

@@ -171,20 +171,29 @@ def _cast(narrow: str, expr: str) -> str:
 
 
 def round_result(lowerer, ssa):
-    """Round the result ``ssa`` just produced to its declared narrow type, in place."""
-    narrow = NARROW.get(ssa.elem_type)
-    if narrow is None or not _rounds(ssa):
+    """Round what ``ssa`` just produced to its declared narrow type, in place.
+
+    An operation with several results (a scan or a reduction over a tuple) has a type
+    per result, and the first one's says nothing of the others: each is rounded to its own.
+    """
+    if not _rounds(ssa):
         return
-    if ssa.result_ids and len(ssa.result_ids) > 1:
-        raise MetalNonRecoverableError(
-            f"{ssa.op} with {len(ssa.result_ids)} results computes a {ssa.elem_type} value by arithmetic: "
-            "the conversion of each result to its own type is not implemented, so the kernel is refused.",
-            op_name=ssa.op,
-        )
+    results = list(ssa.result_ids or [])
+    if len(results) > 1:
+        for value_id in results:
+            _round_value(lowerer, ssa, value_id, lowerer._native_value_facts(value_id, op_name=ssa.op).elem)
+        return
+    _round_value(lowerer, ssa, ssa.id, ssa.elem_type)
+
+
+def _round_value(lowerer, ssa, value_id, elem_type):
+    narrow = NARROW.get(elem_type)
+    if narrow is None:
+        return
     kb = lowerer.kb
-    name = lowerer.env.get(ssa.id)
-    array = lowerer.env_array.get(ssa.id)
-    shared = getattr(lowerer, "_shared_mem_descs", {}).get(ssa.id)
+    name = lowerer.env.get(value_id)
+    array = lowerer.env_array.get(value_id)
+    shared = getattr(lowerer, "_shared_mem_descs", {}).get(value_id)
     sources = [lowerer.env.get(operand) for operand in ssa.operand_ids or ()]
     aliased = name is not None and name in sources
     if ssa.op in _CASTS and not aliased:
@@ -196,12 +205,12 @@ def round_result(lowerer, ssa):
             return
         if ty != "float":
             raise MetalNonRecoverableError(
-                f"{ssa.op}: a {ssa.elem_type} result held as `{ty}` cannot be rounded to its type.", op_name=ssa.op
+                f"{ssa.op}: a {elem_type} result held as `{ty}` cannot be rounded to its type.", op_name=ssa.op
             )
         if aliased:
             fresh = lowerer._var_array("nr", [_cast(narrow, f"{var}[{i}]") for i in range(count)], "float")
-            lowerer.env[ssa.id] = fresh
-            lowerer.env_array[ssa.id] = (fresh, count, "float")
+            lowerer.env[value_id] = fresh
+            lowerer.env_array[value_id] = (fresh, count, "float")
             return
         for i in range(count):
             kb.raw_line(f"    {var}[{i}] = {_cast(narrow, f'{var}[{i}]')};")
@@ -210,7 +219,7 @@ def round_result(lowerer, ssa):
         shared_name, shape, _ = shared
         if aliased and ssa.op in _CASTS:
             raise MetalNonRecoverableError(
-                f"{ssa.op}: a conversion to {ssa.elem_type} of a value held in threadgroup memory was passed "
+                f"{ssa.op}: a conversion to {elem_type} of a value held in threadgroup memory was passed "
                 "through unrounded, and rounding the shared cells would change its other readers. Refused.",
                 op_name=ssa.op,
             )
@@ -227,12 +236,12 @@ def round_result(lowerer, ssa):
         return
     if not isinstance(name, str):
         raise MetalNonRecoverableError(
-            f"{ssa.op}: the {ssa.elem_type} result has no register to round to its type. Refused.", op_name=ssa.op
+            f"{ssa.op}: the {elem_type} result has no register to round to its type. Refused.", op_name=ssa.op
         )
     if aliased or not _LVALUE.fullmatch(name):
         # A passed-through operand or an expression: its rounded value gets its own register.
         fresh = lowerer._next_var("nr")
         kb.raw_line(f"    float {fresh} = {_cast(narrow, name)};")
-        lowerer.env[ssa.id] = fresh
+        lowerer.env[value_id] = fresh
         return
     kb.raw_line(f"    {name} = {_cast(narrow, name)};")
