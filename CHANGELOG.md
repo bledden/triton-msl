@@ -1012,6 +1012,14 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   comparison, 10 of 36 cases were resolved as slower than 0.2.0 and the rest were
   unresolved; on small single-launch workloads the paired excess was about 18–24 µs
   for the native wheel and about 45–54 µs for the pure wheel.
+- A dense attention kernel written with a 32 by 64 tile at head dimension 64 now takes
+  the matrix shader, whose own tile is 32 by 64, when its source is contiguous along
+  the head dimension, K, V and the output share one of float16 or float32, and the
+  shader can stage its Q constant. On an M4 Max, the float16 call at sequence 1024
+  with eight heads went from about 2,671 µs to about 441 µs in the installed native
+  wheel, the same as the 32 by 32 tile, which did not change. The changed wheel was
+  built locally, not by the hosted workflow. Other 32 by 64 sources, 64 by 32 and
+  64 by 64 keep the tiled shader, and head dimension 128 at 32 by 64 is still refused.
 
 ### Validation
 
