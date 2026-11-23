@@ -706,13 +706,24 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   float32 through the product. A source that narrows it itself, with
   `tl.dot(p.to(v.dtype), v)`, keeps its own rounding, which the tiled shader now also
   applies on the dense forward.
-- A variable-length attention kernel that narrows its probability for the value
-  product, with `tl.dot(p.to(v.dtype), v)`, had that narrowing ignored whenever the
-  kernel took the one-key-at-a-time shader, for example with a float32 Q beside float16
-  or bfloat16 K, V and Out: the same inputs gave 0 with a float16 Q and 3.998 with a
-  float32 Q. That shader now rounds the probability for the product as the source does
-  and sums the float32 one. A narrowing the matrix shader's tiles cannot hold, such as
-  float16 values beside a float32 Out, is sent to that shader instead of being dropped.
+- An attention kernel that narrows its probability before the value product, with
+  `tl.dot(p.to(v.dtype), v)` or an explicit `p.to(tl.float16).to(tl.float32)`, now has
+  that probability narrowed where the source narrows it on every forward shader: after
+  the softmax of the source's own key block has taken that block's maximum, and for the
+  value product only. The sum that normalizes stays float32. Before this:
+  - the variable-length one-key-at-a-time shader ignored the narrowing, so the same
+    inputs gave 0 with a float16 Q and 3.998 with a float32 Q; it now takes each source
+    key block in two passes, so the result does not depend on which key comes first;
+  - the dense matrix shader ignored an explicit float16 or bfloat16 narrowing beside a
+    float32 Out, and for a 32-key source block narrowed against the maximum of its
+    64-key tile; it now keeps each source block's own maximum;
+  - the dense tiled shader ignored the narrowing outside the decode step (fixed with the
+    entry above);
+  - the variable-length matrix shader dropped a narrowing its tiles could not hold
+    (float16 values beside a float32 Out); those sources take the one-key shader.
+- A variable-length attention kernel with float16 K and V and a bfloat16 Out had K and
+  V rounded to bfloat16 by the matrix shader's tiles before either dot. It takes the
+  one-key shader, which reads them as stored.
 - A signed 32- or 64-bit sum, difference or product that leaves its type's range
   now wraps, as Triton's integer arithmetic does. The generic lowering wrote these
   as signed shader arithmetic, and the Metal shader compiler reads a signed sum as

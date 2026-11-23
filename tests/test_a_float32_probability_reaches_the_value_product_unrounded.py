@@ -177,8 +177,22 @@ def test_a_source_that_narrows_the_probability_itself_is_lowered_or_refused(bm, 
         msl = _lowered(_narrowed(narrowed_dir), "fp16", _constants(bm, bn, 64))
     except MetalNonRecoverableError:
         return
-    if MATRIX in msl:
+    assert MATRIX in msl
+    if bn == 64:
         assert "threadgroup half tgP[32 * 64];" in msl and "tgP[pr*BN+cj] = half(p);" in msl
+    else:
+        # Two 32-key source blocks to the tile: P is narrowed against its own block's maximum
+        # and rescaled to the tile's in float32 (test_attention_forwards_follow_the_source_recurrence).
+        assert "threadgroup float tgP[32 * 64];" in msl
+        assert "tgP[pr*BN+cj] = float(half(exp(tg_S[pr*BN+cj] - ms))) * exp(ms - mr);" in msl
+
+
+def test_half_accumulators_leave_a_per_block_narrowing_to_the_tiled_shader(narrowed_dir, monkeypatch):
+    """The opt-in half accumulators have no float P tile to rescale a block's narrowed P in."""
+    monkeypatch.setenv("TRITON_MSL_FA_HALF_ACCUM", "1")
+    assert TILED in _lowered(_narrowed(narrowed_dir), "fp16", _constants(32, 32, 64))
+    msl = _lowered(_narrowed(narrowed_dir), "fp16", _constants(32, 64, 64))
+    assert MATRIX in msl and "tgP[pr*BN+cj] = half(p);" in msl
 
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires actual Metal")
@@ -341,7 +355,7 @@ def test_a_narrowed_probability_beside_a_float32_out_leaves_the_denominator_wide
     torch.mps.synchronize()
     source = _executed_source(executed, compiled)
     tile = "half" if kv_dtype == torch.float16 else "bfloat"
-    assert f"acc[d] = acc[d] * alpha + float({tile}(p)) * tg_V[kk * D + d];" in source
+    assert f"float p_v = float({tile}(p));" in source
     p = math.exp(-0.5)
     rounded = round(p * grid) / grid
     want = 3 * (1 + rounded) / (1 + p)
@@ -386,8 +400,8 @@ def test_a_variable_length_source_that_narrows_the_probability_gets_its_own_roun
         assert f"threadgroup {tile} tg_P[BM*BN];" in source and "tg_R" not in source
     else:
         assert "simdgroup_multiply_accumulate" not in source
-        assert f"l_i = l_i * alpha + p;" in source
-        assert f"acc[d] = acc[d] * alpha + float({tile}(p)) * tg_V[kk * D + d];" in source
+        assert "l_i = l_i * alpha + p_sum;" in source
+        assert f"float p_v = float({tile}(p));" in source
 
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires actual Metal")

@@ -2134,7 +2134,16 @@ def make_flash_attention_kernel_simdgroup(
     # float32 and round to one float16 value would otherwise cancel against opposite values.
     # Only a source that narrows P itself (round_p "half"), or the opt-in half accumulators,
     # store P as half.
-    _float_p = elem == "half" and not half_accumulate and round_p != "half"
+    # A source whose key block is narrower than this tile narrows each probability against the
+    # maximum its own block ends with, and later blocks rescale the product in float32. The tile
+    # then holds round(exp(s - m_block)) * exp(m_block - m_tile): a float, like a bfloat16 P.
+    _p_src_block = next((b for b in (sentinel_kv_block, source_kv_block, source_block_ends) if type(b) is int), None)
+    _split_p = round_p is not None and _p_src_block is not None and _p_src_block < BLOCK_N
+    if (_split_p or round_p == "bfloat") and elem == "half" and half_accumulate:
+        raise ValueError("half accumulators cannot hold this source's narrowed P")
+    if _split_p and fragment_lowering != "off":
+        raise ValueError("a P narrowed per source key block needs the default fragment lowering")
+    _float_p = elem == "half" and not half_accumulate and (round_p != "half" or _split_p)
     _p_bytes = BM * BN * (4 if _float_p else 2)
     _float_q = _wide_q and (
         BM * D * 4 + BM * BN * 4 + _p_bytes + BM * 4 * 3 + BM * 8 * 4 * 2 + BN * Dc_tail * 2 <= 32768
@@ -2302,13 +2311,23 @@ def make_flash_attention_kernel_simdgroup(
         else _q_raw
     )
     _s_scale = "s_scale" if round_q else "scale"
+
+    def _p_cell(dst):
+        """The statement that stores a float P for row r, column cj (inside the P loop)."""
+        if round_p is None:
+            return f"{dst}[r*BN+cj] = p;"
+        if _split_p:
+            return (
+                f"{{ float ms = tg_pmax[pr*8u+pc]; {dst}[r*BN+cj] = "
+                f"float({round_p}({_EXP}(tg_S[r*BN+cj] - ms))) * {_EXP}(ms - mr); }}"
+            )
+        return f"{dst}[r*BN+cj] = float({round_p}(p));"
+
     if elem == "half" and _p_in_scores:
-        if round_p == "bfloat":
-            raise ValueError("bf16 P rounding on the half simdgroup maker is not a source shape")
         if _float_q or fragment_lowering != "off":
             raise ValueError("a float32 P in the score tile needs on_scratch and the default fragment lowering")
         p_buffers = f"    threadgroup {acc_buf} on_scratch[{n_groups} * 64];"
-        p_write, p_src = "tg_S[r*BN+cj] = p;", "tg_S"
+        p_write, p_src = _p_cell("tg_S"), "tg_S"
         p_zero = "tg_S[pr*BN+cj] = 0.0f;"
     elif elem == "half":
         _p_t = "float" if _float_p else "half"
@@ -2316,13 +2335,11 @@ def make_flash_attention_kernel_simdgroup(
             "" if _float_q else f"\n    threadgroup {acc_buf} on_scratch[{n_groups} * 64];"
         )
         # A half tgP rounds P where the source does (round_p 'half') or by the opt-in.
-        p_write, p_src = ("tgP[r*BN+cj] = p;" if _float_p else "tgP[r*BN+cj] = half(p);"), "tgP"
+        p_write, p_src = (_p_cell("tgP") if _float_p else "tgP[r*BN+cj] = half(p);"), "tgP"
         p_zero = "tgP[pr*BN+cj] = 0.0f;" if _float_p else "tgP[pr*BN+cj] = half(0.0f);"
-        if round_p == "bfloat":
-            raise ValueError("bf16 P rounding on the half simdgroup maker is not a source shape")
     else:
         p_buffers = f"    threadgroup float on_scratch[{n_groups} * 64];"
-        p_write, p_src = (f"tg_S[r*BN+cj] = float({round_p}(p));" if round_p else "tg_S[r*BN+cj] = p;"), "tg_S"
+        p_write, p_src = _p_cell("tg_S"), "tg_S"
         p_zero = "tg_S[pr*BN+cj] = 0.0f;"
     _score_store_update = (
         "                tg_S[pr*BN+cj] = s;\n                pm = (isnan(pm) || isnan(s)) ? NAN : max(pm, s);"
@@ -2506,11 +2523,21 @@ def make_flash_attention_kernel_simdgroup(
             if _src_block % 8 != 0 or BLOCK_N % _src_block != 0:
                 raise ValueError("a narrower source KV block must be a multiple of 8 that divides the tile")
             _per = _src_block // 8
+            _sub_max = (
+                "\n                { float m_run = m_prev;  // each chunk's own source block maximum\n"
+                f"                  for (uint j = 0u; j < 8u; j += {_per}u) {{\n"
+                f"                      for (uint i = j; i < j + {_per}u; i++) m_run = max(m_run, tg_pmax[r*8u+i]);\n"
+                f"                      for (uint i = j; i < j + {_per}u; i++) tg_pmax[r*8u+i] = m_run;\n"
+                "                  } }"
+                if _split_p
+                else ""
+            )
             _ended = f"if ((j % {_per}u) == {_per - 1}u && m_new == -INFINITY)"
             _narrow = "m_new = (isnan(m_new) || isnan(pj)) ? NAN : max(m_new, pj);\n"
             _plain = "                for (uint j = 0u; j < 8u; j++) m_new = max(m_new, tg_pmax[r*8u+j]);"
             if _mnew_loop.count(_narrow) == 1:
                 _mnew_loop = _mnew_loop.replace(_narrow, _narrow + f"                    {_ended} m_new = NAN;\n")
+                _mnew_loop += _sub_max
             else:
                 assert _mnew_loop == _plain
                 # max() drops a NaN operand: carry the ended block in a flag past the loop.
@@ -2521,7 +2548,7 @@ def make_flash_attention_kernel_simdgroup(
                     f"                    {_ended} m_ended = true;\n"
                     "                }\n"
                     "                if (m_ended) m_new = NAN;"
-                )
+                ) + _sub_max
 
     # ---- per-block body emitter (mode in {'full','tail'}) ----
     def guard_decls(mode):
@@ -6133,7 +6160,11 @@ def make_varlen_flash_attention(
     # round_p: the source's own narrowing of P before P @ V. The denominator sums the float32 P.
     if round_p not in (None, "half", "bfloat"):
         raise ValueError("round_p must be None, 'half' or 'bfloat'")
-    _p_value = f"float({round_p}(p))" if round_p else "p"
+    # The source takes one maximum over its whole key block, forms each probability against it
+    # and only then narrows; a probability narrowed against a running maximum and rescaled later
+    # is a different number. So a narrowing source gets its block in two passes.
+    if round_p and source_block != BN:
+        raise ValueError("a narrowed P needs the source's key block to be this template's tile")
     # This template takes one key at a time; the source takes ``source_block`` of them. A row
     # that has seen no key above -inf is NaN in the source when its block ends, not before.
     _alpha, _p = "exp2((m_i - m_new) * inv_ln2)", "exp2((s - m_new) * inv_ln2)"
@@ -6190,6 +6221,55 @@ def make_varlen_flash_attention(
     _maxs = b.get("MAXS")
     kmax_expr = _varlen_kmax_expr(_maxs)
     causal_guard = "&& (qrow >= krow)" if causal else ""
+    if round_p:
+        _row_update = f"""        if (valid) {{
+            float s_blk[{BN}];
+            float m_new = m_i;
+            for (uint kk = 0u; kk < BN; kk++) {{
+                uint krow = kt + kk;
+                float s = -INFINITY;
+                if (krow < kmax {causal_guard}) {{
+                    s = 0.0f;
+                    for (uint d = 0u; d < D; d++) s += q_reg[d] * tg_K[kk * D + d];
+                    s *= {_s_scale};
+                    m_new = max(m_new, s);
+                }}
+                s_blk[kk] = s;
+            }}
+            float alpha = exp2((m_i - m_new) * inv_ln2);
+            float p_sum = 0.0f;
+            for (uint d = 0u; d < D; d++) acc[d] *= alpha;
+            for (uint kk = 0u; kk < BN; kk++) {{
+                uint krow = kt + kk;
+                if (krow < kmax {causal_guard}) {{
+                    float p = exp2((s_blk[kk] - m_new) * inv_ln2);
+                    p_sum += p;
+                    float p_v = float({round_p}(p));
+                    for (uint d = 0u; d < D; d++) acc[d] += p_v * tg_V[kk * D + d];
+                }}
+            }}
+            l_i = l_i * alpha + p_sum;
+            m_i = m_new;
+        }}
+"""
+    else:
+        _row_update = f"""        if (valid) {{
+            for (uint kk = 0u; kk < BN; kk++) {{
+                uint krow = kt + kk;
+                if (krow < kmax {causal_guard}) {{
+                    float s = 0.0f;
+                    for (uint d = 0u; d < D; d++) s += q_reg[d] * tg_K[kk * D + d];
+                    s *= {_s_scale};
+                    float m_new = max(m_i, s);
+                    float alpha = {_alpha};
+                    float p = {_p};
+                    l_i = l_i * alpha + p;
+                    for (uint d = 0u; d < D; d++) acc[d] = acc[d] * alpha + p * tg_V[kk * D + d];
+                    m_i = m_new;
+                }}
+            }}
+        }}
+"""
     sig = ",\n".join(arg_decls)
     return f"""#include <metal_stdlib>
 using namespace metal;
@@ -6240,23 +6320,7 @@ kernel void {kernel_name}(
             tg_V[e] = kv ? float({b["V"]}[{_varlen_cell("(k_start + krow) * v_st + h * v_sh + dd * v_sk")}]) : 0.0f;
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (valid) {{
-            for (uint kk = 0u; kk < BN; kk++) {{
-                uint krow = kt + kk;
-                if (krow < kmax {causal_guard}) {{
-                    float s = 0.0f;
-                    for (uint d = 0u; d < D; d++) s += q_reg[d] * tg_K[kk * D + d];
-                    s *= {_s_scale};
-                    float m_new = max(m_i, s);
-                    float alpha = {_alpha};
-                    float p = {_p};
-                    l_i = l_i * alpha + p;
-                    for (uint d = 0u; d < D; d++) acc[d] = acc[d] * alpha + {_p_value} * tg_V[kk * D + d];
-                    m_i = m_new;
-                }}
-            }}
-        }}
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+{_row_update}        threadgroup_barrier(mem_flags::mem_threadgroup);
     }}
     if (valid) {{
         for (uint d = 0u; d < D; d++)

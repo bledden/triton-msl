@@ -8788,6 +8788,14 @@ class GenericLowerer(
             mma_eligible = False
         if _q_elem == "f32" and _tile != "float":
             mma_eligible = False
+        # The 16-bit tiles hold K and V as they are stored only when that is their own type: a
+        # float16 K or V in bfloat16 tiles (a bfloat16 Out) would lose three bits before the dots.
+        _kv_elems = {
+            {"fp16": "f16", "half": "f16", "fp32": "f32", "float": "f32", "bfloat16": "bf16"}.get(e, e)
+            for e in (str(self.graph.args[roles[r]].elem_type) for r in ("k", "v"))
+        }
+        if _tile != "float" and _kv_elems != {info["out_dtype"]}:
+            mma_eligible = False
         # A float32 product of float16 values that leaves the bounds the half tiles follow it
         # in: the scalar maker's float registers stage it.
         if (
@@ -16561,6 +16569,25 @@ class GenericLowerer(
                 _simd = True
             except MetalNonRecoverableError:
                 _q_plan = None
+        _round_p = getattr(self, "_fa_rounding", {}).get("round_p")
+        if (
+            _simd
+            and _fa_half_accumulate(info["out_dtype"])
+            and _round_p
+            and (block_n != 64 or (_round_p == "bfloat" and _role_types["out"] == "f16"))
+        ):
+            # The source narrows each probability against the maximum of its own key block, or
+            # to bfloat16. The matrix maker replays both in a float P tile, which the opt-in
+            # half accumulators do not have; the tiled maker's P is a float.
+            if v_head_dim != head_dim or info.get("is_mla"):
+                raise MetalNonRecoverableError(
+                    "FlashAttention: the source narrows its probability before the value product "
+                    f"(to {_round_p}, with a {block_n}-key block), which the half-accumulate matrix "
+                    "shader cannot replay and the tiled shader cannot compute for different Q.K "
+                    "and V head dimensions; refusing rather than round a different probability.",
+                    op_name="tt.dot",
+                )
+            _simd, _q_plan = False, None
         if _simd:
             from triton_msl.codegen._fa_fragments import scope_reason, validate_mode
 
@@ -16623,9 +16650,9 @@ class GenericLowerer(
                 v_head_dim=v_head_dim,
                 half_accumulate=half_accumulate,
                 fragment_lowering=selected,
-                # A float16 kernel's P is float32 at the P @ V product unless the source
-                # narrows it; the float32 maker has no P narrowing on this route.
-                round_p="half" if _role_types["out"] == "f16" and rounding.get("round_p") == "half" else None,
+                # P is float32 at the P @ V product unless the source narrows it, and then the
+                # maker narrows it there too, against the maximum of the source's own key block.
+                round_p=rounding.get("round_p"),
                 **(_q_plan or {"scale": info["scale"]}),
                 source_kv_block=_dense_tail["source_kv_block"],
                 mask_tail_scores=_dense_tail["mask_tail_scores"],
