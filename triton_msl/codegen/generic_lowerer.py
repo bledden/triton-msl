@@ -8800,13 +8800,13 @@ class GenericLowerer(
             )
         ):
             mma_eligible = False
+        # The source's own narrowing of P. The matrix maker replays one to its 16-bit tile type;
+        # the scalar maker replays any, so a narrowing the tiles cannot hold goes there.
+        _varlen_round_p = getattr(self, "_fa_rounding", {}).get("round_p")
+        if _varlen_round_p is not None and _varlen_round_p != _tile:
+            mma_eligible = False
         _q_plan = self._fa_q_product_plan(info, _exp_multiplier, _tile if mma_eligible else "float", _q_elem)
         _scale_kw = _q_plan or {"scale": info["scale"]}
-        # The source's own narrowing of P. The 16-bit tile replays one to the tensor type; any
-        # other is left to the scalar template, as before.
-        _varlen_round_p = getattr(self, "_fa_rounding", {}).get("round_p")
-        if _varlen_round_p is not None and _varlen_round_p != {"f16": "half", "bf16": "bfloat"}.get(info["out_dtype"]):
-            _varlen_round_p = None
         if mma_eligible:
             from triton_msl.codegen._msl_templates import make_varlen_flash_attention_mma
 
@@ -8838,6 +8838,7 @@ class GenericLowerer(
                 bindings=bindings,
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
                 source_block=32,  # the detector admits BLOCK_N == 32 alone
+                round_p=_varlen_round_p,
                 **_scale_kw,
             )
             self.effective_block_size = 32

@@ -288,11 +288,7 @@ def test_the_variable_length_matrix_shader_multiplies_a_float32_probability(dtyp
         assert "tg_P" not in source and "threadgroup float tg_R[4 * 64];" in source
 
 
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires actual Metal")
-@pytest.mark.parametrize("dtype,big,tile", [(torch.float16, 65504.0, "half"), (torch.bfloat16, 65536.0, "bfloat")])
-def test_a_variable_length_source_that_narrows_the_probability_gets_its_own_rounding(
-    dtype, big, tile, narrowed_dir, executed
-):
+def _narrowed_varlen(narrowed_dir):
     import tests.test_varlen_fa_routing as routing
 
     name = "narrowed_varlen"
@@ -310,6 +306,59 @@ def test_a_variable_length_source_that_narrows_the_probability_gets_its_own_roun
         sys.modules[name] = module
         spec.loader.exec_module(module)
         _NARROWED[name] = module._varlen_fwd
+    return _NARROWED[name]
+
+
+# A float32 Out resolves what the narrowing costs: with keys at scores 0 and -0.5 and every value 3,
+# the source computes 3 * (1 + round(p)) / (1 + p). Rounding the denominator too would give 3.
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires actual Metal")
+@pytest.mark.parametrize(
+    "q_dtype,kv_dtype,grid",
+    [
+        (torch.float32, torch.float16, 2048),
+        (torch.float16, torch.float16, 2048),
+        (torch.float32, torch.bfloat16, 256),
+    ],
+)
+def test_a_narrowed_probability_beside_a_float32_out_leaves_the_denominator_wide(
+    q_dtype, kv_dtype, grid, narrowed_dir, executed
+):
+    kernel = _narrowed_varlen(narrowed_dir)
+    n, heads, dim = 64, 2, 64
+    q = torch.zeros((n, heads, dim), dtype=q_dtype)
+    q[..., 0] = 8
+    k = torch.zeros((n, heads, dim), dtype=kv_dtype)
+    k[..., 0] = -100
+    k[0, :, 0] = 0
+    k[1, :, 0] = -0.5
+    v = torch.full((n, heads, dim), 3, dtype=kv_dtype)
+    q, k, v = [x.to("mps") for x in (q, k, v)]
+    out = torch.full((n, heads, dim), float("nan"), dtype=torch.float32, device="mps")
+    cu = torch.tensor([0, n], device="mps", dtype=torch.int32)
+    compiled = kernel[(2, heads)](
+        q, k, v, out, cu, cu, *q.stride(), *k.stride(), *v.stride(), *out.stride(), heads, n, dim**-0.5, 32, 32, dim
+    )
+    torch.mps.synchronize()
+    source = _executed_source(executed, compiled)
+    tile = "half" if kv_dtype == torch.float16 else "bfloat"
+    assert f"acc[d] = acc[d] * alpha + float({tile}(p)) * tg_V[kk * D + d];" in source
+    p = math.exp(-0.5)
+    rounded = round(p * grid) / grid
+    want = 3 * (1 + rounded) / (1 + p)
+    assert 1e-4 < 3 - want < 2.1e-3
+    got = out.cpu().double()
+    assert float((got - want).abs().max()) <= 2e-5, got.unique()
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires actual Metal")
+@pytest.mark.parametrize("q_dtype", [None, torch.float32])
+@pytest.mark.parametrize("dtype,big,tile", [(torch.float16, 65504.0, "half"), (torch.bfloat16, 65536.0, "bfloat")])
+def test_a_variable_length_source_that_narrows_the_probability_gets_its_own_rounding(
+    dtype, big, tile, q_dtype, narrowed_dir, executed
+):
+    # A float32 Q beside 16-bit K, V and Out takes the one-key-at-a-time shader, which narrows the
+    # probability for the value product as the matrix shader does and sums the float32 one.
+    kernel = _narrowed_varlen(narrowed_dir)
     n, heads, dim = 64, 2, 64
     q = torch.zeros((n, heads, dim), dtype=dtype)
     q[..., 0] = 8
@@ -319,11 +368,11 @@ def test_a_variable_length_source_that_narrows_the_probability_gets_its_own_roun
     k[1, :, 0] = -(2.0**-13)
     v = torch.zeros_like(q)
     v[0], v[1] = big, -big
-    q, k, v = [x.to("mps") for x in (q, k, v)]
-    out = torch.full_like(q, float("nan"))
+    q, k, v = [x.to("mps") for x in (q.to(q_dtype or dtype), k, v)]
+    out = torch.full_like(v, float("nan"))
     cu = torch.tensor([0, n], device="mps", dtype=torch.int32)
     try:
-        compiled = _NARROWED[name][(2, heads)](
+        compiled = kernel[(2, heads)](
             q, k, v, out, cu, cu, *q.stride(), *k.stride(), *v.stride(), *out.stride(), heads, n, dim**-0.5, 32, 32, dim
         )
     except MetalNonRecoverableError:
@@ -332,5 +381,42 @@ def test_a_variable_length_source_that_narrows_the_probability_gets_its_own_roun
     source = _executed_source(executed, compiled)
     got = out.cpu().float()
     assert torch.equal(got, torch.zeros_like(got)), got.unique()
-    if "simdgroup_multiply_accumulate" in source:
+    if q_dtype is None:
+        assert "simdgroup_multiply_accumulate" in source
         assert f"threadgroup {tile} tg_P[BM*BN];" in source and "tg_R" not in source
+    else:
+        assert "simdgroup_multiply_accumulate" not in source
+        assert f"l_i = l_i * alpha + p;" in source
+        assert f"acc[d] = acc[d] * alpha + float({tile}(p)) * tg_V[kk * D + d];" in source
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires actual Metal")
+@pytest.mark.parametrize("dtype,big", [(torch.float16, 65504.0), (torch.bfloat16, 65536.0)])
+def test_the_one_key_variable_length_shader_multiplies_a_float32_probability(dtype, big, executed):
+    # The same inputs and types as the narrowed source above, from the source that keeps P wide.
+    from tests.test_varlen_fa_routing import _varlen_fwd
+
+    n, heads, dim = 64, 2, 64
+    q = torch.zeros((n, heads, dim), dtype=torch.float32)
+    q[..., 0] = 8
+    k = torch.zeros((n, heads, dim), dtype=dtype)
+    k[..., 0] = -100
+    k[0, :, 0] = 0
+    k[1, :, 0] = -(2.0**-13)
+    v = torch.zeros_like(k)
+    v[0], v[1] = big, -big
+    q, k, v = [x.to("mps") for x in (q, k, v)]
+    out = torch.full_like(v, float("nan"))
+    cu = torch.tensor([0, n], device="mps", dtype=torch.int32)
+    compiled = _varlen_fwd[(2, heads)](
+        q, k, v, out, cu, cu, *q.stride(), *k.stride(), *v.stride(), *out.stride(), heads, n, dim**-0.5, 32, 32, dim
+    )
+    torch.mps.synchronize()
+    source = _executed_source(executed, compiled)
+    assert "simdgroup_multiply_accumulate" not in source
+    assert "acc[d] = acc[d] * alpha + p * tg_V[kk * D + d];" in source
+    p = math.exp(-(2.0**-13) * 8 * float(torch.tensor(dim**-0.5, dtype=torch.float32)))
+    want = float(torch.tensor(big * (1.0 - p) / (1.0 + p)).to(dtype))
+    got = out.cpu().float()
+    assert want > 3.9
+    assert float((got - want).abs().max()) <= (0.04 if dtype == torch.bfloat16 else 0.004), got.unique()

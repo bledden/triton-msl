@@ -6102,6 +6102,7 @@ def make_varlen_flash_attention(
     scale_chain=(),
     post_scale=None,
     source_block=None,
+    round_p=None,
 ):
     """VARLEN FlashAttention-2 (packed cu_seqlens, route-only ABI). One thread per query
     row; K/V tiles staged in threadgroup memory; online softmax with a register acc.
@@ -6129,6 +6130,10 @@ def make_varlen_flash_attention(
         raise ValueError(f"varlen FA out_dtype must be fp32/fp16/bf16 (got {out_dtype!r})")
     D = head_dim
     BM = BN = 32
+    # round_p: the source's own narrowing of P before P @ V. The denominator sums the float32 P.
+    if round_p not in (None, "half", "bfloat"):
+        raise ValueError("round_p must be None, 'half' or 'bfloat'")
+    _p_value = f"float({round_p}(p))" if round_p else "p"
     # This template takes one key at a time; the source takes ``source_block`` of them. A row
     # that has seen no key above -inf is NaN in the source when its block ends, not before.
     _alpha, _p = "exp2((m_i - m_new) * inv_ln2)", "exp2((s - m_new) * inv_ln2)"
@@ -6246,7 +6251,7 @@ kernel void {kernel_name}(
                     float alpha = {_alpha};
                     float p = {_p};
                     l_i = l_i * alpha + p;
-                    for (uint d = 0u; d < D; d++) acc[d] = acc[d] * alpha + p * tg_V[kk * D + d];
+                    for (uint d = 0u; d < D; d++) acc[d] = acc[d] * alpha + {_p_value} * tg_V[kk * D + d];
                     m_i = m_new;
                 }}
             }}

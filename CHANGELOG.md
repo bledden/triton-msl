@@ -706,6 +706,13 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   float32 through the product. A source that narrows it itself, with
   `tl.dot(p.to(v.dtype), v)`, keeps its own rounding, which the tiled shader now also
   applies on the dense forward.
+- A variable-length attention kernel that narrows its probability for the value
+  product, with `tl.dot(p.to(v.dtype), v)`, had that narrowing ignored whenever the
+  kernel took the one-key-at-a-time shader, for example with a float32 Q beside float16
+  or bfloat16 K, V and Out: the same inputs gave 0 with a float16 Q and 3.998 with a
+  float32 Q. That shader now rounds the probability for the product as the source does
+  and sums the float32 one. A narrowing the matrix shader's tiles cannot hold, such as
+  float16 values beside a float32 Out, is sent to that shader instead of being dropped.
 - A signed 32- or 64-bit sum, difference or product that leaves its type's range
   now wraps, as Triton's integer arithmetic does. The generic lowering wrote these
   as signed shader arithmetic, and the Metal shader compiler reads a signed sum as
