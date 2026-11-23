@@ -694,6 +694,18 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 
 ### Fixes
 
+- A float16 attention kernel that multiplies a float32 probability, as the standard
+  forward does with `tl.dot(p.to(tl.float32), v.to(tl.float32))`, had that probability
+  rounded to float16 first by the matrix shader, and to the tensor's 16-bit type by the
+  variable-length matrix shader. Probabilities that differ in float32 and round to one
+  16-bit value could cancel against opposite values: a result of 3.998 came out as 0.
+  This affected the 32 by 32 tile at head dimensions 64 and 128, the MLA core and the
+  variable-length forward in float16 and bfloat16, measured on the 0.4.0 development
+  build `0c4cd04`. The released 0.2.0 and 0.3.0 matrix templates store the probability
+  the same way; that was read in their source and not run. The probability now stays
+  float32 through the product. A source that narrows it itself, with
+  `tl.dot(p.to(v.dtype), v)`, keeps its own rounding, which the tiled shader now also
+  applies on the dense forward.
 - A signed 32- or 64-bit sum, difference or product that leaves its type's range
   now wraps, as Triton's integer arithmetic does. The generic lowering wrote these
   as signed shader arithmetic, and the Metal shader compiler reads a signed sum as
@@ -1016,9 +1028,10 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   the matrix shader, whose own tile is 32 by 64, when its source is contiguous along
   the head dimension, K, V and the output share one of float16 or float32, and the
   shader can stage its Q constant. On an M4 Max, the float16 call at sequence 1024
-  with eight heads went from about 2,671 µs to about 441 µs in the installed native
-  wheel, the same as the 32 by 32 tile, which did not change. The changed wheel was
-  built locally, not by the hosted workflow. Other 32 by 64 sources, 64 by 32 and
+  with eight heads went from about 2,677 µs to about 449 µs in the installed native
+  wheel, with the corrected probability tile described under Fixes. The 32 by 32
+  tile takes 447 to 453 µs with that correction and took 443 to 445 µs without it.
+  The changed wheel was built locally, not by the hosted workflow. Other 32 by 64 sources, 64 by 32 and
   64 by 64 keep the tiled shader, and head dimension 128 at 32 by 64 is still refused.
 
 ### Validation
