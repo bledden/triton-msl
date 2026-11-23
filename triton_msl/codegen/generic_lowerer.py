@@ -8802,6 +8802,11 @@ class GenericLowerer(
             mma_eligible = False
         _q_plan = self._fa_q_product_plan(info, _exp_multiplier, _tile if mma_eligible else "float", _q_elem)
         _scale_kw = _q_plan or {"scale": info["scale"]}
+        # The source's own narrowing of P. The 16-bit tile replays one to the tensor type; any
+        # other is left to the scalar template, as before.
+        _varlen_round_p = getattr(self, "_fa_rounding", {}).get("round_p")
+        if _varlen_round_p is not None and _varlen_round_p != {"f16": "half", "bf16": "bfloat"}.get(info["out_dtype"]):
+            _varlen_round_p = None
         if mma_eligible:
             from triton_msl.codegen._msl_templates import make_varlen_flash_attention_mma
 
@@ -8813,6 +8818,7 @@ class GenericLowerer(
                 bindings=bindings,
                 kernel_name=_sanitize_msl_name(self.graph.func_name),
                 source_block=32,  # the detector admits BLOCK_N == 32 alone
+                round_p=_varlen_round_p,
                 **_scale_kw,
             )
             self.effective_block_size = 128
@@ -16616,6 +16622,9 @@ class GenericLowerer(
                 v_head_dim=v_head_dim,
                 half_accumulate=half_accumulate,
                 fragment_lowering=selected,
+                # A float16 kernel's P is float32 at the P @ V product unless the source
+                # narrows it; the float32 maker has no P narrowing on this route.
+                round_p="half" if _role_types["out"] == "f16" and rounding.get("round_p") == "half" else None,
                 **(_q_plan or {"scale": info["scale"]}),
                 source_kv_block=_dense_tail["source_kv_block"],
                 mask_tail_scores=_dense_tail["mask_tail_scores"],
@@ -16667,7 +16676,8 @@ class GenericLowerer(
                 query_tile=32 if head_dim == 64 and block_m >= 32 and (block_m, block_n) != (32, 32) else None,
                 initial_values=_dense_tail["initial_values"],
                 query_length=_expr(info["query_length"]) if "query_length" in info else None,
-                round_p=getattr(self, "_fa_rounding", {}).get("round_p") if "query_length" in info else None,
+                # The source's own narrowing of P, on the decode step and on the dense forward.
+                round_p=getattr(self, "_fa_rounding", {}).get("round_p"),
                 **(_q_plan or {"scale": info["scale"]}),
             )
             # Match every cooperative loop's physical stride, even for >1024 scores.

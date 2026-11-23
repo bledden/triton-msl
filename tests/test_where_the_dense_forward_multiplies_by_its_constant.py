@@ -980,10 +980,10 @@ def test_variable_length_text_scales_where_it_is_told(maker_name, out_dtype):
 def test_float16_text_forms_the_float32_product_of_q():
     """A float32 product of float16 values. Where the tile fits in float32 it holds the product,
     and the final store's scratch moves into the dead score tile to make the room. Where it
-    does not (a QK head dimension of 192), Q is staged as it is and each fragment loaded from
+    does not (a QK head dimension of 128 or 192, beside the float32 P tile), Q is staged as it is and each fragment loaded from
     it is multiplied by the constant on a diagonal. The score is not multiplied again."""
     make = templates.make_flash_attention_kernel_simdgroup
-    for dim in (64, 128):
+    for dim in (64,):
         kw = dict(head_dim=dim, out_dtype="fp16", scale=0.3)
         plain = make(**kw)
         assert "simdgroup_half8x8 qf, kf;" in plain and "s_scale" not in plain
@@ -993,7 +993,7 @@ def test_float16_text_forms_the_float32_product_of_q():
             (make(round_q="float", **kw), "1.0f"),
             (make(round_q="float", post_scale=0.5, **kw), "0.5f"),
         ):
-            assert f"threadgroup float tgQ[32 * {dim}];" in text and "threadgroup half tgP[" in text
+            assert f"threadgroup float tgQ[32 * {dim}];" in text and "threadgroup float tgP[" in text
             assert "tgQ[i] = (qr < N_CTX) ? (float(Q[q_base + qr*q_sm + (i%D)*q_sk]) * scale) : float(0);" in text
             assert text.count("simdgroup_float8x8 qf; simdgroup_half8x8 kf;") == 2
             assert "qh" not in text and "simdgroup_multiply(qf" not in text
@@ -1001,20 +1001,23 @@ def test_float16_text_forms_the_float32_product_of_q():
             assert "on_scratch" not in text and text.count("tg_S + sgitg*256u") == 5
             assert text.count("tg_S[sgitg*256u+e]") == 1
             assert f"const float s_scale = {post};" in text and "const float scale = 0.3f;" in text
-    # 32 KB of threadgroup memory: the float tile at 128 fits with the scratch moved, by 640 bytes
-    assert 32 * 128 * 4 + 32 * 64 * 4 + 32 * 64 * 2 + 32 * 12 + 32 * 64 + 64 * 8 * 2 == 32768 - 640
+    # 32 KB of threadgroup memory: beside a float32 P tile the float Q tile at 128 no longer fits
+    assert 32 * 128 * 4 + 32 * 64 * 4 + 32 * 64 * 4 + 32 * 12 + 32 * 64 + 64 * 8 * 2 > 32768
 
-    kw = dict(head_dim=192, out_dtype="fp16", scale=0.3)
-    plain = make(**kw)
-    assert "simdgroup_half8x8 qf, kf;" in plain and "qh" not in plain
-    for text, post in ((make(round_q="float", **kw), "1.0f"), (make(round_q="float", post_scale=0.5, **kw), "0.5f")):
-        assert "simdgroup_half8x8 qh, kf; simdgroup_float8x8 qf; simdgroup_float8x8 qc(scale);" in text
-        # two key loops (whole blocks and the split tail), four row groups each
-        assert text.count("simdgroup_multiply(qf, qh, qc);") == 8 and text.count("simdgroup_load(qh, tgQ") == 8
-        assert "simdgroup_load(qf, tgQ" not in text
-        assert "tgQ[i] = (qr < N_CTX) ? Q[q_base + qr*q_sm + (i%D)*q_sk] : half(0);" in text
-        assert "threadgroup half tgQ[" in text and "threadgroup float on_scratch[8 * 64];" in text
-        assert f"const float s_scale = {post};" in text and "const float scale = 0.3f;" in text
+    for kw in (dict(head_dim=128, out_dtype="fp16", scale=0.3), dict(head_dim=192, out_dtype="fp16", scale=0.3)):
+        plain = make(**kw)
+        assert "simdgroup_half8x8 qf, kf;" in plain and "qh" not in plain
+        for text, post in (
+            (make(round_q="float", **kw), "1.0f"),
+            (make(round_q="float", post_scale=0.5, **kw), "0.5f"),
+        ):
+            assert "simdgroup_half8x8 qh, kf; simdgroup_float8x8 qf; simdgroup_float8x8 qc(scale);" in text
+            # two key loops (whole blocks and the split tail), four row groups each
+            assert text.count("simdgroup_multiply(qf, qh, qc);") == 8 and text.count("simdgroup_load(qh, tgQ") == 8
+            assert "simdgroup_load(qf, tgQ" not in text
+            assert "tgQ[i] = (qr < N_CTX) ? Q[q_base + qr*q_sm + (i%D)*q_sk] : half(0);" in text
+            assert "threadgroup half tgQ[" in text and "threadgroup float on_scratch[8 * 64];" in text
+            assert f"const float s_scale = {post};" in text and "const float scale = 0.3f;" in text
     with pytest.raises(ValueError, match="needs float32 score accumulators"):
         make(round_q="float", half_accumulate=True, **kw)
     # a float32 maker stages the product in its float tile, as before

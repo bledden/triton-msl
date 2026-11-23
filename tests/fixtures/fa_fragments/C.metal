@@ -56,7 +56,7 @@ kernel void _flash_attn_fwd(
 
     threadgroup half tgQ[32 * 64];
     threadgroup float  tg_S[32 * 64];
-    threadgroup half tgP[32 * 64];
+    threadgroup float tgP[32 * 64];
     threadgroup float on_scratch[8 * 64];
     threadgroup float  tg_m[32], tg_l[32], tg_alpha[32];
     threadgroup float  tg_pmax[32 * 8], tg_psum[32 * 8];  // parallel-softmax partials
@@ -119,7 +119,7 @@ kernel void _flash_attn_fwd(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             float ps = 0.0f; float mr = tg_m[pr];
             for (uint cj = cA; cj < cB; cj++) {
-                float p = exp(tg_S[pr*BN+cj] - mr); tgP[pr*BN+cj] = half(p); ps += p;
+                float p = exp(tg_S[pr*BN+cj] - mr); tgP[pr*BN+cj] = p; ps += p;
             }
             tg_psum[pr*8u + pc] = ps;
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -131,10 +131,10 @@ kernel void _flash_attn_fwd(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             // Keep a nonfinite source row local across the 8x8 MMAs.
             if (!isfinite(tg_l[pr])) {
-                for (uint cj = cA; cj < cB; cj++) { tgP[pr*BN+cj] = half(0.0f); }
+                for (uint cj = cA; cj < cB; cj++) { tgP[pr*BN+cj] = 0.0f; }
             }        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        simdgroup_half8x8 pf, vf, vfs[64/8];
+        simdgroup_float8x8 pf; simdgroup_half8x8 vf, vfs[64/8];
         for (uint t=0u;t<TPG;t++) {
             uint ct = sgitg + t*8u;
             // Batch four row fragments in the now-dead float score tile.
@@ -219,7 +219,7 @@ kernel void _flash_attn_fwd(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             float ps = 0.0f; float mr = tg_m[pr];
             for (uint cj = cA; cj < cB; cj++) {
-                float p = exp(tg_S[pr*BN+cj] - mr); tgP[pr*BN+cj] = half(p); ps += p;
+                float p = exp(tg_S[pr*BN+cj] - mr); tgP[pr*BN+cj] = p; ps += p;
             }
             tg_psum[pr*8u + pc] = ps;
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -231,10 +231,10 @@ kernel void _flash_attn_fwd(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             // Keep a nonfinite source row local across the 8x8 MMAs.
             if (!isfinite(tg_l[pr])) {
-                for (uint cj = cA; cj < cB; cj++) { tgP[pr*BN+cj] = half(0.0f); }
+                for (uint cj = cA; cj < cB; cj++) { tgP[pr*BN+cj] = 0.0f; }
             }        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        simdgroup_half8x8 pf, vf, vfs[64/8];
+        simdgroup_float8x8 pf; simdgroup_half8x8 vf, vfs[64/8];
         for (uint t=0u;t<TPG;t++) {
             uint ct = sgitg + t*8u;
             // Batch four row fragments in the now-dead float score tile.

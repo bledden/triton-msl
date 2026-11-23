@@ -2129,8 +2129,21 @@ def make_flash_attention_kernel_simdgroup(
     _wide_q = round_q == "float" and elem == "half"
     if _wide_q and half_accumulate:
         raise ValueError("a float32 Q product needs float32 score accumulators")
+    # P reaches the P @ V product at the type the source gives it. A float16 kernel whose
+    # source multiplies a float32 P keeps P in float32: two probabilities that differ in
+    # float32 and round to one float16 value would otherwise cancel against opposite values.
+    # Only a source that narrows P itself (round_p "half"), or the opt-in half accumulators,
+    # store P as half.
+    _float_p = elem == "half" and not half_accumulate and round_p != "half"
+    _p_bytes = BM * BN * (4 if _float_p else 2)
     _float_q = _wide_q and (
-        BM * D * 4 + BM * BN * 4 + BM * BN * 2 + BM * 4 * 3 + BM * 8 * 4 * 2 + BN * Dc_tail * 2 <= 32768
+        BM * D * 4 + BM * BN * 4 + _p_bytes + BM * 4 * 3 + BM * 8 * 4 * 2 + BN * Dc_tail * 2 <= 32768
+    )
+    # Where a float32 P tile does not fit beside the score tile (a QK head dimension above
+    # 170), P replaces the scores in the score tile, as it does on the float32 maker, and
+    # the accumulators are rescaled through on_scratch instead of the score tile.
+    _p_in_scores = _float_p and (
+        BM * D * 2 + BM * BN * 4 + _p_bytes + n_groups * 64 * 4 + BM * 4 * 3 + BM * 8 * 4 * 2 + BN * Dc_tail * 2 > 32768
     )
     _q_tile_t = "float" if _float_q else elem
     # Threadgroup-memory budget (32KB on M-series). tgQ (BM*head_dim) is the
@@ -2141,12 +2154,16 @@ def make_flash_attention_kernel_simdgroup(
     _tg_bytes = (
         BM * D * _eb  # tgQ
         + BM * BN * 4  # tg_S (float)
-        + (BM * BN * 2 if elem == "half" else 0)  # tgP (fp16 only)
+        + (0 if elem != "half" or _p_in_scores else _p_bytes)  # tgP (fp16 only)
         + n_groups * 64 * 4  # on_scratch (float)
         + BM * 4 * 3  # tg_m / tg_l / tg_alpha
         + BM * 8 * 4 * 2  # tg_pmax / tg_psum (parallel softmax)
         + BN * Dc_tail * _eb  # tgKV
     )
+    # Moving P into the score tile makes room; it does not admit a head dimension the maker
+    # refused while P had a half tile of its own.
+    if _p_in_scores:
+        _tg_bytes += BM * BN * 2
     if _tg_bytes > 32768:
         raise ValueError(
             f"simd FA threadgroup memory {_tg_bytes}B exceeds the 32KB M-series limit "
@@ -2285,12 +2302,22 @@ def make_flash_attention_kernel_simdgroup(
         else _q_raw
     )
     _s_scale = "s_scale" if round_q else "scale"
-    if elem == "half":
-        p_buffers = f"    threadgroup half tgP[{BM} * {BN}];" + (
+    if elem == "half" and _p_in_scores:
+        if round_p == "bfloat":
+            raise ValueError("bf16 P rounding on the half simdgroup maker is not a source shape")
+        if _float_q or fragment_lowering != "off":
+            raise ValueError("a float32 P in the score tile needs on_scratch and the default fragment lowering")
+        p_buffers = f"    threadgroup {acc_buf} on_scratch[{n_groups} * 64];"
+        p_write, p_src = "tg_S[r*BN+cj] = p;", "tg_S"
+        p_zero = "tg_S[pr*BN+cj] = 0.0f;"
+    elif elem == "half":
+        _p_t = "float" if _float_p else "half"
+        p_buffers = f"    threadgroup {_p_t} tgP[{BM} * {BN}];" + (
             "" if _float_q else f"\n    threadgroup {acc_buf} on_scratch[{n_groups} * 64];"
         )
-        p_write, p_src = "tgP[r*BN+cj] = half(p);", "tgP"  # fp16 P is rounded by construction (== round_p 'half')
-        p_zero = "tgP[pr*BN+cj] = half(0.0f);"
+        # A half tgP rounds P where the source does (round_p 'half') or by the opt-in.
+        p_write, p_src = ("tgP[r*BN+cj] = p;" if _float_p else "tgP[r*BN+cj] = half(p);"), "tgP"
+        p_zero = "tgP[pr*BN+cj] = 0.0f;" if _float_p else "tgP[pr*BN+cj] = half(0.0f);"
         if round_p == "bfloat":
             raise ValueError("bf16 P rounding on the half simdgroup maker is not a source shape")
     else:
@@ -2343,7 +2370,7 @@ def make_flash_attention_kernel_simdgroup(
     # completes every score reader. Each SIMD group then owns 256 disjoint
     # float slots; 8 groups * 4 fragments * 64 slots == BM * BN == 2048.
     # The end-of-key-block threadgroup barrier protects the next score store.
-    if elem == "half" and not half_accumulate:
+    if elem == "half" and not half_accumulate and not _p_in_scores:
         _alpha_rescale = (
             "// Batch four row fragments in the now-dead float score tile.\n            "
             + _fa_row_loop(
@@ -2609,7 +2636,7 @@ def make_flash_attention_kernel_simdgroup(
             }
 %(NONFINITE_SANITIZE)s        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-%(BEFORE_FRAGMENTS)s        %(PLOADT)s pf, vf, vfs[%(BN)d/8];
+%(BEFORE_FRAGMENTS)s        %(PDECL)s vf, vfs[%(BN)d/8];
 %(AFTER_FRAGMENTS)s        for (uint t=0u;t<TPG;t++) {
             uint ct = sgitg + t*%(NG)du;
             %(ALPHA_RESCALE)s
@@ -2654,7 +2681,7 @@ def make_flash_attention_kernel_simdgroup(
             "MNEW_LOOP": _mnew_loop,
             "NONFINITE_SANITIZE": _nonfinite_sanitize,
             "ALPHA_RESCALE": _alpha_rescale,
-            "PLOADT": p_load_t,
+            "PDECL": f"simdgroup_float8x8 pf; {p_load_t}" if _float_p else f"{p_load_t} pf,",
             "BN": BN,
             "NG": n_groups,
             "VLOAD": vload,
@@ -6246,6 +6273,7 @@ def make_varlen_flash_attention_mma(
     scale_chain=(),
     post_scale=None,
     source_block=None,
+    round_p=None,
 ):
     """FAST varlen FlashAttention-2 via simdgroup_matrix MMA (fp16 in/out, fp32 accumulate).
 
@@ -6289,7 +6317,19 @@ def make_varlen_flash_attention_mma(
         raise ValueError(f"varlen MMA FA needs head_dim %% 8 == 0 (got {D})")
     # register-O budget (no tg_O): tg_Q + tg_K + tg_V + tg_P (TB bytes each) + tg_S (float,
     # reused as SIMD-private rescale/output scratch) + tg_m/tg_l/tg_alpha.
-    tg_bytes = BM * D * TB + BN * D * TB * 2 + BM * BN * TB + BM * BN * 4 + BM * 4 * 3
+    # P reaches P @ V in float32, as the source's float32 product has it. A float tile holds it
+    # as it is. Beside half or bfloat tiles it stays in the float score tile, where it replaces
+    # the scores it was computed from, and the rescale scratch moves to a tile of its own: a P
+    # rounded to the tensor type would let two probabilities that differ in float32 cancel.
+    # A source that narrows P to the tensor type itself (round_p) keeps the narrow tile.
+    if round_p not in (None, "half", "bfloat") or (round_p is not None and round_p != TILE):
+        raise ValueError("round_p must be None or this maker's 16-bit tile type")
+    _wide_p = TB == 2 and round_p is None
+    _p_decl = f"threadgroup float tg_R[{NG} * 64];" if _wide_p else f"threadgroup {TILE} tg_P[BM*BN];"
+    _p_tile, _p_cast, _p_frag = ("tg_S", "", "simdgroup_float8x8 pf; ") if _wide_p else ("tg_P", TILE, "")
+    _rescale = "tg_R" if _wide_p else "tg_S"
+    _p_names = "vf" if _wide_p else "pf, vf"
+    tg_bytes = BM * D * TB + BN * D * TB * 2 + (NG * 64 * 4 if _wide_p else BM * BN * TB) + BM * BN * 4 + BM * 4 * 3
     if tg_bytes > 32768:
         raise ValueError(
             f"varlen MMA FA threadgroup memory {tg_bytes}B > 32KB for head_dim={D}; use the scalar template"
@@ -6365,7 +6405,7 @@ kernel void {kernel_name}(
     threadgroup {TILE} tg_Q[BM*D];
     threadgroup {TILE} tg_K[BN*D];
     threadgroup {TILE} tg_V[BN*D];
-    threadgroup {TILE} tg_P[BM*BN];
+    {_p_decl}
     threadgroup float tg_S[BM*BN];
     threadgroup float tg_m[BM];
     threadgroup float tg_l[BM];
@@ -6421,13 +6461,13 @@ kernel void {kernel_name}(
             }}
             float m_new = max(m_old, m_blk);
             float alpha = {_alpha}, lsum = 0.0f;
-            for (uint j = 0u; j < BN; j++) {{ float p = {_p}; tg_P[r*BN+j]={TILE}(p); lsum += p; }}
+            for (uint j = 0u; j < BN; j++) {{ float p = {_p}; {_p_tile}[r*BN+j]={_p_cast}(p); lsum += p; }}
             tg_l[r] = l_old*alpha + lsum; tg_m[r] = m_new;
             bool finite_row = isfinite(tg_l[r]);
             // Keep a nonfinite row out of both MMAs.  Even an off-diagonal
             // zero contaminates sibling rows when multiplied by NaN.
             if (!finite_row)
-                for (uint j = 0u; j < BN; j++) tg_P[r*BN+j] = {TILE}(0);
+                for (uint j = 0u; j < BN; j++) {_p_tile}[r*BN+j] = {_p_cast}(0);
             tg_alpha[r] = finite_row ? alpha : 0.0f;
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -6435,16 +6475,16 @@ kernel void {kernel_name}(
         // Scalar row rescale: no invented off-diagonal 0*Inf or 0*NaN.
         // tg_S is dead after softmax; each group owns a disjoint 64-cell tile.
         for (uint et = 0u; et < D/8u; et++) {{
-            simdgroup_store(o_acc[et], tg_S + sg*64u, 8);
+            simdgroup_store(o_acc[et], {_rescale} + sg*64u, 8);
             simdgroup_barrier(mem_flags::mem_threadgroup);
             for (uint e=lane; e<64u; e+=32u)
-                tg_S[sg*64u+e] *= tg_alpha[sg*8u+e/8u];
+                {_rescale}[sg*64u+e] *= tg_alpha[sg*8u+e/8u];
             simdgroup_barrier(mem_flags::mem_threadgroup);
-            simdgroup_load(o_acc[et], tg_S + sg*64u, 8);
+            simdgroup_load(o_acc[et], {_rescale} + sg*64u, 8);
             simdgroup_barrier(mem_flags::mem_threadgroup);
             for (uint nt = 0u; nt < BN/8u; nt++) {{
-                {SGT} pf, vf;
-                simdgroup_load(pf, tg_P + (sg*8u)*BN + nt*8u, BN);
+                {_p_frag}{SGT} {_p_names};
+                simdgroup_load(pf, {_p_tile} + (sg*8u)*BN + nt*8u, BN);
                 simdgroup_load(vf, tg_V + (nt*8u)*D + et*8u, D);
                 simdgroup_multiply_accumulate(o_acc[et], pf, vf, o_acc[et]);
             }}

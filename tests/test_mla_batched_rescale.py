@@ -16,7 +16,7 @@ def test_mla_rescale_reference_and_candidate_emission():
     )
     assert (
         hashlib.sha256(candidate.encode()).hexdigest()
-        == "b30320465a0a458d8121b6b4dc386a45f8f049acf457e0569c03a7601b840838"
+        == "56d8d1c0966ac29a63579c15daef71897a7ed45ccda68361297a1075d49ca6a3"
     )
 
 
