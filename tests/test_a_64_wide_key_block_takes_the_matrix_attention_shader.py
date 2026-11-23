@@ -11,8 +11,8 @@ Admitted: head dimension 64 for Q.K and for V, tile 32 by 64, float16 or float32
 of one type, the innermost stride of all four folded to one, and no separate query length. Every
 other source keeps the shader it had; so does one whose Q constant the half tiles cannot stage.
 
-The references are float64 numpy, computed a query block at a time over the keys the source's
-loop visits; they share nothing with the lowering.
+The references are float64 numpy and follow the source's own recurrence, a query block and a key
+block at a time; they share nothing with the lowering.
 """
 
 import importlib.util
@@ -152,27 +152,36 @@ def test_uniform_bfloat16_at_32_by_64_is_still_refused():
 
 
 def _reference(q, k, v, n, mask, plain, bn=64, bm=32):
-    """Out in float64: each query block over the keys its source loop visits, padding as the source loads it."""
+    """Out in float64 by the source's own recurrence: a query block at a time, a key block at a time."""
     dim = q.shape[-1]
     out = np.empty(q.shape[:2] + (n, dim))
-    for block in range(-(-n // bm)):
-        rows = np.arange(block * bm, min((block + 1) * bm, n))
-        stop = min((block + 1) * bm, n) if mask == 3 else n
-        visited = -(-stop // bn) * bn
-        keys, values = k[:, :, :visited].copy(), v[:, :, :visited].copy()
-        if "K" not in plain:
-            keys[:, :, n:] = 0
-        if "V" not in plain:
-            values[:, :, n:] = 0
-        scores = (q[:, :, rows] * dim**-0.5) @ keys.swapaxes(-1, -2)
-        cols = np.arange(visited)
-        if mask == 1:
-            scores[..., cols >= n] = -np.inf
-        if mask in (3, 6):
-            scores[..., rows[:, None] < cols[None, :]] = -np.inf
-        with np.errstate(invalid="ignore"):
-            p = np.exp(scores - scores.max(-1, keepdims=True))
-            out[:, :, rows] = (p @ values) / p.sum(-1, keepdims=True)
+    with np.errstate(invalid="ignore", over="ignore"):
+        for block in range(-(-n // bm)):
+            rows = np.arange(block * bm, min((block + 1) * bm, n))
+            stop = min((block + 1) * bm, n) if mask == 3 else n
+            scaled = q[:, :, rows] * dim**-0.5
+            m = np.full(q.shape[:2] + (len(rows),), -np.inf)
+            total = np.zeros_like(m)
+            acc = np.zeros(q.shape[:2] + (len(rows), dim))
+            for start in range(0, stop, bn):
+                cols = np.arange(start, start + bn)
+                keys, values = k[:, :, cols].copy(), v[:, :, cols].copy()
+                if "K" not in plain:
+                    keys[:, :, cols >= n] = 0
+                if "V" not in plain:
+                    values[:, :, cols >= n] = 0
+                scores = scaled @ keys.swapaxes(-1, -2)
+                if mask == 1:
+                    scores[..., cols >= n] = -np.inf
+                if mask in (3, 6):
+                    scores[..., rows[:, None] < cols[None, :]] = -np.inf
+                m_new = np.maximum(m, scores.max(-1))
+                alpha = np.exp(m - m_new)
+                p = np.exp(scores - m_new[..., None])
+                total = total * alpha + p.sum(-1)
+                acc = acc * alpha[..., None] + p @ values
+                m = m_new
+            out[:, :, rows] = acc / total[..., None]
     return out
 
 
@@ -555,3 +564,44 @@ def test_a_float32_q_with_no_constant_of_its_own_keeps_the_tiled_shader(wide_dir
     assert TILED in msl and MATRIX not in msl
     _, msl = _lowered(kernel, _uniform("fp16"), constants)
     assert MATRIX in msl and TILED not in msl
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires actual Metal")
+@pytest.mark.parametrize(
+    "keys,bn,empty,strided",
+    [
+        (32, 64, False, False),
+        (64, 64, True, False),
+        (96, 64, True, False),
+        (32, 64, False, True),
+        (64, 64, True, True),
+        (32, 32, True, False),  # the 32-wide source on the same shader, as before
+    ],
+)
+@pytest.mark.parametrize("dtype", ["fp16", "fp32"])
+def test_a_row_is_nan_exactly_when_a_whole_source_key_block_scores_minus_infinity(
+    dtype, keys, bn, empty, strided, monkeypatch
+):
+    """The running maximum is still -inf when the source's first key block ends: -inf less -inf is NaN.
+
+    Every Q element is positive and the first ``keys`` rows of K are -inf, so their scores are -inf.
+    A 64-wide source block that also holds finite keys ends with a finite maximum, where a 32-wide
+    block of the same keys is NaN: the softmax is updated where the source's block ends.
+    """
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", "1")
+    n = 128
+    q, k, v, out = _tensors(dtype, n, 2, 800 + keys)
+    q = q.abs() + 0.25
+    k[:, :, :keys] = float("-inf")
+    want = _reference(q.double().numpy(), k.double().numpy(), v.double().numpy(), n, 0, "", bn=bn)
+    assert np.isnan(want).all() if empty else np.isfinite(want).all()
+    qd, kd, vd, od = [x.to("mps") for x in (q, k, v, out)]
+    compiled = _launch_tail(_strided(qd) if strided else qd, kd, vd, od, n, 0, "", bn=bn)
+    torch.mps.synchronize()
+    assert (TILED if strided else MATRIX) in compiled.asm["msl"]
+    got = od.cpu().double().numpy()
+    assert np.array_equal(got[:, :, n:], out[:, :, n:].double().numpy())
+    if empty:
+        assert np.isnan(got[:, :, :n]).all()
+    else:
+        np.testing.assert_allclose(got[:, :, :n], want, atol=0.002, rtol=0.002)
