@@ -92,9 +92,10 @@ def _constant_number(op):
     return float(value)
 
 
-def _simd_fa_eligible(info):
+def _simd_fa_eligible(info, kv_blocks=(32,)):
     """True if the detected FA can use the simdgroup template: head_dim in {64, 128},
-    block 32x32, fp32/fp16, AND contiguous innermost (head-dim) stride for all of
+    block 32x32 (or 32 by another width in ``kv_blocks``, which only the dense symmetric
+    route passes), fp32/fp16, AND contiguous innermost (head-dim) stride for all of
     Q/K/V/Out. info["strides"][role] is [z,h,m,k]; index 3 (k) == "c1" means the
     innermost stride folded to 1 (contiguous). Non-contiguous -> scalar template
     (handles general strides) -> never silent-wrong.
@@ -121,7 +122,7 @@ def _simd_fa_eligible(info):
     qk_cap = 192 if out_dtype == "f16" else 128
     if not (isinstance(qk, int) and qk % 8 == 0 and 64 <= qk <= qk_cap):
         return False
-    if not (info.get("block_m") == 32 and info.get("block_n") == 32):
+    if not (info.get("block_m") == 32 and info.get("block_n") in kv_blocks):
         return False
     st = info.get("strides", {})
     if not all(st.get(r, [None] * 4)[3] == "c1" for r in ("q", "k", "v", "o")):
@@ -16520,21 +16521,47 @@ class GenericLowerer(
             and str(args[info["q"]].elem_type) in ("f32", "fp32", "float")
             and v_head_dim == head_dim
         )
-        if _simd_fa_eligible(info) and "query_length" not in info and not _wide_q:
+        _simd = _simd_fa_eligible(info) and "query_length" not in info and not _wide_q
+        _spell = {"fp16": "f16", "half": "f16", "fp32": "f32", "float": "f32", "bfloat16": "bf16"}
+        _role_types = {
+            r: _spell.get(str(args[info[r]].elem_type), str(args[info[r]].elem_type)) for r in ("q", "k", "v", "out")
+        }
+        _mixed_abi = len({_role_types[r] for r in ("k", "v", "out")}) != 1 or (
+            _role_types["q"] == "bf16" and _role_types["out"] == "f16"
+        )
+        _q_plan = None
+        if (
+            not _simd
+            and (block_m, block_n) == (32, 64)
+            and head_dim == 64
+            and v_head_dim == 64
+            and not info.get("is_mla")
+            and "query_length" not in info
+            and not _wide_q
+            and not _mixed_abi
+            and _simd_fa_eligible(info, kv_blocks=(64,))
+        ):
+            # A source whose key block is the matrix template's own 64-wide tile. The template
+            # replays the source's key loop from the proved block width (its tail guard, the keys
+            # an unmasked load visits, the causal stop), and at equal widths each of its softmax
+            # updates covers the keys of one source iteration. The tiled maker computed this
+            # source before and still does wherever this maker has no matching form: role types
+            # it cannot load as one matrix type, and a Q constant its half tiles cannot stage.
+            try:
+                _q_plan = self._fa_q_product_plan(
+                    info, _exp_multiplier, "half" if _role_types["out"] == "f16" else "float", _role_types["q"]
+                )
+                _simd = True
+            except MetalNonRecoverableError:
+                _q_plan = None
+        if _simd:
             from triton_msl.codegen._fa_fragments import scope_reason, validate_mode
 
             # The simdgroup template stages Q through a scalar cast but loads K and V and
             # stores Out as matrices of ONE element type (out_dtype). A K or V of another
             # float type, or a bfloat Q beside half tiles, has no matching matrix load:
             # name the refusal here instead of surfacing the Metal compiler's error.
-            _spell = {"fp16": "f16", "half": "f16", "fp32": "f32", "float": "f32", "bfloat16": "bf16"}
-            _role_types = {
-                r: _spell.get(str(args[info[r]].elem_type), str(args[info[r]].elem_type))
-                for r in ("q", "k", "v", "out")
-            }
-            if len({_role_types[r] for r in ("k", "v", "out")}) != 1 or (
-                _role_types["q"] == "bf16" and _role_types["out"] == "f16"
-            ):
+            if _mixed_abi:
                 raise MetalNonRecoverableError(
                     "FlashAttention: the source roles have element types "
                     f"Q={_role_types['q']}, K={_role_types['k']}, V={_role_types['v']}, "
@@ -16547,9 +16574,10 @@ class GenericLowerer(
             half_accumulate = _fa_half_accumulate(info["out_dtype"])
             rounding = getattr(self, "_fa_rounding", {})
             # The Q product where the source forms it (see _fa_q_product_plan).
-            _q_plan = self._fa_q_product_plan(
-                info, _exp_multiplier, "half" if _role_types["out"] == "f16" else "float", _role_types["q"]
-            )
+            if _q_plan is None:
+                _q_plan = self._fa_q_product_plan(
+                    info, _exp_multiplier, "half" if _role_types["out"] == "f16" else "float", _role_types["q"]
+                )
             reason = scope_reason(
                 head_dim=head_dim,
                 v_head_dim=v_head_dim,

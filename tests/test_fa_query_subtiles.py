@@ -49,16 +49,22 @@ def test_larger_attention_tiles_compute_source(bm, bn, causal, dtype, executed, 
     graph, opts = _graph(dtype, bm, bn, causal)
     lower = GenericLowerer(graph, opts)
     msl = lower.lower()  # Fresh lowering must compute, not refuse or reuse a JIT cache.
-    assert "Head-dim-tiled FlashAttention-2" in msl
-    assert lower.effective_block_size == 1024
-    assert "const uint BM = 32u;" in msl
-    assert f"const uint BN = {bn}u;" in msl
-    assert f"const uint DC = {32 if bn == 64 else 64}u;" in msl
-    arrays = re.findall(r"threadgroup float \w+\[([0-9 *]+)\];", msl)
-    assert len(arrays) == 5
-    declared_bytes = 4 * sum(math.prod(int(n.strip()) for n in size.split("*")) for size in arrays)
-    assert declared_bytes == (24832 if bn == 64 else 20736)
-    assert declared_bytes <= 32768
+    # 32 by 64 is the matrix shader's own tile, and a contiguous source of one float type takes it
+    # (test_a_64_wide_key_block_takes_the_matrix_attention_shader); the tiled shader keeps the rest.
+    route_marker = "simdgroup-MMA FlashAttention-2" if (bm, bn) == (32, 64) else "Head-dim-tiled FlashAttention-2"
+    assert route_marker in msl
+    if (bm, bn) == (32, 64):
+        assert lower.effective_block_size == 256
+    else:
+        assert lower.effective_block_size == 1024
+        assert "const uint BM = 32u;" in msl
+        assert f"const uint BN = {bn}u;" in msl
+        assert f"const uint DC = {32 if bn == 64 else 64}u;" in msl
+        arrays = re.findall(r"threadgroup float \w+\[([0-9 *]+)\];", msl)
+        assert len(arrays) == 5
+        declared_bytes = 4 * sum(math.prod(int(n.strip()) for n in size.split("*")) for size in arrays)
+        assert declared_bytes == (24832 if bn == 64 else 20736)
+        assert declared_bytes <= 32768
     if bm == 64:
         assert "const uint SOURCE_BM = 64u;" in msl
         assert "query_offset < SOURCE_BM; query_offset += BM" in msl
@@ -103,7 +109,7 @@ def test_larger_attention_tiles_compute_source(bm, bn, causal, dtype, executed, 
 
     compiled = launch()
     torch.mps.synchronize()
-    assert "Head-dim-tiled FlashAttention-2" in _executed_source(executed, compiled)
+    assert route_marker in _executed_source(executed, compiled)
     torch.testing.assert_close(out.cpu(), reference, atol=0.002, rtol=0.002)
     # Splitting query storage must NOT shorten the source program's visited KV
     # range: its first SOURCE_BM=64 queries all visit the NaN in row40, even
