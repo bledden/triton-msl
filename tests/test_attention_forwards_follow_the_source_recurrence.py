@@ -74,6 +74,11 @@ def _p_for_dot(p, form, v_dtype):
     return _rnd(p, {"vtype": v_dtype, "half": torch.float16, "bfloat": torch.bfloat16}[form])
 
 
+def _dot(p, v):
+    """p @ v term by term: a BLAS product may skip a zero factor, and 0 * NaN is NaN."""
+    return (p[:, :, None] * v[None, :, :]).sum(1)
+
+
 def _recurrence(q, k, v, mask_fn, blocks, form, v_dtype):
     """One query block. q is the source's scaled Q, k the keys as the score dot reads them."""
     rows = q.shape[0]
@@ -94,7 +99,7 @@ def _recurrence(q, k, v, mask_fn, blocks, form, v_dtype):
         alpha = _rnd(torch.exp(_rnd(m_i - m_new, F32)), F32)
         p = _rnd(torch.exp(_rnd(qk - m_new[:, None], F32)), F32)
         l_i = _rnd(_rnd(l_i * alpha, F32) + _rnd(p.sum(1), F32), F32)
-        acc = _rnd(_rnd(acc * alpha[:, None], F32) + _rnd(_p_for_dot(p, form, v_dtype) @ vb, F32), F32)
+        acc = _rnd(_rnd(acc * alpha[:, None], F32) + _rnd(_dot(_p_for_dot(p, form, v_dtype), vb), F32), F32)
         # What a probability within 5e-6 of a rounding boundary could move the row by.
         swing = (_p_for_dot(p * (1 + 5e-6), form, v_dtype) - _p_for_dot(p * (1 - 5e-6), form, v_dtype)).abs()
         swing = (swing - p * 1e-5).clamp(min=0).nan_to_num()
@@ -325,9 +330,9 @@ def test_a_dense_explicit_half_probability_is_narrowed_in_its_own_key_block(
     if bm == 32:
         assert MATRIX in source
     if (bm, bn) == (32, 32):
-        # Two source blocks to a tile: each chunk reads the maximum its own block ended with.
-        assert "float ms = tg_pmax[pr*8u+pc];" in source
-        assert "float(half(exp(tg_S[pr*BN+cj] - ms))) * exp(ms - mr);" in source
+        # Two source blocks to a tile: each chunk reads the maximum its own block ended with,
+        # and each block has its own alpha.
+        assert "float mr = m_was;" in source and "tg_alpha[pr*2u + pc/4u] = exp(m_lo - mr);" in source
 
 
 @pytest.mark.parametrize("q_t", ["f32", "f16"])

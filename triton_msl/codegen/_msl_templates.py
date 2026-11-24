@@ -2143,7 +2143,19 @@ def make_flash_attention_kernel_simdgroup(
         raise ValueError("half accumulators cannot hold this source's narrowed P")
     if _split_p and fragment_lowering != "off":
         raise ValueError("a P narrowed per source key block needs the default fragment lowering")
-    _float_p = elem == "half" and not half_accumulate and (round_p != "half" or _split_p)
+    # A tile that holds several of the source's key blocks replays each block's own update:
+    # its maximum, acc * alpha in float32, then its value product added (the source's
+    # tt.dot(p, v, acc * alpha)). One fused update for the tile would form every probability
+    # against the tile's maximum, and a block whose product overflows float32 would come out
+    # finite where the source's stays infinite. The opt-in half accumulators and the
+    # experimental fragment lowerings keep the fused form.
+    _exact = not half_accumulate and fragment_lowering == "off"
+    _n_sub = (
+        BLOCK_N // _p_src_block
+        if _exact and _p_src_block is not None and 0 < _p_src_block < BLOCK_N and BLOCK_N % _p_src_block == 0
+        else 1
+    )
+    _float_p = elem == "half" and not half_accumulate and round_p != "half"
     _p_bytes = BM * BN * (4 if _float_p else 2)
     _float_q = _wide_q and (
         BM * D * 4 + BM * BN * 4 + _p_bytes + BM * 4 * 3 + BM * 8 * 4 * 2 + BN * Dc_tail * 2 <= 32768
@@ -2166,6 +2178,7 @@ def make_flash_attention_kernel_simdgroup(
         + (0 if elem != "half" or _p_in_scores else _p_bytes)  # tgP (fp16 only)
         + n_groups * 64 * 4  # on_scratch (float)
         + BM * 4 * 3  # tg_m / tg_l / tg_alpha
+        + BM * 4 * (_n_sub - 1)  # one alpha for each source key block in the tile
         + BM * 8 * 4 * 2  # tg_pmax / tg_psum (parallel softmax)
         + BN * Dc_tail * _eb  # tgKV
     )
@@ -2316,11 +2329,6 @@ def make_flash_attention_kernel_simdgroup(
         """The statement that stores a float P for row r, column cj (inside the P loop)."""
         if round_p is None:
             return f"{dst}[r*BN+cj] = p;"
-        if _split_p:
-            return (
-                f"{{ float ms = tg_pmax[pr*8u+pc]; {dst}[r*BN+cj] = "
-                f"float({round_p}({_EXP}(tg_S[r*BN+cj] - ms))) * {_EXP}(ms - mr); }}"
-            )
         return f"{dst}[r*BN+cj] = float({round_p}(p));"
 
     if elem == "half" and _p_in_scores:
@@ -2523,21 +2531,16 @@ def make_flash_attention_kernel_simdgroup(
             if _src_block % 8 != 0 or BLOCK_N % _src_block != 0:
                 raise ValueError("a narrower source KV block must be a multiple of 8 that divides the tile")
             _per = _src_block // 8
-            _sub_max = (
-                "\n                { float m_run = m_prev;  // each chunk's own source block maximum\n"
-                f"                  for (uint j = 0u; j < 8u; j += {_per}u) {{\n"
-                f"                      for (uint i = j; i < j + {_per}u; i++) m_run = max(m_run, tg_pmax[r*8u+i]);\n"
-                f"                      for (uint i = j; i < j + {_per}u; i++) tg_pmax[r*8u+i] = m_run;\n"
-                "                  } }"
-                if _split_p
-                else ""
-            )
+            if _n_sub > 1:
+                # (A row that is NaN from here on gets its NaN denominator from the block that
+                # makes it so: a NaN alpha where a block ends on -inf, a NaN probability sum
+                # where a score is NaN.)
+                _m_store = "tg_m[r] = m_new; tg_l[r] = l_prev;"
             _ended = f"if ((j % {_per}u) == {_per - 1}u && m_new == -INFINITY)"
             _narrow = "m_new = (isnan(m_new) || isnan(pj)) ? NAN : max(m_new, pj);\n"
             _plain = "                for (uint j = 0u; j < 8u; j++) m_new = max(m_new, tg_pmax[r*8u+j]);"
             if _mnew_loop.count(_narrow) == 1:
                 _mnew_loop = _mnew_loop.replace(_narrow, _narrow + f"                    {_ended} m_new = NAN;\n")
-                _mnew_loop += _sub_max
             else:
                 assert _mnew_loop == _plain
                 # max() drops a NaN operand: carry the ended block in a flag past the loop.
@@ -2548,7 +2551,7 @@ def make_flash_attention_kernel_simdgroup(
                     f"                    {_ended} m_ended = true;\n"
                     "                }\n"
                     "                if (m_ended) m_new = NAN;"
-                ) + _sub_max
+                )
 
     # ---- per-block body emitter (mode in {'full','tail'}) ----
     def guard_decls(mode):
@@ -2642,7 +2645,7 @@ def make_flash_attention_kernel_simdgroup(
                 %(SCORE_CELL)s
 %(SCORE_STORE_UPDATE)s
             }
-            tg_pmax[pr*8u + pc] = pm;
+            tg_pmax[pr*8u + pc] = pm;%(M_WAS)s
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lid < BM) {
                 uint r = lid; float m_prev = tg_m[r], l_prev = tg_l[r], m_new = m_prev;
@@ -2650,7 +2653,7 @@ def make_flash_attention_kernel_simdgroup(
                 %(M_STORE)s
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            float ps = 0.0f; float mr = tg_m[pr];
+            float ps = 0.0f; %(MR)s
             for (uint cj = cA; cj < cB; cj++) {
                 float p = %(P_EXPR)s; %(PWRITE_PR)s ps += p;
             }
@@ -2658,7 +2661,7 @@ def make_flash_attention_kernel_simdgroup(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lid < BM) {
                 uint r = lid; float l = tg_l[r];
-                for (uint j = 0u; j < 8u; j++) l += tg_psum[r*8u+j];
+                %(L_SUM)s
                 tg_l[r] = l;
             }
 %(NONFINITE_SANITIZE)s        }
@@ -2666,19 +2669,65 @@ def make_flash_attention_kernel_simdgroup(
 %(BEFORE_FRAGMENTS)s        %(PDECL)s vf, vfs[%(BN)d/8];
 %(AFTER_FRAGMENTS)s        for (uint t=0u;t<TPG;t++) {
             uint ct = sgitg + t*%(NG)du;
-            %(ALPHA_RESCALE)s
-%(VLOAD)s
-            for (uint kk=0u;kk<BN;kk+=8u) {
-                vf = vfs[kk/8u];
-                simdgroup_load(pf, %(PSRC)s + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);
-                simdgroup_load(pf, %(PSRC)s + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);
-                simdgroup_load(pf, %(PSRC)s + 16u*BN + kk, BN); simdgroup_multiply_accumulate(o[2][t], pf, vf, o[2][t]);
-                simdgroup_load(pf, %(PSRC)s + 24u*BN + kk, BN); simdgroup_multiply_accumulate(o[3][t], pf, vf, o[3][t]);
-            }
+%(PV_STAGE)s
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }"""
+        _fused_pv = (
+            "            %(ALPHA_RESCALE)s\n"
+            "%(VLOAD)s\n"
+            "            for (uint kk=0u;kk<BN;kk+=8u) {\n"
+            "                vf = vfs[kk/8u];\n"
+            "                simdgroup_load(pf, %(PSRC)s + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);\n"
+            "                simdgroup_load(pf, %(PSRC)s + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);\n"
+            "                simdgroup_load(pf, %(PSRC)s + 16u*BN + kk, BN); simdgroup_multiply_accumulate(o[2][t], pf, vf, o[2][t]);\n"
+            "                simdgroup_load(pf, %(PSRC)s + 24u*BN + kk, BN); simdgroup_multiply_accumulate(o[3][t], pf, vf, o[3][t]);\n"
+            "            }"
+        ) % {"ALPHA_RESCALE": _alpha_rescale, "VLOAD": vload, "PSRC": p_src}
+        _pv_stage = _fused_pv
+        if _n_sub > 1:
+            import re as _re
+
+            _span, _pv_stage = BN // _n_sub, ""
+            for _b in range(_n_sub):
+                _pv_stage += (
+                    f"            // source key block {_b} of this tile: acc * alpha, then its value product\n            "
+                    + _re.sub(
+                        r"tg_alpha\[([^\]]+)\]", lambda m: f"tg_alpha[({m.group(1)})*{_n_sub}u + {_b}u]", _alpha_rescale
+                    )
+                    + "\n"
+                    + (vload + "\n" if _b == 0 else "")
+                    + f"            for (uint kk={_b * _span}u;kk<{(_b + 1) * _span}u;kk+=8u) {{\n"
+                    "                vf = vfs[kk/8u];\n"
+                    f"                simdgroup_load(pf, {p_src} + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);\n"
+                    f"                simdgroup_load(pf, {p_src} + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);\n"
+                    f"                simdgroup_load(pf, {p_src} + 16u*BN + kk, BN); simdgroup_multiply_accumulate(o[2][t], pf, vf, o[2][t]);\n"
+                    f"                simdgroup_load(pf, {p_src} + 24u*BN + kk, BN); simdgroup_multiply_accumulate(o[3][t], pf, vf, o[3][t]);\n"
+                    "            }" + ("\n" if _b < _n_sub - 1 else "")
+                )
         return tmpl % {
+            "PV_STAGE": _pv_stage,
+            "M_WAS": " float m_was = tg_m[pr];  // the maximum before this tile" if _n_sub > 1 else "",
+            # Each thread's keys lie in one source key block: its maximum is the running maximum
+            # at that block's end, and the block's alpha steps from the maximum before it.
+            "MR": (
+                "float mr = m_was;\n"
+                f"            for (uint j = 0u; j < (pc/{8 // _n_sub}u)*{8 // _n_sub}u; j++) mr = max(mr, tg_pmax[pr*8u+j]);\n"
+                "            { float m_lo = mr;\n"
+                f"              for (uint j = (pc/{8 // _n_sub}u)*{8 // _n_sub}u; j < (pc/{8 // _n_sub}u + 1u)*{8 // _n_sub}u; j++) mr = max(mr, tg_pmax[pr*8u+j]);\n"
+                f"              if (pc % {8 // _n_sub}u == 0u) tg_alpha[pr*{_n_sub}u + pc/{8 // _n_sub}u] = {_EXP}(m_lo - mr); }}"
+                if _n_sub > 1
+                else "float mr = tg_m[pr];"
+            ),
+            "L_SUM": (
+                f"for (uint b = 0u; b < {_n_sub}u; b++) {{\n"
+                "                    float sb = 0.0f;\n"
+                f"                    for (uint j = b*{8 // _n_sub}u; j < (b+1u)*{8 // _n_sub}u; j++) sb += tg_psum[r*8u+j];\n"
+                f"                    l = l * tg_alpha[r*{_n_sub}u + b] + sb;\n"
+                "                }"
+                if _n_sub > 1
+                else "for (uint j = 0u; j < 8u; j++) l += tg_psum[r*8u+j];"
+            ),
             "BEFORE_FRAGMENTS": _before_fragments,
             "AFTER_FRAGMENTS": _after_fragments,
             "ACC": acc_frag,
@@ -2707,12 +2756,9 @@ def make_flash_attention_kernel_simdgroup(
             "SCORE_STORE_UPDATE": _score_store_update,
             "MNEW_LOOP": _mnew_loop,
             "NONFINITE_SANITIZE": _nonfinite_sanitize,
-            "ALPHA_RESCALE": _alpha_rescale,
             "PDECL": f"simdgroup_float8x8 pf; {p_load_t}" if _float_p else f"{p_load_t} pf,",
             "BN": BN,
             "NG": n_groups,
-            "VLOAD": vload,
-            "PSRC": p_src,
         }
 
     block_full, block_tail = block("full"), block("tail")
@@ -2807,7 +2853,7 @@ kernel void {kernel_name}(
     threadgroup {_q_tile_t} tgQ[{BM} * {D}];
     threadgroup {acc_buf}  tg_S[{BM} * {BN}];
 {p_buffers}
-    threadgroup float  tg_m[{BM}], tg_l[{BM}], tg_alpha[{BM}];
+    threadgroup float  tg_m[{BM}], tg_l[{BM}], tg_alpha[{BM * _n_sub}];
     threadgroup float  tg_pmax[{BM} * 8], tg_psum[{BM} * 8];  // parallel-softmax partials
     threadgroup {elem} tgKV[{BN} * {Dc_tail}u];
 
@@ -6165,6 +6211,7 @@ def make_varlen_flash_attention(
     # is a different number. So a narrowing source gets its block in two passes.
     if round_p and source_block != BN:
         raise ValueError("a narrowed P needs the source's key block to be this template's tile")
+    # (Any other source_block is the route-free template alone; it keeps the one-key update.)
     # This template takes one key at a time; the source takes ``source_block`` of them. A row
     # that has seen no key above -inf is NaN in the source when its block ends, not before.
     _alpha, _p = "exp2((m_i - m_new) * inv_ln2)", "exp2((s - m_new) * inv_ln2)"
@@ -6221,7 +6268,11 @@ def make_varlen_flash_attention(
     _maxs = b.get("MAXS")
     kmax_expr = _varlen_kmax_expr(_maxs)
     causal_guard = "&& (qrow >= krow)" if causal else ""
-    if round_p:
+    if source_block == BN:
+        # The source's own block: one maximum, acc * alpha, then the value product added
+        # (tt.dot(p, v, acc * alpha)). The causal mask is on the SCORE; V is loaded for every
+        # key of the sequence, so a masked key still contributes 0 * v (NaN where v is not finite).
+        _p_v = f"float({round_p}(p))" if round_p else "p"
         _row_update = f"""        if (valid) {{
             float s_blk[{BN}];
             float m_new = m_i;
@@ -6240,11 +6291,10 @@ def make_varlen_flash_attention(
             float p_sum = 0.0f;
             for (uint d = 0u; d < D; d++) acc[d] *= alpha;
             for (uint kk = 0u; kk < BN; kk++) {{
-                uint krow = kt + kk;
-                if (krow < kmax {causal_guard}) {{
+                if (kt + kk < kmax) {{
                     float p = exp2((s_blk[kk] - m_new) * inv_ln2);
                     p_sum += p;
-                    float p_v = float({round_p}(p));
+                    float p_v = {_p_v};
                     for (uint d = 0u; d < D; d++) acc[d] += p_v * tg_V[kk * D + d];
                 }}
             }}

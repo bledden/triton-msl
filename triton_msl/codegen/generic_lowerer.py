@@ -14068,10 +14068,13 @@ class GenericLowerer(
             # blocks: exact only when the source's kv block is 64. Otherwise the tiled maker
             # (which takes block_n from the source) replays it exactly — slower, correct.
             and (not _rp or block_n == 64)
-            # A 64-wide tile lines up with the source's iterations when the source's key block
-            # divides it or is a whole number of tiles; the template then tells the padding
-            # keys the source visits from the ones it never reaches.
-            and ((64 % block_n == 0 and block_n % 8 == 0) or block_n % 64 == 0)
+            # A 64-wide tile replays the source's iterations when the source's key block divides
+            # it: each block inside the tile is its own accumulator update. A wider source block
+            # is ONE update over all its keys; the tile would split it in two, and a product
+            # that is finite against the whole block's maximum can overflow float32 against the
+            # first tile's. Those take the tiled maker, which walks the source's own block.
+            and 64 % block_n == 0
+            and block_n % 8 == 0
             # The fragment loads of this template take whole rows and whole key columns.
             and not _other_axis
         )

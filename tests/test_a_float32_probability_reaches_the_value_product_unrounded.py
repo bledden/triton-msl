@@ -178,13 +178,11 @@ def test_a_source_that_narrows_the_probability_itself_is_lowered_or_refused(bm, 
     except MetalNonRecoverableError:
         return
     assert MATRIX in msl
-    if bn == 64:
-        assert "threadgroup half tgP[32 * 64];" in msl and "tgP[pr*BN+cj] = half(p);" in msl
-    else:
-        # Two 32-key source blocks to the tile: P is narrowed against its own block's maximum
-        # and rescaled to the tile's in float32 (test_attention_forwards_follow_the_source_recurrence).
-        assert "threadgroup float tgP[32 * 64];" in msl
-        assert "tgP[pr*BN+cj] = float(half(exp(tg_S[pr*BN+cj] - ms))) * exp(ms - mr);" in msl
+    assert "threadgroup half tgP[32 * 64];" in msl and "tgP[pr*BN+cj] = half(p);" in msl
+    # Two 32-key source blocks to the tile: P is formed and narrowed against its own block's
+    # maximum, and each block is one accumulator update
+    # (test_attention_forwards_follow_the_source_recurrence).
+    assert ("float mr = m_was;" in msl) == (bn == 32)
 
 
 def test_half_accumulators_leave_a_per_block_narrowing_to_the_tiled_shader(narrowed_dir, monkeypatch):
@@ -428,7 +426,7 @@ def test_the_one_key_variable_length_shader_multiplies_a_float32_probability(dty
     torch.mps.synchronize()
     source = _executed_source(executed, compiled)
     assert "simdgroup_multiply_accumulate" not in source
-    assert "acc[d] = acc[d] * alpha + p * tg_V[kk * D + d];" in source
+    assert "float p_v = p;" in source and "acc[d] += p_v * tg_V[kk * D + d];" in source
     p = math.exp(-(2.0**-13) * 8 * float(torch.tensor(dim**-0.5, dtype=torch.float32)))
     want = float(torch.tensor(big * (1.0 - p) / (1.0 + p)).to(dtype))
     got = out.cpu().float()

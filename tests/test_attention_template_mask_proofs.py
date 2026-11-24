@@ -267,8 +267,10 @@ def _lower_biased_block(float_type, dim, block_n):
 
 @pytest.mark.parametrize(
     "float_type,dim,block_n,expected",
-    [("fp32", dim, block_n, ("simd", block_n)) for dim in (32, 64, 128) for block_n in (8, 16, 32, 64, 128, 256)]
+    [("fp32", dim, block_n, ("simd", block_n)) for dim in (32, 64, 128) for block_n in (8, 16, 32, 64)]
     + [
+        ("fp32", 32, 128, ("tiled", 16)),
+        ("fp32", 64, 128, ("tiled", 8)),
         ("fp16", 32, 32, ("tiled", 32)),
         ("fp16", 64, 64, ("simd", 64)),
         ("fp16", 128, 32, ("tiled", 64)),
@@ -280,16 +282,27 @@ def _lower_biased_block(float_type, dim, block_n):
     ],
 )
 def test_biased_key_block_template_and_slice(float_type, dim, block_n, expected, biased_makers):
-    """fp32 runs on the 64-wide MMA template for every key block that divides 64 or is a whole
-    number of 64-key tiles. A half type rounds its probabilities per source block, so it takes
-    that template only at a 64-key block and otherwise the tiled one with a slice that fits."""
+    """fp32 runs on the 64-wide MMA template for every key block that divides 64: each source
+    block inside the tile is its own accumulator update. A wider source block is one update the
+    tile would split (test_attention_forwards_keep_the_source_special_values), so it takes the
+    tiled template. A half type rounds its probabilities per source block, so it takes the MMA
+    template only at a 64-key block and otherwise the tiled one with a slice that fits."""
     _lower_biased_block(float_type, dim, block_n)
     assert biased_makers == [expected]
 
 
 @pytest.mark.parametrize(
     "float_type,dim,block_n,size",
-    [("fp16", 128, 128, 37120), ("bf16", 128, 128, 37120), ("fp16", 32, 256, 45312), ("bf16", 64, 256, 49408)],
+    [
+        ("fp16", 128, 128, 37120),
+        ("bf16", 128, 128, 37120),
+        ("fp16", 32, 256, 45312),
+        ("bf16", 64, 256, 49408),
+        ("fp32", 128, 128, 37120),
+        ("fp32", 32, 256, 45312),
+        ("fp32", 64, 256, 49408),
+        ("fp32", 128, 256, 57600),
+    ],
 )
 def test_biased_key_block_too_large_for_threadgroup_memory_refuses(float_type, dim, block_n, size, biased_makers):
     # The size named is the working set at the narrowest slice the template stages.
@@ -860,8 +873,7 @@ def _assert_biased_sentinel(result, tol):
     + [(n, 16) for n in (16, 40, 48, 100)]
     + [(n, 64) for n in (32, 96)]
     + [(n, 8) for n in (20, 72)]
-    + [(n, 128) for n in (40, 64, 96, 128, 160, 300)]
-    + [(300, 256)],
+    + [(n, 128) for n in (40, 64, 96, 128, 160, 300)],
 )
 def test_biased_finite_sentinel_counts_the_keys_the_source_visits(n_ctx, block_n, dim, sentinel, fa_hits):
     """A 64-wide template tile over an odd number of 32-key source iterations visits 32 keys

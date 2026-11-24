@@ -58,7 +58,7 @@ kernel void _flash_attn_fwd(
     threadgroup float  tg_S[32 * 64];
     threadgroup float tgP[32 * 64];
     threadgroup float on_scratch[8 * 64];
-    threadgroup float  tg_m[32], tg_l[32], tg_alpha[32];
+    threadgroup float  tg_m[32], tg_l[32], tg_alpha[64];
     threadgroup float  tg_pmax[32 * 8], tg_psum[32 * 8];  // parallel-softmax partials
     threadgroup half tgKV[64 * 8u];
 
@@ -104,7 +104,7 @@ kernel void _flash_attn_fwd(
                 float s = true ? (tg_S[pr*BN+cj]*scale) : -INFINITY;
                 tg_S[pr*BN+cj] = s; pm = max(pm, s);
             }
-            tg_pmax[pr*8u + pc] = pm;
+            tg_pmax[pr*8u + pc] = pm; float m_was = tg_m[pr];  // the maximum before this tile
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lid < BM) {
                 uint r = lid; float m_prev = tg_m[r], l_prev = tg_l[r], m_new = m_prev;
@@ -114,10 +114,14 @@ kernel void _flash_attn_fwd(
                     if ((j % 4u) == 3u && m_new == -INFINITY) m_ended = true;
                 }
                 if (m_ended) m_new = NAN;
-                tg_m[r] = m_new; tg_alpha[r] = exp(m_prev - m_new); tg_l[r] = l_prev * tg_alpha[r];
+                tg_m[r] = m_new; tg_l[r] = l_prev;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            float ps = 0.0f; float mr = tg_m[pr];
+            float ps = 0.0f; float mr = m_was;
+            for (uint j = 0u; j < (pc/4u)*4u; j++) mr = max(mr, tg_pmax[pr*8u+j]);
+            { float m_lo = mr;
+              for (uint j = (pc/4u)*4u; j < (pc/4u + 1u)*4u; j++) mr = max(mr, tg_pmax[pr*8u+j]);
+              if (pc % 4u == 0u) tg_alpha[pr*2u + pc/4u] = exp(m_lo - mr); }
             for (uint cj = cA; cj < cB; cj++) {
                 float p = exp(tg_S[pr*BN+cj] - mr); tgP[pr*BN+cj] = p; ps += p;
             }
@@ -125,7 +129,11 @@ kernel void _flash_attn_fwd(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lid < BM) {
                 uint r = lid; float l = tg_l[r];
-                for (uint j = 0u; j < 8u; j++) l += tg_psum[r*8u+j];
+                for (uint b = 0u; b < 2u; b++) {
+                    float sb = 0.0f;
+                    for (uint j = b*4u; j < (b+1u)*4u; j++) sb += tg_psum[r*8u+j];
+                    l = l * tg_alpha[r*2u + b] + sb;
+                }
                 tg_l[r] = l;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -137,6 +145,7 @@ kernel void _flash_attn_fwd(
         simdgroup_float8x8 pf; simdgroup_half8x8 vf, vfs[64/8];
         for (uint t=0u;t<TPG;t++) {
             uint ct = sgitg + t*8u;
+            // source key block 0 of this tile: acc * alpha, then its value product
             // Batch four row fragments in the now-dead float score tile.
             for (uint rb=0u;rb<4u;rb++) {
                 simdgroup_store(o[rb][t], tg_S + sgitg*256u + rb*64u, 8u);
@@ -144,7 +153,7 @@ kernel void _flash_attn_fwd(
             simdgroup_barrier(mem_flags::mem_threadgroup);
             for (uint rb=0u;rb<4u;rb++) {
                 for (uint e=lid%32u;e<64u;e+=32u) {
-                    float a=tg_alpha[rb*8u+e/8u];
+                    float a=tg_alpha[(rb*8u+e/8u)*2u + 0u];
                     tg_S[sgitg*256u+rb*64u+e] = float(tg_S[sgitg*256u+rb*64u+e] * float(isfinite(a) ? a : 0.0f));
                 }
             }
@@ -155,7 +164,31 @@ kernel void _flash_attn_fwd(
             simdgroup_barrier(mem_flags::mem_threadgroup);
             for (uint kk=0u;kk<BN;kk+=8u)
                 simdgroup_load(vfs[kk/8u], V + v_base + (kv_start + kk)*v_sn + (ct*8u)*v_sk, v_sn);
-            for (uint kk=0u;kk<BN;kk+=8u) {
+            for (uint kk=0u;kk<32u;kk+=8u) {
+                vf = vfs[kk/8u];
+                simdgroup_load(pf, tgP + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);
+                simdgroup_load(pf, tgP + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);
+                simdgroup_load(pf, tgP + 16u*BN + kk, BN); simdgroup_multiply_accumulate(o[2][t], pf, vf, o[2][t]);
+                simdgroup_load(pf, tgP + 24u*BN + kk, BN); simdgroup_multiply_accumulate(o[3][t], pf, vf, o[3][t]);
+            }
+            // source key block 1 of this tile: acc * alpha, then its value product
+            // Batch four row fragments in the now-dead float score tile.
+            for (uint rb=0u;rb<4u;rb++) {
+                simdgroup_store(o[rb][t], tg_S + sgitg*256u + rb*64u, 8u);
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint rb=0u;rb<4u;rb++) {
+                for (uint e=lid%32u;e<64u;e+=32u) {
+                    float a=tg_alpha[(rb*8u+e/8u)*2u + 1u];
+                    tg_S[sgitg*256u+rb*64u+e] = float(tg_S[sgitg*256u+rb*64u+e] * float(isfinite(a) ? a : 0.0f));
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint rb=0u;rb<4u;rb++) {
+                simdgroup_load(o[rb][t], tg_S + sgitg*256u + rb*64u, 8u);
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint kk=32u;kk<64u;kk+=8u) {
                 vf = vfs[kk/8u];
                 simdgroup_load(pf, tgP + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);
                 simdgroup_load(pf, tgP + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);
@@ -204,7 +237,7 @@ kernel void _flash_attn_fwd(
                 float s = ((kv_row < N_CTX) || (kv_row - N_CTX < ((32u - N_CTX % 32u) % 32u))) /* source KV tail: 32 */ ? (tg_S[pr*BN+cj]*scale) : -INFINITY;
                 tg_S[pr*BN+cj] = s; pm = max(pm, s);
             }
-            tg_pmax[pr*8u + pc] = pm;
+            tg_pmax[pr*8u + pc] = pm; float m_was = tg_m[pr];  // the maximum before this tile
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lid < BM) {
                 uint r = lid; float m_prev = tg_m[r], l_prev = tg_l[r], m_new = m_prev;
@@ -214,10 +247,14 @@ kernel void _flash_attn_fwd(
                     if ((j % 4u) == 3u && m_new == -INFINITY) m_ended = true;
                 }
                 if (m_ended) m_new = NAN;
-                tg_m[r] = m_new; tg_alpha[r] = exp(m_prev - m_new); tg_l[r] = l_prev * tg_alpha[r];
+                tg_m[r] = m_new; tg_l[r] = l_prev;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            float ps = 0.0f; float mr = tg_m[pr];
+            float ps = 0.0f; float mr = m_was;
+            for (uint j = 0u; j < (pc/4u)*4u; j++) mr = max(mr, tg_pmax[pr*8u+j]);
+            { float m_lo = mr;
+              for (uint j = (pc/4u)*4u; j < (pc/4u + 1u)*4u; j++) mr = max(mr, tg_pmax[pr*8u+j]);
+              if (pc % 4u == 0u) tg_alpha[pr*2u + pc/4u] = exp(m_lo - mr); }
             for (uint cj = cA; cj < cB; cj++) {
                 float p = exp(tg_S[pr*BN+cj] - mr); tgP[pr*BN+cj] = p; ps += p;
             }
@@ -225,7 +262,11 @@ kernel void _flash_attn_fwd(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lid < BM) {
                 uint r = lid; float l = tg_l[r];
-                for (uint j = 0u; j < 8u; j++) l += tg_psum[r*8u+j];
+                for (uint b = 0u; b < 2u; b++) {
+                    float sb = 0.0f;
+                    for (uint j = b*4u; j < (b+1u)*4u; j++) sb += tg_psum[r*8u+j];
+                    l = l * tg_alpha[r*2u + b] + sb;
+                }
                 tg_l[r] = l;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -237,6 +278,7 @@ kernel void _flash_attn_fwd(
         simdgroup_float8x8 pf; simdgroup_half8x8 vf, vfs[64/8];
         for (uint t=0u;t<TPG;t++) {
             uint ct = sgitg + t*8u;
+            // source key block 0 of this tile: acc * alpha, then its value product
             // Batch four row fragments in the now-dead float score tile.
             for (uint rb=0u;rb<4u;rb++) {
                 simdgroup_store(o[rb][t], tg_S + sgitg*256u + rb*64u, 8u);
@@ -244,7 +286,7 @@ kernel void _flash_attn_fwd(
             simdgroup_barrier(mem_flags::mem_threadgroup);
             for (uint rb=0u;rb<4u;rb++) {
                 for (uint e=lid%32u;e<64u;e+=32u) {
-                    float a=tg_alpha[rb*8u+e/8u];
+                    float a=tg_alpha[(rb*8u+e/8u)*2u + 0u];
                     tg_S[sgitg*256u+rb*64u+e] = float(tg_S[sgitg*256u+rb*64u+e] * float(isfinite(a) ? a : 0.0f));
                 }
             }
@@ -263,7 +305,31 @@ kernel void _flash_attn_fwd(
                 simdgroup_load(vfs[kk/8u], tgKV + sgitg*64u, 8u);
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint kk=0u;kk<BN;kk+=8u) {
+            for (uint kk=0u;kk<32u;kk+=8u) {
+                vf = vfs[kk/8u];
+                simdgroup_load(pf, tgP + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);
+                simdgroup_load(pf, tgP + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);
+                simdgroup_load(pf, tgP + 16u*BN + kk, BN); simdgroup_multiply_accumulate(o[2][t], pf, vf, o[2][t]);
+                simdgroup_load(pf, tgP + 24u*BN + kk, BN); simdgroup_multiply_accumulate(o[3][t], pf, vf, o[3][t]);
+            }
+            // source key block 1 of this tile: acc * alpha, then its value product
+            // Batch four row fragments in the now-dead float score tile.
+            for (uint rb=0u;rb<4u;rb++) {
+                simdgroup_store(o[rb][t], tg_S + sgitg*256u + rb*64u, 8u);
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint rb=0u;rb<4u;rb++) {
+                for (uint e=lid%32u;e<64u;e+=32u) {
+                    float a=tg_alpha[(rb*8u+e/8u)*2u + 1u];
+                    tg_S[sgitg*256u+rb*64u+e] = float(tg_S[sgitg*256u+rb*64u+e] * float(isfinite(a) ? a : 0.0f));
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint rb=0u;rb<4u;rb++) {
+                simdgroup_load(o[rb][t], tg_S + sgitg*256u + rb*64u, 8u);
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint kk=32u;kk<64u;kk+=8u) {
                 vf = vfs[kk/8u];
                 simdgroup_load(pf, tgP + 0u*BN + kk, BN);  simdgroup_multiply_accumulate(o[0][t], pf, vf, o[0][t]);
                 simdgroup_load(pf, tgP + 8u*BN + kk, BN);  simdgroup_multiply_accumulate(o[1][t], pf, vf, o[1][t]);

@@ -2,8 +2,8 @@
   {
     "file": "C.metal",
     "source": "fa512-fragment-lowering-inquiry-20261028/proposed-sources/C.metal",
-    "sha256": "92c66e636cf9f145e2698baa3db74eb82e701880d12ea80255435dbe25f24e05",
-    "amended": "source block-end rule (a row is NaN where a 32-key source block ends on -inf): the maximum loop only; P held in float32 through P @ V (the source's float32 product), 2026-11-23"
+    "sha256": "e27422e5d782ffe7352dc981e4435dd53ddc6fd734d04847ee30bbe35348d770",
+    "amended": "source block-end rule (a row is NaN where a 32-key source block ends on -inf): the maximum loop only; P held in float32 through P @ V (the source's float32 product), 2026-11-23; each 32-key source block of the tile is its own accumulator update (maximum, acc * alpha, value product), 2026-11-23"
   },
   {
     "file": "C_U.metal",

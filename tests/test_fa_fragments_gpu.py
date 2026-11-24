@@ -41,7 +41,12 @@ def test_fragment_compositions_match_reference_and_each_other(n):
         torch.testing.assert_close(output.double(), reference, rtol=0.004, atol=0.004)
         assert torch.all(backing[:16] == 117) and torch.all(backing[-16:] == 117)
         assert all(torch.equal(x, old) for x, old in zip((q, k, v), snapshots))
-        if baseline is None:
+        if mode == "off":
+            # The default lowering replays each 32-key source block's accumulator update; the
+            # experimental lowerings keep one fused update per 64-key tile. They agree with it
+            # to rounding (the reference comparison above) and with each other exactly.
+            pass
+        elif baseline is None:
             baseline = output.clone()
         else:
             assert torch.equal(output, baseline), mode
