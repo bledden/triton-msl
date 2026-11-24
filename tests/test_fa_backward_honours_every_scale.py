@@ -58,14 +58,22 @@ def test_alternating_scales_on_one_shape(causal, dtype):
         _check(f"scale={scale} causal={causal}", _device(*x, scale, causal), _float64(*x, scale, causal), TOL[dtype])
 
 
+# The MPS SDPA calls below leave torch's cached SDPA at scale 0.5 for these two shapes (both causal
+# flags) for the rest of the process, so no other test may use MPS SDPA on them: a later SDPA
+# oracle at another scale would get scale 0.5's attention. Reserved: [1, 3, 208, 64] and its
+# folded [3, 208, 64]; no other test uses N = 208.
+RESERVED_SDPA_SHAPE = (1, 3, 208, 64)
+
+
 @pytest.mark.parametrize("causal", [False, True], ids=["full", "causal"])
 def test_a_prior_user_sdpa_call_with_another_scale(causal):
     # The caller's own SDPA calls come first, on the 4-D shape and on the folded [Z*H, N, 64]
     # shape flash_attention works on, with a scale that flash_attention is then not given.
-    x = _inputs((1, 2, 80, 64), 9, torch.float32)
+    z, h, n, d = RESERVED_SDPA_SHAPE
+    x = _inputs(RESERVED_SDPA_SHAPE, 9, torch.float32)
     q, k, v = (t.to("mps") for t in x[:3])
     F.scaled_dot_product_attention(q, k, v, scale=0.5, is_causal=causal)
-    F.scaled_dot_product_attention(*(t.reshape(2, 80, 64) for t in (q, k, v)), scale=0.5, is_causal=causal)
+    F.scaled_dot_product_attention(*(t.reshape(z * h, n, d) for t in (q, k, v)), scale=0.5, is_causal=causal)
     torch.mps.synchronize()
     for scale in (0.125, None):
         _check(f"after SDPA(0.5): scale={scale}", _device(*x, scale, causal), _float64(*x, scale, causal), 1e-4)

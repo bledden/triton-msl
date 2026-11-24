@@ -363,10 +363,23 @@ split Q/K widths 128+64, V width 128.
 The native wheel takes 23–44% longer than MLX across the full dense panel
 (0.69–0.82× speed, rounded), with every observed native dense block favoring MLX.
 Historical near-MLX parity is not sustained. MLA depends on size and boundary:
-N512 loses to prejoined SDPA, while causal N2048 beats MLX by about 1.24× native
-and 1.23× pure. Candidate MLA concatenation is timed; MLX and prejoined SDPA receive
+N512 loses to prejoined SDPA, while causal N2048 beat MLX by about 1.24× native
+and 1.23× pure with the 0.3.0 kernel (this does not hold for 0.4.0: see the note
+below). Candidate MLA concatenation is timed; MLX and prejoined SDPA receive
 already joined Q/K. The separate split-input SDPA arm includes concatenation;
 native full N1024/2048 speedups against it are 1.215×/1.483×.
+
+**0.4.0 note on causal MLA.** The causal MLA timings in 890 and 895 were taken
+with a causal work-skip: the kernel stopped each query tile's key loop at the
+tile's end, although its source visits every key block and multiplies each
+hidden key's value by probability zero, so a NaN or infinity there must make
+the row NaN. 0.4.0 removes that work-skip (commit 45c91d8), and a causal MLA
+launch of this kernel now costs about as much as a non-causal one: about 1.75
+times its previous time at N2048 in a separate fp16, 16-head measurement
+(host-inclusive wall time). The causal MLA figures in this section, including
+the 1.24×/1.23× against MLX above and the causal MLA ratio in 895 below, were
+measured with the work-skip and do not describe 0.4.0. Causal MLA in 0.4.0 has
+not been compared with MLX or SDPA.
 
 Method and limits: warmed public calls plus framework synchronization, not isolated
 GPU time. MLX uses the optimized `mask="causal"`. Candidate output is preallocated
@@ -404,7 +417,9 @@ same as 890. The pure wheel was not rerun in this attribution experiment.
 | Dense fp32 causal | 1.148–1.291× |
 | MLA N2048 full / causal | 1.125× / 1.131× |
 
-Above 1 means final is slower. These are medians of corresponding block-median
+Above 1 means final is slower. Both builds' causal MLA launches had the causal
+work-skip that 0.4.0 removes (see the 0.4.0 note above), so the causal MLA ratio
+does not describe 0.4.0. These are medians of corresponding block-median
 ratios, not ratios of independently aggregated absolute times. Observed paired
 blocks cross parity for fp16 N4096 full and fp32 N4096 causal; the other twelve
 comparisons are above 1 in all observed blocks. Block ranges are not confidence

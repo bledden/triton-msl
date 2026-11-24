@@ -12,8 +12,10 @@ returned the first scale's attention, and dQ/dK computed from it.
 
 Head dim is fixed at 64, ``N % 16 == 0`` (the backward tile). The dedicated Metal
 ``make_fa_logsumexp_kernel`` does not materialize the N*N score matrix. That statement
-describes the logsumexp kernel, not the output, whose float32 scores are one ``[ZH, N, N]``
-tensor.
+describes the logsumexp kernel, not the output. ``_attention_output`` materializes float32
+scores: each of its steps (matmul, scale, causal fill, softmax) makes a new ``[ZH, N, N]``
+float32 tensor from the previous one, so its peak is about two such tensors, plus an N x N
+boolean mask when causal.
 See ``make_fa_backward_dkv_kernel`` / ``make_fa_backward_dq_kernel`` for the backward kernels
 and ``tests/test_fa_backward.py`` for the autograd cross-check.
 """

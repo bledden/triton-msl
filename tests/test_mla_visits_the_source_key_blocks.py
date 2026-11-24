@@ -176,24 +176,27 @@ def _source(x, causal, clamp, lo=0):
     return torch.where(visited[:, :, None], p[:, :, None] * v[None, :, :], 0.0).sum(1)
 
 
-@pytest.mark.parametrize("dtype", ["f32", "f16"])
-@pytest.mark.parametrize("form", ["two-dot", "one-dot"])
-def test_a_hidden_key_value_reaches_every_row_whose_source_loop_loads_it(form, dtype, executed):
-    """NaN and +inf at keys 20 and 40 (the first 64-key tile) and 70 and 100 (the second)."""
+def _check_special_values(form, dtype, n, keys, executed):
+    """For each key, NaN and then +inf at V[key, 0]; every row as the source's loop computes it.
+
+    A row whose loop loads ``key`` is NaN for a NaN value. For +inf it is NaN where the causal
+    mask hides the key (rows < key: probability zero times infinity) and +inf where the row sees
+    it. A row whose loop never loads the key averages ones, and features 1.. are one everywhere.
+    """
     tol = 1e-5 if dtype == "f32" else 1e-3
-    rows = torch.arange(N)
-    loads = _visited(N, clamp=form == "one-dot")
+    rows = torch.arange(n)
+    loads = _visited(n, clamp=form == "one-dot")
     sources = set()
-    for key in (20, 40, 70, 100):
+    for key in keys:
         for bad in (math.nan, math.inf):
             executed.clear()
-            got, compiled = _launch(form, _inputs(form, dtype, key=key, bad=bad))
+            got, compiled = _launch(form, _inputs(form, dtype, n=n, key=key, bad=bad))
             sources.add(_executed_source(executed, compiled))
             seen = loads[:, key]
             want_nan = seen if math.isnan(bad) else seen & (rows < key)
-            want_inf = torch.zeros(N, dtype=torch.bool) if math.isnan(bad) else seen & (rows >= key)
+            want_inf = torch.zeros(n, dtype=torch.bool) if math.isnan(bad) else seen & (rows >= key)
             f0 = got[:, 0]
-            case = f"{form} {dtype} key={key} value={bad}"
+            case = f"{form} {dtype} N={n} key={key} value={bad}"
             assert torch.equal(f0.isnan(), want_nan), f"{case}: NaN rows {f0.isnan().nonzero().flatten().tolist()}"
             assert torch.equal(f0 == math.inf, want_inf), (
                 f"{case}: +inf rows {(f0 == math.inf).nonzero().flatten().tolist()}"
@@ -205,14 +208,34 @@ def test_a_hidden_key_value_reaches_every_row_whose_source_loop_loads_it(form, d
     assert SHADER in source
     assert "break;" not in source and "skip fully-masked blocks" not in source
     if form == "two-dot":
-        # Every key block, as the source's loop: no stop before N_CTX.
+        # Every key block, as the source's loop: no stop before N_CTX, and the staged tail tile
+        # runs for every query tile (no guard on the query tile's end).
         assert "uint n_full = N_CTX / BN;" in source and "source_kv_stop" not in source
+        assert "if (n_full * BN < N_CTX) {" in source
     else:
         # The clamped source's own stop: the work past it is still skipped, and the tail tile
         # stages only the keys of the source blocks the loop visits.
         assert "const uint source_kv_stop = min(q_start + BM, N_CTX); // source KV loop stop" in source
         assert "uint n_full = source_kv_stop / BN;" in source
         assert "if (n_full * BN < source_kv_stop) {" in source
+
+
+@pytest.mark.parametrize("dtype", ["f32", "f16"])
+@pytest.mark.parametrize("form", ["two-dot", "one-dot"])
+def test_a_hidden_key_value_reaches_every_row_whose_source_loop_loads_it(form, dtype, executed):
+    """NaN and +inf at keys 20 and 40 (the first 64-key tile) and 70 and 100 (the second)."""
+    _check_special_values(form, dtype, N, (20, 40, 70, 100), executed)
+
+
+@pytest.mark.parametrize("dtype", ["f32", "f16"])
+@pytest.mark.parametrize("form", ["two-dot", "one-dot"])
+def test_a_hidden_key_value_in_the_padded_tail_tile_reaches_every_row_that_loads_it(form, dtype, executed):
+    """N = 96 (N % 64 == 32): the template's second 64-key tile is its staged tail, keys 64-95 and
+    padding 96-127. The two-dot source's loop loads keys 64-95 (its third 32-key block) for every
+    query tile, so rows 0-63 run the tail tile too and must see a NaN or +inf at keys 70 and 90,
+    which their mask hides. Keys 20 and 40 sit in the first, full tile. The one-dot source loads
+    keys 64-95 for rows 64-95 only (its loop stops at the query tile's end)."""
+    _check_special_values(form, dtype, 96, (20, 40, 70, 90), executed)
 
 
 @pytest.mark.parametrize("n", [96, 128])
@@ -226,21 +249,29 @@ def test_finite_causal_mla_matches_float64_attention(form, dtype, n, executed):
     assert err <= (1e-4 if dtype == "f32" else 5e-3), f"{form} {dtype} N={n}: max error {err}"
 
 
+CLAMPED = "MLA attention: arith.minsi in an address"
+NOT_EVERY_BLOCK = f"MLA attention: a source loop that is not range(0, sequence length, {BN})"
+
+
 @pytest.mark.parametrize(
-    "causal,clamp,lo",
-    [(True, True, 0), (False, True, 0), (True, False, BN)],
+    "causal,clamp,lo,reason",
+    [(True, True, 0, CLAMPED), (False, True, 0, CLAMPED), (True, False, BN, NOT_EVERY_BLOCK)],
     ids=["clamped-causal", "clamped-unmasked", "loop-from-BN"],
 )
-def test_a_two_dot_key_loop_other_than_every_block_is_correct_or_refused(causal, clamp, lo):
-    """The two-dot route replays range(0, N_CTX, BN) only. Another loop must be refused, or computed
-    as its source computes it: a NaN in V at key 40 reaches rows 0-31 only if their loop loads it."""
+def test_a_two_dot_key_loop_other_than_every_block_is_correct_or_refused(causal, clamp, lo, reason):
+    """The two-dot route replays range(0, N_CTX, BN) only. Another loop must be computed as its
+    source computes it (a NaN in V at key 40 reaches rows 0-31 only if their loop loads it), or
+    refused by the MLA address witness for that loop: the min() of a clamped stop reaches the key
+    addresses, and a loop from BN is not range(0, N_CTX, BN). A refusal from any other stage fails.
+    This is a guard, not a regression test: ccef348 refuses these loops with the same reasons."""
     x = list(_inputs("two-dot", "f32", seed=3))
     v = x[-1].cpu()
     v[0, 0, 40, 0] = math.nan
     x[-1] = v.to("mps")
     try:
         got, _ = _launch("loop", tuple(x), causal=causal, clamp=clamp, lo=lo)
-    except MetalNonRecoverableError:
+    except MetalNonRecoverableError as e:
+        assert reason in str(e), f"refused for another reason: {str(e).splitlines()[0][:300]}"
         return
     want = _source(tuple(x), causal, clamp, lo)
     assert torch.equal(got.isnan(), want.isnan())
