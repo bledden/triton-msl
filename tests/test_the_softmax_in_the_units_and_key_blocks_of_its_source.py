@@ -422,12 +422,20 @@ def test_biased_row_is_nan_where_a_source_block_ends_on_minus_infinity(type_name
 
 
 @requires_mps
-@pytest.mark.parametrize("block,text", [(16, "(j % 2u) == 1u"), (32, "(j % 4u) == 3u"), (128, "% 128u) != 0u")])
+@pytest.mark.parametrize("block,text", [(16, "(j % 2u) == 1u"), (32, "(j % 4u) == 3u")])
 def test_simdgroup_text_ends_the_sources_block(block, text, cold_caches, maker_spy):
     tensors = _tensors(160, 32)
     _check(biased_source._biased_fa, "f32", tensors, 160, block=block)
     assert [name for name, _, _ in maker_spy] == [MAKERS[1]]
     assert text in maker_spy[0][2] and "m_new == -INFINITY" in maker_spy[0][2]
+
+
+@requires_mps
+def test_a_source_block_wider_than_the_tile_takes_the_tiled_maker(cold_caches, maker_spy):
+    """A 128-key source block is one accumulator update; the 64-key simdgroup tile would make it
+    two (test_attention_forwards_keep_the_source_special_values)."""
+    _check(biased_source._biased_fa, "f32", _tensors(160, 32), 160, block=128)
+    assert [name for name, _, _ in maker_spy] == [MAKERS[0]]
 
 
 @requires_mps
@@ -595,7 +603,6 @@ def _varlen_text(maker_name, out_dtype, **kw):
         (MAKERS[3], "fp32", 32, "(m_new == -INFINITY && ((kt + BN) % 32u) != 0u)"),
         (MAKERS[3], "fp32", 64, "(m_new == -INFINITY && ((kt + BN) % 64u) != 0u)"),
         (MAKERS[3], "fp16", 64, "(m_new == -INFINITY && ((kt + BN) % 64u) != 0u)"),
-        (MAKERS[2], "fp32", 32, "(m_new == -INFINITY && ((krow + 1u) % 32u) != 0u)"),
     ],
 )
 def test_variable_length_text_ends_the_sources_block(maker_name, out_dtype, block, text):
@@ -604,6 +611,17 @@ def test_variable_length_text_ends_the_sources_block(maker_name, out_dtype, bloc
     assert text not in plain and "m_new == -INFINITY" not in plain
     assert told.count(text) == 2  # alpha and P
     assert told.replace(f"({text} ? 1.0f : ", "(").replace(f"({text} ? 0.0f : ", "(") != plain
+
+
+def test_the_one_key_shader_takes_its_sources_block_whole():
+    """At the source's own 32 keys the one-key template takes the block in two passes: the
+    maximum first, then alpha and every probability against it. A block that ends on -inf is
+    NaN by that arithmetic, with no guard to say when the block ends."""
+    plain = _varlen_text(MAKERS[2], "fp32")
+    told = _varlen_text(MAKERS[2], "fp32", source_block=32)
+    assert "float s_blk[32];" in told and "float s_blk[32];" not in plain
+    assert "float alpha = exp2((m_i - m_new) * inv_ln2);" in told
+    assert "m_new == -INFINITY" not in told and "m_new == -INFINITY" not in plain
 
 
 @pytest.mark.parametrize(

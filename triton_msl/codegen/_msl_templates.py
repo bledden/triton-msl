@@ -2135,8 +2135,9 @@ def make_flash_attention_kernel_simdgroup(
     # Only a source that narrows P itself (round_p "half"), or the opt-in half accumulators,
     # store P as half.
     # A source whose key block is narrower than this tile narrows each probability against the
-    # maximum its own block ends with, and later blocks rescale the product in float32. The tile
-    # then holds round(exp(s - m_block)) * exp(m_block - m_tile): a float, like a bfloat16 P.
+    # maximum its own block ends with: the tile holds round(exp(s - m_block)), and each source
+    # block is its own accumulator update (below). Half accumulators and the fragment lowerings
+    # keep one fused update per tile and cannot replay that, so they refuse it.
     _p_src_block = next((b for b in (sentinel_kv_block, source_kv_block, source_block_ends) if type(b) is int), None)
     _split_p = round_p is not None and _p_src_block is not None and _p_src_block < BLOCK_N
     if (_split_p or round_p == "bfloat") and elem == "half" and half_accumulate:

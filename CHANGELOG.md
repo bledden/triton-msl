@@ -724,6 +724,28 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 - A variable-length attention kernel with float16 K and V and a bfloat16 Out had K and
   V rounded to bfloat16 by the matrix shader's tiles before either dot. It takes the
   one-key shader, which reads them as stored.
+- An attention forward now makes one accumulator update for each key block of its
+  source: that block's maximum, the float32 accumulator multiplied by alpha, then the
+  block's value product added. Measured on the 0.4.0 development build `0c4cd04`:
+  - the dense matrix shader took two 32-key source blocks as one 64-key update, so a
+    first block whose product overflows float32 came out finite (about 7.2e37 where
+    the source gives `+inf`), and an infinite value could come out NaN;
+  - the variable-length one-key shader rescaled after every key, so two overflowing
+    products followed by a larger score in the same block gave `+inf` where the source
+    is finite;
+  - the same shader skipped the value of a causally masked key. The source masks the
+    score and still loads V for every key of the sequence, so a future key whose value
+    is NaN or infinite gives NaN (`0 * v`);
+  - a float32 biased attention kernel with a 128- or 256-key block ran on the 64-key
+    matrix tile, which split one source update in two and could overflow where the
+    source does not. These kernels now take the tiled shader.
+  Two visible costs. A float32 biased attention kernel with a 256-key block, or a
+  128-key block at head dimension 128, does not fit the tiled shader's 32 KiB of
+  threadgroup memory and is refused where it used to compute; a 128-key block at head
+  dimensions 32 and 64 computes. And a dense kernel written with 32-key blocks now
+  makes two updates per 64-key tile: see Performance. The opt-in
+  `TRITON_MSL_FA_HALF_ACCUM=1` accumulators and the experimental
+  `experimental_fa_fragment_lowering` modes keep one fused update per tile.
 - A signed 32- or 64-bit sum, difference or product that leaves its type's range
   now wraps, as Triton's integer arithmetic does. The generic lowering wrote these
   as signed shader arithmetic, and the Metal shader compiler reads a signed sum as
@@ -1048,8 +1070,10 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   shader can stage its Q constant. On an M4 Max, the float16 call at sequence 1024
   with eight heads went from about 2,677 µs to about 449 µs in the installed native
   wheel, with the corrected probability tile described under Fixes. The 32 by 32
-  tile takes 447 to 453 µs with that correction and took 443 to 445 µs without it.
-  The changed wheel was built locally, not by the hosted workflow. Other 32 by 64 sources, 64 by 32 and
+  tile took 494 µs in both repetitions of the same run, against 450 to 462 µs for
+  `0c4cd04`: its two 32-key source blocks are now two accumulator updates per tile
+  (Fixes), about 8% over the build before that fix on this fixture. Other shapes were
+  not timed. The changed wheel was built locally, not by the hosted workflow. Other 32 by 64 sources, 64 by 32 and
   64 by 64 keep the tiled shader, and head dimension 128 at 32 by 64 is still refused.
 
 ### Validation
