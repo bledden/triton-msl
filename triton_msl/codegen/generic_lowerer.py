@@ -14338,6 +14338,12 @@ class GenericLowerer(
             v_head_dim=info["v_head_dim"],
             half_accumulate=_fa_half_accumulate(info["out_dtype"]),
             source_block_ends=int(info["block_n"]),
+            # The witness above proved the source's one key loop is range(0, N_CTX, BN): every
+            # key block for every query tile. A causal mask on the score does not stop it, and a
+            # hidden key's value still enters tt.dot(p, v, acc * alpha), where 0 * NaN is NaN.
+            # So no causal work-skip: the template visits every key block too (whole blocks, by
+            # the launch bound above).
+            source_causal_stop=False,
             **(_q_plan or {"scale": info["scale"]}),
         )
         self.effective_block_size = 256

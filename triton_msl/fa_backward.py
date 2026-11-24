@@ -1,20 +1,24 @@
 """FlashAttention with a Metal backward pass — enables TRAINING.
 
-This exposes ``flash_attention`` as a ``torch.autograd.Function``. The forward obtains
-the output from PyTorch's eager scaled-dot-product attention and computes the logsumexp
-with a separate Metal kernel. The backward dispatches this package's tiled Metal dK/dV
-and dQ kernels (FA-2 backward). Calling eager torch SDPA does not by itself route that
-operation through this package's Triton-to-Metal backend.
+This exposes ``flash_attention`` as a ``torch.autograd.Function``. The forward computes
+the output in float32 with explicit torch matmul and softmax operations (``_attention_output``)
+and the logsumexp with a separate Metal kernel. The backward dispatches this package's
+tiled Metal dK/dV and dQ kernels (FA-2 backward).
+
+The output is deliberately NOT torch's ``scaled_dot_product_attention``: on MPS, torch
+2.12.1 caches that operation per shape and causal flag and ignores ``scale`` on later
+calls, so a second scale for the same shape (or a scale the caller's own code used first)
+returned the first scale's attention, and dQ/dK computed from it.
 
 Head dim is fixed at 64, ``N % 16 == 0`` (the backward tile). The dedicated Metal
 ``make_fa_logsumexp_kernel`` does not materialize the N*N score matrix. That statement
-describes the logsumexp kernel, not the implementation PyTorch selects for the output.
+describes the logsumexp kernel, not the output, whose float32 scores are one ``[ZH, N, N]``
+tensor.
 See ``make_fa_backward_dkv_kernel`` / ``make_fa_backward_dq_kernel`` for the backward kernels
 and ``tests/test_fa_backward.py`` for the autograd cross-check.
 """
 
 import torch
-import torch.nn.functional as F
 
 from triton_msl.codegen._msl_templates import (
     make_fa_backward_dkv_kernel,
@@ -72,10 +76,24 @@ def _dispatch_backward(q, k, v, dO, L, D, scale, causal):
     return dQ, dK, dV
 
 
+def _attention_output(q, k, v, scale, causal):
+    """softmax(scale * q @ k^T, causal) @ v in float32. q,k,v: [ZH,N,64] mps float32.
+
+    Not torch's scaled_dot_product_attention: its MPS implementation in torch 2.12.1 keeps
+    the first scale it sees for a shape and returns that attention for every later scale.
+    Here the scale is an ordinary multiply on this call's scores.
+    """
+    s = torch.matmul(q, k.transpose(-1, -2)) * scale
+    if causal:
+        n = q.shape[-2]
+        s = s.masked_fill(torch.ones(n, n, dtype=torch.bool, device=q.device).triu(1), float("-inf"))
+    return torch.matmul(torch.softmax(s, dim=-1), v)
+
+
 class _FlashAttentionFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, scale, causal):
-        O = F.scaled_dot_product_attention(q, k, v, is_causal=causal, scale=scale)
+        O = _attention_output(q, k, v, scale, causal)
         L = _logsumexp(q, k, scale, causal)  # Metal flash logsumexp — no N*N materialization
         ctx.save_for_backward(q, k, v, O, L)
         ctx.scale, ctx.causal = scale, causal

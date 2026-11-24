@@ -694,6 +694,22 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
 
 ### Fixes
 
+- The causal MLA forward (two QK dots, nope and rope) skipped the key blocks past each
+  query tile. Its source loops over every key block and masks the score, so a hidden
+  key's value still enters `tt.dot(p, v, acc * alpha)`, and a NaN or infinity there
+  makes the row NaN: 0 * NaN is NaN. On a 128-key causal launch, rows 0-63 returned 1.0
+  where the source gives NaN. The MLA route now visits every key block, as its source
+  does. Its address proof accepts only the loop `range(0, N_CTX, BLOCK_N)` and refuses
+  a loop clamped at the query tile's end, so a causal MLA launch now takes as long as a
+  non-causal one: 1.55 to 1.9 times its previous time at 1,024 to 4,096 keys (float16,
+  16 heads, Q.K head dimension 192, V 128, M4 Max). The dense route already followed its
+  source's own loop, including its causal stop.
+- `triton_msl.fa_backward.flash_attention` returned the attention of an earlier scale,
+  and dQ and dK computed from it, when the scale changed within a process; dV was right.
+  Its forward was torch's MPS `scaled_dot_product_attention`, which in torch 2.12.1 keeps
+  the first scale it sees for a shape and causal flag and ignores later ones. A scale the
+  caller's own code passed to SDPA first had the same effect. The forward is now an
+  explicit float32 matmul and softmax and does not call SDPA.
 - A float16 attention kernel that multiplies a float32 probability, as the standard
   forward does with `tl.dot(p.to(tl.float32), v.to(tl.float32))`, had that probability
   rounded to float16 first by the matrix shader, and to the tensor's 16-bit type by the

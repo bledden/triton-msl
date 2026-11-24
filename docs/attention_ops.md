@@ -44,10 +44,12 @@ o.backward(dO)                              # dQ/dK/dV computed on Metal
 ```
 
 - head dim `== 64`, `N % 16 == 0`, full and causal.
-- The forward computes `O` through PyTorch SDPA; that eager call is not rerouted to
-  triton-msl merely by importing this package. A separate dedicated Metal flash kernel
+- The forward computes `O` in float32 with explicit torch matmul and softmax (one `[ZH, N, N]`
+  score tensor). It does not call PyTorch SDPA: on MPS, torch 2.12.1 keeps the first `scale`
+  it sees for a shape and ignores later ones, which returned a wrong `O`, dQ and dK whenever
+  the scale changed within a process. A separate dedicated Metal flash kernel
   (`make_fa_logsumexp_kernel`, tiled/online) computes the log-sum-exp needed by backward
-  without materializing its N×N score matrix. PyTorch owns SDPA's implementation selection.
+  without materializing its N×N score matrix.
 
 
 ## Biased / triangle attention (trifast's shape) — forward and backward templates

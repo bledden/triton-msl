@@ -34,7 +34,7 @@ def forbid_execution(monkeypatch):
         pytest.fail("autograd/eager/runtime work reached for invalid fixed ABI")
 
     monkeypatch.setattr(fa._FlashAttentionFn, "apply", forbidden)
-    monkeypatch.setattr(fa.F, "scaled_dot_product_attention", forbidden)
+    monkeypatch.setattr(fa, "_attention_output", forbidden)
     monkeypatch.setattr(fa, "_logsumexp", forbidden)
     monkeypatch.setattr(fa, "_dispatch_backward", forbidden)
 

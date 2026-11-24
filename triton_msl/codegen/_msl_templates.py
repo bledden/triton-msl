@@ -2011,6 +2011,14 @@ def make_flash_attention_kernel_simdgroup(
     ``post_scale``: with ``round_q``, the constant the source multiplies the finished score by
     (None: one). The Q product is staged with ``scale`` alone.
 
+    ``source_causal_stop``: None keeps the standalone causal work-skip (key tiles that start past
+    the query tile are not visited). A compiled source passes its proved key loop instead: False
+    when the loop visits every key block, True when it stops at ``min(q_start + BM, N_CTX)``. A
+    causal mask on the score does not stop the source's value product (0 * NaN is NaN), so
+    False visits every tile. True needs ``source_kv_block`` (the dense proof); False needs it or,
+    for a route whose launch requires N_CTX to be a whole number of source key blocks,
+    ``source_block_ends``.
+
     packet 164 (item F-a): ``round_q`` / ``round_p`` in {None, "half", "bfloat"} replay the SOURCE's
     narrowing — ``q * tl.full([1], scale, dtype)`` (the scale rounded to the input dtype, each product
     rounded; the score tile is then NOT scaled again) and ``p.to(dtype)`` before P @ V. A half×half
@@ -2467,7 +2475,13 @@ def make_flash_attention_kernel_simdgroup(
         _source_tail = _fa_source_tail_guard(source_kv_block, BLOCK_N)
     if unmasked_kv and (_source_tail is None or not set(unmasked_kv) <= {"K", "V"}):
         raise ValueError("unmasked KV roles require the proved source block")
-    if source_causal_stop is not None and (_source_tail is None or type(source_causal_stop) is not bool):
+    # A source loop over every key block needs no tail proof when the launch requires the
+    # length to be a whole number of the source's key blocks (``source_block_ends``, the MLA
+    # route): every key below N_CTX is then a key that loop visits.
+    _every_block = source_causal_stop is False and type(source_block_ends) is int
+    if source_causal_stop is not None and (
+        (_source_tail is None and not _every_block) or type(source_causal_stop) is not bool
+    ):
         raise ValueError("source loop stop requires a proved dense source block")
     _stop = "source_kv_stop" if source_causal_stop else "N_CTX"
     _visited = (

@@ -98,7 +98,7 @@ def test_real_tensor_invalid_peers_refuse_before_eager_or_metal(monkeypatch, def
         pytest.fail("invalid peer entered eager/autograd/Metal preparation")
 
     monkeypatch.setattr(fa._FlashAttentionFn, "apply", forbidden)
-    monkeypatch.setattr(fa.F, "scaled_dot_product_attention", forbidden)
+    monkeypatch.setattr(fa, "_attention_output", forbidden)
     monkeypatch.setattr(fa, "_logsumexp", forbidden)
     monkeypatch.setattr(fa, "_dispatch_backward", forbidden)
     with pytest.raises((ValueError, TypeError)):
