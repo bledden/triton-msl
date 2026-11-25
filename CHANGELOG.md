@@ -100,20 +100,49 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   accepted, one element less is refused. This is a change for a launch that ran
   with a short operand before. `do_not_specialize=["K"]` keeps the K-loop
   template and its own plan.
-- Prove the same for a single dot on a route without a template storage plan:
-  an epilogue on the generic route, the fused softmax template, masked operand
-  loads at a loop bound of 1, the source-replayed K-loop epilogue, and a
-  fully masked K-loop template that has no fast replacement. The launcher
-  computes, from the kernel's access plan, the lowest and highest element each
-  load and store of the source reaches, masks and loop trips included, and
-  refuses a launch that leaves a storage. An access whose address or mask
-  depends on loaded data, or that sits under a branch the arguments do not
-  decide, is not judged. The elements are kept per grid and scalar arguments,
-  and a passing launch is remembered under the lane-order key. A launch of more
-  than 262,144 address instances per access is read at the first two and last
-  two programs of each grid axis, and past that at the first two and last two
-  loop trips. A K-loop kernel that carries a fast replacement (`fast_matmul`,
-  the direct entry) and no storage plan is not covered by either proof.
+- Prove the same, where it can be proved, for a single dot on a route without a
+  template storage plan: an epilogue on the generic route, the fused softmax
+  template, masked operand loads at a loop bound of 1, the source-replayed
+  K-loop epilogue, and a fully masked K-loop template that has no fast
+  replacement. The launcher computes, from the kernel's access plan, the lowest
+  and highest element each load and store of the source reaches, masks and loop
+  trips included, and refuses a launch that leaves a storage. What is proved,
+  and what is not:
+  - Proved, every accessed cell: an access that does not follow the program id;
+    any access of a launch with at most 4,194,304 address instances per access
+    (every program is read); and, for any grid of up to 4,194,304 programs, an
+    access whose address is a lane part plus a program part under a mask that
+    does not follow the program (unmasked operand loads on a tiled grid).
+  - Not proved, dispatched as before: an access past those limits whose mask
+    follows the program (a boundary mask on a tiled axis, the 1-D
+    `pid % n` / `pid // n` split). It is read at the first two and last two
+    programs of each grid axis and trips of each loop only. A cell found
+    outside there refuses the launch; a launch with nothing found there runs,
+    and one whose out-of-storage cell belongs to a program in between is not
+    caught.
+  - Not judged at all: an access whose address or mask depends on loaded data,
+    one under a branch the arguments do not decide, one through a pointer the
+    plan cannot trace to one argument, one in an unbounded loop, and a tensor
+    whose storage cannot be read or whose element width differs from the
+    pointer's.
+  `triton_msl.backend._lane_order.storage_unproved()` names the accesses of a
+  kernel's last judged launch that were not proved. A K-loop kernel that
+  carries a fast replacement (`fast_matmul`, the direct entry) and no storage
+  plan, a kernel of several dots and a kernel without a dot take neither proof.
+  The MLX route runs neither.
+- Refuse a dot of two constant tiles unless its one store is the dense whole
+  tile. The template for it stores `C[i * N + j]` for the whole tile from every
+  program, through the last pointer argument: a store that was masked, tiled by
+  `program_id`, strided or padded was overwritten (a store clipped at 20 rows
+  wrote 32; a second row tile was never written), and an output of exactly the
+  source's cells passed the storage proof and was then written past. Those
+  forms now refuse at compile; the dense unmasked form stores through the
+  pointer its store addresses. 0.3.0 was not checked.
+- Refuse a dot with one constant operand on the positional matmul template. It
+  has two pointer arguments, the template binds A, B, C, M, N, K by slot, and
+  its signature guard ran only for three or more pointers: the shader read the
+  output as B and stored through the buffer of the scalar in slot 2. The guard
+  now runs for every kernel that reaches the template.
 - These changes require fresh integrated hardware and installed-artifact
   qualification. Earlier source-tree matmul timings do not measure their cost.
 
