@@ -3,6 +3,7 @@ import platform
 import struct
 import subprocess
 import tempfile
+import warnings
 from types import BuiltinFunctionType
 
 # Only the ordinary builtin consumer may omit the per-launch generator.
@@ -708,17 +709,27 @@ class MetalUtils:
             # Triton framework path: Metal loads a library from a file, so the bytes are
             # written to one. It is ours, and needed only until the library is loaded and
             # its pipelines are built: it is removed whether that succeeds or not.
-            with tempfile.NamedTemporaryFile(suffix=".metallib", delete=False) as f:
-                tmp_path = f.name
+            f = tempfile.NamedTemporaryFile(suffix=".metallib", delete=False)
+            tmp_path = f.name
             try:
-                with open(tmp_path, "wb") as f:
+                try:
                     f.write(kernel)
+                finally:
+                    f.close()
                 return MetalUtils._load_library(self, name, kernel, Foundation.NSURL.fileURLWithPath_(tmp_path))
             finally:
                 try:
                     os.unlink(tmp_path)
-                except OSError:
+                except FileNotFoundError:
                     pass
+                except OSError as error:
+                    # Reported, not raised: raising here would replace the loaded library or
+                    # the load's own error.
+                    warnings.warn(
+                        f"temporary Metal library {tmp_path} could not be removed: {error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
         # Legacy path: kernel is a file path string, the caller's file.
         return MetalUtils._load_library(self, name, kernel, Foundation.NSURL.fileURLWithPath_(kernel))
 

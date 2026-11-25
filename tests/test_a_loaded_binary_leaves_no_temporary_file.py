@@ -80,7 +80,13 @@ def test_a_loaded_binary_leaves_no_file_and_was_there_for_every_step(loader):
     try:
         assert isinstance(pipeline, _Pipeline)
         steps = [step for step, _ in utils._device.seen]
-        assert steps == ["library", "function kernel", "pipeline kernel", "function kernel__mmdirect", "pipeline kernel__mmdirect"]
+        assert steps == [
+            "library",
+            "function kernel",
+            "pipeline kernel",
+            "function kernel__mmdirect",
+            "pipeline kernel__mmdirect",
+        ]
         assert all(content == BINARY for _, content in utils._device.seen)
         assert os.listdir(directory) == []
     finally:
@@ -122,6 +128,88 @@ def test_a_path_the_caller_passed_is_left_alone(loader):
     assert utils._device.path == str(theirs)
     assert theirs.read_bytes() == BINARY
     assert os.listdir(directory) == ["theirs.metallib"]
+
+
+class _Handle:
+    """The temporary file's own handle, failing at one step."""
+
+    def __init__(self, real, fail):
+        self._real, self._fail, self.name, self.written = real, fail, real.name, []
+
+    def write(self, data):
+        if self._fail == "write":
+            raise OSError("no space left on device")
+        self.written.append(bytes(data))
+        return self._real.write(data)
+
+    def close(self):
+        self._real.close()
+        if self._fail == "close":
+            raise OSError("close failed")
+
+
+def _handles(monkeypatch, fail=None):
+    made = []
+    real = driver.tempfile.NamedTemporaryFile
+
+    def named(*args, **kwargs):
+        made.append(_Handle(real(*args, **kwargs), fail))
+        return made[-1]
+
+    monkeypatch.setattr(driver.tempfile, "NamedTemporaryFile", named)
+    return made
+
+
+def test_the_binary_is_written_through_the_temporary_files_own_handle(loader, monkeypatch):
+    make, directory = loader
+    made = _handles(monkeypatch)
+    utils = make()
+    library, *_ = utils.load_binary("kernel", BINARY, 0)
+    utils.unload_module(library)
+    assert [handle.written for handle in made] == [[BINARY]]
+    assert os.listdir(directory) == []
+
+
+@pytest.mark.parametrize("step", ["write", "close"])
+def test_a_binary_that_cannot_be_written_leaves_no_file_and_reaches_no_device(loader, monkeypatch, step):
+    make, directory = loader
+    _handles(monkeypatch, fail=step)
+    utils = make()
+    with pytest.raises(OSError, match="no space left|close failed"):
+        utils.load_binary("kernel", BINARY, 0)
+    assert utils._device.seen == []
+    assert os.listdir(directory) == []
+
+
+def test_a_file_that_cannot_be_removed_is_reported_and_the_library_is_still_returned(loader, monkeypatch):
+    make, directory = loader
+    utils = make()
+
+    def refuse(path):
+        raise PermissionError(13, "Permission denied", path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(driver.os, "unlink", refuse)
+        with pytest.warns(RuntimeWarning, match=r"temporary Metal library .*\.metallib could not be removed"):
+            library, pipeline, *_ = utils.load_binary("kernel", BINARY, 0)
+    utils.unload_module(library)
+    assert isinstance(pipeline, _Pipeline)
+    assert len(os.listdir(directory)) == 1
+
+
+def test_a_removal_failure_does_not_hide_the_load_failure(loader, monkeypatch):
+    make, _ = loader
+    utils = make(library_error="no such library")
+
+    def refuse(path):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(driver.os, "unlink", refuse)
+    with (
+        pytest.warns(RuntimeWarning, match="could not be removed"),
+        pytest.raises(RuntimeError, match="Failed to load metallib"),
+    ):
+        utils.load_binary("kernel", BINARY, 0)
 
 
 _TWICE = """
