@@ -4162,8 +4162,25 @@ class _TemplateMixin:
         block_size = num_warps * 32
         self._matmul_block_size = total
 
-        c_ptr = ptr_args[-1] if ptr_args else None
-        c_msl_type = triton_type_to_msl(c_ptr.elem_type) if c_ptr else "float"
+        # This template stores the whole M x N tile at ``C[i * N + j]`` from every
+        # program. That is the source only when its one store is unmasked and addresses
+        # exactly those cells of one pointer argument: no program id, no runtime stride,
+        # no padded row. Anything else it would overwrite (GPU: a store clipped at 20
+        # rows wrote 32; a second row tile was never written; a row stride of 50 wrote
+        # the dense cells). The output is the pointer the store addresses, not the last
+        # pointer argument.
+        c_ptr = self._constant_dot_dense_store(M, N)
+        if c_ptr is None:
+            from triton_msl.errors import MetalNonRecoverableError
+
+            raise MetalNonRecoverableError(
+                "dot of two constant tiles: the template stores the whole tile densely (C[i * N + j]) from "
+                "every program, and this kernel's store is masked, tiled by program_id, strided or padded, "
+                "or is not one plain store through a pointer argument. Refusing (correct-or-refuse). Store "
+                "the constant product with a plain elementwise kernel.",
+                op_name="tt.dot",
+            )
+        c_msl_type = triton_type_to_msl(c_ptr.elem_type)
 
         lines = []
         lines.append("#include <metal_stdlib>")
@@ -4188,6 +4205,98 @@ class _TemplateMixin:
         lines.append("}")
         lines.append("")
         return "\n".join(lines)
+
+    def _constant_dot_dense_store(self, rows, cols):
+        """The pointer argument a constant dot stores to, when the source's one store is the dense tile.
+
+        Evaluates the store address over the tile from the operations that build it. It
+        must be ``C + i * cols + j`` for ``i`` in ``[0, rows)`` and ``j`` in ``[0, cols)``,
+        from compile-time values only, with no mask. Returns None for anything else.
+        """
+        import numpy as np
+
+        ops = {}
+
+        def collect(found):
+            for op in found:
+                ops[op.id] = op
+                collect(op.region_ops or ())
+                collect(op.else_ops or ())
+
+        collect(self.graph.ops)
+        stores = [op for op in ops.values() if op.op == "tt.store"]
+        dots = [op for op in ops.values() if op.op == "tt.dot"]
+        if len(stores) != 1 or len(dots) != 1 or len(stores[0].operand_ids or []) != 2:
+            return None
+        store, dot = stores[0], dots[0]
+        # The template converts its float sum to the output type once. Between the dot
+        # and the store the source may change layout and cast to another float type;
+        # anything else, or another observer of the product, is not replayed.
+        passed = ("ttg.convert_layout", "arith.truncf", "arith.extf", "tt.fp_to_fp")
+        chain, value = {dot.id}, store.operand_ids[1]
+        for _ in range(8):
+            op = ops.get(value)
+            if op is None or op.id == dot.id:
+                break
+            if op.op not in passed or not op.operand_ids:
+                return None
+            chain.add(op.id)
+            value = op.operand_ids[0]
+        if value != dot.id:
+            return None  # the stored value is not the dot result itself
+        for use in ops.values():
+            if use.id in chain or use.id == store.id:
+                continue
+            if any(operand in chain for operand in (use.operand_ids or ())):
+                return None
+        arguments = {arg.id: arg for arg in self.graph.args}
+        base = []
+
+        def offset(value_id, depth=0):
+            """The integer array a value is over the tile, or None; a pointer contributes its argument."""
+            if depth > 32:
+                return None
+            if value_id in arguments:
+                if not arguments[value_id].is_ptr:
+                    return None
+                base.append(arguments[value_id])
+                return np.zeros((), dtype=np.int64)
+            op = ops.get(value_id)
+            if op is None:
+                return None
+            operands = [offset(operand, depth + 1) for operand in (op.operand_ids or ())]
+            if any(found is None for found in operands):
+                return None
+            if op.op == "arith.constant":
+                found = self._const_int(op.id, ops)
+                return None if found is None else np.asarray(found, dtype=np.int64)
+            if op.op == "tt.make_range":
+                try:
+                    return np.arange(int(op.attrs.get("start")), int(op.attrs.get("end")), dtype=np.int64)
+                except (TypeError, ValueError):
+                    return None
+            if op.op == "tt.expand_dims" and len(operands) == 1:
+                try:
+                    return np.expand_dims(operands[0], int(op.attrs.get("axis")))
+                except (TypeError, ValueError, IndexError):
+                    return None
+            if op.op in ("tt.splat", "tt.broadcast", "ttg.convert_layout", "arith.extsi") and len(operands) == 1:
+                return operands[0]
+            if op.op in ("arith.addi", "tt.addptr") and len(operands) == 2:
+                return operands[0] + operands[1]
+            if op.op == "arith.muli" and len(operands) == 2:
+                return operands[0] * operands[1]
+            return None
+
+        try:
+            found = offset(store.operand_ids[0])
+            if found is None or len(base) != 1:
+                return None
+            found = np.broadcast_to(found, (rows, cols))
+        except ValueError:
+            return None
+        dense = np.arange(rows, dtype=np.int64)[:, None] * cols + np.arange(cols, dtype=np.int64)[None, :]
+        return base[0] if np.array_equal(found, dense) else None
 
     def _lower_dot_simple_template(self, tile_dims, ptr_args, dtype) -> str:
         """Fall back to optimized simdgroup matmul template for simple kernels."""
@@ -4226,24 +4335,44 @@ class _TemplateMixin:
         # garbage when read back (saw a 7.6 trillion mismatch on
         # ``test_simple_matmul[…-float16-float32]``).
         out_dtype = dtype
-        if len(ptr_args) >= 3:
-            a_arg, b_arg, c_arg = self._dot_template_ptr_roles()  # P0 (065): dataflow, not position
-            out_dtype = _mlir_to_triton_dtype(c_arg.elem_type)
-            # Prove integrity BEFORE constructing the template: construction may
-            # raise a prunable resource failure, which must not hide bad roles.
-            # The template hard-binds A/B/C to buffers 0/1/2 and cannot re-slot.
-            _idx = tuple(a.index for a in (a_arg, b_arg, c_arg))
-            if _idx != (0, 1, 2) or len(ptr_args) != 3:
-                from triton_msl.errors import MetalNonRecoverableError
+        # The template binds buffers by position: A, B, C at slots 0/1/2 and the
+        # integer extents M, N, K at slots 3/4/5. That is checked for EVERY kernel that
+        # reaches it, whatever its pointer count: a dot with one constant operand has two
+        # pointers, skipped the old three-pointer guard, and the shader then read the
+        # output as B and stored through the buffer of the scalar at slot 2.
+        from triton_msl.errors import MetalNonRecoverableError
 
-                raise MetalNonRecoverableError(
-                    f"simple matmul template requires the canonical (A, B, C, ...) "
-                    f"signature with the three pointers at argument slots 0/1/2 "
-                    f"(dataflow-resolved roles sit at {_idx}, {len(ptr_args)} pointer "
-                    f"args): make_matmul_kernel binds buffers by position and would "
-                    f"write the output into the wrong buffer. Refusing.",
-                    op_name="tt.dot",
-                )
+        _args = list(self.graph.args)
+        _slots_ok = (
+            len(ptr_args) == 3
+            and len(_args) >= 6
+            and all(arg.is_ptr for arg in _args[:3])
+            and all((not arg.is_ptr) and arg.elem_type in ("i32", "i64", "u32", "u64") for arg in _args[3:6])
+        )
+        if not _slots_ok:
+            raise MetalNonRecoverableError(
+                "simple matmul template requires the canonical (A, B, C, M, N, K, ...) signature: three "
+                "pointers at argument slots 0/1/2 followed by three integer extents "
+                f"(this kernel has {len(ptr_args)} pointer argument(s)). make_matmul_kernel binds its "
+                "buffers by position, so a dot with a constant operand or another signature would read "
+                "and store through the wrong buffers. Refusing.",
+                op_name="tt.dot",
+            )
+        a_arg, b_arg, c_arg = self._dot_template_ptr_roles()  # P0 (065): dataflow, not position
+        out_dtype = _mlir_to_triton_dtype(c_arg.elem_type)
+        # Prove integrity BEFORE constructing the template: construction may
+        # raise a prunable resource failure, which must not hide bad roles.
+        # The template hard-binds A/B/C to buffers 0/1/2 and cannot re-slot.
+        _idx = tuple(a.index for a in (a_arg, b_arg, c_arg))
+        if _idx != (0, 1, 2) or len(ptr_args) != 3:
+            raise MetalNonRecoverableError(
+                f"simple matmul template requires the canonical (A, B, C, ...) "
+                f"signature with the three pointers at argument slots 0/1/2 "
+                f"(dataflow-resolved roles sit at {_idx}, {len(ptr_args)} pointer "
+                f"args): make_matmul_kernel binds buffers by position and would "
+                f"write the output into the wrong buffer. Refusing.",
+                op_name="tt.dot",
+            )
 
         # Phase 4: record the runtime fast-matmul dispatch descriptor (additive;
         # the generic kernel below is still emitted + returned). The launcher only
