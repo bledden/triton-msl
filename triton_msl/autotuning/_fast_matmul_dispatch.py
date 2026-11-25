@@ -130,7 +130,16 @@ def _fast_grid_ok(grid, spec, M, N):
 
 
 def dispatch_fast_matmul(
-    rt, descriptor, kargs, *, grid=None, launch_exit_hook=None, launch_metadata=None, submission_state=None
+    rt,
+    descriptor,
+    kargs,
+    *,
+    grid=None,
+    launch_exit_hook=None,
+    launch_metadata=None,
+    submission_state=None,
+    memo=None,
+    remember=True,
 ):
     """Attempt to dispatch via the simdgroup fast-matmul template.
 
@@ -147,6 +156,11 @@ def dispatch_fast_matmul(
         Non-constexpr kernel args in buffer order (kargs[:6] = [A,B,C,M,N,K]).
     launch_exit_hook, launch_metadata : optional
         Forwarded to the exit hook after a successful dispatch (same as driver).
+    memo : LaunchMemo, optional
+        The launcher's memo of output-overlap checks that passed. A launch of exact MPS
+        tensors whose M, N, K and A/B/C storage facts were checked before skips the check;
+        without a memo, with ``remember=False`` (the launch ran a hook), or for any other
+        argument, the check runs and nothing is remembered.
 
     Returns
     -------
@@ -233,7 +247,17 @@ def dispatch_fast_matmul(
         # that overlaps an operand is defined there and a race here. The row-major
         # contract above gives each tensor's exact extent; an overlap keeps the compiled
         # entry, which preserves the source order. Also gates split-K below.
-        if output_overlaps_operand(kargs, 2, M * N, {0: M * K, 1: K * N}, exact=True):
+        def _overlaps():
+            return output_overlaps_operand(kargs, 2, M * N, {0: M * K, 1: K * N}, exact=True)
+
+        if memo is None:
+            _overlap = _overlaps()
+        else:
+            from triton_msl.backend._launch_memo import overlap_key
+
+            _key = overlap_key(kargs, (m_idx, n_idx, k_idx)) if remember else None
+            _overlap = memo.recall(_key, _overlaps, False)
+        if _overlap:
             return False
 
         # --- SPLIT-K for skinny/deep fp32 (occupancy-starved) ---
@@ -312,6 +336,10 @@ def dispatch_fast_matmul(
 
     except Exception as _error:
         _submission.reraise_if_attempted(_error)
+        from triton_msl.backend._launch_memo import LaunchMemoDisagreement
+
+        if isinstance(_error, LaunchMemoDisagreement):
+            raise  # test mode: a remembered check that disagrees is never a fallback
         # Fast path failed -> mark the SELECTED variant (sel_msl) unsupported,
         # NOT fast_msl (the (4,4) default).  Marking fast_msl would permanently
         # disable the (4,4) fallback for any shape, not just the failing variant.

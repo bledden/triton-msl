@@ -1094,6 +1094,16 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   (Fixes), about 8% over the build before that fix on this fixture. Other shapes were
   not timed. The changed wheel was built locally, not by the hosted workflow. Other 32 by 64 sources, 64 by 32 and
   64 by 64 keep the tiled shader, and head dimension 128 at 32 by 64 is still refused.
+- A launcher remembers a matmul grid storage proof and a fast matmul output-overlap
+  check that passed, under every value the check reads (the grid, the captured scalar
+  payloads, and for each role tensor its storage, size, view offset, element width and
+  data pointer), and skips the check on a later launch with the same values. A
+  refusal is never remembered; a launch with an enter hook, a tensor that is not an
+  exact MPS `torch.Tensor`, a scalar that is not an exact built-in, or a value that
+  cannot be read takes the check. `TRITON_MSL_LAUNCH_MEMO=0` turns it off,
+  `TRITON_MSL_LAUNCH_MEMO_VERIFY=1` runs the check on every remembered launch and
+  raises on a disagreement, `TRITON_MSL_LAUNCH_MEMO_DIAG=1` counts hits, misses,
+  bypasses and evictions (docs/USAGE.md, Tuning flags).
 
 ### Validation
 

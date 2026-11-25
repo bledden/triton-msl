@@ -1058,6 +1058,26 @@ def _i32(v):
     return v - 0x100000000 if v >= 0x80000000 else v
 
 
+_HOOK_CHAIN = None
+
+
+def _runs_a_hook(hook):
+    """Does this launch hook run anything? Triton passes a HookChain even with no hook registered."""
+    global _HOOK_CHAIN
+    if not hook:
+        return False
+    if _HOOK_CHAIN is None:
+        try:
+            from triton.knobs import HookChain
+
+            _HOOK_CHAIN = HookChain
+        except Exception:
+            _HOOK_CHAIN = False
+    if _HOOK_CHAIN and type(hook) is _HOOK_CHAIN:
+        return bool(hook.calls)
+    return True
+
+
 class MetalLauncher:
     """Triton kernel launcher for Metal backend.
 
@@ -1091,6 +1111,12 @@ class MetalLauncher:
 
         # Kernel name for the compile_shader fast-path MSL lookup (Phase 4).
         self.kernel_name = getattr(metadata, "name", None)
+        # Passing launch checks remembered for the same inputs (see _launch_memo). Each
+        # memo is this launcher's alone, so its immutable descriptors are not in the key.
+        from ._launch_memo import LaunchMemo
+
+        self._matmul_memo = LaunchMemo(self.kernel_name, "matmul_storage")
+        self._overlap_memo = LaunchMemo(self.kernel_name, "matmul_overlap")
         # Where the kernel loads and stores (see __call__). Every kernel the emitter lowers
         # carries a plan; a launcher built around a shader of its own has none.
         from triton_msl.backend._lane_order import launch_plan
@@ -1249,6 +1275,8 @@ class MetalLauncher:
                 )
         import ctypes
 
+        # Decided before the hook runs: a hook that removes itself still ran.
+        _memo_free = not _runs_a_hook(launch_enter_hook)
         if launch_enter_hook:
             # Upstream Triton\'s hook convention is a single
             # ``LaunchMetadata`` argument. Passing both kernel_metadata
@@ -1335,10 +1363,24 @@ class MetalLauncher:
                     "Refusing launch: packed address-bounds contract has an unknown discriminator",
                     op_name="tt.dot",
                 )
+        # A hook ran above and may have changed a storage: a hooked launch takes
+        # every check itself. Otherwise a proof that passed on these same inputs
+        # (grid, scalar payloads, the role tensors' storages, extents, offsets,
+        # widths and pointers, read here) is remembered and the check skipped.
         if tail_access_bounds is not None:
-            _tail_reason = _matmul_tail_bounds_reason(
-                tail_access_bounds, flat_args, flat_sigs, scalar_payloads, (gridX, gridY, gridZ)
-            )
+            _memo = getattr(self, "_matmul_memo", None)
+            _proof_key = None
+            if _memo is not None and _memo_free:
+                from ._launch_memo import matmul_proof_key
+
+                _proof_key = matmul_proof_key(
+                    tail_access_bounds, flat_args, flat_sigs, scalar_payloads, (gridX, gridY, gridZ)
+                )
+
+            def _tail_check(_bounds=tail_access_bounds):
+                return _matmul_tail_bounds_reason(_bounds, flat_args, flat_sigs, scalar_payloads, (gridX, gridY, gridZ))
+
+            _tail_reason = _tail_check() if _memo is None else _memo.recall(_proof_key, _tail_check, None)
             if _tail_reason is not None:
                 from triton_msl.errors import MetalNonRecoverableError
 
@@ -1462,6 +1504,8 @@ class MetalLauncher:
                             launch_exit_hook=launch_exit_hook,
                             launch_metadata=launch_metadata,
                             submission_state=_submission,
+                            memo=getattr(self, "_overlap_memo", None),
+                            remember=_memo_free,
                         ):
                             return
 
@@ -1592,6 +1636,10 @@ class MetalLauncher:
                             return
             except Exception as _error:
                 _submission.reraise_if_attempted(_error)
+                from ._launch_memo import LaunchMemoDisagreement
+
+                if isinstance(_error, LaunchMemoDisagreement):
+                    raise  # test mode: a remembered check that disagrees is never a fallback
                 # Only a pre-invocation failure can mark unsupported and fall
                 # through to the existing driver path (correct, just slower).
                 try:
