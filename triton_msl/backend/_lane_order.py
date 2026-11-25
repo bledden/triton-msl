@@ -19,7 +19,8 @@ from triton_msl.autotuning._operand_overlap import _base, _share, _storage
 
 PID, LANE, LOOP, OPAQUE = 1, 2, 4, 8
 BUDGET = 1 << 22  # addresses compared at a time
-STORAGE_BUDGET = 1 << 18  # address instances one access is read at, for the storage proof
+STORAGE_BUDGET = 1 << 18  # address instances of one access read at a time, for the storage proof
+WALK_BUDGET = 1 << 22  # and in all, when every program has to be read
 SLICES = 16  # and how many times that for one launch, a run of programs at a time
 
 # Atomic updates that leave the same cell whatever order they land in. A floating-point add
@@ -138,6 +139,32 @@ def outside_storage(check, arguments, grid):
         return check.outside(arguments, grid)
     except Exception:
         return None
+
+
+_UNPROVED = {}
+
+
+def record_unproved(kernel, check):
+    """Keep what the last storage proof of ``kernel`` could not prove (``storage_unproved`` reads it)."""
+    found = getattr(check, "unproved", None)
+    if found:
+        if len(_UNPROVED) > 1024:
+            _UNPROVED.clear()
+        _UNPROVED[kernel] = list(found)
+    elif kernel in _UNPROVED:
+        del _UNPROVED[kernel]
+
+
+def storage_unproved():
+    """{kernel name: [(kind, access ordinal, why)]} for kernels whose last judged launch was dispatched
+    with an access the storage proof did not prove inside its storage.
+
+    ``why`` is "sampled" (past the budget: only the ends of the grid and the loops were
+    read), "budget", "storage" (the tensor's storage could not be read), "branch",
+    "opaque-address", "opaque-mask", "unknown-base", "unbounded", or the evaluation's own
+    reason. A remembered launch is not judged again and leaves the record as it was.
+    """
+    return {kernel: list(found) for kernel, found in _UNPROVED.items()}
 
 
 def remembered_outside_storage(memo, check, arguments, grid, hooked):
@@ -361,6 +388,9 @@ class LaunchCheck:
         # The elements each access reaches, per grid and scalar arguments (``outside``).
         self.spans = {}
         self.scalars = None
+        # The accesses of the last launch ``outside`` judged that it could not prove inside
+        # their storage: [(kind, access ordinal, why)].
+        self.unproved = []
         # Proofs remembered for whole launches (a _launch_memo.LaunchMemo the launcher
         # sets), this check's alone: a replaced check starts with none.
         self.memo = None
@@ -435,33 +465,46 @@ class LaunchCheck:
         is looked at when all of that is one computation before the launch: one pointer
         argument, an address and a mask that follow nothing but the grid, the lane, the
         loop trips and the integer arguments, counted loops, and no branch that may leave
-        it out. Its lowest and highest element are then exact, and the launch is outside
-        when either lies outside the storage behind the pointer. Any other access is not
-        judged here. A launch of more address instances than ``STORAGE_BUDGET`` is read
-        at the first two and last two programs of each grid axis only, and past that at
-        the first two and last two trips of each loop: what is found there is still an
-        access of the source, what lies between is not looked at.
+        it out. Its lowest and highest element are then EXACT in one of three ways: every
+        program read (up to ``STORAGE_BUDGET`` address instances at once, ``WALK_BUDGET``
+        in all); the lanes of one program and the translation of every program, when the
+        address is a lane part plus a program part and the mask does not follow the
+        program; or one program, when nothing follows the program. The launch is outside
+        when either extreme lies outside the storage behind the pointer.
+
+        An access that fits none of these is NOT PROVED. It is read at the first two and
+        last two programs of each grid axis and trips of each loop, and a cell found
+        outside there is a cell of the source, so the launch is still refused; a launch
+        with nothing found there is dispatched as before, and ``self.unproved`` names the
+        access. The same goes for an access the check cannot read at all.
 
         The elements reached do not depend on the storages, so they are kept per grid and
         scalar arguments: a launch with other tensors compares its storages and no more.
         """
         if self.why:
+            self.unproved = [("plan", -1, self.why)]
             return None
         key = (tuple(int(extent) for extent in grid), tuple(self._plain(arguments, index) for index in self._scalars()))
-        spans = self.spans.get(key)
-        if spans is None:
-            spans = self._spans(arguments, grid)
+        found = self.spans.get(key)
+        if found is None:
+            found = self._spans(arguments, grid)
             if len(self.spans) > 256:
                 self.spans.clear()
-            self.spans[key] = spans
-        for kind, index, low, high in spans:
+            self.spans[key] = found
+        spans, unproved = found
+        unproved = list(unproved)
+        answer = None
+        for ordinal, kind, index, low, high in spans:
             try:
                 room = self._room(arguments[index], self.pointers[index][1])
             except Exception:
-                continue
-            if room is not None and (low < -room[0] or high >= room[1]):
-                return (kind, index, low, high, room[0], room[1])
-        return None
+                room = None
+            if room is None:
+                unproved.append((kind, ordinal, "storage"))
+            elif answer is None and (low < -room[0] or high >= room[1]):
+                answer = (kind, index, low, high, room[0], room[1])
+        self.unproved = unproved
+        return answer
 
     def _scalars(self):
         """The scalar arguments any address, mask, loop bound or branch of the plan reads."""
@@ -479,23 +522,34 @@ class LaunchCheck:
         return (type(value).__name__, repr(value))
 
     def _spans(self, arguments, grid):
-        """[(kind, pointer argument, lowest, highest)] for every access this launch performs and the check can read."""
+        """([(ordinal, kind, pointer argument, lowest, highest)], [(kind, ordinal, why not proved)])."""
         left_out, reached = self._branches(arguments, grid)
-        found = []
+        found, unproved = [], []
         for ordinal, access in enumerate(self.accesses):
-            if ordinal in left_out or (ordinal in self.branched and ordinal not in reached):
+            if ordinal in left_out:
+                continue
+            if ordinal in self.branched and ordinal not in reached:
+                unproved.append((access[0], ordinal, "branch"))
                 continue
             bases = self.bases[ordinal]
             if access[5] or not bases or len(bases) != 1:
+                unproved.append((access[0], ordinal, "unbounded" if access[5] else "unknown-base"))
                 continue
             (index,) = bases
             try:
                 span = self._span(ordinal, index, arguments, grid)
-            except Exception:
+            except Unproved as unproved_access:
+                unproved.append((access[0], ordinal, unproved_access.reason))
                 continue
-            if span is not None:
-                found.append((access[0], index, span[0], span[1]))
-        return found
+            except Exception as error:
+                unproved.append((access[0], ordinal, type(error).__name__))
+                continue
+            if span is None:
+                continue
+            if not span[2]:
+                unproved.append((access[0], ordinal, "sampled"))
+            found.append((ordinal, access[0], index, span[0], span[1]))
+        return found, unproved
 
     @staticmethod
     def _room(value, width):
@@ -512,7 +566,7 @@ class LaunchCheck:
         return before, extent // size - before
 
     def _span(self, ordinal, index, arguments, grid):
-        """(lowest, highest) element this access reaches from its pointer over the launch, or None for no element."""
+        """(lowest, highest, exact) element this access reaches from its pointer, or None for no element."""
         _, pointer, mask, shape, inside, _ = self.accesses[ordinal]
         shape = tuple(shape)
         size = 1
@@ -521,7 +575,7 @@ class LaunchCheck:
         if self.flags[pointer] & OPAQUE or self.follows[pointer] - set(inside):
             raise Unproved("opaque-address")
         if mask >= 0 and (self.flags[mask] & OPAQUE or self.follows[mask] - set(inside)):
-            raise Unproved("eval", "a mask the check cannot compute")
+            raise Unproved("opaque-mask")
         trips, axis = {}, {}
         for loop in sorted(inside):
             lower, upper, step = (self._scalar(bound, arguments, grid) for bound in self.loops[loop][:3])
@@ -539,57 +593,121 @@ class LaunchCheck:
         programs = extents[0] * extents[1] * extents[2]
         if programs <= 0 or each <= 0:
             return None
+        if each > STORAGE_BUDGET:
+            raise Unproved("budget")
+        lead = 1 + len(trips)
 
+        def read(order, picks=None):
+            """(lowest, highest) over these programs, or None when none of their lanes is kept."""
+            count = int(order.size)
+            order = order.reshape((count,) + (1,) * (lead - 1))
+            pid = [order % extents[0], (order // extents[0]) % extents[1], order // (extents[0] * extents[1])]
+            env = _Env(lead, count, pid, dict(trips), axis, {index: 0}, arguments, grid)
+            env.picks = picks or {}
+            with np.errstate(over="ignore"):
+                value, rank = self._eval(pointer, env)
+                if rank == 0:
+                    value = value.reshape(value.shape + (1,) * len(shape))
+                elif rank != len(shape):
+                    raise Unproved("eval", "rank")
+                if mask >= 0:
+                    wide = [1] * lead
+                    wide[0] = count
+                    for loop in follows:
+                        wide[axis[loop]] = env.picks[loop].size if loop in env.picks else trips[loop]
+                    full = tuple(wide) + shape
+                    keep, mask_rank = self._eval(mask, env)
+                    if mask_rank == 0:
+                        keep = keep.reshape(keep.shape + (1,) * len(shape))
+                    elif mask_rank != len(shape):
+                        raise Unproved("eval", "rank")
+                    value = np.broadcast_to(value, full)[np.broadcast_to(keep, full) != 0]
+            return (int(value.min()), int(value.max())) if value.size else None
+
+        def merged(parts):
+            parts = [part for part in parts if part is not None]
+            return None if not parts else (min(part[0] for part in parts), max(part[1] for part in parts))
+
+        one = np.zeros(1, dtype=np.int64)
+        on_program = (self.flags[pointer] | (self.flags[mask] if mask >= 0 else 0)) & PID
+        if not on_program:
+            # Every program reaches the same elements.
+            found = read(one)
+            return None if found is None else (*found, True)
+        if programs * each <= STORAGE_BUDGET:
+            found = read(np.arange(programs, dtype=np.int64))
+            return None if found is None else (*found, True)
+        if not (mask >= 0 and self.flags[mask] & PID):
+            shift = self._program_shift(pointer, extents, arguments, grid)
+            if shift is not None:
+                # The address is the lanes of program 0 plus one number per program:
+                # confirmed on the two programs the extremes come from before it is used.
+                found = read(one)
+                if found is None:
+                    return None
+                low, high, lowest, highest = shift
+                if read(np.array([lowest], dtype=np.int64)) == (found[0] + low, found[1] + low) and read(
+                    np.array([highest], dtype=np.int64)
+                ) == (found[0] + high, found[1] + high):
+                    return (found[0] + low, found[1] + high, True)
+        if programs * each <= WALK_BUDGET:
+            run = max(1, STORAGE_BUDGET // each)
+            found = merged(
+                read(np.arange(start, min(programs, start + run), dtype=np.int64)) for start in range(0, programs, run)
+            )
+            return None if found is None else (*found, True)
+
+        # Not proved from here on: the ends of each grid axis, then of each loop.
         def ends(extent):
             return sorted({at for at in (0, 1, extent - 2, extent - 1) if 0 <= at < extent})
 
+        corners = [ends(extent) for extent in extents]
+        order = np.array(
+            [x + extents[0] * (y + extents[1] * z) for z in corners[2] for y in corners[1] for x in corners[0]],
+            dtype=np.int64,
+        )
         picks = {}
-        if not (self.flags[pointer] | (self.flags[mask] if mask >= 0 else 0)) & PID:
-            # Every program reaches the same elements.
-            order = np.zeros(1, dtype=np.int64)
-        elif programs * each <= STORAGE_BUDGET:
-            order = np.arange(programs, dtype=np.int64)
-        else:
-            corners = [ends(extent) for extent in extents]
-            order = np.array(
-                [x + extents[0] * (y + extents[1] * z) for z in corners[2] for y in corners[1] for x in corners[0]],
-                dtype=np.int64,
-            )
         if order.size * each > STORAGE_BUDGET:
-            # The first two and last two trips of each loop the access follows.
             each = size
             for loop in follows:
                 picks[loop] = np.array(ends(trips[loop]), dtype=np.int64)
                 each *= picks[loop].size
         if order.size * each > STORAGE_BUDGET:
             raise Unproved("budget")
-        lead = 1 + len(trips)
-        count = int(order.size)
-        order = order.reshape((count,) + (1,) * (lead - 1))
-        pid = [order % extents[0], (order // extents[0]) % extents[1], order // (extents[0] * extents[1])]
-        env = _Env(lead, count, pid, dict(trips), axis, {index: 0}, arguments, grid)
-        env.picks = picks
-        with np.errstate(over="ignore"):
-            value, rank = self._eval(pointer, env)
-            if rank == 0:
-                value = value.reshape(value.shape + (1,) * len(shape))
-            elif rank != len(shape):
-                raise Unproved("eval", "rank")
-            wide = [1] * lead
-            wide[0] = count
-            for loop in follows:
-                wide[axis[loop]] = picks[loop].size if loop in picks else trips[loop]
-            full = tuple(wide) + shape
-            if mask >= 0:
-                keep, mask_rank = self._eval(mask, env)
-                if mask_rank == 0:
-                    keep = keep.reshape(keep.shape + (1,) * len(shape))
-                elif mask_rank != len(shape):
-                    raise Unproved("eval", "rank")
-                value = np.broadcast_to(value, full)[np.broadcast_to(keep, full) != 0]
-        if not value.size:
+        found = read(order, picks)
+        return None if found is None else (*found, False)
+
+    def _program_shift(self, pointer, extents, arguments, grid):
+        """(lowest, highest) of what the programs add to an address that is lanes plus programs, or None.
+
+        ``_pid_part`` splits the address into program-following atoms with integer
+        coefficients, exact while nothing wraps. Returns the lowest and highest sum over
+        every program, relative to program 0, and the programs they come from; the caller
+        confirms the split on those two programs. With more programs than ``WALK_BUDGET``
+        there is no shift.
+        """
+        programs = extents[0] * extents[1] * extents[2]
+        if programs > WALK_BUDGET:
             return None
-        return int(value.min()), int(value.max())
+        try:
+            part = self._pid_part(pointer, arguments, grid)
+        except (_NotSeparable, Unproved):
+            return None
+        order = np.arange(programs, dtype=np.int64).reshape((programs, 1))
+        pid = [order % extents[0], (order // extents[0]) % extents[1], order // (extents[0] * extents[1])]
+        env = _Env(2, programs, pid, {}, {}, {}, arguments, grid)
+        total = np.zeros((programs, 1), dtype=np.int64)
+        with np.errstate(over="ignore"):
+            for atom, coefficient in part.items():
+                if self.flags[atom] & (LANE | LOOP | OPAQUE):
+                    return None
+                value, rank = self._eval(atom, env)
+                if rank != 0:
+                    return None
+                signed = coefficient - (1 << 32) if coefficient >> 31 else coefficient
+                total = total + np.broadcast_to(value, (programs, 1)) * signed
+        total = total - total[0]
+        return int(total.min()), int(total.max()), int(total.argmin()), int(total.argmax())
 
     def _branches(self, arguments, grid):
         """(the accesses this launch does not perform, those it is known to perform), of the ones under a branch.

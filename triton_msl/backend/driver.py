@@ -1156,6 +1156,7 @@ class MetalLauncher:
         self._matmul_memo = LaunchMemo(self.kernel_name, "matmul_storage")
         self._overlap_memo = LaunchMemo(self.kernel_name, "matmul_overlap")
         self._dot_storage_memo = LaunchMemo(self.kernel_name, "dot_storage")
+        self._storage_unproved = False
         # Where the kernel loads and stores (see __call__). Every kernel the emitter lowers
         # carries a plan; a launcher built around a shader of its own has none.
         from triton_msl.backend._lane_order import launch_plan
@@ -1467,6 +1468,12 @@ class MetalLauncher:
                     not _memo_free,
                 )
             )
+            if self._lane_check is not None and (self._lane_check.unproved or self._storage_unproved):
+                # Dispatched as before where an access could not be proved; say which.
+                from triton_msl.backend._lane_order import record_unproved
+
+                record_unproved(self.kernel_name, self._lane_check)
+                self._storage_unproved = bool(self._lane_check.unproved)
             if _outside is not None:
                 from triton_msl.errors import MetalNonRecoverableError
 
