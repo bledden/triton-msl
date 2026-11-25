@@ -630,6 +630,23 @@ def _matmul_tail_bounds_reason(descriptor, kargs, signatures=None, scalar_payloa
         return "the K-tail runtime allocation bounds could not be proven; mask the K tail"
 
 
+def _single_tile_plan(descriptor):
+    """Whether a matmul storage plan is a loop-free dot's: its depth is the literal tile depth."""
+    try:
+        depth = descriptor[3][2]
+        return (
+            len(descriptor) == 7
+            and type(depth) in (tuple, list)
+            and len(depth) == 3
+            and depth[0] == "literal"
+            and type(depth[1]) is int
+            and depth[1] == descriptor[1]
+            and descriptor[6][6] is False
+        )
+    except Exception:
+        return False
+
+
 class MetalUtils:
     """Manages Metal device, command queue, and kernel dispatch.
 
@@ -1138,6 +1155,7 @@ class MetalLauncher:
 
         self._matmul_memo = LaunchMemo(self.kernel_name, "matmul_storage")
         self._overlap_memo = LaunchMemo(self.kernel_name, "matmul_overlap")
+        self._dot_storage_memo = LaunchMemo(self.kernel_name, "dot_storage")
         # Where the kernel loads and stores (see __call__). Every kernel the emitter lowers
         # carries a plan; a launcher built around a shader of its own has none.
         from triton_msl.backend._lane_order import launch_plan
@@ -1411,6 +1429,20 @@ class MetalLauncher:
             if _tail_reason is not None:
                 from triton_msl.errors import MetalNonRecoverableError
 
+                if _single_tile_plan(tail_access_bounds):
+                    # A loop-free dot (which a K loop of one iteration also is, once
+                    # Triton has specialised the bound and folded the loop): there is no
+                    # K tail to mask, the source loads its whole tile.
+                    raise MetalNonRecoverableError(
+                        "Refusing single-tile dot launch: "
+                        + _tail_reason.replace(" or mask the K tail", "")
+                        .replace("; mask the K tail", "")
+                        .replace("full-block K tail reaches", "source tile reaches")
+                        .replace("K-tail ", "")
+                        + ". The source loads one whole tile of each operand per program and stores the "
+                        "tile its mask keeps; every one of those cells must lie inside its tensor's storage",
+                        op_name="tt.dot",
+                    )
                 raise MetalNonRecoverableError(
                     "Refusing unmasked partial-K matmul launch: " + _tail_reason,
                     op_name="tt.dot",
@@ -1418,6 +1450,35 @@ class MetalLauncher:
             # Evidence belongs only to this checked metadata snapshot and live
             # invocation. Never remember successful bounds on the launcher.
             validated_tail_bounds = tail_access_bounds
+        if isinstance(_plan, dict) and _plan.get("storage") and not _plan.get("replaced") and address_bounds is None:
+            # A kernel of one dot with no template storage contract: the source's own
+            # accesses, read from the access plan, must lie inside their storages.
+            # Remembered like the proofs above, under every value the check reads.
+            from triton_msl.backend._lane_order import remembered_outside_storage
+
+            _outside = (
+                None
+                if self._lane_check is None
+                else remembered_outside_storage(
+                    getattr(self, "_dot_storage_memo", None),
+                    self._lane_check,
+                    flat_args,
+                    (gridX, gridY, gridZ),
+                    not _memo_free,
+                )
+            )
+            if _outside is not None:
+                from triton_msl.errors import MetalNonRecoverableError
+
+                _kind, _index, _low, _high, _before, _after = _outside
+                _name = self.arg_names[flat_origin[_index]] if _index < len(flat_origin) else f"#{_index}"
+                raise MetalNonRecoverableError(
+                    f"Refusing dot launch: the source {'loads' if _kind == 'L' else 'stores'} elements {_low} to "
+                    f"{_high} from the pointer of argument '{_name}', whose storage holds {_before} before that "
+                    f"pointer and {_after} from it on. The source program addresses every one of those cells, "
+                    "whatever the lowering reads; pad the storage or mask the access",
+                    op_name="tt.load" if _kind == "L" else "tt.store",
+                )
         if batched_dot_bounds is not None:
             _bounds_reason = _batched_dot_host_bounds_reason(batched_dot_bounds, flat_args, (gridX, gridY, gridZ))
             if _bounds_reason is not None:

@@ -754,6 +754,17 @@ def _mept_path_log(tag, detail):
         pass
 
 
+def _dot_count(graph):
+    """How many ``tt.dot`` operations the kernel and the functions it calls hold (0 without a graph)."""
+    if graph is None:
+        return 0
+
+    def count(ops):
+        return sum((op.op == "tt.dot") + count(op.region_ops or ()) + count(op.else_ops or ()) for op in ops)
+
+    return count(graph.ops) + sum(count(function.ops) for function in (graph.called_funcs or ()))
+
+
 def emit_msl(mod, metadata, options):
     """Convert a TritonGPU IR module to MSL source code.
 
@@ -881,6 +892,17 @@ def emit_msl(mod, metadata, options):
                     "lowering produced conflicting launch address contracts", op_name="tt.dot"
                 )
             metadata["batched_dot_bounds"] = _batched_bounds or _tail_bounds
+            # A kernel of one dot that no template with a storage contract of its own
+            # lowered (the generic route, the fused softmax/epilogue template, the
+            # source-replayed K-loop epilogue): the launcher proves from the access plan
+            # that every cell its source addresses lies inside the argument's storage.
+            # A K loop that runs once reaches these routes too, once Triton has folded
+            # it away, and must not launch where two trips of it are refused.
+            _plan["storage"] = bool(
+                not _plan["replaced"]
+                and metadata["batched_dot_bounds"] is None
+                and _dot_count(getattr(lowerer, "graph", None)) == 1
+            )
             plan = lowerer._assert_plan
             metadata["device_assert"] = (
                 {"schema": 1, "messages": plan["messages"], "buffer_index": len(graph.args)}

@@ -85,6 +85,35 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   tile strides, on the dense template, were right.
 - Clip the fused matmul and softmax template's store at the store mask's
   runtime extents. It stored its whole baked tile whatever the mask said.
+- Prove a loop-free `tl.dot`'s storage before it is launched. Triton turns an
+  integer argument equal to 1 into a constant, and a K loop that then runs once
+  is folded away before the backend sees it, so `K = 1` is the same program as a
+  dot written without a loop. Only the K-loop templates recorded a storage
+  plan: at `K = 1` an operand shorter than the tile, or an empty one, was
+  dispatched, where `K = 2` on the same tensors is refused. 0.3.0 does the same.
+  Both loop-free templates now record the grid storage plan with the literal
+  tile depth (never the older plan, which skips its check on an aligned K), and
+  the launcher proves it on both dispatch routes through the existing launch
+  memo. The plan is the source's own access set: one whole tile of each operand
+  per launched program and the tile the store mask keeps. A storage that ends
+  at the last of those cells is accepted, a view inside a larger storage is
+  accepted, one element less is refused. This is a change for a launch that ran
+  with a short operand before. `do_not_specialize=["K"]` keeps the K-loop
+  template and its own plan.
+- Prove the same for a single dot on a route without a template storage plan:
+  an epilogue on the generic route, the fused softmax template, masked operand
+  loads at a loop bound of 1, the source-replayed K-loop epilogue, and a
+  fully masked K-loop template that has no fast replacement. The launcher
+  computes, from the kernel's access plan, the lowest and highest element each
+  load and store of the source reaches, masks and loop trips included, and
+  refuses a launch that leaves a storage. An access whose address or mask
+  depends on loaded data, or that sits under a branch the arguments do not
+  decide, is not judged. The elements are kept per grid and scalar arguments,
+  and a passing launch is remembered under the lane-order key. A launch of more
+  than 262,144 address instances per access is read at the first two and last
+  two programs of each grid axis, and past that at the first two and last two
+  loop trips. A K-loop kernel that carries a fast replacement (`fast_matmul`,
+  the direct entry) and no storage plan is not covered by either proof.
 - These changes require fresh integrated hardware and installed-artifact
   qualification. Earlier source-tree matmul timings do not measure their cost.
 

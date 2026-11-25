@@ -498,7 +498,9 @@ def test_a_scalar_that_compares_equal_to_one_is_launched_as_itself(counted, veri
 
     Triton compiles a bool K separately from an int K, and that source is refused when
     it is compiled, so nothing remembered for an int K can stand in for it. The
-    remembered K = 64 launch is still the remembered launch afterwards.
+    remembered K = 64 launch is still the remembered launch afterwards. K = 1 is a
+    launcher of its own (Triton makes the 1 a constant and the loop is folded away): its
+    single tile takes the storage proof once and is remembered like the K = 64 launch.
     """
     a, b, c = _aligned()
     _launch(a, b, c, 64)
@@ -516,7 +518,7 @@ def test_a_scalar_that_compares_equal_to_one_is_launched_as_itself(counted, veri
         c.fill_(17391.0)
         _launch(a, b, c, k)
         assert torch.equal(c.cpu().view(M, N), _oracle(a, b, k))
-    assert _diag("matmul_storage").get("misses") == 1 and _diag("matmul_storage").get("hits", 0) >= 1
+    assert _diag("matmul_storage") == dict(misses=2, hits=3)
     assert counted == _checks(verify)
 
 

@@ -166,35 +166,44 @@ class _TemplateMixin:
             or any(bound is not None and bound != clip for bound, clip in zip(grid, store))
         )
 
-    def _record_full_block_tail_bounds(self, info, block_m, block_n, block_k, source):
-        """Bind an unmasked K-tail template to its runtime allocation proof."""
+    def _record_full_block_tail_bounds(self, info, block_m, block_n, block_k, source, single_tile=False):
+        """Bind an unmasked K-tail template, or a loop-free tile, to its runtime allocation proof.
+
+        ``single_tile`` is the loop-free dot: one whole ``block_k`` deep tile per program,
+        loads unmasked. Its depth is the literal ``block_k``, and it always takes the grid
+        plan: the legacy plan skips its bounds check on an aligned K, which a literal
+        ``block_k`` always is.
+        """
+        from triton_msl.errors import MetalNonRecoverableError
+
+        what = "single-tile dot" if single_tile else "unmasked K-loop full-block replay"
+        advice = "" if single_tile else "; mask the K tail"
         roles = self._dot_template_ptr_roles()
         strides = self._inferred_stride_descriptors()
         widths = self._dot_offset_arith_widths()
         if roles is None or len(roles) != 3 or strides is None or any(value is None for value in strides):
-            from triton_msl.errors import MetalNonRecoverableError
-
             raise MetalNonRecoverableError(
-                "unmasked K-loop full-block replay has no complete A/B/C address proof; mask the K tail",
+                f"{what} has no complete A/B/C address proof{advice}",
                 op_name="tt.dot",
             )
+        if single_tile and (widths is None or any(role not in widths for role in ("A", "B", "C"))):
+            widths = self._single_tile_literal_widths(strides, block_m, block_n, block_k)
         if widths is None or any(role not in widths for role in ("A", "B", "C")):
-            from triton_msl.errors import MetalNonRecoverableError
-
             raise MetalNonRecoverableError(
-                "unmasked K-loop source address widths are unresolved; mask the K tail", op_name="tt.dot"
+                ("single-tile dot" if single_tile else "unmasked K-loop")
+                + f" source address widths are unresolved{advice}",
+                op_name="tt.dot",
             )
         indices = {arg.id: index for index, arg in enumerate(self.graph.args)}
         try:
             tensor_indices = tuple(indices[arg.id] for arg in roles)
         except (KeyError, AttributeError):
-            from triton_msl.errors import MetalNonRecoverableError
-
             raise MetalNonRecoverableError(
-                "unmasked K-loop pointer ownership is unresolved; mask the K tail", op_name="tt.dot"
+                ("single-tile dot" if single_tile else "unmasked K-loop") + f" pointer ownership is unresolved{advice}",
+                op_name="tt.dot",
             )
         m_ext, n_ext = self._matmul_output_extent_args()
-        grid_plan = self._matmul_needs_grid_plan(info)
+        grid_plan = single_tile or self._matmul_needs_grid_plan(info)
         m_ref = self._tail_ref(m_ext) if m_ext is not None else None
         n_ref = self._tail_ref(n_ext) if n_ext is not None else None
         k_ref = self._tail_ref(source)
@@ -205,10 +214,9 @@ class _TemplateMixin:
             or k_ref is None
             or any(ref is None for ref in stride_refs)
         ):
-            from triton_msl.errors import MetalNonRecoverableError
-
             raise MetalNonRecoverableError(
-                "unmasked K-loop affine bounds cannot be represented by the launch ABI; mask the K tail",
+                ("single-tile dot" if single_tile else "unmasked K-loop")
+                + f" affine bounds cannot be represented by the launch ABI{advice}",
                 op_name="tt.dot",
             )
         descriptor = (
@@ -232,8 +240,6 @@ class _TemplateMixin:
                 *info.get("load_domain_args", info.get("load_extent_args", (None, None))),
             )
             if any(bound is not None and ref is None for bound, ref in zip(source_extents, (*grid_refs, *load_refs))):
-                from triton_msl.errors import MetalNonRecoverableError
-
                 raise MetalNonRecoverableError(
                     "matmul source extent cannot be represented by the launch ABI", op_name="tt.dot"
                 )
@@ -256,20 +262,61 @@ class _TemplateMixin:
             if not grid_plan or any(
                 value is not None and ref is None for value, ref in zip(identity_args, identity_refs)
             ):
-                from triton_msl.errors import MetalNonRecoverableError
-
                 raise MetalNonRecoverableError(
                     "matmul load modulo has no representable no-wrap launch proof", op_name="tt.dot"
                 )
             descriptor = ("matmul_grid_storage_v2", *descriptor[1:6], (*descriptor[6], identity_refs))
         previous = getattr(self, "_tail_access_bounds", None)
         if previous is not None and previous != descriptor:
-            from triton_msl.errors import MetalNonRecoverableError
-
             raise MetalNonRecoverableError(
-                "matmul template produced inconsistent K-tail launch contracts; mask the K tail", op_name="tt.dot"
+                "matmul template produced inconsistent "
+                + ("single-tile" if single_tile else "K-tail")
+                + f" launch contracts{advice}",
+                op_name="tt.dot",
             )
         self._tail_access_bounds = descriptor
+
+    def _single_tile_literal_widths(self, strides, block_m, block_n, block_k):
+        """Address widths for a loop-free tile whose six strides are compile-time integers.
+
+        The launch proof checks each address term, and their sum, against the width the
+        source computes it in. With literal strides and a baked tile every term is known
+        here: when each role's whole offset range fits 32 bits, the source's address is
+        the same number at any width it uses, and the strictest declaration (both terms
+        and their sum in one i32) proves exactly the cells the source addresses. Returns
+        None when a stride is not a literal or a range does not fit.
+        """
+        try:
+            values = [int(str(value)) for value in strides]
+        except (TypeError, ValueError):
+            return None
+        names = {arg.name for arg in self.graph.args}
+        if any(str(value) in names for value in strides):
+            return None
+        widths = {}
+        for role, (rows, cols), (row, col) in (
+            ("A", (block_m, block_k), values[0:2]),
+            ("B", (block_k, block_n), values[2:4]),
+            ("C", (block_m, block_n), values[4:6]),
+        ):
+            terms = ((rows - 1) * row, (cols - 1) * col)
+            low = sum(min(0, term) for term in terms)
+            high = sum(max(0, term) for term in terms)
+            if low < -(1 << 31) or high > (1 << 31) - 1:
+                return None
+            widths[role] = ("i32", "i32", True)
+        return widths
+
+    def _record_single_tile_bounds(self, info, block_m, block_n, block_k):
+        """Bind a loop-free dot to the launch storage proof of the cells its source addresses.
+
+        The source loads one whole ``block_m`` x ``block_k`` tile of A and ``block_k`` x
+        ``block_n`` tile of B per launched program, unmasked, and stores the tile of C its
+        mask keeps. A loop bound of 1 reaches the backend as this same program (Triton
+        specialises the argument and folds the loop away), so without this record a
+        launch whose operand is shorter than the tile, or empty, was dispatched.
+        """
+        self._record_full_block_tail_bounds(info, block_m, block_n, block_k, int(block_k), single_tile=True)
 
     def _k_extent_line(self, info, BLOCK_K, has_K, BLOCK_M=None, BLOCK_N=None, source_bindings=None):
         """MSL statement setting ``_K`` (the matmul reduction extent), resolved
@@ -337,6 +384,7 @@ class _TemplateMixin:
             # A non-looped dot reduces exactly its own tile: the loads are unmasked (the
             # value-path proof refuses a mask), so an argument named K is A's row stride
             # or anything else, never the depth (GPU: K=64 over a 32-wide tile summed 64).
+            self._record_single_tile_bounds(info, BLOCK_M, BLOCK_N, BLOCK_K)
             return f"    long _K = {BLOCK_K};  // single, non-looped dot tile"
         from triton_msl.errors import MetalNonRecoverableError
 
@@ -1754,6 +1802,17 @@ class _TemplateMixin:
         trans_a = info.get("trans_a", False)
         trans_b = info.get("trans_b", False)
         batch_size = info.get("batch_size", 1)
+        if batch_size != 1:
+            # A rank-2 dot is all the detector hands this template; the storage proof
+            # recorded below describes one tile and would not cover a batch walk.
+            from triton_msl.errors import MetalNonRecoverableError
+
+            raise MetalNonRecoverableError(
+                "simple-dot matmul template reached with a batched dot. Refusing.", op_name="tt.dot"
+            )
+        # The whole baked tile is this program's source access: A[0, M) x [0, K),
+        # B[0, K) x [0, N), C[0, M) x [0, N) at the traced strides.
+        self._record_single_tile_bounds(info, M, N, K)
 
         # 128 threads = 4 SIMD groups x 32 threads
         self.effective_block_size = 128
