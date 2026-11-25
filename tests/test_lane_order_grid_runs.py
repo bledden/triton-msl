@@ -61,9 +61,15 @@ def _counted(monkeypatch, kernel):
     """Record the comparisons the check makes, by the programs each one covers."""
     for device in kernel.device_caches.values():
         for compiled in device[0].values():
-            # An answer kept from an earlier launch of the same sizes would make none.
-            if getattr(compiled.run, "_lane_check", None) is not None:
-                compiled.run._lane_check.cache.clear()
+            # An answer kept from an earlier launch of the same sizes would make none: the
+            # check keeps its answers per layout, and the launcher's memo keeps whole
+            # launches it proved (on storage the allocator hands out again), under
+            # whichever BUDGET and SLICES a test had set at the time.
+            check = getattr(compiled.run, "_lane_check", None)
+            if check is not None:
+                check.cache.clear()
+                if getattr(check, "memo", None) is not None:
+                    check.memo.entries.clear()
     runs = []
     inner = _lane_order.LaunchCheck._lanes
 
@@ -115,6 +121,21 @@ def test_the_grid_is_compared_in_runs_that_cover_every_program(device, monkeypat
 
 
 @pytest.mark.parametrize("device", DEVICES)
+def test_the_comparisons_are_made_again_when_a_test_is_repeated(device):
+    """The counting tests do not depend on what an earlier launch of the same sizes left behind.
+
+    A repeated test launches the same kernel on storage the allocator hands out again,
+    so the launcher's memo would answer for the check and no comparison would be
+    counted, and the budget the refusal test lowers would never be consulted.
+    """
+    for _ in range(2):
+        with pytest.MonkeyPatch.context() as patch:
+            test_the_grid_is_compared_in_runs_that_cover_every_program(device, patch)
+    with pytest.MonkeyPatch.context() as patch:
+        test_a_grid_of_more_runs_than_one_launch_is_given_refuses_before_comparing_them(device, patch)
+
+
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("small", [False, True], ids=["one comparison's size", "a small one"])
 def test_a_meeting_in_the_last_program_is_found(small, device, monkeypatch):
     rows, width, block = (96, 100, 64) if small else (1536, 1500, 1024)
@@ -162,12 +183,6 @@ def test_a_grid_of_more_runs_than_one_launch_is_given_refuses_before_comparing_t
     programs = count // block
     monkeypatch.setattr(_lane_order, "BUDGET", 16 * 2 * block)
     monkeypatch.setattr(_lane_order, "SLICES", 4)
-    # The budget is changed for this launch alone: a proof an earlier test found for the
-    # same kernel under the default budget, on storage the allocator hands out again, must
-    # not stand in for the comparison that is to be refused here.
-    from triton_msl.backend import _launch_memo
-
-    monkeypatch.setattr(_launch_memo, "ENABLED", False)
     runs = _counted(monkeypatch, _slice_add)
     x, y, _ = _slice_case(rows, width, device)
     before = x.clone()

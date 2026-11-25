@@ -1105,7 +1105,11 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   facts or exact scalar value and the grid (a compiled GPT-2 paid it on all 43
   launches of a call); there a `torch.nn.Parameter`, which a compiled model passes
   for its weights and whose tensor methods are the plain tensor's, counts as a
-  tensor, while any other subclass takes the check. `TRITON_MSL_LAUNCH_MEMO=0` turns it off,
+  tensor, while any other subclass takes the check. The values are read before the
+  check and the check reads the arguments itself, so a pass is remembered only when
+  the values read again after it are the same: a storage rebound while a check runs
+  (by another thread, or inside a tensor accessor) leaves nothing remembered under the
+  binding the check did not see. `TRITON_MSL_LAUNCH_MEMO=0` turns it off,
   `TRITON_MSL_LAUNCH_MEMO_VERIFY=1` runs the check on every remembered launch and
   raises on a disagreement, `TRITON_MSL_LAUNCH_MEMO_DIAG=1` counts hits, misses,
   bypasses and evictions (docs/USAGE.md, Tuning flags).

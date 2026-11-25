@@ -106,14 +106,22 @@ def remembered_unproved(check, arguments, grid):
     The key is every value the check reads (``_launch_memo.lane_order_key``: each
     argument's storage, extent, offset, width and pointer, or its exact scalar value, and
     the grid). An argument the key cannot hold, or a check without a memo, runs the check;
-    only a proof is remembered. In test mode a remembered launch runs the check too.
+    only a proof is remembered, and only when the key read again after the check is the
+    key read before it. In test mode a remembered launch runs the check too.
     """
     memo = getattr(check, "memo", None)
     if memo is None:
         return unproved(check, arguments, grid)
     from triton_msl.backend._launch_memo import lane_order_key
 
-    return memo.recall(lane_order_key(arguments, grid), lambda: unproved(check, arguments, grid), None)
+    return memo.recall(lane_order_key(arguments, grid), unproved, None, _key_again, (check, arguments, grid))
+
+
+def _key_again(check, arguments, grid):
+    """The memo's key for these arguments now (read after ``unproved`` ran, with its inputs)."""
+    from triton_msl.backend._launch_memo import lane_order_key
+
+    return lane_order_key(arguments, grid)
 
 
 class Unproved(Exception):

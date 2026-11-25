@@ -10,6 +10,15 @@ verdict that passed is remembered under those values and the check is skipped on
 next launch that has them. A refusal is never remembered: it is computed again, and
 raised, every time.
 
+The key is read before the check, and the check reads the arguments again. A storage
+rebound between the two reads (by another thread, or by code that runs inside a tensor
+accessor) would leave a pass that belongs to the new binding stored under the old one,
+which the check may refuse. So after a check passes the key is read once more and the
+pass is remembered only when both readings are equal; otherwise the launch has taken
+the check and nothing is kept. A launch that is already remembered pays for one reading
+only. Two changes inside the one check that restore the first binding exactly are not
+seen by this comparison.
+
 Only a passing verdict is remembered, and only when every input of the check can be
 read and is of a type the check was reviewed for (an exact ``torch.Tensor``, an exact
 ``int``, ``bool`` or ``float``). Anything else, or a failure reading a value, bypasses
@@ -203,38 +212,52 @@ class LaunchMemo:
         self.kind = kind
         self.entries = set()
 
-    def recall(self, key, check, passing):
-        """``check()``'s result, or ``passing`` without running it when ``key`` is remembered.
+    def recall(self, key, check, passing, read, inputs):
+        """``check(*inputs)``'s result, or ``passing`` without running it when ``key`` is remembered.
 
         A key of None bypasses: the check runs and nothing is remembered. A result that
-        is ``passing`` (identity: ``None`` or ``False``) is remembered under the key; any
-        other result is returned and forgotten. In test mode a hit runs the check too and
-        a result other than ``passing`` raises.
+        is ``passing`` (identity: ``None`` or ``False``) is remembered under the key when
+        ``read(*inputs)``, the key read again after the check, still equals it. A key that
+        changed while the check ran is counted as a bypass: the result is returned and
+        nothing is remembered. Any other result is returned and forgotten. A hit never
+        calls ``read``. In test mode a hit runs the check too and a result other than
+        ``passing`` raises.
         """
         if key is None:
             if DIAG:
                 _count(self, "bypasses")
-            return check()
+            return check(*inputs)
         if key in self.entries:
             if DIAG:
                 _count(self, "hits")
             if VERIFY:
-                found = check()
+                found = check(*inputs)
                 if found is not passing:
                     raise LaunchMemoDisagreement(
                         f"{self.kind} memo of kernel {self.kernel!r}: a remembered passing launch is now "
                         f"answered {found!r} by the check"
                     )
             return passing
+        found = check(*inputs)
+        if found is not passing:
+            if DIAG:
+                _count(self, "misses")
+            return found
+        try:
+            unchanged = read(*inputs) == key
+        except Exception:
+            unchanged = False
+        if not unchanged:
+            if DIAG:
+                _count(self, "bypasses")
+            return found
         if DIAG:
             _count(self, "misses")
-        found = check()
-        if found is passing:
-            if len(self.entries) >= LIMIT:
-                self.entries.clear()
-                if DIAG:
-                    _count(self, "evictions")
-            self.entries.add(key)
+        if len(self.entries) >= LIMIT:
+            self.entries.clear()
+            if DIAG:
+                _count(self, "evictions")
+        self.entries.add(key)
         return found
 
 

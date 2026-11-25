@@ -1372,21 +1372,21 @@ class MetalLauncher:
         # A hook ran above and may have changed a storage: a hooked launch takes
         # every check itself. Otherwise a proof that passed on these same inputs
         # (grid, scalar payloads, the role tensors' storages, extents, offsets,
-        # widths and pointers, read here) is remembered and the check skipped.
+        # widths and pointers, read here) is remembered and the check skipped. A
+        # proof that passes is remembered only when the same inputs, read again
+        # after it, still give the key: the proof reads the tensors itself.
         if tail_access_bounds is not None:
             _memo = getattr(self, "_matmul_memo", None)
-            _proof_key = None
-            if _memo is not None and _memo_free:
+            _proof_inputs = (tail_access_bounds, flat_args, flat_sigs, scalar_payloads, (gridX, gridY, gridZ))
+            if _memo is None:
+                _tail_reason = _matmul_tail_bounds_reason(*_proof_inputs)
+            else:
                 from ._launch_memo import matmul_proof_key
 
-                _proof_key = matmul_proof_key(
-                    tail_access_bounds, flat_args, flat_sigs, scalar_payloads, (gridX, gridY, gridZ)
+                _proof_key = matmul_proof_key(*_proof_inputs) if _memo_free else None
+                _tail_reason = _memo.recall(
+                    _proof_key, _matmul_tail_bounds_reason, None, matmul_proof_key, _proof_inputs
                 )
-
-            def _tail_check(_bounds=tail_access_bounds):
-                return _matmul_tail_bounds_reason(_bounds, flat_args, flat_sigs, scalar_payloads, (gridX, gridY, gridZ))
-
-            _tail_reason = _tail_check() if _memo is None else _memo.recall(_proof_key, _tail_check, None)
             if _tail_reason is not None:
                 from triton_msl.errors import MetalNonRecoverableError
 

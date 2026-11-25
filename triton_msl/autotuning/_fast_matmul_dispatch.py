@@ -247,7 +247,7 @@ def dispatch_fast_matmul(
         # that overlaps an operand is defined there and a race here. The row-major
         # contract above gives each tensor's exact extent; an overlap keeps the compiled
         # entry, which preserves the source order. Also gates split-K below.
-        def _overlaps():
+        def _overlaps(*_key_inputs):
             return output_overlaps_operand(kargs, 2, M * N, {0: M * K, 1: K * N}, exact=True)
 
         if memo is None:
@@ -255,8 +255,10 @@ def dispatch_fast_matmul(
         else:
             from triton_msl.backend._launch_memo import overlap_key
 
-            _key = overlap_key(kargs, (m_idx, n_idx, k_idx)) if remember else None
-            _overlap = memo.recall(_key, _overlaps, False)
+            # Remembered only when the key read again after the check is the key read here.
+            _scalars = (m_idx, n_idx, k_idx)
+            _key = overlap_key(kargs, _scalars) if remember else None
+            _overlap = memo.recall(_key, _overlaps, False, overlap_key, (kargs, _scalars))
         if _overlap:
             return False
 
