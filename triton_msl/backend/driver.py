@@ -705,15 +705,25 @@ class MetalUtils:
         import Foundation
 
         if isinstance(kernel, (bytes, bytearray)):
-            # Triton framework path: write bytes to temp file.
+            # Triton framework path: Metal loads a library from a file, so the bytes are
+            # written to one. It is ours, and needed only until the library is loaded and
+            # its pipelines are built: it is removed whether that succeeds or not.
             with tempfile.NamedTemporaryFile(suffix=".metallib", delete=False) as f:
-                f.write(kernel)
                 tmp_path = f.name
-            url = Foundation.NSURL.fileURLWithPath_(tmp_path)
-        else:
-            # Legacy path: kernel is a file path string.
-            url = Foundation.NSURL.fileURLWithPath_(kernel)
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(kernel)
+                return MetalUtils._load_library(self, name, kernel, Foundation.NSURL.fileURLWithPath_(tmp_path))
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        # Legacy path: kernel is a file path string, the caller's file.
+        return MetalUtils._load_library(self, name, kernel, Foundation.NSURL.fileURLWithPath_(kernel))
 
+    def _load_library(self, name, kernel, url):
+        """``load_binary`` for a library file at ``url``; ``kernel`` is what the caller passed."""
         library, error = self.device.newLibraryWithURL_error_(url, None)
         if error is not None:
             raise RuntimeError(f"Failed to load metallib: {error}")
