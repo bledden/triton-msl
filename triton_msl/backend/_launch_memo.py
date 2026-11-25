@@ -1,8 +1,8 @@
 """Remember a launch check that passed, for the same inputs, so the next launch skips it.
 
 The launcher proves several facts about a launch from its arguments before anything is
-submitted (the matmul grid storage proof, the fast matmul output overlap). Each is a pure
-function of a few values: the grid, the scalar arguments as the
+submitted (the lane order, the matmul grid storage proof, the fast matmul output
+overlap). Each is a pure function of a few values: the grid, the scalar arguments as the
 GPU reads them, and per tensor the storage behind it, its extent, the view's offset and
 element width and the live data pointer. None reads tensor contents or the view's
 shape. A launch of the same kernel with the same values has the same verdict, so a
@@ -36,6 +36,7 @@ LIMIT = 256  # remembered launches per launcher and check; reaching it clears th
 
 _SCALARS = (int, bool, float)
 _TENSORS = None
+_LANE_TENSORS = None
 _DIAGNOSTICS = {}
 
 
@@ -52,13 +53,35 @@ def _tensor_types():
     return _TENSORS
 
 
-def tensor_facts(value):
-    """What a launch check reads of one tensor argument, or None when it is not an exact tensor.
+def _lane_tensor_types():
+    """Exact ``torch.Tensor``, and ``torch.nn.Parameter`` while it leaves the tensor methods alone.
+
+    A compiled model passes its weights as Parameters to every kernel that reads them.
+    Parameter is torch's own subclass with ``__torch_function__`` disabled, so the storage,
+    offset, width and pointer the lane-order check reads of one are the plain tensor's.
+    Any other subclass may answer those questions as it likes and takes the check.
+    """
+    global _LANE_TENSORS
+    if _LANE_TENSORS is None:
+        import torch
+
+        found = [torch.Tensor]
+        parameter = torch.nn.Parameter
+        disabled = getattr(torch._C, "_disabled_torch_function_impl", None)
+        if disabled is not None and getattr(parameter, "__torch_function__", None) is disabled:
+            found.append(parameter)
+        _LANE_TENSORS = tuple(found)
+    return _LANE_TENSORS
+
+
+def tensor_facts(value, types=None):
+    """What a launch check reads of one tensor argument, or None when its type is not in ``types``.
 
     (device type, storage data pointer, storage bytes, view offset in elements, element
-    width, live data pointer). Read at the point the check would read them.
+    width, live data pointer). Read at the point the check would read them. ``types`` is
+    the exact ``torch.Tensor`` alone unless given.
     """
-    if type(value) not in _tensor_types():
+    if type(value) not in (_tensor_types() if types is None else types):
         return None
     storage = value.untyped_storage()
     return (
@@ -132,6 +155,42 @@ def overlap_key(arguments, scalar_indices):
     if any(found is None or found[0] != "mps" for found in facts):
         return None
     return scalars + facts
+
+
+def lane_order_key(arguments, grid):
+    """Every value the lane-order check can read of this launch, or None to take the check.
+
+    The check reads, of each pointer argument, the storage behind it (grouping the
+    arguments that share one), the view's offset and element width and, on the host, the
+    data pointer; of each scalar argument its integer value where an address, a loop bound
+    or a branch uses it; and the grid. The key holds all of them, whichever the plan uses:
+    every argument is an exact tensor (or a ``torch.nn.Parameter``, see
+    ``_lane_tensor_types``) or an exact int, bool or float, else the check runs. A float
+    is refused wherever the check reads it, so its value cannot turn a verdict into a
+    proof; it is kept in the key all the same, apart from the integers.
+    """
+    if not ENABLED:
+        return None
+    extents = _grid(grid)
+    if extents is None:
+        return None
+    parts = [extents]
+    try:
+        tensors = _lane_tensor_types()
+        for value in arguments:
+            kind = type(value)
+            if kind is int or kind is bool:
+                parts.append(value)
+            elif kind is float:
+                parts.append(("float", value))
+            else:
+                found = tensor_facts(value, tensors)
+                if found is None:
+                    return None
+                parts.append(found)
+    except Exception:
+        return None
+    return tuple(parts)
 
 
 class LaunchMemo:

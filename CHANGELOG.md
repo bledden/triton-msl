@@ -1100,7 +1100,12 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   data pointer), and skips the check on a later launch with the same values. A
   refusal is never remembered; a launch with an enter hook, a tensor that is not an
   exact MPS `torch.Tensor`, a scalar that is not an exact built-in, or a value that
-  cannot be read takes the check. `TRITON_MSL_LAUNCH_MEMO=0` turns it off,
+  cannot be read takes the check. The lane-order check, which every emitted kernel
+  takes before any hook, is remembered the same way under every argument's storage
+  facts or exact scalar value and the grid (a compiled GPT-2 paid it on all 43
+  launches of a call); there a `torch.nn.Parameter`, which a compiled model passes
+  for its weights and whose tensor methods are the plain tensor's, counts as a
+  tensor, while any other subclass takes the check. `TRITON_MSL_LAUNCH_MEMO=0` turns it off,
   `TRITON_MSL_LAUNCH_MEMO_VERIFY=1` runs the check on every remembered launch and
   raises on a disagreement, `TRITON_MSL_LAUNCH_MEMO_DIAG=1` counts hits, misses,
   bypasses and evictions (docs/USAGE.md, Tuning flags).

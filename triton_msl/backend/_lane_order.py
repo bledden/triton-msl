@@ -100,6 +100,22 @@ def unproved(check, arguments, grid):
     return None
 
 
+def remembered_unproved(check, arguments, grid):
+    """``unproved``, skipped where ``check.memo`` remembers a proof for these very arguments and grid.
+
+    The key is every value the check reads (``_launch_memo.lane_order_key``: each
+    argument's storage, extent, offset, width and pointer, or its exact scalar value, and
+    the grid). An argument the key cannot hold, or a check without a memo, runs the check;
+    only a proof is remembered. In test mode a remembered launch runs the check too.
+    """
+    memo = getattr(check, "memo", None)
+    if memo is None:
+        return unproved(check, arguments, grid)
+    from triton_msl.backend._launch_memo import lane_order_key
+
+    return memo.recall(lane_order_key(arguments, grid), lambda: unproved(check, arguments, grid), None)
+
+
 class Unproved(Exception):
     def __init__(self, reason, detail=""):
         super().__init__(reason)
@@ -302,6 +318,9 @@ class LaunchCheck:
             and (alone or only_first)
         )
         self.cache = {}
+        # Proofs remembered for whole launches (a _launch_memo.LaunchMemo the launcher
+        # sets), this check's alone: a replaced check starts with none.
+        self.memo = None
 
     def _bases(self, node):
         entry = self.nodes[node]

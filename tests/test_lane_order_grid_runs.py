@@ -162,6 +162,12 @@ def test_a_grid_of_more_runs_than_one_launch_is_given_refuses_before_comparing_t
     programs = count // block
     monkeypatch.setattr(_lane_order, "BUDGET", 16 * 2 * block)
     monkeypatch.setattr(_lane_order, "SLICES", 4)
+    # The budget is changed for this launch alone: a proof an earlier test found for the
+    # same kernel under the default budget, on storage the allocator hands out again, must
+    # not stand in for the comparison that is to be refused here.
+    from triton_msl.backend import _launch_memo
+
+    monkeypatch.setattr(_launch_memo, "ENABLED", False)
     runs = _counted(monkeypatch, _slice_add)
     x, y, _ = _slice_case(rows, width, device)
     before = x.clone()

@@ -1253,13 +1253,19 @@ class MetalLauncher:
             # launch where two lanes of a program meet at an element one of them stores
             # can differ from the source (an in-place reversal kept half its elements).
             # Which lanes meet depends on the arguments, so it is decided here, before
-            # any hook: a launch with no proof is refused.
-            from triton_msl.backend._lane_order import LaunchCheck, unproved
+            # any hook: a launch with no proof is refused. A proof found for these same
+            # storages, scalars and grid on an earlier launch is remembered (_launch_memo)
+            # on the check that found it.
+            from triton_msl.backend._lane_order import LaunchCheck, remembered_unproved
+            from triton_msl.backend._launch_memo import LaunchMemo, LaunchMemoDisagreement
 
             try:
                 if self._lane_check is None:
                     self._lane_check = LaunchCheck(_plan)
-                _open = unproved(self._lane_check, flat_args, (gridX, gridY, gridZ))
+                    self._lane_check.memo = LaunchMemo(self.kernel_name, "lane_order")
+                _open = remembered_unproved(self._lane_check, flat_args, (gridX, gridY, gridZ))
+            except LaunchMemoDisagreement:
+                raise
             except Exception as _error:
                 _open = (f"the kernel's access plan could not be read ({type(_error).__name__})", ())
             if _open is not None:
