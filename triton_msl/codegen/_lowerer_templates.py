@@ -349,6 +349,25 @@ class _TemplateMixin:
             op_name="tt.dot",
         )
 
+    def _single_tile_is_tiled_or_clipped(self):
+        """Whether the source tiles an axis by program_id or clips its store at a runtime extent.
+
+        Either makes the program depend on a value the dense single-tile template does
+        not read. Any program-id operation counts, wherever it is used.
+        """
+
+        def _any_pid(ops):
+            for op in ops:
+                if (
+                    op.op in self._PID_OPS
+                    or (op.region_ops and _any_pid(op.region_ops))
+                    or (op.else_ops and _any_pid(op.else_ops))
+                ):
+                    return True
+            return False
+
+        return _any_pid(self.graph.ops) or any(extent is not None for extent in self._matmul_output_extent_args())
+
     def _refuse_if_pid_tiles_baked_output(self, has_M, has_N, what):
         """Single-source integrity guard for every matmul template that emits the
         whole baked output from a single threadgroup. If the kernel tiles the
@@ -1316,10 +1335,18 @@ class _TemplateMixin:
         self.effective_block_size = block_size
         tile = BLOCK_M * BLOCK_N
 
-        use_staging = (BLOCK_M, BLOCK_N, BLOCK_K) == (32, 32, 32) and (a_msl, b_msl, c_msl) == (
-            "float",
-            "float",
-            "float",
+        # An in-tile transpose (single-tile form only; the value-path proof admits the
+        # square forms) swaps which load index the reduction walks. ``a = trans(load(A +
+        # rm[:, None] * sr + rk[None, :] * sc))`` is ``a[i, j] = A[rm[j] * sr + rk[i] * sc]``:
+        # the reduction index walks the ROW term, with the row tile's program offset, and
+        # the output row walks the column term. B is the mirror image. Addressing these
+        # as ``A[m * sr + k * sc]`` computed the untransposed product (GPU).
+        trans_a = bool(info.get("trans_a")) and not has_k_loop
+        trans_b = bool(info.get("trans_b")) and not has_k_loop
+        use_staging = (
+            (BLOCK_M, BLOCK_N, BLOCK_K) == (32, 32, 32)
+            and (a_msl, b_msl, c_msl) == ("float", "float", "float")
+            and not (trans_a or trans_b)
         )
 
         safe_name = _sanitize_msl_name(self.graph.func_name)
@@ -1376,14 +1403,14 @@ class _TemplateMixin:
         lines.extend(self._matmul_tile_extent_lines(info, BLOCK_M, BLOCK_N, source_bindings))
         lines.append("")
         _a_addr = self._width_faithful_addr(
-            [("m", a_row), ("k", a_col)],
+            [("row_base + k", a_row), ("_lm", a_col)] if trans_a else [("m", a_row), ("k", a_col)],
             *_widths["A"],
             what="strided matmul operand A",
             scalar_names=scalar_names,
             source_bindings=source_bindings,
         )
         _b_addr = self._width_faithful_addr(
-            [("k", b_row), ("n", b_col)],
+            [("_ln", b_row), ("col_base + k", b_col)] if trans_b else [("k", b_row), ("n", b_col)],
             *_widths["B"],
             what="strided matmul operand B",
             scalar_names=scalar_names,
@@ -1675,6 +1702,25 @@ class _TemplateMixin:
             if not self._simdgroup_leading_dims_are_dense(info, descriptors):
                 return self._lower_strided_scalar_matmul(info, descriptors)
 
+        # The dense single-tile template below computes tile (0, 0) of baked extents in
+        # one threadgroup: it takes no program id and reads no runtime extent. A source
+        # that tiles either axis by program_id, or clips its store at a runtime extent,
+        # is a different program there (GPU: a second row tile was never computed; a
+        # store clipped at M = 20 wrote all 32 rows). The stride-aware scalar template
+        # replays the proved grid mapping and the store clip, so such a kernel takes it
+        # whatever its strides are; without a traced layout it has no template.
+        if not info.get("has_k_loop") and self._single_tile_is_tiled_or_clipped():
+            if decision is None:
+                from triton_msl.errors import MetalNonRecoverableError
+
+                raise MetalNonRecoverableError(
+                    "non-looped matmul tiles its output by program_id or clips its store at a runtime "
+                    "extent, and its operand layout could not be traced; the single-tile template "
+                    "computes one whole baked tile and would drop both. Refusing (correct-or-refuse).",
+                    op_name="tt.dot",
+                )
+            return self._lower_strided_scalar_matmul(info, decision[1])
+
         # Phase 4: record the runtime fast-matmul dispatch descriptor (additive;
         # the generic inline kernel below is still emitted + returned).
         self._fast_matmul = self._maybe_fast_matmul_descriptor()
@@ -1689,6 +1735,16 @@ class _TemplateMixin:
         # pid-tiled baked-output launch would leave every block but the first stale.
         # M/N are baked constexpr here, so has_M=has_N=False. Re-audit 2026-06-27.
         self._refuse_if_pid_tiles_baked_output(False, False, "simple-dot matmul")
+        if self._single_tile_is_tiled_or_clipped():
+            # Unreachable while the routing above holds; the shared guard accepts an axis
+            # whose store mask names a runtime extent, which this template never reads.
+            from triton_msl.errors import MetalNonRecoverableError
+
+            raise MetalNonRecoverableError(
+                "simple-dot matmul template reached with a program_id-tiled or runtime-clipped "
+                "output, which it does not replay. Refusing.",
+                op_name="tt.dot",
+            )
 
         M = info["M"]
         N = info["N"]
@@ -3267,7 +3323,7 @@ class _TemplateMixin:
         lines.append(f"        for (uint i = tiitg; i < {m_block * N}u; i += 128u) {{")
         lines.append(f"            uint row = i / {N}u, col = i % {N}u;")
         c_store_addr = _addr(c_ptr, "mstrip + row", "col", c_row_s, c_col_s, N, "C")
-        lines.append(f"            {c_store_addr} = ({c_msl_type})tg_C[i];")
+        lines.append(f"            {self._fused_store_clip(source_bindings)}{c_store_addr} = ({c_msl_type})tg_C[i];")
         lines.append("        }")
         lines.append("        threadgroup_barrier(mem_flags::mem_threadgroup);")
         lines.append("    }  // end M-strip loop")
@@ -3308,6 +3364,29 @@ class _TemplateMixin:
         "math.ceil": "ceil",
         "math.absf": "fabs",
     }
+
+    def _fused_store_clip(self, source_bindings):
+        """The store's runtime clip as an MSL ``if (...) `` prefix, empty without one.
+
+        The fused template computes its whole baked tile, epilogue included, and stores
+        it. A store mask that clips an axis at a runtime extent keeps only the rows and
+        columns below it (GPU: ``M = 20`` wrote all 32 rows). The stride-aware matmul
+        templates clip at the same argument (``_matmul_tile_extent_lines``).
+        """
+        clips = []
+        for extent, index in zip(self._matmul_output_extent_args(), ("mstrip + row", "col")):
+            if extent is None:
+                continue
+            if self._declared_int_elem_type(extent) not in ("i32", "i64", "u32", "u64"):
+                from triton_msl.errors import MetalNonRecoverableError
+
+                raise MetalNonRecoverableError(
+                    "fused matmul+softmax/epilogue template: the store clips at an argument that is not "
+                    "a 32- or 64-bit integer, which the template cannot replay. Refusing.",
+                    op_name="tt.store",
+                )
+            clips.append(f"(long)({index}) < (long)({(source_bindings or {}).get(extent, extent)})")
+        return f"if ({' && '.join(clips)}) " if clips else ""
 
     def _emit_matmul_epilogue_loop(
         self, info, m_block, N, c_ptr, c_row_s, c_col_s, c_msl_type, _addr, source_bindings=None
@@ -3417,7 +3496,7 @@ class _TemplateMixin:
         ]
         lines.extend(body)
         c_store_addr = _addr(c_ptr, "mstrip + row", "col", c_row_s, c_col_s, N, "C")
-        lines.append(f"            {c_store_addr} = ({c_msl_type})({out});")
+        lines.append(f"            {self._fused_store_clip(source_bindings)}{c_store_addr} = ({c_msl_type})({out});")
         lines.append("        }")
         return lines
 

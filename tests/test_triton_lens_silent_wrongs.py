@@ -851,18 +851,21 @@ if _HAS:
 
 
 @requires
-def test_pid_tiled_simpledot_matmul_refuses():
-    # The non-K-loop simple-dot template emits the whole baked output from one threadgroup
-    # and never honors program_id (the 4th pid-guard twin) -> multi-block left rows stale.
-    # Must refuse loudly. (mask-store/twin hunt 2026-06-27)
+def test_pid_tiled_simpledot_matmul_computes_every_tile():
+    # The dense simple-dot template emits one baked tile from one threadgroup and never
+    # honors program_id (the 4th pid-guard twin) -> multi-block left rows stale. It refused
+    # this kernel (mask-store/twin hunt 2026-06-27). A program_id-tiled loop-free dot now
+    # takes the stride-aware scalar template, which replays the grid: every row tile is
+    # computed, and the dense template is not reached.
     _clear()
     M, N, K, BM = 64, 32, 16, 32
     A = torch.randn(M, K, device="mps")
     B = torch.randn(K, N, device="mps")
     O = torch.zeros(M, N, device="mps")
-    with pytest.raises(MetalNonRecoverableError):
-        _k_pid_simpledot[(M // BM,)](A, B, O, N=N, K=K, BM=BM)
-        torch.mps.synchronize()
+    handle = _k_pid_simpledot[(M // BM,)](A, B, O, N=N, K=K, BM=BM)
+    torch.mps.synchronize()
+    torch.testing.assert_close(O.cpu(), A.cpu() @ B.cpu(), atol=1e-4, rtol=1e-4)
+    assert "single, non-looped dot tile" in handle.asm["msl"] and "pid_m = pid3.x;" in handle.asm["msl"]
 
 
 @requires

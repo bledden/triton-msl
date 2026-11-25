@@ -64,6 +64,27 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   constant clip is whole-tile only on the bare `tl.arange` tile. The epilogue
   route keeps the matmul forms; `rm[:, None] < M` and `(rm < M)[:, None]` both
   keep the template.
+- Keep a loop-free dot's program_id tiling and store clip. A loop-free
+  `tl.dot` whose row strides are the literal tile sizes took the dense
+  single-tile template even when the source tiled an axis by `program_id` or
+  clipped its store at a runtime extent. That template computes tile (0, 0) of
+  baked extents in one threadgroup: with two row tiles the second was never
+  computed, and a store clipped at `M = 20` wrote all 32 rows, 384 cells the
+  source does not store and past the end of an output of exactly `M` rows.
+  0.3.0 lowers these kernels the same way. Such a kernel now takes the
+  stride-aware scalar template, which replays the proved grid mapping and the
+  clip; the dense template only sees an untiled, unclipped tile. A tiled
+  literal-stride dot with an unmasked store, refused before, now compiles on
+  the scalar template. No kernel of the project suite or of upstream
+  `test_core` changes route.
+- Walk the transposed index in the scalar single-tile template. `tl.trans` on
+  a loaded operand tile makes the reduction walk the load's row term (with the
+  row tile's program offset for A, the column tile's for B). The template
+  addressed it as an untransposed operand, so a transposed operand with
+  runtime or padded strides returned the untransposed product; only literal
+  tile strides, on the dense template, were right.
+- Clip the fused matmul and softmax template's store at the store mask's
+  runtime extents. It stored its whole baked tile whatever the mask said.
 - These changes require fresh integrated hardware and installed-artifact
   qualification. Earlier source-tree matmul timings do not measure their cost.
 
