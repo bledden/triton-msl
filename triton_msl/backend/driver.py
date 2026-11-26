@@ -1156,7 +1156,10 @@ class MetalLauncher:
         self._matmul_memo = LaunchMemo(self.kernel_name, "matmul_storage")
         self._overlap_memo = LaunchMemo(self.kernel_name, "matmul_overlap")
         self._dot_storage_memo = LaunchMemo(self.kernel_name, "dot_storage")
-        self._storage_unproved = False
+        # The access-plan storage proof's verdict for the last launch through this launcher
+        # (see _lane_order.verdict), and the verdict of each remembered launch.
+        self.storage_verdict = None
+        self._storage_verdicts = {}
         # Where the kernel loads and stores (see __call__). Every kernel the emitter lowers
         # carries a plan; a launcher built around a shader of its own has none.
         from triton_msl.backend._lane_order import launch_plan
@@ -1457,23 +1460,26 @@ class MetalLauncher:
             # Remembered like the proofs above, under every value the check reads.
             from triton_msl.backend._lane_order import remembered_outside_storage
 
-            _outside = (
-                None
-                if self._lane_check is None
-                else remembered_outside_storage(
+            if self._lane_check is None:
+                _outside = None
+            else:
+                _outside, _judged = remembered_outside_storage(
                     getattr(self, "_dot_storage_memo", None),
                     self._lane_check,
                     flat_args,
                     (gridX, gridY, gridZ),
                     not _memo_free,
+                    self._storage_verdicts,
                 )
-            )
-            if self._lane_check is not None and (self._lane_check.unproved or self._storage_unproved):
-                # Dispatched as before where an access could not be proved; say which.
-                from triton_msl.backend._lane_order import record_unproved
+                # What the proof established for THIS launch: ("proved", ()), or
+                # ("sampled" | "not judged", the accesses it could not prove). A remembered
+                # launch keeps the verdict of its first sight.
+                self.storage_verdict = _judged
+                if _judged[0] != "proved":
+                    from triton_msl.backend import _launch_memo
 
-                record_unproved(self.kernel_name, self._lane_check)
-                self._storage_unproved = bool(self._lane_check.unproved)
+                    if _launch_memo.DIAG:
+                        _launch_memo._count(self._dot_storage_memo, _judged[0].replace(" ", "_"))
             if _outside is not None:
                 from triton_msl.errors import MetalNonRecoverableError
 

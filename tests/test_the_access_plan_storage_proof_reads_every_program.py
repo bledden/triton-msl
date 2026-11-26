@@ -1,21 +1,13 @@
-"""The access-plan storage proof is exact on large and over-launched grids, or says it is not a proof.
+"""The access-plan storage proof agrees with the source wherever it says "proved".
 
-Past 262,144 address instances per access the proof read only the first two and last two
-programs of each grid axis and took what it found for the whole launch. With a grid launched
-past the data (the last programs fully masked) or the tutorial's 1-D grid split (``pid % n``,
-``pid // n``), the cell that leaves the storage belongs to a program in between, and a launch
-with a short operand or a short output was dispatched.
-
-Now every program is read, in slices, up to 4,194,304 address instances per access; an address
-that is a lane part plus a program part, under a mask that does not follow the program, is
-exact for any grid up to that many programs. What is left over is read at the ends only and
-recorded as NOT PROVED (``_lane_order.storage_unproved``): a cell found outside there still
-refuses the launch, and a launch with nothing found there is dispatched, as it was before the
-proof existed.
-
-The first tests compare the proof with the source's exact access set, enumerated in numpy over
-every program, on host tensors and without a device. The last ones are launch decisions on
-both dispatch routes with the submission methods replaced: nothing is submitted.
+The proof's lowest and highest element per access are compared with the source's exact access
+set, enumerated in numpy over every program, on host tensors and without a device: grids from
+one program to thousands, grids launched past the data, the 1-D grid split, short tensors.
+Where the proof calls an access proved, a launch whose source leaves a storage must be
+refused, with the source's own extremes. Where it calls it sampled (past 262,144 address
+instances, read at the ends of the grid only), a refusal must still be a true one. The launch
+decisions on the GPU routes are in
+tests/test_a_storage_verdict_is_proved_sampled_or_not_judged.py.
 """
 
 import numpy as np
@@ -24,12 +16,8 @@ import torch
 import triton
 import triton.language as tl
 
-from tests.test_a_loop_free_dot_proves_its_storage import OUTSIDE, _forget_tripped_lease, _install_tripwire
-from triton_msl.backend import _lane_order
 from triton_msl.backend._lane_order import LaunchCheck, launch_plan, outside_storage
-from triton_msl.errors import MetalNonRecoverableError
 
-requires_gpu = pytest.mark.skipif(not torch.backends.mps.is_available(), reason="Metal GPU needed")
 BLOCK = 16
 B16 = dict(BM=BLOCK, BN=BLOCK, BK=BLOCK)
 
@@ -105,10 +93,6 @@ def _unproved(check):
     return getattr(check, "unproved", [])
 
 
-def _recorded():
-    return getattr(_lane_order, "storage_unproved", dict)()
-
-
 def _check(kernel):
     if kernel not in _CHECKS:
         compiled = triton.JITFunction(kernel.fn).warmup(*[torch.float32] * 3, 160, 16, 16, 16, 16, 16, grid=(4,), **B16)
@@ -168,10 +152,10 @@ def test_the_proof_agrees_with_the_source_on_every_grid(case):
         assert any(why in ("sampled", "budget") for _, _, why in _unproved(check))
 
 
-def test_grids_within_the_walk_are_proved_and_larger_ones_say_they_are_not():
+def test_a_launch_within_the_budget_is_proved_and_a_larger_one_is_sampled():
     scalars = [160, 16, 16, 16, 16, 16]
     check = _check(_rows)
-    for programs, proved in ((10, True), (1100, True), (16000, True), (20000, False)):
+    for programs, proved in ((10, True), (1024, True), (1100, False), (16000, False), (20000, False)):
         spans = _source(_rows, programs, *scalars)
         exact = [torch.zeros(span[1] + 1) for span in spans]
         assert outside_storage(check, exact + scalars, (programs, 1, 1)) is None
@@ -181,7 +165,7 @@ def test_grids_within_the_walk_are_proved_and_larger_ones_say_they_are_not():
             # What the ends show is still refused: A without its second row tile.
             short = [torch.zeros(BLOCK * 16)] + exact[1:]
             assert outside_storage(check, short + scalars, (programs, 1, 1))[1] == 0
-    # Unmasked loads follow the program by a plain shift: exact for any grid the walk could not read.
+    # Unmasked loads follow the program by a plain shift: exact for a grid far past the budget.
     check = _check(_plain)
     scalars = [16 * 70000, 16, 16, 16, 16, 16]
     spans = _source(_plain, 70000, *scalars)
@@ -196,52 +180,10 @@ def test_grids_within_the_walk_are_proved_and_larger_ones_say_they_are_not():
     )
 
 
-def _decision(monkeypatch, launch):
-    with monkeypatch.context() as patch:
-        hits = _install_tripwire(patch)
-        try:
-            launch()
-            return "dispatched"
-        except MetalNonRecoverableError as refusal:
-            return "refused" if OUTSIDE in str(refusal) else str(refusal)
-        except Exception:
-            if not hits:
-                raise
-            return "dispatched"
-        finally:
-            _forget_tripped_lease(hits)
-
-
-@requires_gpu
-@pytest.mark.parametrize("compile_shader", ["1", "0"])
-@pytest.mark.parametrize("kernel,programs,n", [(_rows, 1100, 16), (_split, 1102, 1760)], ids=["over_launched", "split"])
-def test_a_large_grid_with_a_short_tensor_is_refused_before_dispatch(kernel, programs, n, compile_shader, monkeypatch):
-    """The reviewer's reproducer: 160 rows of data, over a thousand programs, tensors holding 32 rows."""
-    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", compile_shader)
-    scalars = [160, n, 16, 16, 16, 16 if kernel is _rows else 1760]
-    spans = _source(kernel, programs, *scalars)
-    sizes = [span[1] + 1 for span in spans]
-
-    def launch(shrink):
-        tensors = [torch.zeros(max(0, size - shrink.get(role, 0)), device="mps") for role, size in enumerate(sizes)]
-        return lambda: kernel[(programs,)](*tensors, *scalars, **B16)
-
-    assert _decision(monkeypatch, launch({})) == "dispatched"
-    assert kernel.fn.__name__ not in _recorded()
-    for role in (0, 2):
-        assert _decision(monkeypatch, launch({role: 1})) == "refused"
-        assert _decision(monkeypatch, launch({role: sizes[role] - 512})) == "refused"
-
-
-@requires_gpu
-@pytest.mark.parametrize("compile_shader", ["1", "0"])
-def test_a_grid_past_the_walk_is_dispatched_and_recorded_as_not_proved(compile_shader, monkeypatch):
-    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", compile_shader)
-    scalars = [160, 16, 16, 16, 16, 16]
-    sizes = [span[1] + 1 for span in _source(_rows, 20000, *scalars)]
-    tensors = [torch.zeros(size, device="mps") for size in sizes]
-    assert _decision(monkeypatch, lambda: _rows[(20000,)](*tensors, *scalars, **B16)) == "dispatched"
-    assert {why for _, _, why in _recorded()["_rows"]} == {"sampled"}
-    # In bounds at a smaller grid again: judged in full, and the record is withdrawn.
-    assert _decision(monkeypatch, lambda: _rows[(10,)](*tensors, *scalars, **B16)) == "dispatched"
-    assert "_rows" not in _recorded()
+def test_a_program_part_that_could_wrap_32_bits_is_not_called_proved():
+    """A row stride that takes the address past 2**31 elements: the closed form does not vouch for it."""
+    check = _check(_plain)
+    scalars = [16 * 70000, 16, 16, 4000, 16, 16]  # 70,000 programs x 16 rows x 4,000 elements per row
+    tensors = [torch.zeros(8), torch.zeros(8), torch.zeros(8)]
+    outside_storage(check, tensors + scalars, (70000, 1, 1))
+    assert ("L", 0, "sampled") in [tuple(entry) for entry in _unproved(check)]
