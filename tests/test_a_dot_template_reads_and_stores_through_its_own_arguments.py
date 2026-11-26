@@ -420,3 +420,148 @@ def test_a_constant_dot_cast_once_stores_the_source_value(values, mode, compile_
     assert np.array_equal(got, expected), (
         f"{int((got != expected).sum())} cells differ; first {got[2048]!r} vs {expected[2048]!r}"
     )
+
+
+# ---- the constant dot's value is the generic route's --------------------------------------------
+#
+# The template stored ``(float)K * a * b`` with ``a`` and ``b`` printed as float literals. No
+# summation of the source gives that for a product that overflows only after the multiply by K
+# (3e38 x 1e-3 stored +inf), and a float16 or bfloat16 constant was printed as the decimal MLIR
+# shows for it, which is another float32 (float16 1e-4 was 0.000100017). The same dot of loaded
+# tiles takes the generic route, which starts from the accumulator and adds one product per k in
+# a float register, and rounds the sum to the dot's type. The template now runs that expression
+# on the constants' own bits, and these tests compare it with the generic route on the GPU, bit
+# for bit, on the same device (which contracts the step to a fused multiply-add and flushes a
+# subnormal result; neither is assumed here).
+
+
+@triton.jit
+def _constant_product(
+    C, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, AV: tl.constexpr, BV: tl.constexpr, DT: tl.constexpr
+):
+    rm = tl.arange(0, BM)
+    rn = tl.arange(0, BN)
+    tl.store(C + rm[:, None] * BN + rn[None, :], tl.dot(tl.full((BM, BK), AV, DT), tl.full((BK, BN), BV, DT)))
+
+
+@triton.jit
+def _loaded_product(A, B, C, SA, SB, SC, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    # The same dot of loaded tiles with a zero accumulator: the generic route.
+    rm = tl.arange(0, BM)
+    rn = tl.arange(0, BN)
+    rk = tl.arange(0, BK)
+    cp = C + rm[:, None] * SC + rn[None, :]
+    c = tl.dot(tl.load(A + rm[:, None] * SA + rk[None, :]), tl.load(B + rk[:, None] * SB + rn[None, :])) + tl.load(cp)
+    tl.store(cp, c)
+
+
+_INF = float("inf")
+_KINDS = {
+    "fp32": (torch.float32, tl.float32, "*fp32"),
+    "fp16": (torch.float16, tl.float16, "*fp16"),
+    "bf16": (torch.bfloat16, tl.bfloat16, "*bf16"),
+}
+PRODUCTS = [
+    ("fp32", 3e38, 1e-3),  # K * a overflows, the sum does not
+    ("fp32", 1e-30, 1e-15),  # a subnormal product
+    ("fp32", 1e-20, 1e-20),  # a subnormal sum
+    ("fp32", 0.1, 0.3),
+    ("fp32", 0.1, 0.3001),
+    ("fp32", 1.0 / 3.0, 7.0),
+    ("fp32", 1.5, 2.25),
+    ("fp32", 3e38, 0.5),  # the sum overflows
+    ("fp32", -1.5, 2.25),
+    ("fp32", _INF, 2.0),
+    ("fp32", _INF, 0.0),  # not a number
+    ("fp16", 1e-4, 1e-4),
+    ("fp16", 0.1, 0.3),
+    ("fp16", 1.0 / 3.0, 7.0),
+    ("fp16", 60000.0, 1.5),  # float16 overflow of the result, not of the float sum
+    ("fp16", 255.0, 255.0),
+    ("fp16", _INF, 2.0),
+    ("fp16", -_INF, 0.5),
+    ("bf16", 0.1, 0.3),
+    ("bf16", 1e-4, 1e-4),
+    ("bf16", 3e38, 1e-3),
+    ("bf16", _INF, 2.0),
+]
+
+
+def _lower_typed(kernel, kind, constants):
+    backend = MetalBackend(GPUTarget("metal", "apple-m4", 32))
+    options = backend.parse_options({"num_warps": 4})
+    signature = {
+        name: ("constexpr" if name in constants else _KINDS[kind][2] if name in ("A", "B", "C") else "i32")
+        for name in kernel.arg_names
+    }
+    context = ir.context()
+    ir.load_dialects(context)
+    module = ASTSource(kernel, signature, constants).make_ir(
+        backend.target, options, backend.get_codegen_implementation(options), backend.get_module_map(), context
+    )
+    module = backend.make_ttgir(backend.make_ttir(module, {}, options), {}, options)
+    return emit_msl(module, {}, options)
+
+
+def _float_bits(value, kind):
+    import struct
+
+    if kind == "fp16":
+        value = float(np.float16(value))
+    elif kind == "bf16" and np.isfinite(value):
+        word = struct.unpack("<I", struct.pack("<f", np.float32(value)))[0]
+        word = (word + 0x7FFF + ((word >> 16) & 1)) & 0xFFFF0000
+        return word
+    return struct.unpack("<I", struct.pack("<f", np.float32(value)))[0]
+
+
+@pytest.mark.parametrize("block", [16, 32])
+@pytest.mark.parametrize("kind,a,b", PRODUCTS, ids=lambda item: repr(item))
+def test_a_constant_dot_is_the_generic_routes_sum_of_the_constants_own_bits(kind, a, b, block):
+    msl = _lower_typed(_constant_product, kind, dict(BM=block, BN=block, BK=block, AV=a, BV=b, DT=_KINDS[kind][1]))
+    assert f"volatile float _a = as_type<float>(0x{_float_bits(a, kind):08X}u);" in msl
+    assert f"volatile float _b = as_type<float>(0x{_float_bits(b, kind):08X}u);" in msl
+    assert "float _dot_sum = 0.0f;" in msl
+    assert f"for (uint _dk = 0; _dk < {block}u; _dk++)" in msl and "_dot_sum += _a * _b;" in msl
+    # A dot of float16 or bfloat16 tiles is a float32 value in the TTGIR; the one cast on the way
+    # to the store rounds it, as the generic route's does.
+    stored = {"fp32": "float", "fp16": "half", "bf16": "bfloat"}[kind]
+    assert "float _sum = _dot_sum;" in msl
+    # One store, of the tile's own cells, through the store's pointer; and no read of any buffer.
+    stores = [line.strip() for line in msl.splitlines() if "_mmarg0[" in line]
+    assert stores == [f"_mmarg0[_i * {block}u + _j] = ({stored})_sum;"]
+    assert f"_e < {block * block}u" in msl
+
+
+def test_a_constant_dot_with_an_accumulator_that_is_not_zero_is_refused():
+    @triton.jit
+    def biased(C, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+        rm = tl.arange(0, BM)
+        rn = tl.arange(0, BN)
+        acc = tl.full((BM, BN), 0.5, tl.float32)
+        acc = tl.dot(tl.full((BM, BK), 0.1, tl.float32), tl.full((BK, BN), 0.3, tl.float32), acc)
+        tl.store(C + rm[:, None] * BN + rn[None, :], acc)
+
+    with pytest.raises(MetalNonRecoverableError):
+        _lower_typed(biased, "fp32", BLOCKS)
+
+
+@requires_gpu
+@pytest.mark.parametrize("compile_shader", ["1", "0"])
+@pytest.mark.parametrize("kind,a,b", PRODUCTS, ids=lambda item: repr(item))
+def test_a_constant_dot_stores_what_the_generic_route_stores(kind, a, b, compile_shader, monkeypatch):
+    """Both launched on views 1,024 elements into storages of 4,096; whole storages compared."""
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", compile_shader)
+    dtype = _KINDS[kind][0]
+    loaded = [torch.full((4096,), value, dtype=dtype, device="mps") for value in (a, b, 0.0)]
+    _loaded_product[(1,)](loaded[0][1024:2048], loaded[1][1024:2048], loaded[2][1024:2048], 32, 32, 32, **BLOCKS)
+    constant = torch.zeros(4096, dtype=dtype, device="mps")
+    _constant_product[(1,)](constant[1024:2048], AV=a, BV=b, DT=_KINDS[kind][1], **BLOCKS)
+    torch.mps.synchronize()
+    want = loaded[2].float().cpu().numpy()
+    got = constant.float().cpu().numpy()
+    assert (want[1024:2048] == want[1024]).all() or np.isnan(want[1024:2048]).all()
+    same = (got.view(np.uint32) == want.view(np.uint32)) | (np.isnan(got) & np.isnan(want))
+    assert same.all(), (
+        f"constant dot stores {got[1024]!r}, the generic route {want[1024]!r} ({int((~same).sum())} cells)"
+    )

@@ -5681,9 +5681,17 @@ class _DetectionMixin:
         Returns (const_a, const_b, M, N, K, dot_elem_type) if both inputs
         are constants, or None otherwise.
         """
-        import struct as _struct
+        from triton_msl.errors import MetalNonRecoverableError
 
         op_by_id = {ssa.id: ssa for ssa in self.graph.ops}
+
+        def _refuse(why):
+            raise MetalNonRecoverableError(
+                f"dot of two constant tiles: {why}. The template computes the sum of one float product per k "
+                "from a zero accumulator and has no other form. Refusing (correct-or-refuse). Store the "
+                "constant product with a plain elementwise kernel.",
+                op_name="tt.dot",
+            )
 
         for ssa in self.graph.ops:
             if ssa.op != "tt.dot":
@@ -5697,22 +5705,31 @@ class _DetectionMixin:
                 return None
             if a_op.op != "arith.constant" or b_op.op != "arith.constant":
                 return None
-
-            def _get_float_val(op):
-                v = op.attrs.get("value")
-                if v is None:
-                    return 0.0
-                if isinstance(v, float):
-                    return v
-                if isinstance(v, int) and op.elem_type in ("f32", "f16", "bf16"):
-                    try:
-                        return _struct.unpack("f", _struct.pack("I", v & 0xFFFFFFFF))[0]
-                    except _struct.error:
-                        return 0.0
-                return float(v)
-
-            const_a = _get_float_val(a_op)
-            const_b = _get_float_val(b_op)
+            # The walker gives a float constant as the number it holds in its own type.
+            # Anything else here (a tile that is not one number, an integer dot, a
+            # float64 one) is not this template's program, and no other route takes a
+            # dot of two constants: refuse it by name.
+            for operand in (a_op, b_op):
+                if operand.elem_type not in ("f32", "f16", "bf16") or type(operand.attrs.get("value")) is not float:
+                    _refuse("an operand is not one float32, float16 or bfloat16 number")
+            if ssa.elem_type not in ("f32", "f16", "bf16"):
+                _refuse(f"the result type {ssa.elem_type} is not float32, float16 or bfloat16")
+            const_a = a_op.attrs["value"]
+            const_b = b_op.attrs["value"]
+            if len(ssa.operand_ids) >= 3:
+                # The accumulator: a constant zero, through the wrappers that change no value.
+                acc = op_by_id.get(ssa.operand_ids[2])
+                for _ in range(8):
+                    if (
+                        acc is None
+                        or acc.op not in ("tt.splat", "tt.broadcast", "ttg.convert_layout")
+                        or not acc.operand_ids
+                    ):
+                        break
+                    acc = op_by_id.get(acc.operand_ids[0])
+                held = acc.attrs.get("value") if acc is not None and acc.op == "arith.constant" else None
+                if type(held) not in (int, float) or held != 0 or str(held).startswith("-"):
+                    _refuse("the accumulator is not a constant zero")
 
             dot_shape = _extract_shape(ssa.type_str)
             M = dot_shape[0] if len(dot_shape) >= 1 else 32

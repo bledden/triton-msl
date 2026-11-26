@@ -21,7 +21,7 @@ from triton_msl.codegen.msl_emitter import _msl_compute_type, _sanitize_msl_name
 from triton_msl.codegen.msl_types import triton_type_to_msl
 
 from triton_msl.codegen._lowerer_helpers import _mlir_to_triton_dtype
-from triton_msl.codegen._narrow_float import NARROW, int_to_narrow
+from triton_msl.codegen._narrow_float import NARROW, float_bits, int_to_narrow
 
 
 def _scalar_buffer_decl(arg, index, source_bindings=None):
@@ -4221,11 +4221,27 @@ class _TemplateMixin:
         lines.append(",\n".join(arg_decls) + ",")
         lines.append("    uint lid [[thread_position_in_threadgroup]]")
         lines.append(") {")
+        # The value is the generic route's for the same dot of loaded tiles (read from its
+        # shader, and compared with it on the GPU by the tests): start from the
+        # accumulator, add one product per k in a float register, round the sum to the
+        # dot's type. ``(float)K * a * b`` is no summation of the source: it overflows
+        # where the sum does not (3e38 x 1e-3 stored +inf), and a decimal literal of a
+        # float16 or bfloat16 constant is another float32. The operands are the
+        # constants' own bits, in volatile registers so that the step is computed where
+        # the generic route computes it, by the device, and not folded by the compiler.
         lines.append(f"    for (uint _e = lid; _e < {total}u; _e += {block_size}u) {{")
         lines.append(f"        uint _i = _e / {N}u;")
         lines.append(f"        uint _j = _e % {N}u;")
-        # Each element = sum over K of const_a * const_b = K * const_a * const_b
-        lines.append(f"        float _sum = (float){K}u * {const_a}f * {const_b}f;")
+        lines.append(f"        volatile float _a = {float_bits(const_a)};")
+        lines.append(f"        volatile float _b = {float_bits(const_b)};")
+        lines.append("        float _dot_sum = 0.0f;")
+        lines.append(f"        for (uint _dk = 0; _dk < {K}u; _dk++) {{")
+        lines.append("            _dot_sum += _a * _b;")
+        lines.append("        }")
+        if dot_elem_type in NARROW:
+            lines.append(f"        float _sum = static_cast<float>(static_cast<{NARROW[dot_elem_type]}>(_dot_sum));")
+        else:
+            lines.append("        float _sum = _dot_sum;")
         lines.append(f"        {source_bindings[c_ptr.name]}[_i * {N}u + _j] = ({c_msl_type})_sum;")
         lines.append(f"    }}")
         lines.append("}")
