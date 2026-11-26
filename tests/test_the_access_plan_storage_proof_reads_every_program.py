@@ -167,12 +167,12 @@ def test_a_launch_within_the_budget_is_proved_and_a_larger_one_is_sampled():
             assert outside_storage(check, short + scalars, (programs, 1, 1))[1] == 0
     # Unmasked loads follow the program by a plain shift: exact for a grid far past the budget.
     check = _check(_plain)
-    scalars = [16 * 70000, 16, 16, 16, 16, 16]
-    spans = _source(_plain, 70000, *scalars)
+    scalars = [16 * 60000, 16, 16, 16, 16, 16]
+    spans = _source(_plain, 60000, *scalars)
     exact = [torch.zeros(span[1] + 1) for span in spans]
-    assert outside_storage(check, exact + scalars, (70000, 1, 1)) is None
+    assert outside_storage(check, exact + scalars, (60000, 1, 1)) is None
     assert not [entry for entry in _unproved(check) if entry[0] == "L"]
-    assert outside_storage(check, [torch.zeros(spans[0][1])] + exact[1:] + scalars, (70000, 1, 1))[:4] == (
+    assert outside_storage(check, [torch.zeros(spans[0][1])] + exact[1:] + scalars, (60000, 1, 1))[:4] == (
         "L",
         0,
         0,
@@ -180,10 +180,96 @@ def test_a_launch_within_the_budget_is_proved_and_a_larger_one_is_sampled():
     )
 
 
+@pytest.mark.parametrize("programs,proved", [(65536, True), (65537, False)])
+def test_the_closed_form_reads_at_most_65536_programs(programs, proved):
+    """Its cost is one pass over the programs, paid again whenever a scalar changes: past the cap, sampled."""
+    check = _check(_plain)
+    scalars = [16 * programs, 16, 16, 16, 16, 16]
+    spans = _source(_plain, programs, *scalars)
+    exact = [torch.zeros(span[1] + 1) for span in spans]
+    assert outside_storage(check, exact + scalars, (programs, 1, 1)) is None
+    loads = sorted(why for kind, _, why in _unproved(check) if kind == "L")
+    assert loads == ([] if proved else ["sampled", "sampled"])
+    # Short at the end: the last program reads it on either side of the cap.
+    assert outside_storage(check, [torch.zeros(spans[0][1])] + exact[1:] + scalars, (programs, 1, 1))[:2] == ("L", 0)
+
+
 def test_a_program_part_that_could_wrap_32_bits_is_not_called_proved():
     """A row stride that takes the address past 2**31 elements: the closed form does not vouch for it."""
     check = _check(_plain)
-    scalars = [16 * 70000, 16, 16, 4000, 16, 16]  # 70,000 programs x 16 rows x 4,000 elements per row
+    scalars = [16 * 60000, 16, 16, 4000, 16, 16]  # 60,000 programs x 16 rows x 4,000 elements per row
     tensors = [torch.zeros(8), torch.zeros(8), torch.zeros(8)]
-    outside_storage(check, tensors + scalars, (70000, 1, 1))
+    outside_storage(check, tensors + scalars, (60000, 1, 1))
     assert ("L", 0, "sampled") in [tuple(entry) for entry in _unproved(check)]
+
+
+# ---- addresses the closed form does not reason about -------------------------------------------
+#
+# The closed form splits an address into a lane part and a program part modulo 2**32, and takes
+# the address for exact when its whole range is within 2**31. That holds for one 32-bit offset
+# expression: the source's value is that expression wrapped to 32 bits, congruent to the model
+# and in the same range, so equal. It does not hold for an offset computed at 64 bits (a
+# coefficient that is a multiple of 2**32 vanishes from the model) or for two offsets that
+# follow the program and are added to the pointer one after the other (each wraps on its own
+# and the pointer sum does not). A dot kernel with either address is refused at compile today,
+# so the check is asked directly, on kernels without a dot.
+
+
+@triton.jit
+def _wide(A, C, S1, S2, BM: tl.constexpr):
+    pid = tl.program_id(0)
+    rm = tl.arange(0, BM)
+    tl.store(C + pid * BM + rm, tl.load(A + pid.to(tl.int64) * S1 + rm))
+
+
+@triton.jit
+def _two_offsets(A, C, S1, S2, BM: tl.constexpr):
+    pid = tl.program_id(0)
+    rm = tl.arange(0, BM)
+    row = A + pid * S1
+    tl.store(C + pid * BM + rm, tl.load(row + pid * S2 + rm))
+
+
+def _plan_of(kernel, s1, s2):
+    compiled = triton.JITFunction(kernel.fn).warmup(torch.float32, torch.float32, s1, s2, grid=(4,), BM=256)
+    return LaunchCheck(launch_plan(compiled.metadata))
+
+
+@pytest.mark.parametrize("stride", [1 << 32, 16])
+def test_a_64_bit_program_part_is_sampled_not_proved(stride):
+    """``pid.to(int64) * 2**32``: zero modulo 2**32, so the model saw every program at program 0."""
+    check = _plan_of(_wide, stride, 0)
+    programs = 1101  # 281,856 instances: past the budget, where the closed form was used
+    tensors = [torch.zeros(1 << 22), torch.zeros(programs * 256)]
+    found = outside_storage(check, tensors + [stride, 0], (programs, 1, 1))
+    assert ("L", 0, "sampled") in [tuple(entry) for entry in _unproved(check)]
+    if stride == 1 << 32:
+        assert found is not None and found[:2] == ("L", 0) and found[3] >= 1 << 32  # program 1 is at an end
+    else:
+        assert found is None
+
+
+@pytest.mark.parametrize("programs", [1101, 1104])
+def test_two_program_offsets_added_one_after_the_other_are_sampled_not_proved(programs):
+    """``pid * 2**30`` and ``pid * (1 - 2**30)`` sum to ``pid`` in the model; every fourth program is 2**32 lower."""
+    s1, s2 = 1 << 30, 1 - (1 << 30)
+    pid = np.arange(programs, dtype=np.int64)
+    wrapped = lambda value: (value + (1 << 31)) % (1 << 32) - (1 << 31)  # noqa: E731
+    source = wrapped(pid * s1) + wrapped(pid * s2)
+    assert int(source.min()) == 2 - (1 << 32) and int(source[[0, 1, -1]].min()) >= 0  # outside, not at these ends
+    check = _plan_of(_two_offsets, s1, s2)
+    tensors = [torch.zeros(1 << 22), torch.zeros(programs * 256)]
+    found = outside_storage(check, tensors + [s1, s2], (programs, 1, 1))
+    assert ("L", 0, "sampled") in [tuple(entry) for entry in _unproved(check)]
+    if programs % 4 == 0:
+        # The second program from the end is one of the wrapped ones: the sample reads it.
+        assert found is not None and found[:3] == ("L", 0, programs - 2 - (1 << 32))
+    else:
+        assert found is None  # sampled, with nothing at the ends: dispatched and labelled, not proved
+
+
+def test_within_the_budget_those_addresses_are_read_program_by_program():
+    """Every program read: exact whatever the width, and the wrapped program refuses the launch."""
+    check = _plan_of(_two_offsets, 1 << 30, 1 - (1 << 30))
+    found = outside_storage(check, [torch.zeros(1 << 22), torch.zeros(5 * 256), 1 << 30, 1 - (1 << 30)], (5, 1, 1))
+    assert found[:3] == ("L", 0, 2 - (1 << 32)) and not _unproved(check)

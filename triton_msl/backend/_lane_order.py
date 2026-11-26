@@ -20,7 +20,7 @@ from triton_msl.autotuning._operand_overlap import _base, _share, _storage
 PID, LANE, LOOP, OPAQUE = 1, 2, 4, 8
 BUDGET = 1 << 22  # addresses compared at a time
 STORAGE_BUDGET = 1 << 18  # address instances of one access read at a time, for the storage proof
-SHIFT_PROGRAMS = 1 << 20  # programs whose own part of an address is read one by one
+SHIFT_PROGRAMS = 1 << 16  # programs whose own part of an address is read one by one (the closed form)
 SLICES = 16  # and how many times that for one launch, a run of programs at a time
 
 # Atomic updates that leave the same cell whatever order they land in. A floating-point add
@@ -473,7 +473,8 @@ class LaunchCheck:
         read); the whole launch is within ``STORAGE_BUDGET`` address instances (every
         program is read); or the address is a lane part plus a program part under a mask
         that does not follow the program (the program part is read for every program and
-        the split confirmed on the two extreme ones). The launch is outside when either
+        the split confirmed on the two extreme ones; at most ``SHIFT_PROGRAMS`` programs,
+        one 32-bit program offset, an address range within 2**31). The launch is outside when either
         extreme lies outside the storage behind the pointer.
 
         Any other access is SAMPLED: read at the first two and last two programs of each
@@ -657,7 +658,8 @@ class LaunchCheck:
             if found is not None:
                 # The address is the lanes of program 0 plus one number per program:
                 # confirmed on the two programs the extremes come from before it is
-                # used, and not used where a 32-bit step of the source could wrap.
+                # used, and used only for one 32-bit program offset whose whole range
+                # is within 2**31 (``_one_narrow_program_offset`` says why that is enough).
                 low, high, lowest, highest = shift
                 span = (found[0] + low, found[1] + high)
                 if (
@@ -690,10 +692,12 @@ class LaunchCheck:
         coefficients, exact while nothing wraps. Returns the lowest and highest sum over
         every program, relative to program 0, and the programs they come from; the caller
         confirms the split on those two programs. With more programs than
-        ``SHIFT_PROGRAMS`` there is no shift.
+        ``SHIFT_PROGRAMS`` there is no shift: the pass over the programs is paid again
+        whenever a scalar argument changes (about 1.3 ms at 65,536 programs). Nor is
+        there one for an address ``_one_narrow_program_offset`` does not vouch for.
         """
         programs = extents[0] * extents[1] * extents[2]
-        if programs > SHIFT_PROGRAMS:
+        if programs > SHIFT_PROGRAMS or not self._one_narrow_program_offset(pointer):
             return None
         try:
             part = self._pid_part(pointer, arguments, grid)
@@ -714,6 +718,63 @@ class LaunchCheck:
                 total = total + np.broadcast_to(value, (programs, 1)) * signed
         total = total - total[0]
         return int(total.min()), int(total.max()), int(total.argmin()), int(total.argmax())
+
+    def _one_narrow_program_offset(self, pointer):
+        """Whether the closed form's arithmetic is the source's for this address.
+
+        ``_pid_part`` is exact modulo 2**32, and the caller takes the address for exact
+        when its whole range lies within 2**31. That is sound for ONE offset computed at
+        32 bits: the source's value is the offset wrapped to 32 bits, congruent to the
+        model and in the same range, so equal; an intermediate step that wraps changes
+        neither. It is not sound past that, and this returns False:
+
+        * a sum, product or shift at more than 32 bits on the program part. A coefficient
+          that is a multiple of 2**32 (``pid.to(int64) * 2**32``) vanishes from the
+          model, and the two extreme programs it is confirmed on agree with it;
+        * an extension of the program part other than a sign extension from 32 bits;
+        * two offsets that follow the program, added to the pointer one after the other.
+          Each wraps on its own and the pointer sum does not: ``pid * 2**30`` and then
+          ``pid * (1 - 2**30)`` is ``pid`` in the model and ``pid - 2**32`` for every
+          fourth program.
+
+        Such an access is sampled. No dot kernel reaches here with one today (they are
+        refused at compile as a program-derived batch offset).
+        """
+
+        def narrow(node):
+            if not self.flags[node] & PID:
+                return True
+            entry = self.nodes[node]
+            kind = entry[0]
+            if kind == "b" and entry[2] >= 32:
+                # The operations ``_pid_part`` splits; anything else is an atom, read as it is.
+                if entry[1] in ("add", "sub", "mul", "shl"):
+                    return entry[2] == 32 and narrow(entry[3]) and narrow(entry[4])
+                return True
+            if kind == "x":
+                return entry[1] == "sext" and entry[2] == 32 and narrow(entry[4])
+            if kind in ("bc", "xd"):
+                return narrow(entry[2])
+            if kind == "rs":
+                return narrow(entry[3])
+            return kind != "ptr+"
+
+        offsets, node = 0, pointer
+        while True:
+            entry = self.nodes[node]
+            if entry[0] == "ptr+":
+                if self.flags[entry[2]] & PID:
+                    offsets += 1
+                    if not narrow(entry[2]):
+                        return False
+                node = entry[1]
+            elif entry[0] in ("bc", "xd"):
+                node = entry[2]
+            elif entry[0] == "rs":
+                node = entry[3]
+            else:
+                break
+        return offsets <= 1 and not self.flags[node] & PID
 
     def _branches(self, arguments, grid):
         """(the accesses this launch does not perform, those it is known to perform), of the ones under a branch.
