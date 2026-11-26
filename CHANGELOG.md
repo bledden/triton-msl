@@ -166,14 +166,15 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   sequential sum of rounded products). A constant dot with an accumulator that
   is not a constant zero, an integer or float64 one, or an operand that is not
   one number is refused at compile.
-- Hand every float constant to the lowering as the value it has in its own
-  type. A float16 or bfloat16 constant arrived as the decimal MLIR prints for
-  it, and a constant that is not finite as its bit pattern. The ordinary
-  lowering decoded both. A called (`noinline`) function did not: a float32
-  `+inf` constant in one was `2139095040.0`. The variable-length attention
-  templates printed a float16 scale as its six-digit decimal
-  (`0.0883789f` for `0.08837890625`). Both are fixed in the walker, for every
-  reader. 0.3.0 was not checked.
+- Hand every finite float constant to the lowering as the value it has in its
+  own type. A float16 or bfloat16 constant arrived as the decimal MLIR prints
+  for it, which is another float32, and only the ordinary lowering rounded it:
+  the variable-length attention templates printed a float16 scale as that
+  decimal (`0.0883789f` for `0.08837890625`). That is fixed in the walker, for
+  every reader. A constant that is not finite still arrives as its bit
+  pattern; a called (`noinline`) function printed that integer as a number (a
+  float32 `+inf` was `2139095040.0`) and now prints the infinity. 0.3.0 was
+  not checked.
 - Refuse a dot with one constant operand on the positional matmul template. It
   has two pointer arguments, the template binds A, B, C, M, N, K by slot, and
   its signature guard ran only for three or more pointers: the shader read the

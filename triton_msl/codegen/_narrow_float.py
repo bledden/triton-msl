@@ -98,6 +98,10 @@ def constant_in_type(value, elem_type: str) -> float:
     float16 is another number and the pattern of an infinity is 31744. The result is a
     Python float: exactly the constant for float16 and bfloat16; for float32 and float64
     the decimal's double, which a float literal or one rounding names exactly.
+
+    The walker applies this to the decimals, so a finite constant is already its
+    number for every reader. It leaves a bit pattern an integer, and a reader that
+    prints or computes with a constant calls this for it.
     """
     if isinstance(value, int):
         if elem_type == "f16":

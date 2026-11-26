@@ -243,9 +243,10 @@ class _DeviceFuncLowerer:
             msl_val = "true" if val else "false"
             msl_ty = "bool"
         elif isinstance(val, float) or (isinstance(val, int) and elem.startswith("f")):
-            from triton_msl.codegen._narrow_float import float_literal
+            from triton_msl.codegen._narrow_float import constant_in_type, float_literal
 
-            msl_val = float_literal(val)
+            # An integer here is the bit pattern of a value that is not finite.
+            msl_val = float_literal(constant_in_type(val, elem))
             msl_ty = "float"
         else:
             msl_val = str(val)

@@ -17372,12 +17372,15 @@ class GenericLowerer(
                 return None
             if isinstance(value, bool):
                 return "true" if value else "false"
+            from triton_msl.codegen._narrow_float import FLOAT_TYPES, constant_in_type, float_literal
+
+            if op.elem_type in FLOAT_TYPES:
+                # An integer here is the bit pattern of a value that is not finite.
+                return (
+                    f"({float_literal(constant_in_type(value, op.elem_type))})" if type(value) in (int, float) else None
+                )
             if isinstance(value, int):
                 return f"({int(value)})"
-            if isinstance(value, float):
-                from triton_msl.codegen._narrow_float import float_literal
-
-                return f"({float_literal(value)})"
             return None
 
         # arith.cmpi — binary comparison

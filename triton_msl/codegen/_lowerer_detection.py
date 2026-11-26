@@ -5705,17 +5705,23 @@ class _DetectionMixin:
                 return None
             if a_op.op != "arith.constant" or b_op.op != "arith.constant":
                 return None
-            # The walker gives a float constant as the number it holds in its own type.
-            # Anything else here (a tile that is not one number, an integer dot, a
-            # float64 one) is not this template's program, and no other route takes a
-            # dot of two constants: refuse it by name.
+            # The walker gives a finite float constant as the number it holds in its own
+            # type and one that is not finite as the type's bit pattern. Anything else
+            # here (a tile that is not one number, an integer dot, a float64 one) is
+            # not this template's program, and no other route takes a dot of two
+            # constants: refuse it by name.
+            from triton_msl.codegen._narrow_float import constant_in_type
+
             for operand in (a_op, b_op):
-                if operand.elem_type not in ("f32", "f16", "bf16") or type(operand.attrs.get("value")) is not float:
+                if operand.elem_type not in ("f32", "f16", "bf16") or type(operand.attrs.get("value")) not in (
+                    int,
+                    float,
+                ):
                     _refuse("an operand is not one float32, float16 or bfloat16 number")
             if ssa.elem_type not in ("f32", "f16", "bf16"):
                 _refuse(f"the result type {ssa.elem_type} is not float32, float16 or bfloat16")
-            const_a = a_op.attrs["value"]
-            const_b = b_op.attrs["value"]
+            const_a = constant_in_type(a_op.attrs["value"], a_op.elem_type)
+            const_b = constant_in_type(b_op.attrs["value"], b_op.elem_type)
             if len(ssa.operand_ids) >= 3:
                 # The accumulator: a constant zero, through the wrappers that change no value.
                 acc = op_by_id.get(ssa.operand_ids[2])
