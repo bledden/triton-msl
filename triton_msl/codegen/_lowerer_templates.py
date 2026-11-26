@@ -307,6 +307,22 @@ class _TemplateMixin:
             widths[role] = ("i32", "i32", True)
         return widths
 
+    # Templates whose launches a storage proof judges. INVARIANT for every one of them:
+    # the cells the SHADER stores are exactly the cells the proof's store set holds (the
+    # source's stores), and it loads nothing the source does not load. The proof judges
+    # the source; a template that stores more makes a passing launch write outside its
+    # tensor (the dense template once did, and the constant-dot template). A template
+    # added here needs a row in
+    # tests/test_a_dot_template_reads_and_stores_through_its_own_arguments.py
+    # (``TEMPLATES``), which launches each one and compares the whole output storage.
+    STORAGE_PROVED_TEMPLATES = (
+        "dense single tile",
+        "scalar single tile",
+        "fused softmax/epilogue",
+        "generic dot",
+        "constant dot",
+    )
+
     def _record_single_tile_bounds(self, info, block_m, block_n, block_k):
         """Bind a loop-free dot to the launch storage proof of the cells its source addresses.
 
@@ -4230,20 +4246,23 @@ class _TemplateMixin:
             return None
         store, dot = stores[0], dots[0]
         # The template converts its float sum to the output type once. Between the dot
-        # and the store the source may change layout and cast to another float type;
-        # anything else, or another observer of the product, is not replayed.
-        passed = ("ttg.convert_layout", "arith.truncf", "arith.extf", "tt.fp_to_fp")
-        chain, value = {dot.id}, store.operand_ids[1]
+        # and the store the source may change layout and cast ONCE, to the output's
+        # element type. A second cast rounds through a type the template never visits
+        # (GPU: ``.to(float16).to(float32)`` stored 0.96000004 where the source stores
+        # 0.9599609375); it and any other operation refuse.
+        chain, value, casts = {dot.id}, store.operand_ids[1], []
         for _ in range(8):
             op = ops.get(value)
             if op is None or op.id == dot.id:
                 break
-            if op.op not in passed or not op.operand_ids:
+            if op.op not in ("ttg.convert_layout", "arith.truncf", "arith.extf", "tt.fp_to_fp") or not op.operand_ids:
                 return None
+            if op.op != "ttg.convert_layout":
+                casts.append(op)
             chain.add(op.id)
             value = op.operand_ids[0]
-        if value != dot.id:
-            return None  # the stored value is not the dot result itself
+        if value != dot.id or len(casts) > 1:
+            return None  # not the dot result itself, or a cast round trip
         for use in ops.values():
             if use.id in chain or use.id == store.id:
                 continue
@@ -4296,7 +4315,10 @@ class _TemplateMixin:
         except ValueError:
             return None
         dense = np.arange(rows, dtype=np.int64)[:, None] * cols + np.arange(cols, dtype=np.int64)[None, :]
-        return base[0] if np.array_equal(found, dense) else None
+        if not np.array_equal(found, dense):
+            return None
+        stored = casts[0].elem_type if casts else dot.elem_type
+        return base[0] if stored == base[0].elem_type else None
 
     def _lower_dot_simple_template(self, tile_dims, ptr_args, dtype) -> str:
         """Fall back to optimized simdgroup matmul template for simple kernels."""

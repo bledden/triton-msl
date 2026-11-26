@@ -153,6 +153,25 @@ def test_a_dense_constant_dot_keeps_its_one_output_cast():
     assert "_mmarg0[_i * 32u + _j] = (half)_sum;" in msl
 
 
+@triton.jit
+def _constant_cast_chain(C, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, CHAIN: tl.constexpr):
+    # CHAIN: the product rounded through float16 on its way to a float32 output.
+    rm = tl.arange(0, BM)
+    rn = tl.arange(0, BN)
+    c = tl.dot(tl.full((BM, BK), 0.1, tl.float32), tl.full((BK, BN), 0.3, tl.float32))
+    if CHAIN:
+        c = c.to(tl.float16).to(tl.float32)
+    tl.store(C + rm[:, None] * BN + rn[None, :], c)
+
+
+def test_a_constant_dot_rounded_through_another_type_is_refused():
+    """The template converts once; a cast round trip is a value it does not compute."""
+    msl, _ = _lower(_constant_cast_chain, dict(BLOCKS, CHAIN=False))
+    assert "_mmarg0[_i * 32u + _j] = (float)_sum;" in msl
+    with pytest.raises(MetalNonRecoverableError):
+        _lower(_constant_cast_chain, dict(BLOCKS, CHAIN=True))
+
+
 @pytest.mark.parametrize("form", [1, 2, 3, 4, 5])
 def test_a_constant_dot_the_template_would_overwrite_is_refused(form):
     """Tiled, clipped, strided or padded: the dense whole-tile template is another program."""
@@ -195,22 +214,30 @@ def _constant_launch():
     return source, lambda a, b, c: _both_constant[(1,)](c, a, 32, 32, 32, FORM=0, LC=32, **BLOCKS)
 
 
+# row -> (the product's name for the template, the launch)
 TEMPLATES = {
-    "dense": "dense",
-    "dense_trans_a": "dense_trans_a",
-    "scalar": "loop_free",
-    "scalar_tiled_clipped": "loop_free_partial_tiles",
-    "scalar_negative_stride": "loop_free_negative_row_stride",
-    "loop_bound_one": "loop_bound_one_partial_tiles",
-    "fused_softmax_clipped": "softmax_32_clipped",
-    "generic_epilogue_clipped": "epilogue_32_clipped",
-    "generic_masked_loads": "masked_loads_loop_bound_one_two_tiles",
-    "constant": None,
+    "dense": ("dense single tile", "dense"),
+    "dense_trans_a": ("dense single tile", "dense_trans_a"),
+    "scalar": ("scalar single tile", "loop_free"),
+    "scalar_tiled_clipped": ("scalar single tile", "loop_free_partial_tiles"),
+    "scalar_negative_stride": ("scalar single tile", "loop_free_negative_row_stride"),
+    "loop_bound_one": ("scalar single tile", "loop_bound_one_partial_tiles"),
+    "fused_softmax_clipped": ("fused softmax/epilogue", "softmax_32_clipped"),
+    "generic_epilogue_clipped": ("generic dot", "epilogue_32_clipped"),
+    "generic_masked_loads": ("generic dot", "masked_loads_loop_bound_one_two_tiles"),
+    "constant": ("constant dot", None),
 }
 
 
+def test_every_template_with_a_storage_proof_has_a_row():
+    """A template added to the product's list without a launch-and-compare row fails here."""
+    from triton_msl.codegen.generic_lowerer import GenericLowerer
+
+    assert {kind for kind, _ in TEMPLATES.values()} == set(GenericLowerer.STORAGE_PROVED_TEMPLATES)
+
+
 def _launcher(name):
-    target = TEMPLATES[name]
+    target = TEMPLATES[name][1]
     if target is None:
         return _constant_launch()
     return (LAUNCHES.get(target) or PLAN_LAUNCHES[target])()
