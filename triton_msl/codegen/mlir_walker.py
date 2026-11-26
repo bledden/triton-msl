@@ -1588,6 +1588,16 @@ class MLIRWalker:
                     if ssa_name in self._text_index.constants:
                         attrs["value"] = self._text_index.constants[ssa_name]
             self._constant_walk_index += 1
+            # A float constant is handed on as the number it holds in its own type: the
+            # decimal MLIR prints round-trips in that type only, and a value that is not
+            # finite is printed as the type's bit pattern. No reader decodes either.
+            held = attrs.get("value")
+            if type(held) in (int, float) and op.get_num_results() == 1:
+                from ._narrow_float import FLOAT_TYPES, constant_in_type
+
+                elem = _extract_elem_type(str(op.get_result(0).get_type()))
+                if elem in FLOAT_TYPES:
+                    attrs["value"] = constant_in_type(held, elem)
 
         elif name in ("arith.cmpi", "arith.cmpf"):
             pred = op.get_int_attr("predicate")

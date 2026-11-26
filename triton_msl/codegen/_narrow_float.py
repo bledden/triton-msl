@@ -86,6 +86,52 @@ def narrow_constant(value: float, elem_type: str) -> float:
     return struct.unpack("<f", struct.pack("<I", bits))[0]
 
 
+FLOAT_TYPES = ("f16", "bf16", "f32", "f64")
+
+
+def constant_in_type(value, elem_type: str) -> float:
+    """The number a float constant of ``elem_type`` holds, from what MLIR printed for it.
+
+    MLIR prints a finite constant as a decimal that round-trips in the constant's OWN
+    type, and one that is not finite (or does not print) as the bit pattern of that
+    type, which arrives here as an integer. Read without the type, the decimal of a
+    float16 is another number and the pattern of an infinity is 31744. The result is a
+    Python float: exactly the constant for float16 and bfloat16; for float32 and float64
+    the decimal's double, which a float literal or one rounding names exactly.
+    """
+    if isinstance(value, int):
+        if elem_type == "f16":
+            return struct.unpack("<e", struct.pack("<H", value & 0xFFFF))[0]
+        if elem_type == "bf16":
+            return struct.unpack("<f", struct.pack("<I", (value & 0xFFFF) << 16))[0]
+        if elem_type == "f32":
+            return struct.unpack("<f", struct.pack("<I", value & 0xFFFFFFFF))[0]
+        return struct.unpack("<d", struct.pack("<Q", value & 0xFFFFFFFFFFFFFFFF))[0]
+    value = float(value)
+    if elem_type in NARROW and value == value and value not in (float("inf"), float("-inf")):
+        return narrow_constant(value, elem_type)
+    return value
+
+
+def float_literal(value: float) -> str:
+    """A Metal ``float`` expression for ``value``: the shortest decimal that names it, or the macro.
+
+    ``repr`` of a double round-trips, and of a value a float32 holds it names that
+    float32. An infinity or a NaN has no decimal (``inff`` does not compile).
+    """
+    value = float(value)
+    if value != value:
+        return "NAN"
+    if value in (float("inf"), float("-inf")):
+        return "INFINITY" if value > 0 else "(-INFINITY)"
+    return f"{value!r}f"
+
+
+def float_bits(value: float) -> str:
+    """``value`` as the float32 it rounds to, spelled by its bits: no decimal, no rounding by the compiler."""
+    return f"as_type<float>(0x{struct.unpack('<I', struct.pack('<f', value))[0]:08X}u)"
+
+
 def _walk(ops):
     for op in ops or ():
         yield op

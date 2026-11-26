@@ -17375,7 +17375,9 @@ class GenericLowerer(
             if isinstance(value, int):
                 return f"({int(value)})"
             if isinstance(value, float):
-                return f"({float(value)}f)"
+                from triton_msl.codegen._narrow_float import float_literal
+
+                return f"({float_literal(value)})"
             return None
 
         # arith.cmpi — binary comparison
