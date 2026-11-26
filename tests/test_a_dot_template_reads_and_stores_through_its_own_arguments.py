@@ -172,6 +172,120 @@ def test_a_constant_dot_rounded_through_another_type_is_refused():
         _lower(_constant_cast_chain, dict(BLOCKS, CHAIN=True))
 
 
+@triton.jit
+def _constant_rounded(
+    H, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, MODE: tl.constexpr, AV: tl.constexpr, BV: tl.constexpr
+):
+    # One cast to the float16 output, in each rounding spelling Triton has for a downcast.
+    rm = tl.arange(0, BM)
+    rn = tl.arange(0, BN)
+    c = tl.dot(tl.full((BM, BK), AV, tl.float32), tl.full((BK, BN), BV, tl.float32))
+    if MODE == 0:
+        c = c.to(tl.float16)
+    elif MODE == 1:
+        c = c.to(tl.float16, fp_downcast_rounding="rtne")
+    else:
+        c = c.to(tl.float16, fp_downcast_rounding="rtz")
+    tl.store(H + rm[:, None] * BN + rn[None, :], c)
+
+
+def test_a_constant_dot_cast_toward_zero_is_refused():
+    """The template rounds to nearest. GPU, before: 0.96044921875 stored where the source stores 0.9599609375."""
+    for mode in (0, 1):  # the default rounding and its explicit spelling are the template's own cast
+        msl, _ = _lower(_constant_rounded, dict(BLOCKS, MODE=mode, AV=0.1, BV=0.3001))
+        assert "_mmarg0[_i * 32u + _j] = (half)_sum;" in msl
+    with pytest.raises(MetalNonRecoverableError) as refusal:
+        _lower(_constant_rounded, dict(BLOCKS, MODE=2, AV=0.1, BV=0.3001))
+    assert "rounding" in str(refusal.value)
+
+
+@triton.jit
+def _rounded(
+    A,
+    B,
+    H,
+    M,
+    N,
+    K,
+    SA,
+    SB,
+    SC,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    KIND: tl.constexpr,
+    UNIT: tl.constexpr,
+    RTZ: tl.constexpr,
+):
+    # One dot on each route whose template or fast replacement takes the output cast into its store.
+    rm = tl.arange(0, BM)
+    rn = tl.arange(0, BN)
+    rk = tl.arange(0, BK)
+    if KIND == 4:
+        rm = tl.program_id(0) * BM + rm
+        rn = tl.program_id(1) * BN + rn
+    if KIND == 0 or KIND == 5:
+        ap = A + rm[:, None] * BK + rk[None, :]
+        bp = B + rk[:, None] * BN + rn[None, :]
+        cp = H + rm[:, None] * BN + rn[None, :]
+    elif UNIT:
+        ap = A + rm[:, None] * K + rk[None, :]
+        bp = B + rk[:, None] * N + rn[None, :]
+        cp = H + rm[:, None] * N + rn[None, :]
+    else:
+        ap = A + rm[:, None] * SA + rk[None, :]
+        bp = B + rk[:, None] * SB + rn[None, :]
+        cp = H + rm[:, None] * SC + rn[None, :]
+    if KIND == 5:
+        c = tl.dot(tl.full((BM, BK), 0.1, tl.float32), tl.full((BK, BN), 0.3, tl.float32))
+    elif KIND == 4:
+        c = tl.zeros((BM, BN), tl.float32)
+        for kk in range(0, K, BK):
+            a = tl.load(ap, mask=(rm[:, None] < M) & ((kk + rk)[None, :] < K), other=0.0)
+            b = tl.load(bp, mask=((kk + rk)[:, None] < K) & (rn[None, :] < N), other=0.0)
+            c += tl.dot(a, b)
+            ap += BK
+            bp += BK * (N if UNIT else SB)
+    else:
+        c = tl.dot(tl.load(ap), tl.load(bp))
+    if KIND == 2:
+        c = c - tl.max(c, 1)[:, None]
+        c = tl.exp(c)
+        c = c / tl.sum(c, 1)[:, None]
+    if KIND == 3:
+        c = c * 2.0 + 1.0
+    c = c.to(tl.float16, fp_downcast_rounding="rtz") if RTZ else c.to(tl.float16)
+    if KIND == 4:
+        tl.store(cp, c, mask=(rm[:, None] < M) & (rn[None, :] < N))
+    else:
+        tl.store(cp, c)
+
+
+ROUNDED = {
+    "dense single tile": (0, False),
+    "scalar single tile": (1, False),
+    "fused softmax": (2, False),
+    "epilogue": (3, False),
+    "K loop": (4, False),
+    "K loop, fast replacement": (4, True),
+    "two constant tiles": (5, False),
+}
+
+
+@pytest.mark.parametrize("block", [16, 32])
+@pytest.mark.parametrize("route", sorted(ROUNDED))
+def test_no_route_drops_a_cast_toward_zero(route, block):
+    """Round toward zero on the way to the store is refused, or the shader replays it; no template rounds to nearest instead."""
+    kind, unit = ROUNDED[route]
+    constants = dict(BM=block, BN=block, BK=block, KIND=kind, UNIT=unit)
+    _lower(_rounded, dict(constants, RTZ=False))  # the default rounding compiles on every one of these routes
+    try:
+        msl, _ = _lower(_rounded, dict(constants, RTZ=True))
+    except MetalNonRecoverableError:
+        return
+    assert "0xffffe000" in msl.lower(), "a round-toward-zero cast compiled into a shader that does not truncate"
+
+
 @pytest.mark.parametrize("form", [1, 2, 3, 4, 5])
 def test_a_constant_dot_the_template_would_overwrite_is_refused(form):
     """Tiled, clipped, strided or padded: the dense whole-tile template is another program."""
@@ -278,3 +392,31 @@ def test_a_template_stores_exactly_the_cells_its_proof_is_about(name, compile_sh
             finally:
                 _forget_tripped_lease(hits)
         assert outcome == ("refused" if refused else "dispatched")
+
+
+@requires_gpu
+@pytest.mark.parametrize("compile_shader", ["1", "0"])
+@pytest.mark.parametrize("mode", [0, 1])
+@pytest.mark.parametrize("values", [(0.1, 0.3), (0.1, 0.3001), (1.5, 2.25)])
+def test_a_constant_dot_cast_once_stores_the_source_value(values, mode, compile_shader, monkeypatch):
+    """One cast with the default rounding: every cell is the source's float16, and no other cell changes.
+
+    The shader stores ``_mmarg0[_i * 32 + _j]`` for 1,024 cells and reads nothing; the output is a
+    float16 view 2,048 elements into a storage of 8,192. 0.1 x 0.3001 rounds up, 0.1 x 0.3 down.
+    """
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", compile_shader)
+    msl, _ = _lower(_constant_rounded, dict(BLOCKS, MODE=mode, AV=values[0], BV=values[1]))
+    stores = [line for line in msl.splitlines() if "_mmarg" in line and "=" in line and "buffer" not in line]
+    assert stores == ["        _mmarg0[_i * 32u + _j] = (half)_sum;"] and "_e < 1024u" in msl
+    total = np.float32(0.0)
+    for _ in range(32):
+        total = np.float32(total + np.float32(values[0]) * np.float32(values[1]))
+    expected = np.full(8192, FILL, dtype=np.float16)
+    expected[2048 : 2048 + 1024] = np.float16(total)
+    storage = torch.full((8192,), FILL, dtype=torch.float16, device="mps")
+    _constant_rounded[(1,)](storage[2048:], MODE=mode, AV=values[0], BV=values[1], **BLOCKS)
+    torch.mps.synchronize()
+    got = storage.cpu().numpy()
+    assert np.array_equal(got, expected), (
+        f"{int((got != expected).sum())} cells differ; first {got[2048]!r} vs {expected[2048]!r}"
+    )

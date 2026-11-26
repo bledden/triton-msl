@@ -4186,6 +4186,16 @@ class _TemplateMixin:
         # the dense cells). The output is the pointer the store addresses, not the last
         # pointer argument.
         c_ptr = self._constant_dot_dense_store(M, N)
+        if c_ptr == "rounding":
+            from triton_msl.errors import MetalNonRecoverableError
+
+            raise MetalNonRecoverableError(
+                "dot of two constant tiles: the stored value is cast with a rounding mode other than the default "
+                "(fp_downcast_rounding), and the template converts its sum once, rounding to nearest even. "
+                "Refusing (correct-or-refuse). Use the default rounding, or store the constant product with a "
+                "plain elementwise kernel.",
+                op_name="tt.dot",
+            )
         if c_ptr is None:
             from triton_msl.errors import MetalNonRecoverableError
 
@@ -4227,7 +4237,9 @@ class _TemplateMixin:
 
         Evaluates the store address over the tile from the operations that build it. It
         must be ``C + i * cols + j`` for ``i`` in ``[0, rows)`` and ``j`` in ``[0, cols)``,
-        from compile-time values only, with no mask. Returns None for anything else.
+        from compile-time values only, with no mask. Returns None for anything else, and
+        ``"rounding"`` for a store path whose cast names a rounding mode the template
+        does not have.
         """
         import numpy as np
 
@@ -4249,7 +4261,12 @@ class _TemplateMixin:
         # and the store the source may change layout and cast ONCE, to the output's
         # element type. A second cast rounds through a type the template never visits
         # (GPU: ``.to(float16).to(float32)`` stored 0.96000004 where the source stores
-        # 0.9599609375); it and any other operation refuse.
+        # 0.9599609375); it and any other operation refuse. The one cast is the
+        # template's own conversion, which rounds to nearest even: a cast that names
+        # any other rounding (``fp_downcast_rounding="rtz"`` is ``tt.fp_to_fp`` with a
+        # rounding attribute; GPU: 0.96044921875 stored where the source stores
+        # 0.9599609375) refuses. Only "rtne", or no attribute on a plain
+        # ``arith.truncf``/``arith.extf``, is the default.
         chain, value, casts = {dot.id}, store.operand_ids[1], []
         for _ in range(8):
             op = ops.get(value)
@@ -4257,6 +4274,8 @@ class _TemplateMixin:
                 break
             if op.op not in ("ttg.convert_layout", "arith.truncf", "arith.extf", "tt.fp_to_fp") or not op.operand_ids:
                 return None
+            if op.op == "tt.fp_to_fp" and (op.attrs or {}).get("rounding") != "rtne":
+                return "rounding"
             if op.op != "ttg.convert_layout":
                 casts.append(op)
             chain.add(op.id)
