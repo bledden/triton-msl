@@ -150,6 +150,30 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   time: a runtime row stride passed equal to `N`, a runtime offset passed as 0,
   and a runtime store mask that keeps the whole tile. Use literal strides and
   an unmasked store, or a plain elementwise kernel. 0.3.0 was not checked.
+- Compute the dense dot of two constant tiles as the same dot of loaded tiles
+  is computed. The template stored `(float)K * a * b` with the constants as
+  decimal literals. That overflowed where the sum does not (float32
+  `3e38 x 1e-3` over 32 terms stored `+inf`; the sum is `9.6e36`), and a
+  float16 or bfloat16 constant was the decimal MLIR prints for it, which is
+  another float32 (float16 `1e-4` was `0.000100017`), so nearly every
+  non-dyadic float16 or bfloat16 constant gave a value no summation of the
+  source gives. The template now starts from zero and adds one product of the
+  constants' own bits per `k` in a float register, on the device, which is the
+  expression of the generic route; on the GPU it stores the same bits as that
+  route for the same dot of loaded tiles, including where the device fuses the
+  multiply and add and where it flushes a subnormal result to zero (both are
+  the device's arithmetic, as on every other route, and neither is IEEE's
+  sequential sum of rounded products). A constant dot with an accumulator that
+  is not a constant zero, an integer or float64 one, or an operand that is not
+  one number is refused at compile.
+- Hand every float constant to the lowering as the value it has in its own
+  type. A float16 or bfloat16 constant arrived as the decimal MLIR prints for
+  it, and a constant that is not finite as its bit pattern. The ordinary
+  lowering decoded both. A called (`noinline`) function did not: a float32
+  `+inf` constant in one was `2139095040.0`. The variable-length attention
+  templates printed a float16 scale as its six-digit decimal
+  (`0.0883789f` for `0.08837890625`). Both are fixed in the walker, for every
+  reader. 0.3.0 was not checked.
 - Refuse a dot with one constant operand on the positional matmul template. It
   has two pointer arguments, the template binds A, B, C, M, N, K by slot, and
   its signature guard ran only for three or more pointers: the shader read the
