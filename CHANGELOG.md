@@ -108,20 +108,26 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   replacement. The launcher computes, from the kernel's access plan, the
   elements each load and store of the source reaches, masks and loop trips
   included, and refuses a launch in which one is found outside its storage.
-  Every launch it passes carries one of three verdicts:
+  Every launch this proof passes carries one of three verdicts:
 
   | Access | Verdict | What that means |
   |---|---|---|
   | Does not follow the program id, within 262,144 address instances | proved | every cell shown inside the storage |
   | Any access of a launch within 262,144 address instances per access (programs x lanes x trips) | proved | every program read |
-  | Address = lane part + program part, mask does not follow the program (unmasked loads on a tiled grid), up to 1,048,576 programs, no 32-bit step that could wrap | proved | closed form, confirmed on the two extreme programs |
-  | Anything else past 262,144 instances: a boundary mask on a tiled axis, the 1-D `pid % n` / `pid // n` split, a K loop whose one program is past the budget | sampled | read at the first two and last two programs of each grid axis and trips of each loop. A cell found outside there refuses the launch. An out-of-storage cell of a program or trip in between is NOT caught, and the launch runs as it did in 0.3.0 |
+  | Address = lane part + one program offset computed at 32 bits, mask does not follow the program (unmasked loads on a tiled grid), up to 65,536 programs, the whole address range within 2**31 | proved | closed form, confirmed on the two extreme programs |
+  | Anything else past 262,144 instances: a boundary mask on a tiled axis, the 1-D `pid % n` / `pid // n` split, a K loop whose one program is past the budget, unmasked loads on more than 65,536 programs, a program offset computed at 64 bits or two of them added to the pointer in turn | sampled | read at the first two and last two programs of each grid axis and trips of each loop. A cell found outside there refuses the launch. An out-of-storage cell of a program or trip in between is NOT caught, and the launch runs as it did in 0.3.0 |
   | Address or mask depends on loaded data; under a branch the arguments do not decide; pointer not traced to one argument; unbounded loop; tensor storage unreadable or of another element width; one tile past the budget even at the loop ends | not judged | nothing is claimed for that access |
 
   A launch is "proved" only when every access is. The verdict belongs to the
-  launch: `compiled.run.storage_verdict` is `("proved", ())`, or
-  `("sampled" | "not judged", accesses)` for the last launch through that
-  launcher, and a remembered launch reports the verdict of its first sight.
+  launch: for the last launch through that launcher,
+  `compiled.run.storage_verdict` is `("proved", ())`,
+  `("sampled" | "not judged", accesses)`, or, when this proof refused it,
+  `("refused", (access,))` with the access that left its storage. A remembered
+  launch reports the verdict of its first sight. The value is `None` wherever
+  this proof did not judge the launch: a kernel whose storage the template
+  plan judges (the scalar and dense single-tile templates and the K-loop
+  storage plans; that proof passes or refuses and records no verdict), a
+  kernel with no storage proof, and a launch an earlier check refused.
   With `TRITON_MSL_LAUNCH_MEMO_DIAG=1` the `dot_storage` counters also count
   `sampled` and `not_judged` launches.
   Not covered by either proof: a K-loop kernel that carries a fast replacement
@@ -136,8 +142,10 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   source's cells passed the storage proof and was then written past. Those
   forms now refuse at compile; the dense unmasked form stores through the
   pointer its store addresses. The store path may carry one cast, to the
-  output's element type; a cast round trip (`.to(float16).to(float32)`) stored
-  the unrounded value and now refuses. This is a compile refusal for three
+  output's element type and with the default rounding only; a cast round trip
+  (`.to(float16).to(float32)`) stored the unrounded value, a cast with
+  `fp_downcast_rounding="rtz"` stored the value rounded to nearest
+  (0.96044921875 for 0.9599609375), and both now refuse. This is a compile refusal for three
   forms that computed correctly before, because the store is dense only at run
   time: a runtime row stride passed equal to `N`, a runtime offset passed as 0,
   and a runtime store mask that keeps the whole tile. Use literal strides and
