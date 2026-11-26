@@ -140,3 +140,46 @@ def test_a_remembered_launch_keeps_the_verdict_of_its_first_sight(monkeypatch):
     assert seen == ["sampled", "proved", "sampled", "proved", "sampled"]
     kinds = {why for _, _, why in _verdict(_rows, scalars, B16)[1]}
     assert kinds == {"sampled"}
+
+
+@pytest.mark.parametrize("compile_shader", ["1", "0"])
+def test_a_refused_launch_reports_refused_not_the_launch_before_it(compile_shader, monkeypatch):
+    """The verdict is of the last launch: after a refusal it names the access that left its storage."""
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", compile_shader)
+    scalars = [160, 16, 16, 16, 16, 16]
+    sizes = [span[1] + 1 for span in _source(_rows, 10, *scalars)]
+    whole = [torch.zeros(size, device="mps") for size in sizes]
+    assert _launch(monkeypatch, _rows, (10,), whole, scalars, B16) == "dispatched"
+    assert _verdict(_rows, scalars, B16) == ("proved", ())
+    short = [torch.zeros(sizes[0] - 1, device="mps")] + whole[1:]
+    assert _launch(monkeypatch, _rows, (10,), short, scalars, B16) == "refused"
+    assert _verdict(_rows, scalars, B16) == ("refused", (("L", 0, 0, sizes[0] - 1, 0, sizes[0] - 1),))
+    assert _launch(monkeypatch, _rows, (10,), whole, scalars, B16) == "dispatched"
+    assert _verdict(_rows, scalars, B16) == ("proved", ())
+
+
+def test_a_template_plan_launch_has_no_access_plan_verdict(monkeypatch):
+    """A kernel whose storage its template plan judges: ``storage_verdict`` stays None, passed or refused."""
+    from tests.test_a_loop_free_dot_proves_its_storage import REFUSED, _loop_free
+
+    constants = dict(BM=16, BN=16, BK=16)
+    scalars = [16, 16, 16, 16, 16]
+    whole = [torch.zeros(256, device="mps") for _ in range(3)]
+    handle = []
+    for tensors, outcome in ((whole, "dispatched"), ([torch.zeros(255, device="mps")] + whole[1:], REFUSED)):
+        with monkeypatch.context() as patch:
+            hits = _install_tripwire(patch)
+            try:
+                handle.append(_loop_free[(1, 1)](*tensors, *scalars, **constants))
+                seen = "dispatched"
+            except MetalNonRecoverableError as refusal:
+                seen = REFUSED if REFUSED in str(refusal) else str(refusal)
+            except Exception:
+                if not hits:
+                    raise
+                seen = "dispatched"
+            finally:
+                _forget_tripped_lease(hits)
+        assert seen == outcome
+        launchers = [compiled.run for cache in _loop_free.device_caches.values() for compiled in cache[0].values()]
+        assert launchers and all(launcher.storage_verdict is None for launcher in launchers)

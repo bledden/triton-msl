@@ -1156,8 +1156,17 @@ class MetalLauncher:
         self._matmul_memo = LaunchMemo(self.kernel_name, "matmul_storage")
         self._overlap_memo = LaunchMemo(self.kernel_name, "matmul_overlap")
         self._dot_storage_memo = LaunchMemo(self.kernel_name, "dot_storage")
-        # The access-plan storage proof's verdict for the last launch through this launcher
-        # (see _lane_order.verdict), and the verdict of each remembered launch.
+        # What the access-plan storage proof (see _lane_order.verdict) said of the LAST
+        # launch through this launcher, and the verdict of each remembered launch:
+        #   ("proved", ())                         every access shown inside its storage
+        #   ("sampled" | "not judged", accesses)   dispatched; those accesses were not proved
+        #   ("refused", (access,))                 refused: (kind, argument index, lowest,
+        #                                          highest, elements before, elements from)
+        #   None                                   that proof did not judge the launch: the
+        #       kernel's storage is judged by its template plan (the matmul storage proof,
+        #       which refuses or passes and keeps no verdict here), or it has no storage
+        #       proof (several dots, none, a fast replacement), or an earlier check refused
+        #       the launch before the proof ran.
         self.storage_verdict = None
         self._storage_verdicts = {}
         # Where the kernel loads and stores (see __call__). Every kernel the emitter lowers
@@ -1237,6 +1246,7 @@ class MetalLauncher:
         from triton_msl.backend import _host_extent
 
         _host_extent.clear_launch()
+        self.storage_verdict = None  # of this launch; set where the access-plan proof judges it
         validate_execution_contract(getattr(self, "_execution_contract", None))
         from triton_msl.backend._launch_contract import validate_packed_launch
 
@@ -1483,6 +1493,7 @@ class MetalLauncher:
             if _outside is not None:
                 from triton_msl.errors import MetalNonRecoverableError
 
+                self.storage_verdict = ("refused", (tuple(_outside),))
                 _kind, _index, _low, _high, _before, _after = _outside
                 _name = self.arg_names[flat_origin[_index]] if _index < len(flat_origin) else f"#{_index}"
                 raise MetalNonRecoverableError(
