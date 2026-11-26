@@ -487,13 +487,11 @@ PRODUCTS = [
 ]
 
 
-def _lower_typed(kernel, kind, constants):
+def _lower_typed(kernel, kind, constants, output=None):
     backend = MetalBackend(GPUTarget("metal", "apple-m4", 32))
     options = backend.parse_options({"num_warps": 4})
-    signature = {
-        name: ("constexpr" if name in constants else _KINDS[kind][2] if name in ("A", "B", "C") else "i32")
-        for name in kernel.arg_names
-    }
+    pointer = {"A": _KINDS[kind][2], "B": _KINDS[kind][2], "C": _KINDS[output or kind][2]}
+    signature = {name: ("constexpr" if name in constants else pointer.get(name, "i32")) for name in kernel.arg_names}
     context = ir.context()
     ir.load_dialects(context)
     module = ASTSource(kernel, signature, constants).make_ir(
@@ -565,3 +563,72 @@ def test_a_constant_dot_stores_what_the_generic_route_stores(kind, a, b, compile
     assert same.all(), (
         f"constant dot stores {got[1024]!r}, the generic route {want[1024]!r} ({int((~same).sum())} cells)"
     )
+
+
+# ---- float16 and bfloat16 operands into a float32 output -----------------------------------------
+#
+# The reviewer's reproducer stores the product of float16 or bfloat16 constants into a FLOAT32
+# output. With the output in the operands' type, the last rounding to 16 bits hid most of what
+# the old template got wrong (of the cases above, the non-dyadic float16 and bfloat16 ones
+# stored the same 16 bits on the old tree). Here nothing is rounded after the sum, and the
+# comparator is again the same dot of loaded tiles on the same device: operands of the same
+# type, a zero accumulator, no cast, a float32 store.
+WIDE = [
+    ("fp16", 1e-4, 1e-4),  # the reviewer's X1(c)
+    ("fp16", 0.1, 0.3),
+    ("fp16", 1.0 / 3.0, 7.0),
+    ("fp16", 0.3001, 0.7),
+    ("fp16", 60000.0, 1.5),
+    ("fp16", 65504.0, 65504.0),
+    ("fp16", 6e-8, 6e-8),  # float16 subnormals; their product is a normal float32
+    ("fp16", -0.1, 0.3),
+    ("fp16", _INF, 2.0),
+    ("bf16", 0.1, 0.3),  # the reviewer's X1(c)
+    ("bf16", 1e-4, 1e-4),
+    ("bf16", 1.0 / 3.0, 7.0),
+    ("bf16", 3e38, 1e-3),  # K * a overflows, the sum does not
+    ("bf16", 3e38, 0.5),  # the sum overflows
+    ("bf16", 1e-5, 1e-5),
+    ("bf16", _INF, 2.0),
+]
+
+
+@pytest.mark.parametrize("block", [16, 32])
+@pytest.mark.parametrize("kind,a,b", WIDE, ids=lambda item: repr(item))
+def test_a_narrow_constant_dot_into_float32_sums_the_constants_own_bits(kind, a, b, block):
+    constants = dict(BM=block, BN=block, BK=block, AV=a, BV=b, DT=_KINDS[kind][1])
+    msl = _lower_typed(_constant_product, kind, constants, output="fp32")
+    assert f"volatile float _a = as_type<float>(0x{_float_bits(a, kind):08X}u);" in msl
+    assert f"volatile float _b = as_type<float>(0x{_float_bits(b, kind):08X}u);" in msl
+    assert "float _dot_sum = 0.0f;" in msl and "_dot_sum += _a * _b;" in msl and "float _sum = _dot_sum;" in msl
+    assert "device float* _mmarg0 [[buffer(0)]]" in msl
+    stores = [line.strip() for line in msl.splitlines() if "_mmarg0[" in line]
+    assert stores == [f"_mmarg0[_i * {block}u + _j] = (float)_sum;"] and f"_e < {block * block}u" in msl
+
+
+@requires_gpu
+@pytest.mark.parametrize("compile_shader", ["1", "0"])
+@pytest.mark.parametrize("kind,a,b", WIDE, ids=lambda item: repr(item))
+def test_a_narrow_constant_dot_into_float32_stores_what_the_generic_route_stores(
+    kind, a, b, compile_shader, monkeypatch
+):
+    """Views 1,024 elements into storages of 4,096 filled with a guard value; whole storages compared."""
+    monkeypatch.setenv("TRITON_MSL_COMPILE_SHADER", compile_shader)
+    dtype = _KINDS[kind][0]
+    operands = [torch.full((4096,), value, dtype=dtype, device="mps") for value in (a, b)]
+    loaded = torch.full((4096,), FILL, dtype=torch.float32, device="mps")
+    loaded[1024:2048] = 0.0  # the accumulator the twin loads
+    _loaded_product[(1,)](operands[0][1024:2048], operands[1][1024:2048], loaded[1024:2048], 32, 32, 32, **BLOCKS)
+    constant = torch.full((4096,), FILL, dtype=torch.float32, device="mps")
+    _constant_product[(1,)](constant[1024:2048], AV=a, BV=b, DT=_KINDS[kind][1], **BLOCKS)
+    torch.mps.synchronize()
+    want = loaded.cpu().numpy()
+    got = constant.cpu().numpy()
+    assert (want[:1024] == FILL).all() and (want[2048:] == FILL).all() and not (want[1024:2048] == FILL).any()
+    assert (got[:1024] == FILL).all() and (got[2048:] == FILL).all(), "the constant dot stored outside its tile"
+    same = (got.view(np.uint32) == want.view(np.uint32)) | (np.isnan(got) & np.isnan(want))
+    assert same.all(), (
+        f"constant dot stores {got[1024]!r}, the generic route {want[1024]!r} ({int((~same).sum())} cells)"
+    )
+    for operand, value in zip(operands, (a, b)):
+        assert (operand.float().cpu().numpy() == np.float32(operand[0].float().item())).all() or np.isinf(value)
