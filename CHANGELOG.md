@@ -100,36 +100,34 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   accepted, one element less is refused. This is a change for a launch that ran
   with a short operand before. `do_not_specialize=["K"]` keeps the K-loop
   template and its own plan.
-- Prove the same, where it can be proved, for a single dot on a route without a
-  template storage plan: an epilogue on the generic route, the fused softmax
-  template, masked operand loads at a loop bound of 1, the source-replayed
-  K-loop epilogue, and a fully masked K-loop template that has no fast
-  replacement. The launcher computes, from the kernel's access plan, the lowest
-  and highest element each load and store of the source reaches, masks and loop
-  trips included, and refuses a launch that leaves a storage. What is proved,
-  and what is not:
-  - Proved, every accessed cell: an access that does not follow the program id;
-    any access of a launch with at most 4,194,304 address instances per access
-    (every program is read); and, for any grid of up to 4,194,304 programs, an
-    access whose address is a lane part plus a program part under a mask that
-    does not follow the program (unmasked operand loads on a tiled grid).
-  - Not proved, dispatched as before: an access past those limits whose mask
-    follows the program (a boundary mask on a tiled axis, the 1-D
-    `pid % n` / `pid // n` split). It is read at the first two and last two
-    programs of each grid axis and trips of each loop only. A cell found
-    outside there refuses the launch; a launch with nothing found there runs,
-    and one whose out-of-storage cell belongs to a program in between is not
-    caught.
-  - Not judged at all: an access whose address or mask depends on loaded data,
-    one under a branch the arguments do not decide, one through a pointer the
-    plan cannot trace to one argument, one in an unbounded loop, and a tensor
-    whose storage cannot be read or whose element width differs from the
-    pointer's.
-  `triton_msl.backend._lane_order.storage_unproved()` names the accesses of a
-  kernel's last judged launch that were not proved. A K-loop kernel that
-  carries a fast replacement (`fast_matmul`, the direct entry) and no storage
-  plan, a kernel of several dots and a kernel without a dot take neither proof.
-  The MLX route runs neither.
+- Judge the same, as far as it can be judged cheaply, for a single dot on a
+  route without a template storage plan: an epilogue on the generic route, the
+  fused softmax template, masked operand loads at a loop bound of 1, the
+  source-replayed K-loop epilogue, the dense constant-dot template, and a
+  masked K-loop template that carries neither a storage plan nor a fast
+  replacement. The launcher computes, from the kernel's access plan, the
+  elements each load and store of the source reaches, masks and loop trips
+  included, and refuses a launch in which one is found outside its storage.
+  Every launch it passes carries one of three verdicts:
+
+  | Access | Verdict | What that means |
+  |---|---|---|
+  | Does not follow the program id, within 262,144 address instances | proved | every cell shown inside the storage |
+  | Any access of a launch within 262,144 address instances per access (programs x lanes x trips) | proved | every program read |
+  | Address = lane part + program part, mask does not follow the program (unmasked loads on a tiled grid), up to 1,048,576 programs, no 32-bit step that could wrap | proved | closed form, confirmed on the two extreme programs |
+  | Anything else past 262,144 instances: a boundary mask on a tiled axis, the 1-D `pid % n` / `pid // n` split, a K loop whose one program is past the budget | sampled | read at the first two and last two programs of each grid axis and trips of each loop. A cell found outside there refuses the launch. An out-of-storage cell of a program or trip in between is NOT caught, and the launch runs as it did in 0.3.0 |
+  | Address or mask depends on loaded data; under a branch the arguments do not decide; pointer not traced to one argument; unbounded loop; tensor storage unreadable or of another element width; one tile past the budget even at the loop ends | not judged | nothing is claimed for that access |
+
+  A launch is "proved" only when every access is. The verdict belongs to the
+  launch: `compiled.run.storage_verdict` is `("proved", ())`, or
+  `("sampled" | "not judged", accesses)` for the last launch through that
+  launcher, and a remembered launch reports the verdict of its first sight.
+  With `TRITON_MSL_LAUNCH_MEMO_DIAG=1` the `dot_storage` counters also count
+  `sampled` and `not_judged` launches.
+  Not covered by either proof: a K-loop kernel that carries a fast replacement
+  (`fast_matmul`, the direct entry) and no storage plan, which includes the
+  tutorial's unit-stride masked K-loop matmul; a kernel of several dots; a
+  kernel without a dot; and every launch through the MLX route.
 - Refuse a dot of two constant tiles unless its one store is the dense whole
   tile. The template for it stores `C[i * N + j]` for the whole tile from every
   program, through the last pointer argument: a store that was masked, tiled by
@@ -137,7 +135,13 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   wrote 32; a second row tile was never written), and an output of exactly the
   source's cells passed the storage proof and was then written past. Those
   forms now refuse at compile; the dense unmasked form stores through the
-  pointer its store addresses. 0.3.0 was not checked.
+  pointer its store addresses. The store path may carry one cast, to the
+  output's element type; a cast round trip (`.to(float16).to(float32)`) stored
+  the unrounded value and now refuses. This is a compile refusal for three
+  forms that computed correctly before, because the store is dense only at run
+  time: a runtime row stride passed equal to `N`, a runtime offset passed as 0,
+  and a runtime store mask that keeps the whole tile. Use literal strides and
+  an unmasked store, or a plain elementwise kernel. 0.3.0 was not checked.
 - Refuse a dot with one constant operand on the positional matmul template. It
   has two pointer arguments, the template binds A, B, C, M, N, K by slot, and
   its signature guard ran only for three or more pointers: the shader read the
