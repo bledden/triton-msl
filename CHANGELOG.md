@@ -163,9 +163,17 @@ claimed. The user guide is `docs/releases/0.4.0.md`.
   route for the same dot of loaded tiles, including where the device fuses the
   multiply and add and where it flushes a subnormal result to zero (both are
   the device's arithmetic, as on every other route, and neither is IEEE's
-  sequential sum of rounded products). A constant dot with an accumulator that
-  is not a constant zero, an integer or float64 one, or an operand that is not
-  one number is refused at compile.
+  sequential sum of rounded products). The constants are the ones Triton's IR
+  holds: Triton rounds a bfloat16 constant through float16 before this backend
+  sees it, so one below the float16 range is 0.0 and one inside it can differ
+  from the bfloat16 value the program names in its last bit, and the stored
+  value is then the dot of the IR's constants, not of the named ones. A
+  constant dot with an accumulator that is not a constant zero, an integer or
+  float64 one, or an operand that is not one number is refused at compile. The
+  integer refusal loses a form that computed correctly before (an int8
+  constant dot was exact); the float64 one was computed in float32. A called
+  function also printed a float32 NaN constant as its integer pattern and now
+  stores the NaN.
 - Hand every finite float constant to the lowering as the value it has in its
   own type. A float16 or bfloat16 constant arrived as the decimal MLIR prints
   for it, which is another float32, and only the ordinary lowering rounded it:
